@@ -324,7 +324,8 @@ void Renderer::drawHud(const Game& game) {
     int def = game.playerDefense();
     int gold = countGold(game.inventory());
 
-    std::string weapon = game.equippedWeaponName();
+    std::string melee = game.equippedMeleeName();
+    std::string ranged = game.equippedRangedName();
     std::string armor = game.equippedArmorName();
 
     drawText5x7(renderer, x, y, scale, white, "HP " + std::to_string(p.hp) + "/" + std::to_string(p.hpMax) +
@@ -333,7 +334,7 @@ void Renderer::drawHud(const Game& game) {
         "  LVL " + std::to_string(game.level()));
     y += 7 * scale + 6;
 
-    drawText5x7(renderer, x, y, scale, gray, "WEAPON: " + weapon + "   ARMOR: " + armor);
+    drawText5x7(renderer, x, y, scale, gray, "MELEE: " + melee + "   RANGED: " + ranged + "   ARMOR: " + armor);
     y += 7 * scale + 10;
 
     // Messages
@@ -355,7 +356,7 @@ void Renderer::drawHud(const Game& game) {
     std::string mode = game.isTargeting() ? "TARGET" : (game.isInventoryOpen() ? "INV" : "PLAY");
     std::string lock = game.inputLocked() ? " (ANIM)" : "";
     drawText5x7(renderer, x, bottomY, scale, yellow,
-        "WASD/ARROWS MOVE  . WAIT  G GET  I INV  F FIRE  > OR ENTER STAIRS  PGUP/PGDN LOG  R RESTART" + lock);
+        "WASD/ARROWS MOVE  . WAIT  G GET  I INV  F FIRE(RANGED)  > OR ENTER STAIRS  PGUP/PGDN LOG  R RESTART" + lock);
 
     // Scroll indicator + game over
     if (scroll > 0) {
@@ -389,7 +390,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     int x = bg.x + 12;
     int y = bg.y + 12;
 
-    drawText5x7(renderer, x, y, scale, yellow, "INVENTORY  (UP/DOWN SELECT, E EQUIP, U USE, X DROP, ESC CLOSE)");
+    drawText5x7(renderer, x, y, scale, yellow, "INVENTORY  (UP/DOWN SELECT, E EQUIP, U USE, X DROP, ESC CLOSE)  [M]=MELEE [R]=RANGED [A]=ARMOR");
     y += 7 * scale + 10;
 
     const auto& inv = game.inventory();
@@ -403,8 +404,9 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
         const Item& it = inv[static_cast<size_t>(i)];
         std::string line = (i == sel ? "> " : "  ");
-        if (game.isEquipped(it.id)) line += "* ";
-        else line += "  ";
+        std::string tag = game.equippedTag(it.id);
+        if (!tag.empty()) line += "[" + tag + "] ";
+        else line += "    ";
         line += itemDisplayName(it);
 
         drawText5x7(renderer, x, y, scale, (i == sel ? white : gray), toUpper(line));

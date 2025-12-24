@@ -6,6 +6,7 @@ This is a **massive gameplay upgrade** over the initial drop:
 
 - **Items + inventory**
   - Pick up, drop, use, and equip items (weapon + armor)
+  - Separate **melee** and **ranged** equipment slots (keep a sword equipped while firing a bow)
   - Stackable ammo + gold
 - **Improved dungeon generator**
   - BSP-ish room layout
@@ -36,12 +37,15 @@ Items:
 - **I**: inventory (toggle)
   - **Up/Down**: select
   - **E**: equip / unequip (weapon or armor)
+    - Melee weapons (dagger/sword) go to the **Melee** slot
+    - Bows/wands go to the **Ranged** slot
+    - Armor goes to the **Armor** slot
   - **U**: use (potion/scroll)
   - **X**: drop
   - **Esc**: close inventory
 
 Ranged targeting:
-- **F**: start targeting (requires a ranged-capable equipped weapon)
+- **F**: start targeting (requires a ranged weapon in your **Ranged** slot)
 - **Arrow keys**: move target cursor
 - **Enter**: fire
 - **Esc**: cancel targeting

@@ -109,7 +109,9 @@ public:
     bool isInventoryOpen() const { return invOpen; }
     int inventorySelection() const { return invSel; }
     bool isEquipped(int itemId) const;
-    std::string equippedWeaponName() const;
+    std::string equippedTag(int itemId) const; // e.g. "M", "R", "A", "MR"
+    std::string equippedMeleeName() const;
+    std::string equippedRangedName() const;
     std::string equippedArmorName() const;
     int playerAttack() const;
     int playerDefense() const;
@@ -144,7 +146,8 @@ private:
 
     // Player inventory & equipment
     std::vector<Item> inv;
-    int equipWeaponId = 0;
+    int equipMeleeId = 0;
+    int equipRangedId = 0;
     int equipArmorId = 0;
     bool invOpen = false;
     int invSel = 0;
@@ -199,9 +202,11 @@ private:
     void recomputeTargetLine();
 
     // Helpers
-    int equippedWeaponIndex() const;
+    int equippedMeleeIndex() const;
+    int equippedRangedIndex() const;
     int equippedArmorIndex() const;
-    const Item* equippedWeapon() const;
+    const Item* equippedMelee() const;
+    const Item* equippedRanged() const;
     const Item* equippedArmor() const;
     int playerRangedRange() const;
     bool playerHasRangedReady(std::string* reasonOut) const;

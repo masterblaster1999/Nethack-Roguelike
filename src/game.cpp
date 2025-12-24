@@ -78,16 +78,26 @@ const Entity* Game::entityAt(int x, int y) const {
     return nullptr;
 }
 
-int Game::equippedWeaponIndex() const {
-    return findItemIndexById(inv, equipWeaponId);
+int Game::equippedMeleeIndex() const {
+    return findItemIndexById(inv, equipMeleeId);
+}
+
+int Game::equippedRangedIndex() const {
+    return findItemIndexById(inv, equipRangedId);
 }
 
 int Game::equippedArmorIndex() const {
     return findItemIndexById(inv, equipArmorId);
 }
 
-const Item* Game::equippedWeapon() const {
-    int idx = equippedWeaponIndex();
+const Item* Game::equippedMelee() const {
+    int idx = equippedMeleeIndex();
+    if (idx < 0) return nullptr;
+    return &inv[static_cast<size_t>(idx)];
+}
+
+const Item* Game::equippedRanged() const {
+    int idx = equippedRangedIndex();
     if (idx < 0) return nullptr;
     return &inv[static_cast<size_t>(idx)];
 }
@@ -99,11 +109,24 @@ const Item* Game::equippedArmor() const {
 }
 
 bool Game::isEquipped(int itemId) const {
-    return itemId != 0 && (itemId == equipWeaponId || itemId == equipArmorId);
+    return itemId != 0 && (itemId == equipMeleeId || itemId == equipRangedId || itemId == equipArmorId);
 }
 
-std::string Game::equippedWeaponName() const {
-    const Item* w = equippedWeapon();
+std::string Game::equippedTag(int itemId) const {
+    std::string t;
+    if (itemId != 0 && itemId == equipMeleeId) t += "M";
+    if (itemId != 0 && itemId == equipRangedId) t += "R";
+    if (itemId != 0 && itemId == equipArmorId) t += "A";
+    return t;
+}
+
+std::string Game::equippedMeleeName() const {
+    const Item* w = equippedMelee();
+    return w ? itemDisplayName(*w) : std::string("(NONE)");
+}
+
+std::string Game::equippedRangedName() const {
+    const Item* w = equippedRanged();
     return w ? itemDisplayName(*w) : std::string("(NONE)");
 }
 
@@ -114,9 +137,7 @@ std::string Game::equippedArmorName() const {
 
 int Game::playerAttack() const {
     int atk = player().baseAtk;
-    if (const Item* w = equippedWeapon()) {
-        atk += itemDef(w->kind).meleeAtk;
-    }
+    if (const Item* w = equippedMelee()) atk += itemDef(w->kind).meleeAtk;
     return atk;
 }
 
@@ -129,15 +150,15 @@ int Game::playerDefense() const {
 }
 
 int Game::playerRangedRange() const {
-    const Item* w = equippedWeapon();
+    const Item* w = equippedRanged();
     if (!w) return 0;
     return itemDef(w->kind).range;
 }
 
 bool Game::playerHasRangedReady(std::string* reasonOut) const {
-    const Item* w = equippedWeapon();
+    const Item* w = equippedRanged();
     if (!w) {
-        if (reasonOut) *reasonOut = "NO WEAPON EQUIPPED.";
+        if (reasonOut) *reasonOut = "NO RANGED WEAPON EQUIPPED.";
         return false;
     }
     const ItemDef& d = itemDef(w->kind);
@@ -171,7 +192,8 @@ void Game::newGame(uint32_t seed) {
 
     nextEntityId = 1;
     nextItemId = 1;
-    equipWeaponId = 0;
+    equipMeleeId = 0;
+    equipRangedId = 0;
     equipArmorId = 0;
 
     invOpen = false;
@@ -222,8 +244,9 @@ void Game::newGame(uint32_t seed) {
     give(ItemKind::ScrollTeleport, 1);
     give(ItemKind::Gold, 10);
 
-    // Equip bow by default so FIRE works immediately.
-    equipWeaponId = bowId;
+    // Equip both melee + ranged so bump-attacks and FIRE both work immediately.
+    equipMeleeId = dagId;
+    equipRangedId = bowId;
     equipArmorId = armId;
 
     spawnMonsters();
@@ -674,7 +697,8 @@ bool Game::dropSelected() {
     Item& it = inv[static_cast<size_t>(invSel)];
 
     // Unequip if needed
-    if (it.id == equipWeaponId) equipWeaponId = 0;
+    if (it.id == equipMeleeId) equipMeleeId = 0;
+    if (it.id == equipRangedId) equipRangedId = 0;
     if (it.id == equipArmorId) equipArmorId = 0;
 
     Item drop = it;
@@ -705,13 +729,24 @@ bool Game::equipSelected() {
     const Item& it = inv[static_cast<size_t>(invSel)];
     const ItemDef& d = itemDef(it.kind);
 
-    if (d.slot == EquipSlot::Weapon) {
-        if (equipWeaponId == it.id) {
-            equipWeaponId = 0;
+    if (d.slot == EquipSlot::MeleeWeapon) {
+        if (equipMeleeId == it.id) {
+            equipMeleeId = 0;
             pushMsg("YOU UNWIELD " + itemDisplayName(it) + ".");
         } else {
-            equipWeaponId = it.id;
+            equipMeleeId = it.id;
             pushMsg("YOU WIELD " + itemDisplayName(it) + ".");
+        }
+        return true;
+    }
+
+    if (d.slot == EquipSlot::RangedWeapon) {
+        if (equipRangedId == it.id) {
+            equipRangedId = 0;
+            pushMsg("YOU UNEQUIP " + itemDisplayName(it) + ".");
+        } else {
+            equipRangedId = it.id;
+            pushMsg("YOU READY " + itemDisplayName(it) + ".");
         }
         return true;
     }
@@ -798,8 +833,8 @@ void Game::endTargeting(bool fire) {
         if (!targetValid) {
             pushMsg("NO CLEAR SHOT.");
         } else {
-            // Compute ranged attack from equipped weapon.
-            int wIdx = equippedWeaponIndex();
+            // Compute ranged attack from equipped ranged weapon.
+            int wIdx = equippedRangedIndex();
             if (wIdx >= 0) {
                 Item& w = inv[static_cast<size_t>(wIdx)];
                 const ItemDef& d = itemDef(w.kind);
@@ -809,7 +844,7 @@ void Game::endTargeting(bool fire) {
                         pushMsg("NO ARROWS.");
                     } else {
                         consumeAmmo(inv, AmmoKind::Arrow, 1);
-                        int atk = std::max(1, (playerAttack() + d.rangedAtk) / 2 + rng.range(0, 1));
+                        int atk = std::max(1, player().baseAtk + d.rangedAtk + rng.range(0, 1));
                         attackRanged(playerMut(), targetPos, d.range, atk, d.projectile, true);
                     }
                 } else if (w.kind == ItemKind::WandSparks) {
@@ -817,7 +852,7 @@ void Game::endTargeting(bool fire) {
                         pushMsg("THE WAND IS EMPTY.");
                     } else {
                         w.charges -= 1;
-                        int atk = std::max(1, d.rangedAtk + 2 + rng.range(0, 2));
+                        int atk = std::max(1, player().baseAtk + d.rangedAtk + 2 + rng.range(0, 2));
                         attackRanged(playerMut(), targetPos, d.range, atk, d.projectile, true);
                     }
                 } else {

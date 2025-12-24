@@ -18,7 +18,8 @@ enum class AmmoKind : uint8_t {
 
 enum class EquipSlot : uint8_t {
     None = 0,
-    Weapon,
+    MeleeWeapon,
+    RangedWeapon,
     Armor,
 };
 
@@ -89,7 +90,9 @@ inline bool isStackable(ItemKind k) { return itemDef(k).stackable; }
 inline bool isConsumable(ItemKind k) { return itemDef(k).consumable; }
 inline bool isGold(ItemKind k) { return itemDef(k).isGold; }
 inline EquipSlot equipSlot(ItemKind k) { return itemDef(k).slot; }
-inline bool isWeapon(ItemKind k) { return equipSlot(k) == EquipSlot::Weapon; }
+inline bool isMeleeWeapon(ItemKind k) { return equipSlot(k) == EquipSlot::MeleeWeapon; }
+inline bool isRangedWeapon(ItemKind k) { return equipSlot(k) == EquipSlot::RangedWeapon; }
+inline bool isWeapon(ItemKind k) { return isMeleeWeapon(k) || isRangedWeapon(k); }
 inline bool isArmor(ItemKind k) { return equipSlot(k) == EquipSlot::Armor; }
 
 std::string itemDisplayName(const Item& it);

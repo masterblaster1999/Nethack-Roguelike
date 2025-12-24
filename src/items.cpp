@@ -6,10 +6,10 @@ const ItemDef& itemDef(ItemKind k) {
     // Keep in sync with enum ordering.
     static const ItemDef defs[] = {
         // Weapons
-        { ItemKind::Dagger,        "DAGGER",        false, false, false, EquipSlot::Weapon, 1, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::Sword,         "SWORD",         false, false, false, EquipSlot::Weapon, 2, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::Bow,           "BOW",           false, false, false, EquipSlot::Weapon, 0, 1, 0, 8, AmmoKind::Arrow, ProjectileKind::Arrow, 0, 0 },
-        { ItemKind::WandSparks,    "WAND OF SPARKS",false, false, false, EquipSlot::Weapon, 0, 2, 0, 7, AmmoKind::None, ProjectileKind::Spark, 12, 0 },
+        { ItemKind::Dagger,        "DAGGER",        false, false, false, EquipSlot::MeleeWeapon, 1, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::Sword,         "SWORD",         false, false, false, EquipSlot::MeleeWeapon, 2, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::Bow,           "BOW",           false, false, false, EquipSlot::RangedWeapon, 0, 1, 0, 8, AmmoKind::Arrow, ProjectileKind::Arrow, 0, 0 },
+        { ItemKind::WandSparks,    "WAND OF SPARKS",false, false, false, EquipSlot::RangedWeapon, 0, 2, 0, 7, AmmoKind::None, ProjectileKind::Spark, 12, 0 },
 
         // Armor
         { ItemKind::LeatherArmor,  "LEATHER ARMOR", false, false, false, EquipSlot::Armor, 0, 0, 1, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },

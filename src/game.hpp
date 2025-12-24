@@ -4,6 +4,7 @@
 #include "items.hpp"
 #include "rng.hpp"
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,8 @@ enum class EntityKind : uint8_t {
     SkeletonArcher,
     KoboldSlinger,
     Wolf,
+    Troll,
+    Wizard,
 };
 
 enum class Action : uint8_t {
@@ -26,9 +29,10 @@ enum class Action : uint8_t {
     Right,
     Wait,
 
-    Confirm,     // Enter / > in some contexts
-    Cancel,      // Escape (in-game cancel, main may still quit if not in a mode)
+    Confirm,     // Enter / context confirm
+    Cancel,      // Escape (close UI modes)
 
+    StairsUp,
     StairsDown,
     Restart,
 
@@ -39,6 +43,10 @@ enum class Action : uint8_t {
     Equip,
     Use,
     Drop,
+
+    Save,
+    Load,
+    Help,
 
     LogUp,
     LogDown,
@@ -66,6 +74,10 @@ struct Entity {
     bool packAI = false;
     int groupId = 0;
 
+    // Optional regen (used by Troll)
+    int regenChancePct = 0; // 0 = none
+    int regenAmount = 0;
+
     bool alerted = false;
 
     uint32_t spriteSeed = 0;
@@ -79,6 +91,13 @@ struct FXProjectile {
     float stepTime = 0.03f; // seconds per tile
 };
 
+struct LevelState {
+    int depth = 1;
+    Dungeon dung;
+    std::vector<Entity> monsters;
+    std::vector<GroundItem> ground;
+};
+
 class Game {
 public:
     static constexpr int MAP_W = 30;
@@ -87,7 +106,6 @@ public:
     Game();
 
     void newGame(uint32_t seed);
-    void nextLevel();
 
     void handleAction(Action a);
     void update(float dt);
@@ -101,8 +119,11 @@ public:
 
     int playerId() const { return playerId_; }
 
-    int level() const { return level_; }
+    int depth() const { return depth_; }
+
     bool isGameOver() const { return gameOver; }
+    bool isGameWon() const { return gameWon; }
+    bool isFinished() const { return gameOver || gameWon; }
 
     // Inventory/UI accessors for renderer
     const std::vector<Item>& inventory() const { return inv; }
@@ -116,11 +137,20 @@ public:
     int playerAttack() const;
     int playerDefense() const;
 
+    // Progression
+    int playerCharLevel() const { return charLevel; }
+    int playerXp() const { return xp; }
+    int playerXpToNext() const { return xpNext; }
+    bool playerHasAmulet() const;
+
     // Targeting
     bool isTargeting() const { return targeting; }
     Vec2i targetingCursor() const { return targetPos; }
     const std::vector<Vec2i>& targetingLine() const { return targetLine; }
     bool targetingIsValid() const { return targetValid; }
+
+    // Help overlay
+    bool isHelpOpen() const { return helpOpen; }
 
     // Messages + scrollback
     const std::vector<std::string>& messages() const { return msgs; }
@@ -130,17 +160,23 @@ public:
     const std::vector<FXProjectile>& fxProjectiles() const { return fx; }
     bool inputLocked() const { return inputLock; }
 
+    // Save/load helpers
+    std::string defaultSavePath() const;
+
 private:
     Dungeon dung;
     RNG rng;
 
-    int level_ = 1;
+    int depth_ = 1;
+
+    // Persistent visited levels (monsters + items + explored tiles)
+    std::map<int, LevelState> levels;
 
     std::vector<Entity> ents;
     int nextEntityId = 1;
     int playerId_ = 0;
 
-    // Items on ground
+    // Items on ground (current level)
     std::vector<GroundItem> ground;
     int nextItemId = 1;
 
@@ -158,6 +194,9 @@ private:
     std::vector<Vec2i> targetLine;
     bool targetValid = false;
 
+    // Help overlay
+    bool helpOpen = false;
+
     // Messages
     std::vector<std::string> msgs;
     int msgScroll = 0;
@@ -167,6 +206,12 @@ private:
     bool inputLock = false;
 
     bool gameOver = false;
+    bool gameWon = false;
+
+    // Player progression
+    int charLevel = 1;
+    int xp = 0;
+    int xpNext = 20;
 
 private:
     void pushMsg(const std::string& s);
@@ -201,6 +246,15 @@ private:
     void moveTargetCursor(int dx, int dy);
     void recomputeTargetLine();
 
+    // Level transitions
+    void storeCurrentLevel();
+    bool restoreLevel(int depth);
+    void changeLevel(int newDepth, bool goingDown);
+
+    // Save/load
+    bool saveToFile(const std::string& path);
+    bool loadFromFile(const std::string& path);
+
     // Helpers
     int equippedMeleeIndex() const;
     int equippedRangedIndex() const;
@@ -210,6 +264,11 @@ private:
     const Item* equippedArmor() const;
     int playerRangedRange() const;
     bool playerHasRangedReady(std::string* reasonOut) const;
+
+    // Progression
+    int xpFor(EntityKind k) const;
+    void grantXp(int amount);
+    void onPlayerLevelUp();
 
     // Generation
     void spawnMonsters();

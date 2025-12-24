@@ -490,6 +490,12 @@ void Dungeon::computeFov(int px, int py, int radius) {
     }
 }
 
+void Dungeon::revealAll() {
+    for (auto& t : tiles) {
+        t.explored = true;
+    }
+}
+
 Vec2i Dungeon::randomFloor(RNG& rng, bool avoidDoors) const {
     for (int tries = 0; tries < 4000; ++tries) {
         int x = rng.range(1, width - 2);

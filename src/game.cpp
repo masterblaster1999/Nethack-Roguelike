@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <deque>
 #include <sstream>
+#include <fstream>
+#include <cstring>
 
 namespace {
 
@@ -16,6 +18,8 @@ const char* kindName(EntityKind k) {
         case EntityKind::SkeletonArcher: return "SKELETON";
         case EntityKind::KoboldSlinger: return "KOBOLD";
         case EntityKind::Wolf: return "WOLF";
+        case EntityKind::Troll: return "TROLL";
+        case EntityKind::Wizard: return "WIZARD";
         default: return "THING";
     }
 }
@@ -166,24 +170,105 @@ bool Game::playerHasRangedReady(std::string* reasonOut) const {
         if (reasonOut) *reasonOut = "THAT WEAPON CAN'T FIRE.";
         return false;
     }
-    if (w->kind == ItemKind::Bow) {
-        if (ammoCount(inv, AmmoKind::Arrow) <= 0) {
-            if (reasonOut) *reasonOut = "NO ARROWS.";
+
+    if (d.maxCharges > 0 && w->charges <= 0) {
+        if (reasonOut) *reasonOut = "THE WAND IS OUT OF CHARGES.";
+        return false;
+    }
+
+    if (d.ammo != AmmoKind::None) {
+        int have = ammoCount(inv, d.ammo);
+        if (have <= 0) {
+            if (reasonOut) {
+                *reasonOut = (d.ammo == AmmoKind::Arrow) ? "NO ARROWS." : "NO ROCKS.";
+            }
             return false;
         }
     }
-    if (w->kind == ItemKind::WandSparks) {
-        if (w->charges <= 0) {
-            if (reasonOut) *reasonOut = "THE WAND IS EMPTY.";
-            return false;
-        }
-    }
+
     return true;
 }
 
+int Game::xpFor(EntityKind k) const {
+    switch (k) {
+        case EntityKind::Goblin: return 8;
+        case EntityKind::Bat: return 6;
+        case EntityKind::Slime: return 10;
+        case EntityKind::KoboldSlinger: return 12;
+        case EntityKind::SkeletonArcher: return 16;
+        case EntityKind::Wolf: return 10;
+        case EntityKind::Orc: return 14;
+        case EntityKind::Troll: return 28;
+        case EntityKind::Wizard: return 32;
+        default: return 10;
+    }
+}
+
+void Game::grantXp(int amount) {
+    if (amount <= 0) return;
+    xp += amount;
+
+    std::ostringstream ss;
+    ss << "YOU GAIN " << amount << " XP.";
+    pushMsg(ss.str());
+
+    while (xp >= xpNext) {
+        xp -= xpNext;
+        charLevel += 1;
+        // Scale XP requirement for the next level.
+        xpNext = static_cast<int>(xpNext * 1.35f + 10);
+        onPlayerLevelUp();
+    }
+}
+
+void Game::onPlayerLevelUp() {
+    Entity& p = playerMut();
+
+    int hpGain = 2 + rng.range(0, 2);
+    p.hpMax += hpGain;
+
+    bool atkUp = false;
+    bool defUp = false;
+    if (charLevel % 2 == 0) {
+        p.baseAtk += 1;
+        atkUp = true;
+    }
+    if (charLevel % 3 == 0) {
+        p.baseDef += 1;
+        defUp = true;
+    }
+
+    // Full heal on level up.
+    p.hp = p.hpMax;
+
+    std::ostringstream ss;
+    ss << "LEVEL UP! YOU ARE NOW LEVEL " << charLevel << ".";
+    pushMsg(ss.str());
+
+    std::ostringstream ss2;
+    ss2 << "+" << hpGain << " MAX HP";
+    if (atkUp) ss2 << ", +1 ATK";
+    if (defUp) ss2 << ", +1 DEF";
+    ss2 << ".";
+    pushMsg(ss2.str());
+}
+
+bool Game::playerHasAmulet() const {
+    for (const auto& it : inv) {
+        if (it.kind == ItemKind::AmuletYendor) return true;
+    }
+    return false;
+}
+
 void Game::newGame(uint32_t seed) {
+    if (seed == 0) {
+        // Fall back to a simple randomized seed if user passes 0.
+        seed = hash32(static_cast<uint32_t>(std::rand()) ^ 0xA5A5F00Du);
+    }
+
     rng = RNG(seed);
-    level_ = 1;
+    depth_ = 1;
+    levels.clear();
 
     ents.clear();
     ground.clear();
@@ -201,12 +286,18 @@ void Game::newGame(uint32_t seed) {
     targeting = false;
     targetLine.clear();
     targetValid = false;
+    helpOpen = false;
 
     msgs.clear();
     msgScroll = 0;
 
     inputLock = false;
     gameOver = false;
+    gameWon = false;
+
+    charLevel = 1;
+    xp = 0;
+    xpNext = 20;
 
     dung.generate(rng);
 
@@ -242,6 +333,7 @@ void Game::newGame(uint32_t seed) {
     int armId = give(ItemKind::LeatherArmor, 1);
     give(ItemKind::PotionHealing, 2);
     give(ItemKind::ScrollTeleport, 1);
+    give(ItemKind::ScrollMapping, 1);
     give(ItemKind::Gold, 10);
 
     // Equip both melee + ranged so bump-attacks and FIRE both work immediately.
@@ -252,47 +344,612 @@ void Game::newGame(uint32_t seed) {
     spawnMonsters();
     spawnItems();
 
+    storeCurrentLevel();
     recomputeFov();
 
     pushMsg("WELCOME TO PROCROGUE++.");
-    pushMsg("PRESS I FOR INVENTORY. PRESS F TO TARGET/FIRE.");
-    pushMsg("FIND THE STAIRS (>) TO DESCEND.");
-    (void)dagId;
+    pushMsg("GOAL: FIND THE AMULET OF YENDOR (DEPTH 5), THEN RETURN TO THE EXIT (<) TO WIN.");
+    pushMsg("PRESS ? FOR HELP. PRESS I FOR INVENTORY. PRESS F TO TARGET/FIRE.");
 }
 
-void Game::nextLevel() {
-    level_ += 1;
+void Game::storeCurrentLevel() {
+    LevelState st;
+    st.depth = depth_;
+    st.dung = dung;
+    st.ground = ground;
+    st.monsters.clear();
+    for (const auto& e : ents) {
+        if (e.id == playerId_) continue;
+        st.monsters.push_back(e);
+    }
+    levels[depth_] = std::move(st);
+}
 
-    // Keep player and inventory, regenerate dungeon + spawns.
-    Entity& p = playerMut();
+bool Game::restoreLevel(int depth) {
+    auto it = levels.find(depth);
+    if (it == levels.end()) return false;
 
-    // Remove monsters
+    dung = it->second.dung;
+    ground = it->second.ground;
+
+    // Keep player, restore monsters.
     ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
         return e.id != playerId_;
     }), ents.end());
 
-    ground.clear();
+    for (const auto& m : it->second.monsters) {
+        ents.push_back(m);
+    }
+
+    return true;
+}
+
+void Game::changeLevel(int newDepth, bool goingDown) {
+    if (newDepth < 1) return;
+
+    storeCurrentLevel();
+
+    // Clear transient states.
     fx.clear();
     inputLock = false;
-
     invOpen = false;
     targeting = false;
+    helpOpen = false;
     msgScroll = 0;
 
-    dung.generate(rng);
-    p.pos = dung.stairsUp;
-    p.alerted = false;
+    depth_ = newDepth;
 
-    // Small heal on level transition
+    bool restored = restoreLevel(depth_);
+
+    Entity& p = playerMut();
+
+    if (!restored) {
+        // New level: generate and populate.
+        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+            return e.id != playerId_;
+        }), ents.end());
+        ground.clear();
+
+        dung.generate(rng);
+
+        // Place player before spawning so we never spawn on top of them.
+        p.pos = goingDown ? dung.stairsUp : dung.stairsDown;
+        p.alerted = false;
+
+        spawnMonsters();
+        spawnItems();
+
+        // Save this freshly created level.
+        storeCurrentLevel();
+    } else {
+        // Returning to a visited level.
+        p.pos = goingDown ? dung.stairsUp : dung.stairsDown;
+        p.alerted = false;
+    }
+
+    // Small heal on travel.
     p.hp = std::min(p.hpMax, p.hp + 2);
 
     std::ostringstream ss;
-    ss << "YOU DESCEND TO LEVEL " << level_ << ".";
+    if (goingDown) ss << "YOU DESCEND TO DEPTH " << depth_ << ".";
+    else ss << "YOU ASCEND TO DEPTH " << depth_ << ".";
     pushMsg(ss.str());
 
-    spawnMonsters();
-    spawnItems();
     recomputeFov();
+}
+
+
+std::string Game::defaultSavePath() const {
+    return "procrogue_save.dat";
+}
+
+namespace {
+constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
+constexpr uint32_t SAVE_VERSION = 1u;
+
+template <typename T>
+void writePod(std::ostream& out, const T& v) {
+    out.write(reinterpret_cast<const char*>(&v), static_cast<std::streamsize>(sizeof(T)));
+}
+
+template <typename T>
+bool readPod(std::istream& in, T& v) {
+    return static_cast<bool>(in.read(reinterpret_cast<char*>(&v), static_cast<std::streamsize>(sizeof(T))));
+}
+
+void writeString(std::ostream& out, const std::string& s) {
+    uint32_t len = static_cast<uint32_t>(s.size());
+    writePod(out, len);
+    if (len) out.write(s.data(), static_cast<std::streamsize>(len));
+}
+
+bool readString(std::istream& in, std::string& s) {
+    uint32_t len = 0;
+    if (!readPod(in, len)) return false;
+    s.assign(len, '\0');
+    if (len) {
+        if (!in.read(s.data(), static_cast<std::streamsize>(len))) return false;
+    }
+    return true;
+}
+
+void writeItem(std::ostream& out, const Item& it) {
+    int32_t id = static_cast<int32_t>(it.id);
+    writePod(out, id);
+    uint8_t kind = static_cast<uint8_t>(it.kind);
+    writePod(out, kind);
+    int32_t count = static_cast<int32_t>(it.count);
+    writePod(out, count);
+    int32_t charges = static_cast<int32_t>(it.charges);
+    writePod(out, charges);
+    writePod(out, it.spriteSeed);
+}
+
+bool readItem(std::istream& in, Item& it) {
+    int32_t id = 0;
+    uint8_t kind = 0;
+    int32_t count = 0;
+    int32_t charges = 0;
+    uint32_t seed = 0;
+    if (!readPod(in, id)) return false;
+    if (!readPod(in, kind)) return false;
+    if (!readPod(in, count)) return false;
+    if (!readPod(in, charges)) return false;
+    if (!readPod(in, seed)) return false;
+    it.id = id;
+    it.kind = static_cast<ItemKind>(kind);
+    it.count = count;
+    it.charges = charges;
+    it.spriteSeed = seed;
+    return true;
+}
+
+void writeEntity(std::ostream& out, const Entity& e) {
+    int32_t id = static_cast<int32_t>(e.id);
+    writePod(out, id);
+    uint8_t kind = static_cast<uint8_t>(e.kind);
+    writePod(out, kind);
+    int32_t x = e.pos.x;
+    int32_t y = e.pos.y;
+    writePod(out, x);
+    writePod(out, y);
+    int32_t hp = e.hp;
+    int32_t hpMax = e.hpMax;
+    int32_t atk = e.baseAtk;
+    int32_t def = e.baseDef;
+    writePod(out, hp);
+    writePod(out, hpMax);
+    writePod(out, atk);
+    writePod(out, def);
+    writePod(out, e.spriteSeed);
+    int32_t groupId = e.groupId;
+    writePod(out, groupId);
+    uint8_t alerted = e.alerted ? 1 : 0;
+    writePod(out, alerted);
+
+    uint8_t canRanged = e.canRanged ? 1 : 0;
+    writePod(out, canRanged);
+    int32_t rRange = e.rangedRange;
+    int32_t rAtk = e.rangedAtk;
+    writePod(out, rRange);
+    writePod(out, rAtk);
+    uint8_t rAmmo = static_cast<uint8_t>(e.rangedAmmo);
+    uint8_t rProj = static_cast<uint8_t>(e.rangedProjectile);
+    writePod(out, rAmmo);
+    writePod(out, rProj);
+
+    uint8_t packAI = e.packAI ? 1 : 0;
+    uint8_t willFlee = e.willFlee ? 1 : 0;
+    writePod(out, packAI);
+    writePod(out, willFlee);
+
+    int32_t regenChance = e.regenChancePct;
+    int32_t regenAmt = e.regenAmount;
+    writePod(out, regenChance);
+    writePod(out, regenAmt);
+}
+
+bool readEntity(std::istream& in, Entity& e) {
+    int32_t id = 0;
+    uint8_t kind = 0;
+    int32_t x = 0, y = 0;
+    int32_t hp = 0, hpMax = 0;
+    int32_t atk = 0, def = 0;
+    uint32_t seed = 0;
+    int32_t groupId = 0;
+    uint8_t alerted = 0;
+
+    uint8_t canRanged = 0;
+    int32_t rRange = 0;
+    int32_t rAtk = 0;
+    uint8_t rAmmo = 0;
+    uint8_t rProj = 0;
+
+    uint8_t packAI = 0;
+    uint8_t willFlee = 0;
+
+    int32_t regenChance = 0;
+    int32_t regenAmt = 0;
+
+    if (!readPod(in, id)) return false;
+    if (!readPod(in, kind)) return false;
+    if (!readPod(in, x)) return false;
+    if (!readPod(in, y)) return false;
+    if (!readPod(in, hp)) return false;
+    if (!readPod(in, hpMax)) return false;
+    if (!readPod(in, atk)) return false;
+    if (!readPod(in, def)) return false;
+    if (!readPod(in, seed)) return false;
+    if (!readPod(in, groupId)) return false;
+    if (!readPod(in, alerted)) return false;
+
+    if (!readPod(in, canRanged)) return false;
+    if (!readPod(in, rRange)) return false;
+    if (!readPod(in, rAtk)) return false;
+    if (!readPod(in, rAmmo)) return false;
+    if (!readPod(in, rProj)) return false;
+
+    if (!readPod(in, packAI)) return false;
+    if (!readPod(in, willFlee)) return false;
+
+    if (!readPod(in, regenChance)) return false;
+    if (!readPod(in, regenAmt)) return false;
+
+    e.id = id;
+    e.kind = static_cast<EntityKind>(kind);
+    e.pos = { x, y };
+    e.hp = hp;
+    e.hpMax = hpMax;
+    e.baseAtk = atk;
+    e.baseDef = def;
+    e.spriteSeed = seed;
+    e.groupId = groupId;
+    e.alerted = alerted != 0;
+
+    e.canRanged = canRanged != 0;
+    e.rangedRange = rRange;
+    e.rangedAtk = rAtk;
+    e.rangedAmmo = static_cast<AmmoKind>(rAmmo);
+    e.rangedProjectile = static_cast<ProjectileKind>(rProj);
+
+    e.packAI = packAI != 0;
+    e.willFlee = willFlee != 0;
+
+    e.regenChancePct = regenChance;
+    e.regenAmount = regenAmt;
+    return true;
+}
+
+} // namespace
+
+bool Game::saveToFile(const std::string& path) {
+    // Ensure the currently-loaded level is persisted into `levels`.
+    storeCurrentLevel();
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        pushMsg("FAILED TO SAVE (CANNOT OPEN FILE).");
+        return false;
+    }
+
+    writePod(out, SAVE_MAGIC);
+    writePod(out, SAVE_VERSION);
+
+    uint32_t rngState = rng.state;
+    writePod(out, rngState);
+
+    int32_t depth = depth_;
+    writePod(out, depth);
+
+    int32_t playerId = playerId_;
+    writePod(out, playerId);
+
+    int32_t nextE = nextEntityId;
+    int32_t nextI = nextItemId;
+    writePod(out, nextE);
+    writePod(out, nextI);
+
+    int32_t eqM = equipMeleeId;
+    int32_t eqR = equipRangedId;
+    int32_t eqA = equipArmorId;
+    writePod(out, eqM);
+    writePod(out, eqR);
+    writePod(out, eqA);
+
+    int32_t clvl = charLevel;
+    int32_t xpNow = xp;
+    int32_t xpNeed = xpNext;
+    writePod(out, clvl);
+    writePod(out, xpNow);
+    writePod(out, xpNeed);
+
+    uint8_t over = gameOver ? 1 : 0;
+    uint8_t won = gameWon ? 1 : 0;
+    writePod(out, over);
+    writePod(out, won);
+
+    // Player
+    writeEntity(out, player());
+
+    // Inventory
+    uint32_t invCount = static_cast<uint32_t>(inv.size());
+    writePod(out, invCount);
+    for (const auto& it : inv) {
+        writeItem(out, it);
+    }
+
+    // Messages (for convenience)
+    uint32_t msgCount = static_cast<uint32_t>(msgs.size());
+    writePod(out, msgCount);
+    for (const auto& s : msgs) {
+        writeString(out, s);
+    }
+
+    // Levels
+    uint32_t lvlCount = static_cast<uint32_t>(levels.size());
+    writePod(out, lvlCount);
+    for (const auto& kv : levels) {
+        const int d = kv.first;
+        const LevelState& st = kv.second;
+
+        int32_t d32 = d;
+        writePod(out, d32);
+
+        // Dungeon
+        int32_t w = st.dung.width;
+        int32_t h = st.dung.height;
+        writePod(out, w);
+        writePod(out, h);
+        int32_t upx = st.dung.stairsUp.x;
+        int32_t upy = st.dung.stairsUp.y;
+        int32_t dnx = st.dung.stairsDown.x;
+        int32_t dny = st.dung.stairsDown.y;
+        writePod(out, upx);
+        writePod(out, upy);
+        writePod(out, dnx);
+        writePod(out, dny);
+
+        uint32_t roomCount = static_cast<uint32_t>(st.dung.rooms.size());
+        writePod(out, roomCount);
+        for (const auto& r : st.dung.rooms) {
+            int32_t rx = r.x, ry = r.y, rw = r.w, rh = r.h;
+            writePod(out, rx);
+            writePod(out, ry);
+            writePod(out, rw);
+            writePod(out, rh);
+            uint8_t rt = static_cast<uint8_t>(r.type);
+            writePod(out, rt);
+        }
+
+        uint32_t tileCount = static_cast<uint32_t>(st.dung.tiles.size());
+        writePod(out, tileCount);
+        for (const auto& t : st.dung.tiles) {
+            uint8_t tt = static_cast<uint8_t>(t.type);
+            uint8_t explored = t.explored ? 1 : 0;
+            writePod(out, tt);
+            writePod(out, explored);
+        }
+
+        // Monsters
+        uint32_t monCount = static_cast<uint32_t>(st.monsters.size());
+        writePod(out, monCount);
+        for (const auto& m : st.monsters) {
+            writeEntity(out, m);
+        }
+
+        // Ground items
+        uint32_t gCount = static_cast<uint32_t>(st.ground.size());
+        writePod(out, gCount);
+        for (const auto& gi : st.ground) {
+            int32_t gx = gi.pos.x;
+            int32_t gy = gi.pos.y;
+            writePod(out, gx);
+            writePod(out, gy);
+            writeItem(out, gi.item);
+        }
+    }
+
+    if (!out.good()) {
+        pushMsg("FAILED TO SAVE (WRITE ERROR).");
+        return false;
+    }
+
+    pushMsg("GAME SAVED.");
+    return true;
+}
+
+bool Game::loadFromFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        pushMsg("NO SAVE FILE FOUND.");
+        return false;
+    }
+
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    if (!readPod(in, magic) || !readPod(in, version) || magic != SAVE_MAGIC || version != SAVE_VERSION) {
+        pushMsg("SAVE FILE IS INVALID OR FROM ANOTHER VERSION.");
+        return false;
+    }
+
+    uint32_t rngState = 0;
+    int32_t depth = 1;
+    int32_t pId = 0;
+    int32_t nextE = 1;
+    int32_t nextI = 1;
+    int32_t eqM = 0;
+    int32_t eqR = 0;
+    int32_t eqA = 0;
+    int32_t clvl = 1;
+    int32_t xpNow = 0;
+    int32_t xpNeed = 20;
+    uint8_t over = 0;
+    uint8_t won = 0;
+
+    if (!readPod(in, rngState)) return false;
+    if (!readPod(in, depth)) return false;
+    if (!readPod(in, pId)) return false;
+    if (!readPod(in, nextE)) return false;
+    if (!readPod(in, nextI)) return false;
+    if (!readPod(in, eqM)) return false;
+    if (!readPod(in, eqR)) return false;
+    if (!readPod(in, eqA)) return false;
+    if (!readPod(in, clvl)) return false;
+    if (!readPod(in, xpNow)) return false;
+    if (!readPod(in, xpNeed)) return false;
+    if (!readPod(in, over)) return false;
+    if (!readPod(in, won)) return false;
+
+    Entity p;
+    if (!readEntity(in, p)) return false;
+
+    uint32_t invCount = 0;
+    if (!readPod(in, invCount)) return false;
+    std::vector<Item> invTmp;
+    invTmp.reserve(invCount);
+    for (uint32_t i = 0; i < invCount; ++i) {
+        Item it;
+        if (!readItem(in, it)) return false;
+        invTmp.push_back(it);
+    }
+
+    uint32_t msgCount = 0;
+    if (!readPod(in, msgCount)) return false;
+    std::vector<std::string> msgsTmp;
+    msgsTmp.reserve(msgCount);
+    for (uint32_t i = 0; i < msgCount; ++i) {
+        std::string s;
+        if (!readString(in, s)) return false;
+        msgsTmp.push_back(std::move(s));
+    }
+
+    uint32_t lvlCount = 0;
+    if (!readPod(in, lvlCount)) return false;
+    std::map<int, LevelState> levelsTmp;
+
+    for (uint32_t li = 0; li < lvlCount; ++li) {
+        int32_t d32 = 0;
+        if (!readPod(in, d32)) return false;
+
+        int32_t w = 0, h = 0;
+        int32_t upx = 0, upy = 0, dnx = 0, dny = 0;
+        if (!readPod(in, w)) return false;
+        if (!readPod(in, h)) return false;
+        if (!readPod(in, upx)) return false;
+        if (!readPod(in, upy)) return false;
+        if (!readPod(in, dnx)) return false;
+        if (!readPod(in, dny)) return false;
+
+        LevelState st;
+        st.depth = d32;
+        st.dung = Dungeon(w, h);
+        st.dung.stairsUp = { upx, upy };
+        st.dung.stairsDown = { dnx, dny };
+
+        uint32_t roomCount = 0;
+        if (!readPod(in, roomCount)) return false;
+        st.dung.rooms.clear();
+        st.dung.rooms.reserve(roomCount);
+        for (uint32_t ri = 0; ri < roomCount; ++ri) {
+            int32_t rx = 0, ry = 0, rw = 0, rh = 0;
+            uint8_t rt = 0;
+            if (!readPod(in, rx)) return false;
+            if (!readPod(in, ry)) return false;
+            if (!readPod(in, rw)) return false;
+            if (!readPod(in, rh)) return false;
+            if (!readPod(in, rt)) return false;
+            Room r;
+            r.x = rx;
+            r.y = ry;
+            r.w = rw;
+            r.h = rh;
+            r.type = static_cast<RoomType>(rt);
+            st.dung.rooms.push_back(r);
+        }
+
+        uint32_t tileCount = 0;
+        if (!readPod(in, tileCount)) return false;
+        st.dung.tiles.assign(tileCount, Tile{});
+        for (uint32_t ti = 0; ti < tileCount; ++ti) {
+            uint8_t tt = 0;
+            uint8_t explored = 0;
+            if (!readPod(in, tt)) return false;
+            if (!readPod(in, explored)) return false;
+            st.dung.tiles[ti].type = static_cast<TileType>(tt);
+            st.dung.tiles[ti].visible = false;
+            st.dung.tiles[ti].explored = explored != 0;
+        }
+
+        uint32_t monCount = 0;
+        if (!readPod(in, monCount)) return false;
+        st.monsters.clear();
+        st.monsters.reserve(monCount);
+        for (uint32_t mi = 0; mi < monCount; ++mi) {
+            Entity m;
+            if (!readEntity(in, m)) return false;
+            st.monsters.push_back(m);
+        }
+
+        uint32_t gCount = 0;
+        if (!readPod(in, gCount)) return false;
+        st.ground.clear();
+        st.ground.reserve(gCount);
+        for (uint32_t gi = 0; gi < gCount; ++gi) {
+            int32_t gx = 0, gy = 0;
+            if (!readPod(in, gx)) return false;
+            if (!readPod(in, gy)) return false;
+            GroundItem gr;
+            gr.pos = { gx, gy };
+            if (!readItem(in, gr.item)) return false;
+            st.ground.push_back(gr);
+        }
+
+        levelsTmp[d32] = std::move(st);
+    }
+
+    // If we got here, we have a fully parsed save. Commit state.
+    rng = RNG(rngState);
+    depth_ = depth;
+    playerId_ = pId;
+    nextEntityId = nextE;
+    nextItemId = nextI;
+    equipMeleeId = eqM;
+    equipRangedId = eqR;
+    equipArmorId = eqA;
+    charLevel = clvl;
+    xp = xpNow;
+    xpNext = xpNeed;
+    gameOver = over != 0;
+    gameWon = won != 0;
+
+    inv = std::move(invTmp);
+    msgs = std::move(msgsTmp);
+    msgScroll = 0;
+
+    levels = std::move(levelsTmp);
+
+    // Rebuild entity list: player + monsters for current depth
+    ents.clear();
+    ents.push_back(p);
+
+    // Sanity: ensure we have the current depth.
+    if (levels.find(depth_) == levels.end()) {
+        // Fallback: if missing, reconstruct from what's available.
+        if (!levels.empty()) depth_ = levels.begin()->first;
+    }
+
+    // Close transient UI and effects.
+    invOpen = false;
+    targeting = false;
+    helpOpen = false;
+    inputLock = false;
+    fx.clear();
+
+    restoreLevel(depth_);
+    recomputeFov();
+
+    pushMsg("GAME LOADED.");
+    return true;
 }
 
 void Game::update(float dt) {
@@ -324,7 +981,7 @@ void Game::update(float dt) {
 void Game::handleAction(Action a) {
     if (a == Action::None) return;
 
-    // Message log scroll works in any mode, even during targeting/inv.
+    // Message log scroll works in any mode.
     if (a == Action::LogUp) {
         int maxScroll = std::max(0, static_cast<int>(msgs.size()) - 1);
         msgScroll = clampi(msgScroll + 1, 0, maxScroll);
@@ -336,7 +993,28 @@ void Game::handleAction(Action a) {
         return;
     }
 
-    if (gameOver) {
+    // Global hotkeys (available even while dead/won).
+    if (a == Action::Save) {
+        (void)saveToFile(defaultSavePath());
+        return;
+    }
+    if (a == Action::Load) {
+        (void)loadFromFile(defaultSavePath());
+        return;
+    }
+    if (a == Action::Help) {
+        // Toggle help overlay.
+        helpOpen = !helpOpen;
+        if (helpOpen) {
+            // Close other overlays when opening help.
+            invOpen = false;
+            targeting = false;
+            msgScroll = 0;
+        }
+        return;
+    }
+
+    if (isFinished()) {
         if (a == Action::Restart) {
             newGame(hash32(rng.nextU32()));
         }
@@ -345,17 +1023,25 @@ void Game::handleAction(Action a) {
 
     if (inputLock) {
         // Ignore actions while animating.
-        if (a == Action::Cancel && (invOpen || targeting)) {
+        if (a == Action::Cancel && (invOpen || targeting || helpOpen)) {
             invOpen = false;
             targeting = false;
-            return;
+            helpOpen = false;
         }
         return;
     }
 
     bool acted = false;
 
-    // Inventory mode
+    // Help overlay mode.
+    if (helpOpen) {
+        if (a == Action::Cancel || a == Action::Inventory || a == Action::Help) {
+            helpOpen = false;
+        }
+        return;
+    }
+
+    // Inventory mode.
     if (invOpen) {
         switch (a) {
             case Action::Up: moveInventorySelection(-1); break;
@@ -385,7 +1071,7 @@ void Game::handleAction(Action a) {
         return;
     }
 
-    // Targeting mode
+    // Targeting mode.
     if (targeting) {
         switch (a) {
             case Action::Up: moveTargetCursor(0, -1); break;
@@ -412,7 +1098,7 @@ void Game::handleAction(Action a) {
         return;
     }
 
-    // Normal play mode
+    // Normal play mode.
     Entity& p = playerMut();
     switch (a) {
         case Action::Up:    acted = tryMove(p, 0, -1); break;
@@ -432,11 +1118,50 @@ void Game::handleAction(Action a) {
         case Action::Fire:
             beginTargeting();
             break;
-        case Action::Confirm:
+        case Action::Confirm: {
+            if (p.pos == dung.stairsDown) {
+                changeLevel(depth_ + 1, true);
+                acted = false;
+            } else if (p.pos == dung.stairsUp) {
+                // At depth 1, stairs up is the exit.
+                if (depth_ <= 1) {
+                    if (playerHasAmulet()) {
+                        gameWon = true;
+                        pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!");
+                        pushMsg("VICTORY!");
+                    } else {
+                        pushMsg("THE EXIT IS HERE... BUT YOU STILL NEED THE AMULET.");
+                    }
+                } else {
+                    changeLevel(depth_ - 1, false);
+                }
+                acted = false;
+            } else {
+                pushMsg("THERE ARE NO STAIRS HERE.");
+            }
+        } break;
         case Action::StairsDown:
             if (p.pos == dung.stairsDown) {
-                nextLevel();
-                acted = false; // nextLevel already advances state
+                changeLevel(depth_ + 1, true);
+                acted = false;
+            } else {
+                pushMsg("THERE ARE NO STAIRS HERE.");
+            }
+            break;
+        case Action::StairsUp:
+            if (p.pos == dung.stairsUp) {
+                if (depth_ <= 1) {
+                    if (playerHasAmulet()) {
+                        gameWon = true;
+                        pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!");
+                        pushMsg("VICTORY!");
+                    } else {
+                        pushMsg("THE EXIT IS HERE... BUT YOU STILL NEED THE AMULET.");
+                    }
+                } else {
+                    changeLevel(depth_ - 1, false);
+                }
+                acted = false;
             } else {
                 pushMsg("THERE ARE NO STAIRS HERE.");
             }
@@ -513,6 +1238,10 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
             std::ostringstream ds;
             ds << kindName(defender.kind) << " DIES.";
             pushMsg(ds.str());
+
+            if (attacker.kind == EntityKind::Player) {
+                grantXp(xpFor(defender.kind));
+            }
         }
     }
 }
@@ -600,6 +1329,9 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atk, Proj
                 std::ostringstream ds;
                 ds << kindName(hit->kind) << " DIES.";
                 pushMsg(ds.str());
+                if (fromPlayer) {
+                    grantXp(xpFor(hit->kind));
+                }
             }
         }
     } else if (hitWall) {
@@ -669,6 +1401,9 @@ bool Game::pickupAtPlayer() {
             // stacked
             pickedAny = true;
             pushMsg("YOU PICK UP " + itemDisplayName(it) + ".");
+            if (it.kind == ItemKind::AmuletYendor) {
+                pushMsg("YOU HAVE FOUND THE AMULET OF YENDOR! RETURN TO THE EXIT (<) TO WIN.");
+            }
             ground.erase(ground.begin() + static_cast<long>(gi));
             continue;
         }
@@ -681,6 +1416,9 @@ bool Game::pickupAtPlayer() {
         inv.push_back(it);
         pickedAny = true;
         pushMsg("YOU PICK UP " + itemDisplayName(it) + ".");
+            if (it.kind == ItemKind::AmuletYendor) {
+                pushMsg("YOU HAVE FOUND THE AMULET OF YENDOR! RETURN TO THE EXIT (<) TO WIN.");
+            }
         ground.erase(ground.begin() + static_cast<long>(gi));
     }
 
@@ -773,6 +1511,15 @@ bool Game::useSelected() {
     invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
     Item& it = inv[static_cast<size_t>(invSel)];
 
+    auto consumeOneStackable = [&]() {
+        if (!isStackable(it.kind)) return;
+        it.count -= 1;
+        if (it.count <= 0) {
+            inv.erase(inv.begin() + invSel);
+            invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+        }
+    };
+
     if (it.kind == ItemKind::PotionHealing) {
         Entity& p = playerMut();
         int heal = itemDef(it.kind).healAmount;
@@ -783,11 +1530,17 @@ bool Game::useSelected() {
         ss << "YOU DRINK A POTION. HP " << before << "->" << p.hp << ".";
         pushMsg(ss.str());
 
-        it.count -= 1;
-        if (it.count <= 0) {
-            inv.erase(inv.begin() + invSel);
-            invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
-        }
+        consumeOneStackable();
+        return true;
+    }
+
+    if (it.kind == ItemKind::PotionStrength) {
+        Entity& p = playerMut();
+        p.baseAtk += 1;
+        std::ostringstream ss;
+        ss << "YOU FEEL STRONGER! ATK IS NOW " << p.baseAtk << ".";
+        pushMsg(ss.str());
+        consumeOneStackable();
         return true;
     }
 
@@ -800,11 +1553,15 @@ bool Game::useSelected() {
             break;
         }
         pushMsg("YOU READ A SCROLL. YOU VANISH!");
-        it.count -= 1;
-        if (it.count <= 0) {
-            inv.erase(inv.begin() + invSel);
-            invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
-        }
+        consumeOneStackable();
+        recomputeFov();
+        return true;
+    }
+
+    if (it.kind == ItemKind::ScrollMapping) {
+        dung.revealAll();
+        pushMsg("THE DUNGEON MAP IS REVEALED.");
+        consumeOneStackable();
         recomputeFov();
         return true;
     }
@@ -833,30 +1590,38 @@ void Game::endTargeting(bool fire) {
         if (!targetValid) {
             pushMsg("NO CLEAR SHOT.");
         } else {
-            // Compute ranged attack from equipped ranged weapon.
             int wIdx = equippedRangedIndex();
-            if (wIdx >= 0) {
+            if (wIdx < 0) {
+                pushMsg("NO RANGED WEAPON.");
+            } else {
                 Item& w = inv[static_cast<size_t>(wIdx)];
                 const ItemDef& d = itemDef(w.kind);
 
-                if (w.kind == ItemKind::Bow) {
-                    if (ammoCount(inv, AmmoKind::Arrow) <= 0) {
-                        pushMsg("NO ARROWS.");
-                    } else {
-                        consumeAmmo(inv, AmmoKind::Arrow, 1);
-                        int atk = std::max(1, player().baseAtk + d.rangedAtk + rng.range(0, 1));
-                        attackRanged(playerMut(), targetPos, d.range, atk, d.projectile, true);
-                    }
-                } else if (w.kind == ItemKind::WandSparks) {
-                    if (w.charges <= 0) {
-                        pushMsg("THE WAND IS EMPTY.");
-                    } else {
-                        w.charges -= 1;
-                        int atk = std::max(1, player().baseAtk + d.rangedAtk + 2 + rng.range(0, 2));
-                        attackRanged(playerMut(), targetPos, d.range, atk, d.projectile, true);
-                    }
+                // Re-check readiness (ammo/charges) to be safe.
+                if (d.maxCharges > 0 && w.charges <= 0) {
+                    pushMsg("THE WAND IS OUT OF CHARGES.");
+                } else if (d.ammo != AmmoKind::None && ammoCount(inv, d.ammo) <= 0) {
+                    pushMsg(d.ammo == AmmoKind::Arrow ? "NO ARROWS." : "NO ROCKS.");
                 } else {
-                    pushMsg("THAT WEAPON CAN'T FIRE.");
+                    // Consume charge/ammo.
+                    if (d.maxCharges > 0) {
+                        w.charges -= 1;
+                    }
+                    if (d.ammo != AmmoKind::None) {
+                        consumeAmmo(inv, d.ammo, 1);
+                    }
+
+                    // Compute attack.
+                    int atk = std::max(1, player().baseAtk + d.rangedAtk + rng.range(0, 1));
+                    if (w.kind == ItemKind::WandSparks) {
+                        atk += 2 + rng.range(0, 2);
+                    }
+
+                    attackRanged(playerMut(), targetPos, d.range, atk, d.projectile, true);
+
+                    if (w.kind == ItemKind::WandSparks && w.charges <= 0) {
+                        pushMsg("YOUR WAND SPUTTERS OUT.");
+                    }
                 }
             }
         }
@@ -865,12 +1630,6 @@ void Game::endTargeting(bool fire) {
     targeting = false;
     targetLine.clear();
     targetValid = false;
-}
-
-void Game::moveTargetCursor(int dx, int dy) {
-    targetPos.x = clampi(targetPos.x + dx, 0, dung.width - 1);
-    targetPos.y = clampi(targetPos.y + dy, 0, dung.height - 1);
-    recomputeTargetLine();
 }
 
 void Game::recomputeTargetLine() {
@@ -930,49 +1689,75 @@ void Game::spawnMonsters() {
     int nextGroup = 1;
 
     auto addMonster = [&](EntityKind k, Vec2i pos, int groupId) {
-        Entity e;
-        e.id = nextEntityId++;
-        e.kind = k;
-        e.pos = pos;
-        e.spriteSeed = rng.nextU32();
-        e.groupId = groupId;
+    Entity e;
+    e.id = nextEntityId++;
+    e.kind = k;
+    e.pos = pos;
+    e.spriteSeed = rng.nextU32();
+    e.groupId = groupId;
 
-        switch (k) {
-            case EntityKind::Goblin:
-                e.hpMax = 6; e.baseAtk = 2; e.baseDef = 0;
-                break;
-            case EntityKind::Orc:
-                e.hpMax = 10; e.baseAtk = 3; e.baseDef = 1;
-                break;
-            case EntityKind::Bat:
-                e.hpMax = 4; e.baseAtk = 1; e.baseDef = 0;
-                break;
-            case EntityKind::Slime:
-                e.hpMax = 8; e.baseAtk = 2; e.baseDef = 0;
-                break;
-            case EntityKind::SkeletonArcher:
-                e.hpMax = 7; e.baseAtk = 2; e.baseDef = 0;
-                e.canRanged = true; e.rangedRange = 7; e.rangedAtk = 2;
-                e.rangedProjectile = ProjectileKind::Arrow;
-                break;
-            case EntityKind::KoboldSlinger:
-                e.hpMax = 5; e.baseAtk = 1; e.baseDef = 0;
-                e.canRanged = true; e.rangedRange = 6; e.rangedAtk = 1;
-                e.rangedProjectile = ProjectileKind::Rock;
-                e.willFlee = true;
-                break;
-            case EntityKind::Wolf:
-                e.hpMax = 6; e.baseAtk = 2; e.baseDef = 0;
-                e.packAI = true; e.groupId = groupId;
-                break;
-            default:
-                e.hpMax = 5; e.baseAtk = 2; e.baseDef = 0;
-                break;
-        }
-        e.hp = e.hpMax;
+    switch (k) {
+        case EntityKind::Goblin:
+            e.hpMax = 7; e.baseAtk = 2; e.baseDef = 0;
+            e.willFlee = true;
+            break;
+        case EntityKind::Orc:
+            e.hpMax = 12; e.baseAtk = 3; e.baseDef = 1;
+            break;
+        case EntityKind::Bat:
+            e.hpMax = 5; e.baseAtk = 1; e.baseDef = 0;
+            e.willFlee = true;
+            break;
+        case EntityKind::Slime:
+            e.hpMax = 10; e.baseAtk = 2; e.baseDef = 1;
+            e.willFlee = false;
+            break;
+        case EntityKind::SkeletonArcher:
+            e.hpMax = 10; e.baseAtk = 2; e.baseDef = 1;
+            e.canRanged = true; e.rangedRange = 8; e.rangedAtk = 3;
+            e.rangedAmmo = AmmoKind::Arrow;
+            e.rangedProjectile = ProjectileKind::Arrow;
+            break;
+        case EntityKind::KoboldSlinger:
+            e.hpMax = 8; e.baseAtk = 2; e.baseDef = 0;
+            e.canRanged = true; e.rangedRange = 6; e.rangedAtk = 2;
+            e.rangedAmmo = AmmoKind::Rock;
+            e.rangedProjectile = ProjectileKind::Rock;
+            e.willFlee = true;
+            break;
+        case EntityKind::Wolf:
+            e.hpMax = 10; e.baseAtk = 3; e.baseDef = 0;
+            e.packAI = true;
+            break;
+        case EntityKind::Troll:
+            e.hpMax = 16; e.baseAtk = 4; e.baseDef = 1;
+            e.willFlee = false;
+            e.regenChancePct = 40;
+            e.regenAmount = 1;
+            break;
+        case EntityKind::Wizard:
+            e.hpMax = 12; e.baseAtk = 2; e.baseDef = 1;
+            e.canRanged = true; e.rangedRange = 7; e.rangedAtk = 4;
+            e.rangedAmmo = AmmoKind::None;
+            e.rangedProjectile = ProjectileKind::Spark;
+            e.willFlee = true;
+            break;
+        default:
+            e.hpMax = 6; e.baseAtk = 2; e.baseDef = 0;
+            break;
+    }
 
-        ents.push_back(e);
-    };
+    // A small amount of depth scaling.
+    int d = std::max(0, depth_ - 1);
+    if (d > 0 && k != EntityKind::Player) {
+        e.hpMax += d;
+        e.baseAtk += d / 3;
+        e.baseDef += d / 4;
+    }
+
+    e.hp = e.hpMax;
+    ents.push_back(e);
+};
 
     // Spawn per room, scaling with level.
     for (size_t i = 0; i < rooms.size(); ++i) {
@@ -982,7 +1767,7 @@ void Game::spawnMonsters() {
         bool isStart = (r.contains(dung.stairsUp.x, dung.stairsUp.y));
 
         int base = isStart ? 0 : 1;
-        int n = rng.range(0, base + (level_ >= 3 ? 2 : 1));
+        int n = rng.range(0, base + (depth_ >= 3 ? 2 : 1));
 
         if (r.type == RoomType::Lair && !isStart) {
             // Pack spawns
@@ -1001,25 +1786,39 @@ void Game::spawnMonsters() {
             int roll = rng.range(0, 99);
             EntityKind k = EntityKind::Goblin;
 
-            if (level_ <= 1) {
+            if (depth_ <= 1) {
                 if (roll < 45) k = EntityKind::Goblin;
                 else if (roll < 70) k = EntityKind::Bat;
                 else if (roll < 90) k = EntityKind::Slime;
                 else k = EntityKind::KoboldSlinger;
-            } else if (level_ == 2) {
+            } else if (depth_ == 2) {
                 if (roll < 30) k = EntityKind::Goblin;
                 else if (roll < 55) k = EntityKind::KoboldSlinger;
                 else if (roll < 75) k = EntityKind::SkeletonArcher;
                 else if (roll < 90) k = EntityKind::Slime;
                 else k = EntityKind::Orc;
             } else {
-                if (roll < 25) k = EntityKind::Orc;
-                else if (roll < 45) k = EntityKind::SkeletonArcher;
-                else if (roll < 65) k = EntityKind::Goblin;
-                else if (roll < 80) k = EntityKind::KoboldSlinger;
-                else if (roll < 92) k = EntityKind::Slime;
-                else k = EntityKind::Bat;
-            }
+    if (depth_ >= 4) {
+        if (roll < 20) k = EntityKind::Orc;
+        else if (roll < 35) k = EntityKind::SkeletonArcher;
+        else if (roll < 50) k = EntityKind::Goblin;
+        else if (roll < 62) k = EntityKind::KoboldSlinger;
+        else if (roll < 72) k = EntityKind::Slime;
+        else if (roll < 82) k = EntityKind::Wolf;
+        else if (roll < 92) k = EntityKind::Bat;
+        else if (roll < 97) k = EntityKind::Troll;
+        else k = EntityKind::Wizard;
+    } else {
+        // depth_ == 3
+        if (roll < 25) k = EntityKind::Orc;
+        else if (roll < 45) k = EntityKind::SkeletonArcher;
+        else if (roll < 60) k = EntityKind::Wolf;
+        else if (roll < 75) k = EntityKind::Goblin;
+        else if (roll < 88) k = EntityKind::KoboldSlinger;
+        else if (roll < 95) k = EntityKind::Slime;
+        else k = EntityKind::Bat;
+    }
+}
 
             addMonster(k, p, 0);
         }
@@ -1027,7 +1826,7 @@ void Game::spawnMonsters() {
         // Treasure rooms get a guardian sometimes.
         if (r.type == RoomType::Treasure && !isStart && rng.chance(0.6f)) {
             Vec2i p = randomFreeTileInRoom(r);
-            addMonster(level_ >= 3 ? EntityKind::Orc : EntityKind::Goblin, p, 0);
+            addMonster(depth_ >= 4 ? (rng.chance(0.35f) ? EntityKind::Wizard : EntityKind::Troll) : (depth_ >= 3 ? EntityKind::Orc : EntityKind::Goblin), p, 0);
         }
     }
 }
@@ -1050,49 +1849,83 @@ void Game::spawnItems() {
         ground.push_back(gi);
     };
 
+    auto dropGoodItem = [&](const Room& r) {
+        int roll = rng.range(0, 99);
+        if (roll < 20) dropItemAt(ItemKind::Sword, randomFreeTileInRoom(r));
+        else if (roll < 35) dropItemAt(ItemKind::ChainArmor, randomFreeTileInRoom(r));
+        else if (roll < 50) dropItemAt(ItemKind::WandSparks, randomFreeTileInRoom(r));
+        else if (roll < 60) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r));
+        else if (roll < 72) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), rng.range(1, 2));
+        else if (roll < 84) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
+        else if (roll < 94) dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), rng.range(1, 2));
+        else dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
+    };
+
     for (const Room& r : rooms) {
         Vec2i p = randomFreeTileInRoom(r);
 
         if (r.type == RoomType::Treasure) {
-            dropItemAt(ItemKind::Gold, p, rng.range(15, 40));
-            // One good item
-            int roll = rng.range(0, 99);
-            if (roll < 35) dropItemAt(ItemKind::Sword, randomFreeTileInRoom(r));
-            else if (roll < 55) dropItemAt(ItemKind::ChainArmor, randomFreeTileInRoom(r));
-            else if (roll < 75) dropItemAt(ItemKind::WandSparks, randomFreeTileInRoom(r));
-            else dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), 2);
+            dropItemAt(ItemKind::Gold, p, rng.range(15, 40) + depth_ * 3);
+            dropGoodItem(r);
             continue;
         }
 
         if (r.type == RoomType::Shrine) {
             dropItemAt(ItemKind::PotionHealing, p, rng.range(1, 2));
-            if (rng.chance(0.5f)) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
-            if (rng.chance(0.4f)) dropItemAt(ItemKind::Gold, randomFreeTileInRoom(r), rng.range(6, 18));
+            if (rng.chance(0.45f)) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.45f)) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.35f)) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.50f)) dropItemAt(ItemKind::Gold, randomFreeTileInRoom(r), rng.range(6, 18));
             continue;
         }
 
         if (r.type == RoomType::Lair) {
-            if (rng.chance(0.4f)) dropItemAt(ItemKind::Rock, p, rng.range(3, 7));
+            if (rng.chance(0.50f)) dropItemAt(ItemKind::Rock, p, rng.range(3, 9));
+            if (depth_ >= 2 && rng.chance(0.20f)) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r), 1);
             continue;
         }
 
         // Normal rooms: small chance for loot
-        if (rng.chance(0.30f)) {
+        if (rng.chance(0.35f)) {
             int roll = rng.range(0, 99);
-            if (roll < 30) dropItemAt(ItemKind::Gold, p, rng.range(3, 10));
-            else if (roll < 50) dropItemAt(ItemKind::PotionHealing, p, 1);
-            else if (roll < 70) dropItemAt(ItemKind::Arrow, p, rng.range(4, 10));
-            else if (roll < 80) dropItemAt(ItemKind::Dagger, p, 1);
-            else if (roll < 90) dropItemAt(ItemKind::LeatherArmor, p, 1);
-            else dropItemAt(ItemKind::ScrollTeleport, p, 1);
+            if (roll < 25) dropItemAt(ItemKind::Gold, p, rng.range(3, 10));
+            else if (roll < 40) dropItemAt(ItemKind::PotionHealing, p, 1);
+            else if (roll < 52) dropItemAt(ItemKind::PotionStrength, p, 1);
+            else if (roll < 64) dropItemAt(ItemKind::ScrollTeleport, p, 1);
+            else if (roll < 74) dropItemAt(ItemKind::ScrollMapping, p, 1);
+            else if (roll < 84) dropItemAt(ItemKind::Arrow, p, rng.range(4, 10));
+            else if (roll < 92) dropItemAt(ItemKind::Rock, p, rng.range(3, 8));
+            else if (roll < 96) dropItemAt(ItemKind::Dagger, p, 1);
+            else if (roll < 98) dropItemAt(ItemKind::LeatherArmor, p, 1);
+            else dropItemAt(ItemKind::Sling, p, 1);
+        }
+    }
+
+    // Quest objective: place the Amulet of Yendor on depth 5.
+    if (depth_ == 5 && !playerHasAmulet()) {
+        bool alreadyHere = false;
+        for (const auto& gi : ground) {
+            if (gi.item.kind == ItemKind::AmuletYendor) {
+                alreadyHere = true;
+                break;
+            }
+        }
+        if (!alreadyHere) {
+            const Room* tr = nullptr;
+            for (const Room& r : rooms) {
+                if (r.type == RoomType::Treasure) { tr = &r; break; }
+            }
+            Vec2i pos = tr ? randomFreeTileInRoom(*tr) : dung.stairsDown;
+            dropItemAt(ItemKind::AmuletYendor, pos, 1);
         }
     }
 
     // A little extra ammo somewhere on the map.
-    if (rng.chance(0.7f)) {
+    if (rng.chance(0.75f)) {
         Vec2i pos = dung.randomFloor(rng, true);
         if (!entityAt(pos.x, pos.y)) {
-            dropItemAt(ItemKind::Arrow, pos, rng.range(6, 12));
+            if (rng.chance(0.55f)) dropItemAt(ItemKind::Arrow, pos, rng.range(6, 14));
+            else dropItemAt(ItemKind::Rock, pos, rng.range(4, 12));
         }
     }
 }
@@ -1262,6 +2095,24 @@ void Game::monsterTurn() {
             }
         }
     }
+// Post-turn passive effects (regen, etc.).
+for (auto& m : ents) {
+    if (m.id == playerId_) continue;
+    if (m.hp <= 0) continue;
+    if (m.regenAmount <= 0 || m.regenChancePct <= 0) continue;
+    if (m.hp >= m.hpMax) continue;
+    if (rng.range(1, 100) <= m.regenChancePct) {
+        m.hp = std::min(m.hpMax, m.hp + m.regenAmount);
+
+        // Only message if the monster is currently visible to the player.
+        if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+            std::ostringstream ss;
+            ss << kindName(m.kind) << " REGENERATES.";
+            pushMsg(ss.str());
+        }
+    }
+}
+
 }
 
 void Game::cleanupDead() {

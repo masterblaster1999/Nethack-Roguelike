@@ -60,5 +60,6 @@ private:
 
     void drawHud(const Game& game);
     void drawInventoryOverlay(const Game& game);
+    void drawHelpOverlay(const Game& game);
     void drawTargetingOverlay(const Game& game);
 };

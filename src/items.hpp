@@ -28,6 +28,7 @@ enum class ItemKind : uint8_t {
     Dagger = 0,
     Sword,
     Bow,
+    Sling,
     WandSparks,
 
     // Armor
@@ -36,7 +37,12 @@ enum class ItemKind : uint8_t {
 
     // Consumables
     PotionHealing,
+    PotionStrength,
     ScrollTeleport,
+    ScrollMapping,
+
+    // Quest / special
+    AmuletYendor,
 
     // Ammo / misc
     Arrow,
@@ -104,7 +110,7 @@ int findItemIndexById(const std::vector<Item>& inv, int itemId);
 int findFirstAmmoIndex(const std::vector<Item>& inv, AmmoKind ammo);
 int ammoCount(const std::vector<Item>& inv, AmmoKind ammo);
 
-// Consumes up to `amount` ammo from the first matching stack. Returns true if fully consumed.
+// Consumes up to `amount` ammo from matching stacks. Returns true if fully consumed.
 bool consumeAmmo(std::vector<Item>& inv, AmmoKind ammo, int amount);
 
 // Stacking: tries to merge `incoming` into existing stack in `inv` if possible.

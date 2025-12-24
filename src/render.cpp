@@ -218,7 +218,7 @@ void Renderer::render(const Game& game) {
                 continue;
             }
 
-            SDL_Texture* tex = tileTexture(t.type, x, y, game.level(), frame);
+            SDL_Texture* tex = tileTexture(t.type, x, y, game.depth(), frame);
             if (!tex) continue;
 
             if (t.visible) {
@@ -298,6 +298,10 @@ void Renderer::render(const Game& game) {
         drawInventoryOverlay(game);
     }
 
+    if (game.isHelpOpen()) {
+        drawHelpOverlay(game);
+    }
+
     SDL_RenderPresent(renderer);
 }
 
@@ -315,57 +319,84 @@ void Renderer::drawHud(const Game& game) {
     const Color green{ 120, 255, 120, 255 };
     const Color yellow{ 255, 230, 120, 255 };
 
-    int x = 10;
-    int y = hudTop + 10;
+    const Entity& p = game.player();
 
     // Stats line
-    const Entity& p = game.player();
-    int atk = game.playerAttack();
-    int def = game.playerDefense();
-    int gold = countGold(game.inventory());
+    {
+        std::stringstream ss;
+        ss << "HP " << p.hp << "/" << p.hpMax
+           << "  ATK " << game.playerAttack()
+           << "  DEF " << game.playerDefense()
+           << "  GOLD " << game.goldCount()
+           << "  DEPTH " << game.depth()
+           << "  LVL " << game.characterLevel()
+           << "  XP " << game.experience() << "/" << game.experienceToNext();
+        if (game.playerHasAmulet()) ss << "  AMULET";
+        drawText5x7(renderer, fontTex, 4, hudTop + 2, ss.str(), white, scale);
+    }
 
-    std::string melee = game.equippedMeleeName();
-    std::string ranged = game.equippedRangedName();
-    std::string armor = game.equippedArmorName();
+    // Equipped gear line
+    {
+        std::stringstream eq;
+        eq << "EQUIP: ";
+        if (const Item* w = game.equippedMelee()) {
+            eq << "MELEE=" << itemDisplayName(*w) << "  ";
+        }
+        if (const Item* r = game.equippedRanged()) {
+            eq << "RANGED=" << itemDisplayName(*r) << "  ";
+        }
+        if (const Item* a = game.equippedArmor()) {
+            eq << "ARMOR=" << itemDisplayName(*a);
+        }
+        drawText5x7(renderer, fontTex, 4, hudTop + 16, eq.str(), gray, scale);
+    }
 
-    drawText5x7(renderer, x, y, scale, white, "HP " + std::to_string(p.hp) + "/" + std::to_string(p.hpMax) +
-        "  ATK " + std::to_string(atk) + "  DEF " + std::to_string(def) +
-        "  GOLD " + std::to_string(gold) +
-        "  LVL " + std::to_string(game.level()));
-    y += 7 * scale + 6;
+    // Objective line
+    {
+        std::string obj = game.playerHasAmulet()
+            ? "OBJECTIVE: RETURN TO THE EXIT (<) ON DEPTH 1."
+            : "OBJECTIVE: FIND THE AMULET OF YENDOR ON DEPTH 5.";
+        drawText5x7(renderer, fontTex, 4, hudTop + 30, obj, yellow, scale);
+    }
 
-    drawText5x7(renderer, x, y, scale, gray, "MELEE: " + melee + "   RANGED: " + ranged + "   ARMOR: " + armor);
-    y += 7 * scale + 10;
-
-    // Messages
+    // Messages (scrolled)
     const auto& msgs = game.messages();
-    int lines = std::max(4, (hudH - (y - hudTop) - 22) / (7 * scale + 4));
-    int scroll = game.messageScroll();
+    const int scroll = game.messageScroll();
+    const int lineH = 16;
+    const int startY = hudTop + 44;
+    const int maxLines = (hudH - 44 - 20) / lineH;
 
     int end = static_cast<int>(msgs.size()) - scroll;
-    if (end < 0) end = 0;
-    int start = std::max(0, end - lines);
+    end = clampi(end, 0, static_cast<int>(msgs.size()));
+    int start = std::max(0, end - maxLines);
 
     for (int i = start; i < end; ++i) {
-        drawText5x7(renderer, x, y, scale, white, toUpper(msgs[static_cast<size_t>(i)]));
-        y += 7 * scale + 4;
+        const int y = startY + (i - start) * lineH;
+        const bool isPlayerMsg = msgs[i].fromPlayer;
+        const Color c = isPlayerMsg ? white : gray;
+        drawText5x7(renderer, fontTex, 4, y, msgs[i].text, c, scale);
+    }
+
+    if (scroll > 0) {
+        std::stringstream ss;
+        ss << "LOG -" << scroll;
+        drawText5x7(renderer, fontTex, winW - 130, hudTop + 2, ss.str(), gray, scale);
     }
 
     // Controls line
-    int bottomY = hudTop + hudH - (7 * scale + 10);
-    std::string mode = game.isTargeting() ? "TARGET" : (game.isInventoryOpen() ? "INV" : "PLAY");
-    std::string lock = game.inputLocked() ? " (ANIM)" : "";
-    drawText5x7(renderer, x, bottomY, scale, yellow,
-        "WASD/ARROWS MOVE  . WAIT  G GET  I INV  F FIRE(RANGED)  > OR ENTER STAIRS  PGUP/PGDN LOG  R RESTART" + lock);
-
-    // Scroll indicator + game over
-    if (scroll > 0) {
-        drawText5x7(renderer, winW - 190, hudTop + 10, scale, yellow, "LOG -" + std::to_string(scroll));
+    {
+        const std::string help =
+            "MOVE WASD/ARROWS  . WAIT  G GET  I INV  ? HELP  F FIRE  < UP  > DOWN  F5 SAVE  F9 LOAD  PGUP/PGDN LOG  R RESTART";
+        drawText5x7(renderer, fontTex, 4, hudTop + hudH - 16, help, gray, scale);
     }
 
-    if (game.isGameOver()) {
-        drawText5x7(renderer, winW - 250, hudTop + 32, scale, red, "GAME OVER");
-        drawText5x7(renderer, winW - 250, hudTop + 52, scale, red, "PRESS R TO RESTART");
+    // Game over / win overlays
+    if (game.isGameWon()) {
+        drawText5x7(renderer, fontTex, winW / 2 - 60, hudTop + 54, "VICTORY!", green, 4);
+        drawText5x7(renderer, fontTex, winW / 2 - 110, hudTop + 82, "R RESTART   F9 LOAD", gray, 3);
+    } else if (game.isGameOver()) {
+        drawText5x7(renderer, fontTex, winW / 2 - 70, hudTop + 54, "GAME OVER", red, 4);
+        drawText5x7(renderer, fontTex, winW / 2 - 110, hudTop + 82, "R RESTART   F9 LOAD", gray, 3);
     }
 }
 
@@ -419,6 +450,58 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     const Item& cur = inv[static_cast<size_t>(clampi(sel, 0, static_cast<int>(inv.size()) - 1))];
     std::string hint = "SELECTED: " + itemDisplayName(cur);
     drawText5x7(renderer, x, bg.y + bg.h - 40, scale, yellow, toUpper(hint));
+}
+
+
+void Renderer::drawHelpOverlay(const Game& game) {
+    (void)game;
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    const int panelW = winW - 40;
+    const int panelH = winH - 40;
+    SDL_Rect bg{ 20, 20, panelW, panelH };
+
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 210);
+    SDL_RenderFillRect(renderer, &bg);
+
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 60);
+    SDL_RenderDrawRect(renderer, &bg);
+
+    const int scale = 2;
+    const Color white{ 240, 240, 240, 255 };
+    const Color gray{ 170, 170, 170, 255 };
+    const Color yellow{ 255, 230, 120, 255 };
+
+    int x = bg.x + 12;
+    int y = bg.y + 12;
+
+    drawText5x7(renderer, x, y, scale, yellow, "HELP  (PRESS ? OR ESC TO CLOSE)");
+    y += 7 * scale + 10;
+
+    auto line = [&](const std::string& s, Color c = gray) {
+        drawText5x7(renderer, x, y, scale, c, s);
+        y += 7 * scale + 6;
+    };
+
+    line("GOAL: FIND THE AMULET OF YENDOR ON DEPTH 5.", white);
+    line("      RETURN TO THE EXIT (<) ON DEPTH 1 TO WIN.", white);
+    y += 6;
+
+    line("MOVE: WASD / ARROW KEYS");
+    line("WAIT: . (PERIOD)");
+    line("PICK UP: G");
+    line("INVENTORY: I   (E EQUIP, U USE, X DROP, ESC CLOSE)");
+    line("RANGED: F TARGET, ENTER FIRE, ESC CANCEL");
+    line("STAIRS: < UP, > DOWN   (ENTER ALSO WORKS WHILE STANDING ON STAIRS)");
+    line("LOG SCROLL: PAGEUP / PAGEDOWN");
+    line("SAVE / LOAD: F5 / F9");
+    line("RESTART: R");
+
+    y += 10;
+    line("TIPS:", yellow);
+    line("- BUMP ENEMIES TO MELEE ATTACK.");
+    line("- POTIONS OF STRENGTH PERMANENTLY INCREASE ATK.");
+    line("- SCROLL OF MAPPING REVEALS THE WHOLE FLOOR.");
 }
 
 void Renderer::drawTargetingOverlay(const Game& game) {

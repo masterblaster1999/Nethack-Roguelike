@@ -100,6 +100,8 @@ float densityFor(EntityKind k) {
         case EntityKind::SkeletonArcher: return 0.52f;
         case EntityKind::KoboldSlinger: return 0.50f;
         case EntityKind::Wolf: return 0.55f;
+        case EntityKind::Troll: return 0.68f;
+        case EntityKind::Wizard: return 0.50f;
         default: return 0.55f;
     }
 }
@@ -114,6 +116,8 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::SkeletonArcher: return add({ 200, 200, 190, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
         case EntityKind::KoboldSlinger: return add({ 180, 120, 70, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
         case EntityKind::Wolf: return add({ 150, 150, 160, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
+        case EntityKind::Troll: return add({ 90, 170, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
+        case EntityKind::Wizard: return add({ 140, 100, 200, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         default: return add({ 180, 180, 180, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
     }
 }
@@ -195,6 +199,20 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
     if (kind == EntityKind::Wolf) {
         // Nose
         setPx(s, 8, 10, {30,30,30,255});
+    }
+
+    if (kind == EntityKind::Troll) {
+        // Tusks + snout
+        setPx(s, 7, 11, {240,240,240,255});
+        setPx(s, 9, 11, {240,240,240,255});
+        setPx(s, 8, 10, {30,30,30,255});
+    }
+    if (kind == EntityKind::Wizard) {
+        // Simple hat + sparkle
+        Color hat = mul(base, 0.55f);
+        rect(s, 5, 4, 6, 1, hat);
+        rect(s, 6, 1, 4, 4, mul(base, 0.65f));
+        if (frame % 2 == 1) setPx(s, 9, 2, {255,255,255,140});
     }
 
     // Soft outline (helps readability)
@@ -338,6 +356,48 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
                 setPx(s, 10, 6, {255,255,255,200});
                 setPx(s, 11, 7, {255,255,255,140});
             }
+            break;
+        }
+        case ItemKind::Sling: {
+            Color leather = add({140,90,55,255}, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
+            // Strap
+            line(s, 4, 12, 12, 4, leather);
+            line(s, 5, 13, 13, 5, mul(leather, 0.8f));
+            // Pouch + stone
+            circle(s, 10, 8, 2, mul(leather, 0.9f));
+            circle(s, 10, 8, 1, {140,140,150,255});
+            sparkle();
+            break;
+        }
+        case ItemKind::PotionStrength: {
+            Color glass = {200,200,220,180};
+            Color fluid = {120,220,100,220};
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+            if (frame % 2 == 1) setPx(s, 9, 6, {255,255,255,200});
+            break;
+        }
+        case ItemKind::ScrollMapping: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+            // Simple map-ish marks
+            line(s, 6, 7, 10, 7, {80,50,30,255});
+            line(s, 6, 9, 10, 9, {80,50,30,255});
+            line(s, 7, 7, 7, 10, {80,50,30,255});
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+        case ItemKind::AmuletYendor: {
+            Color gold = add({230,200,60,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            // Chain
+            line(s, 6, 4, 10, 4, mul(gold, 0.9f));
+            line(s, 7, 5, 9, 5, mul(gold, 0.85f));
+            // Pendant
+            circle(s, 8, 10, 3, gold);
+            circle(s, 8, 9, 1, mul(gold, 1.05f));
+            if (frame % 2 == 1) setPx(s, 10, 8, {255,255,255,180});
             break;
         }
         default:

@@ -19,12 +19,26 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
         case SDLK_d: return Action::Right;
 
         case SDLK_SPACE:
-        case SDLK_PERIOD:
-            if ((mod & KMOD_SHIFT) != 0) return Action::Confirm; // '>' on many keyboards
             return Action::Wait;
 
+        case SDLK_PERIOD:
+            if ((mod & KMOD_SHIFT) != 0) {
+                // '>' on many keyboards
+                return Action::StairsDown;
+            }
+            return Action::Wait;
+
+        case SDLK_COMMA:
+            if ((mod & KMOD_SHIFT) != 0) {
+                // '<' on many keyboards
+                return Action::StairsUp;
+            }
+            return Action::None;
+
         case SDLK_GREATER:
-            return Action::Confirm;
+            return Action::StairsDown;
+        case SDLK_LESS:
+            return Action::StairsUp;
 
         case SDLK_RETURN:
         case SDLK_KP_ENTER:
@@ -38,6 +52,15 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
 
         case SDLK_f:
             return Action::Fire;
+
+        case SDLK_QUESTION:
+        case SDLK_h:
+            return Action::Help;
+
+        case SDLK_F5:
+            return Action::Save;
+        case SDLK_F9:
+            return Action::Load;
 
         // Inventory actions (only do something while inventory is open)
         case SDLK_e:
@@ -61,7 +84,8 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
 }
 
 int main(int argc, char** argv) {
-    (void)argc; (void)argv;
+    (void)argc;
+    (void)argv;
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
@@ -103,8 +127,8 @@ int main(int argc, char** argv) {
                 Uint16 mod = ev.key.keysym.mod;
 
                 if (key == SDLK_ESCAPE) {
-                    // ESC cancels inventory/targeting; otherwise quit.
-                    if (game.isInventoryOpen() || game.isTargeting()) {
+                    // ESC cancels UI modes; otherwise quit.
+                    if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen()) {
                         game.handleAction(Action::Cancel);
                     } else {
                         running = false;

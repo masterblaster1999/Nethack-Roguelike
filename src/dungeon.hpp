@@ -53,6 +53,7 @@ public:
     Vec2i stairsUp{ -1, -1 };
     Vec2i stairsDown{ -1, -1 };
 
+    Dungeon() = default;
     Dungeon(int w, int h);
 
     bool inBounds(int x, int y) const {
@@ -71,6 +72,7 @@ public:
     void generate(RNG& rng);
 
     void computeFov(int px, int py, int radius);
+    void revealAll();
 
     bool hasLineOfSight(int x0, int y0, int x1, int y1) const;
 

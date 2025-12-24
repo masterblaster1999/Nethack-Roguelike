@@ -48,6 +48,13 @@ enum class ItemKind : uint8_t {
     Arrow,
     Rock,
     Gold,
+
+    // --- New consumables / progression (added after existing kinds to keep save compatibility) ---
+    PotionAntidote,
+    PotionRegeneration,
+    PotionShielding,
+    ScrollEnchantWeapon,
+    ScrollEnchantArmor,
 };
 
 struct ItemDef {
@@ -82,6 +89,7 @@ struct Item {
     ItemKind kind = ItemKind::Dagger;
     int count = 1;          // for stackables
     int charges = 0;        // for wands
+    int enchant = 0;        // for weapons/armor (+/-), 0 = normal
     uint32_t spriteSeed = 0;
 };
 

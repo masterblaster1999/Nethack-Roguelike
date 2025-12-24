@@ -249,6 +249,32 @@ void Renderer::render(const Game& game) {
         SDL_RenderCopy(renderer, tex, nullptr, &dst);
     }
 
+    // Draw discovered traps (shown on explored tiles; bright when visible, dim when remembered)
+    for (const auto& tr : game.traps()) {
+        if (!tr.discovered) continue;
+        if (!d.inBounds(tr.pos.x, tr.pos.y)) continue;
+        const Tile& t = d.at(tr.pos.x, tr.pos.y);
+        if (!t.explored) continue;
+
+        uint8_t r = 220, g = 80, b = 80;
+        switch (tr.kind) {
+            case TrapKind::Spike:     r = 220; g = 80;  b = 80;  break;
+            case TrapKind::PoisonDart:r = 80;  g = 220; b = 80;  break;
+            case TrapKind::Teleport: r = 170; g = 110; b = 230; break;
+            case TrapKind::Alarm:    r = 220; g = 220; b = 80;  break;
+        }
+
+        const uint8_t a = t.visible ? 220 : 120;
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, r, g, b, a);
+
+        const int x0 = tr.pos.x * tile;
+        const int y0 = tr.pos.y * tile;
+        SDL_RenderDrawLine(renderer, x0 + 4, y0 + 4, x0 + tile - 5, y0 + tile - 5);
+        SDL_RenderDrawLine(renderer, x0 + tile - 5, y0 + 4, x0 + 4, y0 + tile - 5);
+        SDL_RenderDrawPoint(renderer, x0 + tile / 2, y0 + tile / 2);
+    }
+
     // Draw entities (only if their tile is visible; player always visible)
     for (const auto& e : game.entities()) {
         if (!d.inBounds(e.pos.x, e.pos.y)) continue;
@@ -318,6 +344,7 @@ void Renderer::drawHud(const Game& game) {
     const Color red{ 255, 90, 90, 255 };
     const Color green{ 120, 255, 120, 255 };
     const Color yellow{ 255, 230, 120, 255 };
+    const Color orange{ 255, 190, 120, 255 };
 
     const Entity& p = game.player();
 
@@ -332,23 +359,23 @@ void Renderer::drawHud(const Game& game) {
            << "  LVL " << game.characterLevel()
            << "  XP " << game.experience() << "/" << game.experienceToNext();
         if (game.playerHasAmulet()) ss << "  AMULET";
-        drawText5x7(renderer, fontTex, 4, hudTop + 2, ss.str(), white, scale);
+
+        // QoL / status indicators
+        ss << (game.autoPickupEnabled() ? "  AUTO$" : "  AUTO$OFF");
+        if (p.poisonTurns > 0) ss << "  POISON(" << p.poisonTurns << ")";
+        if (p.regenTurns > 0) ss << "  REGEN(" << p.regenTurns << ")";
+        if (p.shieldTurns > 0) ss << "  SHIELD(" << p.shieldTurns << ")";
+        drawText5x7(renderer, 4, hudTop + 2, scale, white, ss.str());
     }
 
     // Equipped gear line
     {
         std::stringstream eq;
-        eq << "EQUIP: ";
-        if (const Item* w = game.equippedMelee()) {
-            eq << "MELEE=" << itemDisplayName(*w) << "  ";
-        }
-        if (const Item* r = game.equippedRanged()) {
-            eq << "RANGED=" << itemDisplayName(*r) << "  ";
-        }
-        if (const Item* a = game.equippedArmor()) {
-            eq << "ARMOR=" << itemDisplayName(*a);
-        }
-        drawText5x7(renderer, fontTex, 4, hudTop + 16, eq.str(), gray, scale);
+        eq << "EQUIP: "
+           << "MELEE=" << game.equippedMeleeName() << "  "
+           << "RANGED=" << game.equippedRangedName() << "  "
+           << "ARMOR=" << game.equippedArmorName();
+        drawText5x7(renderer, 4, hudTop + 16, scale, gray, eq.str());
     }
 
     // Objective line
@@ -356,7 +383,7 @@ void Renderer::drawHud(const Game& game) {
         std::string obj = game.playerHasAmulet()
             ? "OBJECTIVE: RETURN TO THE EXIT (<) ON DEPTH 1."
             : "OBJECTIVE: FIND THE AMULET OF YENDOR ON DEPTH 5.";
-        drawText5x7(renderer, fontTex, 4, hudTop + 30, obj, yellow, scale);
+        drawText5x7(renderer, 4, hudTop + 30, scale, yellow, obj);
     }
 
     // Messages (scrolled)
@@ -372,31 +399,39 @@ void Renderer::drawHud(const Game& game) {
 
     for (int i = start; i < end; ++i) {
         const int y = startY + (i - start) * lineH;
-        const bool isPlayerMsg = msgs[i].fromPlayer;
-        const Color c = isPlayerMsg ? white : gray;
-        drawText5x7(renderer, fontTex, 4, y, msgs[i].text, c, scale);
+        Color c = white;
+        switch (msgs[i].kind) {
+            case MessageKind::Combat:  c = red; break;
+            case MessageKind::Loot:    c = yellow; break;
+            case MessageKind::Success: c = green; break;
+            case MessageKind::Warning: c = orange; break;
+            case MessageKind::System:  c = gray; break;
+            case MessageKind::Info:
+            default: c = msgs[i].fromPlayer ? white : gray; break;
+        }
+        drawText5x7(renderer, 4, y, scale, c, msgs[i].text);
     }
 
     if (scroll > 0) {
         std::stringstream ss;
         ss << "LOG -" << scroll;
-        drawText5x7(renderer, fontTex, winW - 130, hudTop + 2, ss.str(), gray, scale);
+        drawText5x7(renderer, winW - 130, hudTop + 2, scale, gray, ss.str());
     }
 
     // Controls line
     {
         const std::string help =
-            "MOVE WASD/ARROWS  . WAIT  G GET  I INV  ? HELP  F FIRE  < UP  > DOWN  F5 SAVE  F9 LOAD  PGUP/PGDN LOG  R RESTART";
-        drawText5x7(renderer, fontTex, 4, hudTop + hudH - 16, help, gray, scale);
+            "MOVE WASD/ARROWS  . WAIT  G GET  I INV  C SEARCH  P AUTO$  ? HELP  F FIRE  < UP  > DOWN  F5 SAVE  F9 LOAD  PGUP/PGDN LOG  R RESTART";
+        drawText5x7(renderer, 4, hudTop + hudH - 16, scale, gray, help);
     }
 
     // Game over / win overlays
     if (game.isGameWon()) {
-        drawText5x7(renderer, fontTex, winW / 2 - 60, hudTop + 54, "VICTORY!", green, 4);
-        drawText5x7(renderer, fontTex, winW / 2 - 110, hudTop + 82, "R RESTART   F9 LOAD", gray, 3);
+        drawText5x7(renderer, winW / 2 - 60, hudTop + 54, 4, green, "VICTORY!");
+        drawText5x7(renderer, winW / 2 - 110, hudTop + 82, 3, gray, "R RESTART   F9 LOAD");
     } else if (game.isGameOver()) {
-        drawText5x7(renderer, fontTex, winW / 2 - 70, hudTop + 54, "GAME OVER", red, 4);
-        drawText5x7(renderer, fontTex, winW / 2 - 110, hudTop + 82, "R RESTART   F9 LOAD", gray, 3);
+        drawText5x7(renderer, winW / 2 - 70, hudTop + 54, 4, red, "GAME OVER");
+        drawText5x7(renderer, winW / 2 - 110, hudTop + 82, 3, gray, "R RESTART   F9 LOAD");
     }
 }
 
@@ -490,6 +525,8 @@ void Renderer::drawHelpOverlay(const Game& game) {
     line("MOVE: WASD / ARROW KEYS");
     line("WAIT: . (PERIOD)");
     line("PICK UP: G");
+    line("SEARCH: C (REVEAL NEARBY TRAPS)");
+    line("AUTO-PICKUP GOLD: P (TOGGLE)");
     line("INVENTORY: I   (E EQUIP, U USE, X DROP, ESC CLOSE)");
     line("RANGED: F TARGET, ENTER FIRE, ESC CANCEL");
     line("STAIRS: < UP, > DOWN   (ENTER ALSO WORKS WHILE STANDING ON STAIRS)");
@@ -501,6 +538,11 @@ void Renderer::drawHelpOverlay(const Game& game) {
     line("TIPS:", yellow);
     line("- BUMP ENEMIES TO MELEE ATTACK.");
     line("- POTIONS OF STRENGTH PERMANENTLY INCREASE ATK.");
+    line("- POTION OF ANTIDOTE CURES POISON.");
+    line("- POTION OF REGENERATION HEALS OVER TIME.");
+    line("- POTION OF SHIELDING TEMPORARILY BOOSTS DEF.");
+    line("- ENCHANTMENT SCROLLS IMPROVE EQUIPPED GEAR.");
+    line("- DISCOVERED TRAPS ARE DRAWN AS X.");
     line("- SCROLL OF MAPPING REVEALS THE WHOLE FLOOR.");
 }
 

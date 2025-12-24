@@ -19,6 +19,10 @@ enum class EntityKind : uint8_t {
     Wolf,
     Troll,
     Wizard,
+
+    // --- New monsters (appended to keep save compatibility) ---
+    Snake,
+    Spider,
 };
 
 enum class Action : uint8_t {
@@ -50,6 +54,38 @@ enum class Action : uint8_t {
 
     LogUp,
     LogDown,
+
+    // New actions
+    Search,            // Spend a turn searching for nearby traps
+    ToggleAutoPickup,  // Toggle auto-pickup of gold
+};
+
+enum class MessageKind : uint8_t {
+    Info = 0,
+    Combat,
+    Loot,
+    System,
+    Warning,
+    Success,
+};
+
+struct Message {
+    std::string text;
+    MessageKind kind = MessageKind::Info;
+    bool fromPlayer = true;
+};
+
+enum class TrapKind : uint8_t {
+    Spike = 0,
+    PoisonDart,
+    Teleport,
+    Alarm,
+};
+
+struct Trap {
+    TrapKind kind = TrapKind::Spike;
+    Vec2i pos{0,0};
+    bool discovered = false;
 };
 
 struct Entity {
@@ -80,6 +116,11 @@ struct Entity {
 
     bool alerted = false;
 
+    // Timed status effects (mostly used by player, but can be applied to monsters too).
+    int poisonTurns = 0;   // lose 1 HP per full turn
+    int regenTurns = 0;    // heal 1 HP per full turn
+    int shieldTurns = 0;   // temporary defense boost
+
     uint32_t spriteSeed = 0;
 };
 
@@ -96,6 +137,7 @@ struct LevelState {
     Dungeon dung;
     std::vector<Entity> monsters;
     std::vector<GroundItem> ground;
+    std::vector<Trap> traps;
 };
 
 class Game {
@@ -113,6 +155,7 @@ public:
     const Dungeon& dungeon() const { return dung; }
     const std::vector<Entity>& entities() const { return ents; }
     const std::vector<GroundItem>& groundItems() const { return ground; }
+    const std::vector<Trap>& traps() const { return trapsCur; }
 
     const Entity& player() const;
     Entity& playerMut();
@@ -141,6 +184,14 @@ public:
     int playerCharLevel() const { return charLevel; }
     int playerXp() const { return xp; }
     int playerXpToNext() const { return xpNext; }
+
+    // Convenience getters (kept for renderer/legacy naming)
+    int goldCount() const { return countGold(inv); }
+    int characterLevel() const { return charLevel; }
+    int experience() const { return xp; }
+    int experienceToNext() const { return xpNext; }
+
+    bool autoPickupEnabled() const { return autoPickupGold; }
     bool playerHasAmulet() const;
 
     // Targeting
@@ -153,7 +204,7 @@ public:
     bool isHelpOpen() const { return helpOpen; }
 
     // Messages + scrollback
-    const std::vector<std::string>& messages() const { return msgs; }
+    const std::vector<Message>& messages() const { return msgs; }
     int messageScroll() const { return msgScroll; }
 
     // FX
@@ -178,6 +229,8 @@ private:
 
     // Items on ground (current level)
     std::vector<GroundItem> ground;
+    // Traps on current level
+    std::vector<Trap> trapsCur;
     int nextItemId = 1;
 
     // Player inventory & equipment
@@ -198,8 +251,11 @@ private:
     bool helpOpen = false;
 
     // Messages
-    std::vector<std::string> msgs;
+    std::vector<Message> msgs;
     int msgScroll = 0;
+
+    // Options / quality-of-life
+    bool autoPickupGold = true;
 
     // Visual FX
     std::vector<FXProjectile> fx;
@@ -214,7 +270,7 @@ private:
     int xpNext = 20;
 
 private:
-    void pushMsg(const std::string& s);
+    void pushMsg(const std::string& s, MessageKind kind = MessageKind::Info, bool fromPlayer = true);
 
     Entity* entityById(int id);
     const Entity* entityById(int id) const;
@@ -273,6 +329,14 @@ private:
     // Generation
     void spawnMonsters();
     void spawnItems();
+    void spawnTraps();
+
+    // QoL / traps / status
+    bool autoPickupGoldAtPlayer();
+    bool searchForTraps();
+    Trap* trapAtMut(int x, int y);
+    void triggerTrapAt(Vec2i pos, Entity& victim);
+    void applyEndOfTurnEffects();
     Vec2i randomFreeTileInRoom(const Room& r, int tries = 200);
 
     // Line util

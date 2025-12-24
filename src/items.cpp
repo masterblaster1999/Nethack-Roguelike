@@ -61,6 +61,13 @@ const ItemDef& itemDef(ItemKind k) {
         { ItemKind::Arrow,          "ARROW",             true,  false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Arrow, 0, 0 },
         { ItemKind::Rock,           "ROCK",              true,  false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
         { ItemKind::Gold,           "GOLD",              true,  false, true,  EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
+
+        // New consumables / progression
+        { ItemKind::PotionAntidote,      "POTION OF ANTIDOTE",       true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::PotionRegeneration,  "POTION OF REGENERATION",   true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::PotionShielding,     "POTION OF STONESKIN",      true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::ScrollEnchantWeapon, "SCROLL OF ENCHANT WEAPON", true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::ScrollEnchantArmor,  "SCROLL OF ENCHANT ARMOR",  true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
     };
 
     const size_t idx = static_cast<size_t>(k);
@@ -77,6 +84,13 @@ std::string itemDisplayNameSingle(ItemKind k) {
 std::string itemDisplayName(const Item& it) {
     const ItemDef& d = itemDef(it.kind);
     std::ostringstream ss;
+
+    // Prefix enchantment for non-stackable equipment.
+    // (We intentionally keep new ItemKind values appended to preserve old save compatibility.)
+    if ((isWeapon(it.kind) || isArmor(it.kind)) && it.enchant != 0) {
+        if (it.enchant > 0) ss << "+";
+        ss << it.enchant << " ";
+    }
 
     if (d.stackable && it.count > 1) {
         ss << it.count << " " << pluralizeStackableName(it.kind, d.name, it.count);

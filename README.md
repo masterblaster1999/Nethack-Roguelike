@@ -15,11 +15,23 @@ This branch upgrades the original drop with bigger, more "roguelike" systems:
 - **New monsters**
   - **Troll** (regenerates)
   - **Wizard** (ranged magic)
+  - **Snake** (poison bite)
+  - **Spider** (poison bite)
 - **New items**
   - **Sling** (rocks for ammo)
   - **Potion of Strength** (+ATK)
+  - **Potion of Antidote** (cures poison)
+  - **Potion of Regeneration** (heals over time)
+  - **Potion of Shielding** (temporary DEF boost)
   - **Scroll of Mapping** (reveals the explored map)
+  - **Scroll of Enchant Weapon / Armor** (permanent +ATK/+DEF to equipped gear)
   - **Amulet of Yendor** (quest item)
+- **Traps + searching**
+  - Hidden floor traps that can be discovered with **Search (C)**
+  - Discovered traps are drawn as **X** on the map (dimmed when out of sight)
+- **Quality-of-life**
+  - **Auto-pickup gold** toggle (**P**)
+  - Color-coded message log for combat, loot, warnings, etc
 - **Help overlay**
   - In-game key reference (press **?**)
 
@@ -36,6 +48,8 @@ Dungeon:
 
 Items:
 - **G**: pick up items on your tile
+- **C**: search for nearby traps (costs a turn)
+- **P**: toggle auto-pickup of gold
 - **I**: inventory (toggle)
   - **Up/Down**: select
   - **E**: equip / unequip

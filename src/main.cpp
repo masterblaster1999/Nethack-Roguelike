@@ -21,6 +21,12 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
         case SDLK_SPACE:
             return Action::Wait;
 
+        case SDLK_c:
+            return Action::Search;
+
+        case SDLK_p:
+            return Action::ToggleAutoPickup;
+
         case SDLK_PERIOD:
             if ((mod & KMOD_SHIFT) != 0) {
                 // '>' on many keyboards

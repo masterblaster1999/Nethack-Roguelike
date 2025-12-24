@@ -102,6 +102,8 @@ float densityFor(EntityKind k) {
         case EntityKind::Wolf: return 0.55f;
         case EntityKind::Troll: return 0.68f;
         case EntityKind::Wizard: return 0.50f;
+        case EntityKind::Snake: return 0.48f;
+        case EntityKind::Spider: return 0.46f;
         default: return 0.55f;
     }
 }
@@ -118,6 +120,8 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::Wolf: return add({ 150, 150, 160, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Troll: return add({ 90, 170, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Wizard: return add({ 140, 100, 200, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
+        case EntityKind::Snake: return add({ 80, 190, 100, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
+        case EntityKind::Spider: return add({ 80, 80, 95, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
         default: return add({ 180, 180, 180, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
     }
 }
@@ -213,6 +217,28 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
         rect(s, 5, 4, 6, 1, hat);
         rect(s, 6, 1, 4, 4, mul(base, 0.65f));
         if (frame % 2 == 1) setPx(s, 9, 2, {255,255,255,140});
+    }
+
+    if (kind == EntityKind::Snake) {
+        // Tiny tongue + a couple darker scale stripes
+        setPx(s, 8, 11, {220,80,80,255});
+        setPx(s, 9, 11, {220,80,80,255});
+        Color stripe = mul(base, 0.55f);
+        for (int x = 4; x <= 11; x += 2) {
+            setPx(s, x, 9, stripe);
+        }
+    }
+
+    if (kind == EntityKind::Spider) {
+        // Legs
+        Color leg = {20,20,20,255};
+        for (int x = 3; x <= 12; x += 3) {
+            setPx(s, x, 11, leg);
+            setPx(s, x, 12, leg);
+        }
+        // Extra eyes
+        setPx(s, 6, 6, {255,255,255,255});
+        setPx(s, 9, 6, {255,255,255,255});
     }
 
     // Soft outline (helps readability)
@@ -324,12 +350,67 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
             if (frame % 2 == 1) setPx(s, 9, 6, {255,255,255,200});
             break;
         }
+        case ItemKind::PotionAntidote: {
+            Color glass = {200,200,220,180};
+            Color fluid = {90,160,240,220};
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+            // tiny cross highlight
+            setPx(s, 8, 8, {255,255,255,180});
+            if (frame % 2 == 1) setPx(s, 9, 6, {255,255,255,200});
+            break;
+        }
+        case ItemKind::PotionRegeneration: {
+            Color glass = {200,200,220,180};
+            Color fluid = {190,90,230,220};
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+            if (frame % 2 == 1) {
+                setPx(s, 9, 6, {255,255,255,200});
+                setPx(s, 7, 9, {255,255,255,120});
+            }
+            break;
+        }
+        case ItemKind::PotionShielding: {
+            Color glass = {200,200,220,180};
+            Color fluid = {200,200,200,220};
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+            // small "stone" speckle
+            setPx(s, 7, 10, {120,120,120,255});
+            if (frame % 2 == 1) setPx(s, 9, 6, {255,255,255,200});
+            break;
+        }
         case ItemKind::ScrollTeleport: {
             Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
             outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
             rect(s, 5, 6, 6, 5, paper);
             // rune squiggles
             for (int x = 6; x <= 9; ++x) setPx(s, x, 8, {80,50,30,255});
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+        case ItemKind::ScrollEnchantWeapon: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+            // sword-ish glyph
+            line(s, 8, 6, 8, 10, {80,50,30,255});
+            line(s, 7, 10, 9, 10, {80,50,30,255});
+            setPx(s, 8, 5, {255,255,255,140});
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+        case ItemKind::ScrollEnchantArmor: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+            // shield-ish glyph
+            outlineRect(s, 7, 7, 3, 4, {80,50,30,255});
+            setPx(s, 8, 10, {80,50,30,255});
             if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
             break;
         }

@@ -1,8 +1,0 @@
-{
-  "name": "procrogue",
-  "version-string": "0.2.0",
-  "description": "A tiny NetHack-inspired roguelike with procedurally generated pixel sprites.",
-  "dependencies": [
-    "sdl2"
-  ]
-}

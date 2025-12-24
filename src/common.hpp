@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -8,12 +9,30 @@ struct Vec2i {
     int y = 0;
 };
 
+struct Vec2f {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
 struct Color {
     uint8_t r = 255;
     uint8_t g = 255;
     uint8_t b = 255;
     uint8_t a = 255;
 };
+
+inline bool operator==(const Vec2i& a, const Vec2i& b) { return a.x == b.x && a.y == b.y; }
+inline bool operator!=(const Vec2i& a, const Vec2i& b) { return !(a == b); }
+
+inline int manhattan(const Vec2i& a, const Vec2i& b) {
+    return std::abs(a.x - b.x) + std::abs(a.y - b.y);
+}
+
+inline int chebyshev(const Vec2i& a, const Vec2i& b) {
+    int dx = std::abs(a.x - b.x);
+    int dy = std::abs(a.y - b.y);
+    return dx > dy ? dx : dy;
+}
 
 inline int sign(int v) {
     return (v > 0) - (v < 0);

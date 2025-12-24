@@ -18,6 +18,7 @@ add_executable(proc_rogue
     src/dungeon.cpp
     src/render.cpp
     src/spritegen.cpp
+    src/items.cpp
 )
 
 target_include_directories(proc_rogue PRIVATE src)

@@ -2,9 +2,12 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 
+#include "dungeon.hpp"
 #include "game.hpp"
+#include "items.hpp"
 #include "spritegen.hpp"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -18,35 +21,44 @@ public:
     bool init();
     void shutdown();
 
-    bool ok() const { return initialized; }
-
     void render(const Game& game);
 
 private:
+    static constexpr int FRAMES = 2;
+
     int winW = 0;
     int winH = 0;
     int tile = 32;
     int hudH = 160;
 
-    SDL_Window* window = nullptr;
-    SDL_Renderer* renderer = nullptr;
-
-    SDL_PixelFormat* pixfmt = nullptr;
-
     bool initialized = false;
 
-    // Tile texture variants
+    SDL_Window* window = nullptr;
+    SDL_Renderer* renderer = nullptr;
+    SDL_PixelFormat* pixfmt = nullptr;
+
+    // Tile textures (some have variants)
     std::vector<SDL_Texture*> floorVar;
     std::vector<SDL_Texture*> wallVar;
-    std::vector<SDL_Texture*> stairsVar;
 
-    // Entity textures, keyed by (kind, seed)
-    std::unordered_map<uint64_t, SDL_Texture*> entityTex;
+    std::array<SDL_Texture*, FRAMES> stairsUpTex{};
+    std::array<SDL_Texture*, FRAMES> stairsDownTex{};
+    std::array<SDL_Texture*, FRAMES> doorClosedTex{};
+    std::array<SDL_Texture*, FRAMES> doorOpenTex{};
+
+    // Entity / item / projectile textures (keyed by kind+seed)
+    std::unordered_map<uint64_t, std::array<SDL_Texture*, FRAMES>> entityTex;
+    std::unordered_map<uint64_t, std::array<SDL_Texture*, FRAMES>> itemTex;
+    std::unordered_map<uint64_t, std::array<SDL_Texture*, FRAMES>> projTex;
 
     SDL_Texture* textureFromSprite(const SpritePixels& s);
 
-    SDL_Texture* tileTexture(TileType t, int x, int y, int level);
-    SDL_Texture* entityTexture(const Entity& e);
+    SDL_Texture* tileTexture(TileType t, int x, int y, int level, int frame);
+    SDL_Texture* entityTexture(const Entity& e, int frame);
+    SDL_Texture* itemTexture(const Item& it, int frame);
+    SDL_Texture* projectileTexture(ProjectileKind k, int frame);
 
     void drawHud(const Game& game);
+    void drawInventoryOverlay(const Game& game);
+    void drawTargetingOverlay(const Game& game);
 };

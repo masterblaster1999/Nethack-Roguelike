@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <vector>
 
-// Forward declare to avoid include cycles.
+// Forward declares to avoid heavy includes here.
 enum class EntityKind : uint8_t;
+enum class ItemKind : uint8_t;
+enum class ProjectileKind : uint8_t;
 
 struct SpritePixels {
     int w = 0;
@@ -17,9 +19,12 @@ struct SpritePixels {
 };
 
 // 16x16 sprites
-SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed);
+SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame);
+SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame);
+SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int frame);
 
 // 16x16 tiles
-SpritePixels generateFloorTile(uint32_t seed);
-SpritePixels generateWallTile(uint32_t seed);
-SpritePixels generateStairsTile(uint32_t seed);
+SpritePixels generateFloorTile(uint32_t seed, int frame);
+SpritePixels generateWallTile(uint32_t seed, int frame);
+SpritePixels generateStairsTile(uint32_t seed, bool up, int frame);
+SpritePixels generateDoorTile(uint32_t seed, bool open, int frame);

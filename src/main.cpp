@@ -1,63 +1,76 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
-
-#include "game.hpp"
-#include "render.hpp"
-#include "rng.hpp"
-
-#include <chrono>
 #include <cstdint>
 #include <iostream>
 
-static Action actionFromKey(const SDL_Keysym& k) {
-    const SDL_Keycode key = k.sym;
-    const Uint16 mod = k.mod;
+#include "game.hpp"
+#include "render.hpp"
 
+static Action keyToAction(SDL_Keycode key, Uint16 mod) {
     switch (key) {
-        case SDLK_ESCAPE: return Action::None; // handled separately
-        case SDLK_UP:    return Action::MoveUp;
-        case SDLK_DOWN:  return Action::MoveDown;
-        case SDLK_LEFT:  return Action::MoveLeft;
-        case SDLK_RIGHT: return Action::MoveRight;
+        case SDLK_UP:    return Action::Up;
+        case SDLK_DOWN:  return Action::Down;
+        case SDLK_LEFT:  return Action::Left;
+        case SDLK_RIGHT: return Action::Right;
 
-        case SDLK_w: return Action::MoveUp;
-        case SDLK_s: return Action::MoveDown;
-        case SDLK_a: return Action::MoveLeft;
-        case SDLK_d: return Action::MoveRight;
+        case SDLK_w: return Action::Up;
+        case SDLK_s: return Action::Down;
+        case SDLK_a: return Action::Left;
+        case SDLK_d: return Action::Right;
 
         case SDLK_SPACE:
         case SDLK_PERIOD:
-            // Shift+period is '>' on many keyboards; treat that as stairs.
-            if ((mod & KMOD_SHIFT) != 0) return Action::StairsDown;
+            if ((mod & KMOD_SHIFT) != 0) return Action::Confirm; // '>' on many keyboards
             return Action::Wait;
 
         case SDLK_GREATER:
-            return Action::StairsDown;
+            return Action::Confirm;
 
         case SDLK_RETURN:
         case SDLK_KP_ENTER:
-            return Action::StairsDown;
+            return Action::Confirm;
+
+        case SDLK_g:
+            return Action::Pickup;
+
+        case SDLK_i:
+            return Action::Inventory;
+
+        case SDLK_f:
+            return Action::Fire;
+
+        // Inventory actions (only do something while inventory is open)
+        case SDLK_e:
+            return Action::Equip;
+        case SDLK_u:
+            return Action::Use;
+        case SDLK_x:
+            return Action::Drop;
+
+        case SDLK_PAGEUP:
+            return Action::LogUp;
+        case SDLK_PAGEDOWN:
+            return Action::LogDown;
 
         case SDLK_r:
             return Action::Restart;
 
         default:
-            break;
+            return Action::None;
     }
-
-    return Action::None;
 }
 
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
         return 1;
     }
 
-    // For pixel art scaling
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+    Game game;
+    uint32_t seed = static_cast<uint32_t>(SDL_GetTicks());
+    game.newGame(seed);
 
     const int tileSize = 32;
     const int hudHeight = 160;
@@ -70,39 +83,45 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Seed from time
-    uint32_t seed = static_cast<uint32_t>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count()
-    );
-    seed = hash32(seed);
-
-    Game game;
-    game.newGame(seed);
-
     bool running = true;
-    while (running) {
-        SDL_Event e;
-        Action action = Action::None;
+    uint32_t lastTicks = SDL_GetTicks();
 
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) {
+    while (running) {
+        uint32_t now = SDL_GetTicks();
+        float dt = (now - lastTicks) / 1000.0f;
+        if (dt > 0.1f) dt = 0.1f;
+        lastTicks = now;
+
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) {
                 running = false;
-            } else if (e.type == SDL_KEYDOWN && e.key.repeat == 0) {
-                if (e.key.keysym.sym == SDLK_ESCAPE) {
-                    running = false;
-                } else {
-                    action = actionFromKey(e.key.keysym);
+                break;
+            }
+            if (ev.type == SDL_KEYDOWN && ev.key.repeat == 0) {
+                SDL_Keycode key = ev.key.keysym.sym;
+                Uint16 mod = ev.key.keysym.mod;
+
+                if (key == SDLK_ESCAPE) {
+                    // ESC cancels inventory/targeting; otherwise quit.
+                    if (game.isInventoryOpen() || game.isTargeting()) {
+                        game.handleAction(Action::Cancel);
+                    } else {
+                        running = false;
+                    }
+                    continue;
+                }
+
+                Action a = keyToAction(key, mod);
+                if (a != Action::None) {
+                    game.handleAction(a);
                 }
             }
         }
 
-        if (action != Action::None) {
-            game.handleAction(action);
-        }
-
+        game.update(dt);
         renderer.render(game);
 
-        // Small delay to avoid maxing a CPU core.
         SDL_Delay(8);
     }
 

@@ -1,93 +1,71 @@
-# ProcRogue (first playable drop)
+# ProcRogue++
 
-A small, NetHack-inspired, turn-based dungeon crawler written in **C++17 + SDL2**.
+A small SDL2 roguelike with **procedurally generated dungeons** and **procedurally generated pixel sprites**.
 
-**All graphics are generated at runtime** (procedural 16×16 pixel sprites and tile textures). No external art assets.
+This is a **massive gameplay upgrade** over the initial drop:
 
-This is intended to be a clean starting point that we can iterate on heavily (items, inventory, more monsters, more levels, better FOV, UI polish, etc).
-
----
-
-## Features (so far)
-
-- Procedural dungeon (rooms + corridors)
-- Player + monsters with simple combat (bump to attack)
-- Simple monster AI (wander, chase when close)
-- Field-of-view + exploration memory (fog of war)
-- Procedural pixel sprites for:
-  - Floors, walls, stairs
-  - Player + monsters (each has a unique seed → unique sprite)
-- Minimal HUD with bitmap font (no SDL_ttf dependency)
-
----
+- **Items + inventory**
+  - Pick up, drop, use, and equip items (weapon + armor)
+  - Stackable ammo + gold
+- **Improved dungeon generator**
+  - BSP-ish room layout
+  - Door placement, multiple corridors, loops + dead ends
+  - Special rooms (Treasure / Lair / Shrine)
+- **More monsters + behaviors**
+  - Ranged enemies (archer/slinger)
+  - Fleeing behavior when hurt
+  - Pack AI for wolves
+- **Animated procedural sprites**
+  - 2-frame flicker/bob animation for entities/items/FX
+- **Targeting + projectiles**
+  - Aim with a cursor and fire with visible projectiles
+- **Proper message log scrollback**
+  - PageUp/PageDown scrolls combat + loot history
 
 ## Controls
 
-- **Move:** Arrow keys or WASD
-- **Wait (do nothing):** `.` (period) or `Space`
-- **Go down stairs:** `>` or `Enter` (only works while standing on stairs)
-- **Restart:** `R`
-- **Quit:** `Esc`
+Movement:
+- **WASD** / **Arrow keys**: move
+- **.** or **Space**: wait
 
----
+Dungeon:
+- **Enter** or **>**: use stairs down (when standing on them)
 
-## Build (CMake)
+Items:
+- **G**: pick up items on your tile
+- **I**: inventory (toggle)
+  - **Up/Down**: select
+  - **E**: equip / unequip (weapon or armor)
+  - **U**: use (potion/scroll)
+  - **X**: drop
+  - **Esc**: close inventory
 
-### Linux (Ubuntu / Debian)
+Ranged targeting:
+- **F**: start targeting (requires a ranged-capable equipped weapon)
+- **Arrow keys**: move target cursor
+- **Enter**: fire
+- **Esc**: cancel targeting
 
-Install SDL2 dev:
+Message log:
+- **PageUp / PageDown**: scroll message history
+
+Other:
+- **R**: restart
+- Close the window / **Esc** (when not in inventory/targeting): quit
+
+## Build
+
+Requirements:
+- CMake
+- SDL2
+
+Typical CMake build:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y cmake g++ libsdl2-dev
+mkdir -p build
+cd build
+cmake ..
+cmake --build . --config Release
 ```
 
-Build & run:
-
-```bash
-cmake -S . -B build
-cmake --build build -j
-./build/proc_rogue
-```
-
-### macOS (Homebrew)
-
-```bash
-brew install sdl2 cmake
-cmake -S . -B build
-cmake --build build -j
-./build/proc_rogue
-```
-
-### Windows
-
-Recommended easiest path:
-
-- Install **Visual Studio 2022** with C++ Desktop workload
-- Install **vcpkg**
-- `vcpkg install sdl2`
-
-Then configure CMake with the vcpkg toolchain:
-
-```powershell
-cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake
-cmake --build build --config Release
-.uild\Release\proc_rogue.exe
-```
-
----
-
-## Notes
-
-- This project defines `SDL_MAIN_HANDLED`, so it should not strictly require `SDL2main`.
-- All sprite generation is contained in `src/spritegen.*` and is meant to be extended:
-  - animations
-  - equipment overlays
-  - per-biome tile sets
-  - etc.
-
----
-
-## License
-
-MIT (see LICENSE).
+If SDL2 isn't found automatically, make sure it’s installed for your platform and discoverable by CMake.

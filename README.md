@@ -1,92 +1,65 @@
-# ProcRogue++
+# Nethack-Roguelike (ProcRogue)
 
-A small SDL2 roguelike with **procedurally generated dungeons** and **procedurally generated pixel sprites**.
+A small NetHack-inspired roguelike written in **C++17** using **SDL2**.
 
-This branch upgrades the original drop with bigger, more "roguelike" systems:
+Sprites are procedurally generated at runtime (no external art assets), and the game features multiple dungeon floors, traps, ranged combat, equipment, and save/load.
 
-- **Multi-level dungeon persistence**
-  - Stairs up/down, and previously visited depths remain in memory (exploration + monster/item state)
-- **Win condition + quest item**
-  - Find the **Amulet of Yendor** on **Depth 5**, then return to the exit (**<** on Depth 1)
-- **Save / Load (quick keys)**
-  - Save to a local file and resume later
-- **Character progression**
-  - XP from kills, character levels, and stat growth
-- **New monsters**
-  - **Troll** (regenerates)
-  - **Wizard** (ranged magic)
-  - **Snake** (poison bite)
-  - **Spider** (poison bite)
-- **New items**
-  - **Sling** (rocks for ammo)
-  - **Potion of Strength** (+ATK)
-  - **Potion of Antidote** (cures poison)
-  - **Potion of Regeneration** (heals over time)
-  - **Potion of Shielding** (temporary DEF boost)
-  - **Scroll of Mapping** (reveals the explored map)
-  - **Scroll of Enchant Weapon / Armor** (permanent +ATK/+DEF to equipped gear)
-  - **Amulet of Yendor** (quest item)
-- **Traps + searching**
-  - Hidden floor traps that can be discovered with **Search (C)**
-  - Discovered traps are drawn as **X** on the map (dimmed when out of sight)
-- **Quality-of-life**
-  - **Auto-pickup gold** toggle (**P**)
-  - Color-coded message log for combat, loot, warnings, etc
-- **Help overlay**
-  - In-game key reference (press **?**)
+---
+
+## What's new in this upgraded build
+
+* **Modernized CMake**: clearer errors, better Windows support, optional auto-download of SDL2.
+* **Improved Field-of-View**: replaced per-tile raycasts with **shadowcasting** for smoother visibility.
+* **Look/Examine mode**: press **L** (or **V**) to move a cursor and inspect tiles (**no turn consumed**).
+* **Rest command**: press **Z** to rest until healed (interrupts if an enemy becomes visible).
+* **New consumables**:
+  * **Potion of Haste** – grants extra actions (monsters act every other player action).
+  * **Potion of Vision** – increases sight radius temporarily.
+* **Resizable window + fullscreen toggle**: resize freely, toggle fullscreen with **F11**.
+* **HUD improvements**: status effects now display HASTE/VISION and a turn counter.
+
+---
 
 ## Controls
 
-Movement:
-- **WASD** / **Arrow keys**: move
-- **.** or **Space**: wait
+| Action | Keys |
+|---|---|
+| Move | WASD / Arrow Keys |
+| Wait | `.` |
+| Pick up | `G` |
+| Inventory | `I` |
+| Target ranged | `F` |
+| Look / examine | `L` / `V` |
+| Rest | `Z` |
+| Search for traps | `C` |
+| Toggle auto-pickup gold | `P` |
+| Use stairs | `<` / `>` |
+| Help overlay | `?` |
+| Save / Load | `F5` / `F9` |
+| Fullscreen | `F11` |
+| Restart | `R` |
+| Cancel / Exit overlays | `Esc` |
 
-Dungeon:
-- **>**: stairs down (when standing on them)
-- **<**: stairs up (when standing on them)
-- **Enter**: context action (uses stairs up/down if you are standing on them)
+---
 
-Items:
-- **G**: pick up items on your tile
-- **C**: search for nearby traps (costs a turn)
-- **P**: toggle auto-pickup of gold
-- **I**: inventory (toggle)
-  - **Up/Down**: select
-  - **E**: equip / unequip
-    - Melee weapons (dagger/sword) go to the **Melee** slot
-    - Ranged weapons (bow/sling/wand) go to the **Ranged** slot
-    - Armor goes to the **Armor** slot
-  - **U**: use (potion/scroll)
-  - **X**: drop
-  - **Esc**: close inventory
+## Building
 
-Ranged targeting:
-- **F**: start targeting (requires a ranged weapon in your **Ranged** slot)
-- **Arrow keys**: move target cursor
-- **Enter**: fire
-- **Esc**: cancel targeting
+This project uses CMake. SDL2 can be provided three ways:
 
-UI / meta:
-- **?**: help overlay
-- **F5**: save
-- **F9**: load
-- **PageUp / PageDown**: scroll message history
-- **R**: restart
-- Close the window / **Esc** (when not in inventory/targeting/help): quit
+1) **Windows**: CMake can **FetchContent** SDL2 automatically (recommended).
+2) **Windows**: use **vcpkg** (`vcpkg.json` is included).
+3) **Linux/macOS**: install SDL2 from your package manager.
 
-## Build
+See **[docs/BUILDING.md](docs/BUILDING.md)** for detailed, copy/pasteable steps.
 
-Requirements:
-- CMake
-- SDL2
+---
 
-Typical CMake build:
+## Save files
 
-```bash
-mkdir -p build
-cd build
-cmake ..
-cmake --build . --config Release
-```
+The game writes a save file to the working directory (same folder you run the executable from).
 
-If SDL2 isn't found automatically, make sure it’s installed for your platform and discoverable by CMake.
+---
+
+## License
+
+See [LICENSE](LICENSE).

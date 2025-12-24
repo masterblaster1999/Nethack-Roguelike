@@ -58,6 +58,10 @@ enum class Action : uint8_t {
     // New actions
     Search,            // Spend a turn searching for nearby traps
     ToggleAutoPickup,  // Toggle auto-pickup of gold
+
+    // UI / QoL
+    Look,              // Examine tiles without taking a turn
+    Rest,              // Rest (auto-wait) until healed or interrupted
 };
 
 enum class MessageKind : uint8_t {
@@ -120,6 +124,10 @@ struct Entity {
     int poisonTurns = 0;   // lose 1 HP per full turn
     int regenTurns = 0;    // heal 1 HP per full turn
     int shieldTurns = 0;   // temporary defense boost
+
+    // New timed buffs
+    int hasteTurns = 0;    // grants extra player actions (decrements on monster turns)
+    int visionTurns = 0;   // increases FOV radius
 
     uint32_t spriteSeed = 0;
 };
@@ -203,6 +211,14 @@ public:
     // Help overlay
     bool isHelpOpen() const { return helpOpen; }
 
+    // Look/examine overlay (cursor-based inspection)
+    bool isLooking() const { return looking; }
+    Vec2i lookCursor() const { return lookPos; }
+    std::string lookInfoText() const;
+
+    // Turn counter (increments once per player action that consumes time)
+    uint32_t turns() const { return turnCount; }
+
     // Messages + scrollback
     const std::vector<Message>& messages() const { return msgs; }
     int messageScroll() const { return msgScroll; }
@@ -256,6 +272,18 @@ private:
 
     // Options / quality-of-life
     bool autoPickupGold = true;
+
+    // Time / pacing
+    uint32_t turnCount = 0;
+    int naturalRegenCounter = 0;
+
+    // Haste is handled as "every other player action skips the monster turn".
+    // This flag tracks whether we've already taken the "free" haste action.
+    bool hastePhase = false;
+
+    // Look/examine mode
+    bool looking = false;
+    Vec2i lookPos{0,0};
 
     // Visual FX
     std::vector<FXProjectile> fx;
@@ -338,6 +366,19 @@ private:
     void triggerTrapAt(Vec2i pos, Entity& victim);
     void applyEndOfTurnEffects();
     Vec2i randomFreeTileInRoom(const Room& r, int tries = 200);
+
+    // Unified "time passes" handler (runs monsters + end-of-turn effects, handles haste)
+    void advanceAfterPlayerAction();
+    bool anyVisibleHostiles() const;
+
+    // Look/examine mode helpers
+    void beginLook();
+    void endLook();
+    void moveLookCursor(int dx, int dy);
+    std::string describeAt(Vec2i p) const;
+
+    // Rest action
+    void restUntilSafe();
 
     // Line util
     static std::vector<Vec2i> bresenhamLine(Vec2i a, Vec2i b);

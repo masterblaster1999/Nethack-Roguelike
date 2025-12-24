@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 
 namespace {
 
@@ -464,30 +465,82 @@ bool Dungeon::hasLineOfSight(int x0, int y0, int x1, int y1) const {
 void Dungeon::computeFov(int px, int py, int radius) {
     // Reset visibility each frame
     for (auto& t : tiles) t.visible = false;
+    if (!inBounds(px, py)) return;
 
-    // Simple raycast in a circle (small map, good enough).
-    int r2 = radius * radius;
-    for (int y = py - radius; y <= py + radius; ++y) {
-        for (int x = px - radius; x <= px + radius; ++x) {
-            if (!inBounds(x, y)) continue;
-            int dx = x - px;
-            int dy = y - py;
-            if (dx*dx + dy*dy > r2) continue;
+    auto isOpaque = [&](int x, int y) {
+        if (!inBounds(x, y)) return true;
+        TileType tt = at(x, y).type;
+        return (tt == TileType::Wall || tt == TileType::DoorClosed);
+    };
 
-            if (lineOfSight(px, py, x, y)) {
-                Tile& t = at(x, y);
-                t.visible = true;
-                t.explored = true;
-            }
-        }
-    }
+    auto markVis = [&](int x, int y) {
+        if (!inBounds(x, y)) return;
+        Tile& t = at(x, y);
+        t.visible = true;
+        t.explored = true;
+    };
 
     // Always see your own tile
-    if (inBounds(px, py)) {
-        Tile& self = at(px, py);
-        self.visible = true;
-        self.explored = true;
-    }
+    markVis(px, py);
+
+    // Recursive shadowcasting for 8 octants.
+    // Reference: RogueBasin "Recursive Shadowcasting".
+    const int r2 = radius * radius;
+
+    std::function<void(int, float, float, int, int, int, int)> castLight;
+    castLight = [&](int row, float start, float end, int xx, int xy, int yx, int yy) {
+        if (start < end) return;
+        float newStart = start;
+        for (int dist = row; dist <= radius; ++dist) {
+            bool blocked = false;
+
+            for (int dx = -dist, dy = -dist; dx <= 0; ++dx) {
+                const float lSlope = (dx - 0.5f) / (dy + 0.5f);
+                const float rSlope = (dx + 0.5f) / (dy - 0.5f);
+                if (start < rSlope) continue;
+                if (end > lSlope) break;
+
+                const int sax = dx * xx + dy * xy;
+                const int say = dx * yx + dy * yy;
+                const int ax = px + sax;
+                const int ay = py + say;
+
+                if (!inBounds(ax, ay)) continue;
+                const int d2 = (ax - px) * (ax - px) + (ay - py) * (ay - py);
+                if (d2 <= r2) {
+                    markVis(ax, ay);
+                }
+
+                if (blocked) {
+                    if (isOpaque(ax, ay)) {
+                        newStart = rSlope;
+                        continue;
+                    } else {
+                        blocked = false;
+                        start = newStart;
+                    }
+                } else {
+                    if (isOpaque(ax, ay) && dist < radius) {
+                        blocked = true;
+                        castLight(dist + 1, start, lSlope, xx, xy, yx, yy);
+                        newStart = rSlope;
+                    }
+                }
+            }
+
+            if (blocked) break;
+        }
+    };
+
+    // Octant transforms
+    castLight(1, 1.0f, 0.0f, 1, 0, 0, 1);
+    castLight(1, 1.0f, 0.0f, 0, 1, 1, 0);
+    castLight(1, 1.0f, 0.0f, 0, -1, 1, 0);
+    castLight(1, 1.0f, 0.0f, -1, 0, 0, 1);
+    castLight(1, 1.0f, 0.0f, -1, 0, 0, -1);
+    castLight(1, 1.0f, 0.0f, 0, -1, -1, 0);
+    castLight(1, 1.0f, 0.0f, 0, 1, -1, 0);
+    castLight(1, 1.0f, 0.0f, 1, 0, 0, -1);
 }
 
 void Dungeon::revealAll() {

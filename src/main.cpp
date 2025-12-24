@@ -59,6 +59,13 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
         case SDLK_f:
             return Action::Fire;
 
+        case SDLK_l:
+        case SDLK_v:
+            return Action::Look;
+
+        case SDLK_z:
+            return Action::Rest;
+
         case SDLK_QUESTION:
         case SDLK_h:
             return Action::Help;
@@ -132,13 +139,23 @@ int main(int argc, char** argv) {
                 SDL_Keycode key = ev.key.keysym.sym;
                 Uint16 mod = ev.key.keysym.mod;
 
+                if (key == SDLK_F11) {
+                    renderer.toggleFullscreen();
+                    continue;
+                }
+
                 if (key == SDLK_ESCAPE) {
                     // ESC cancels UI modes; otherwise quit.
-                    if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen()) {
+                    if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen() || game.isLooking()) {
                         game.handleAction(Action::Cancel);
                     } else {
                         running = false;
                     }
+                    continue;
+                }
+
+                if (key == SDLK_F11) {
+                    renderer.toggleFullscreen();
                     continue;
                 }
 

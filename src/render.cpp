@@ -17,10 +17,10 @@ bool Renderer::init() {
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0"); // nearest-neighbor
 
-    window = SDL_CreateWindow("ProcRogue++",
+    window = SDL_CreateWindow("ProcRogue",
                               SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                               winW, winH,
-                              SDL_WINDOW_SHOWN);
+                              SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!window) {
         std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << "\n";
         return false;
@@ -32,6 +32,11 @@ bool Renderer::init() {
         SDL_DestroyWindow(window); window = nullptr;
         return false;
     }
+
+    // Keep a fixed "virtual" resolution and let SDL scale the final output.
+    // This makes the window resizable while preserving crisp pixel art.
+    SDL_RenderSetLogicalSize(renderer, winW, winH);
+    SDL_RenderSetIntegerScale(renderer, SDL_TRUE);
 
     pixfmt = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA32);
     if (!pixfmt) {
@@ -102,6 +107,13 @@ void Renderer::shutdown() {
     if (window) { SDL_DestroyWindow(window); window = nullptr; }
 
     initialized = false;
+}
+
+void Renderer::toggleFullscreen() {
+    if (!window) return;
+    const Uint32 flags = SDL_GetWindowFlags(window);
+    const bool isFs = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+    SDL_SetWindowFullscreen(window, isFs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
 }
 
 SDL_Texture* Renderer::textureFromSprite(const SpritePixels& s) {
@@ -313,6 +325,10 @@ void Renderer::render(const Game& game) {
     }
 
     // Overlays
+    if (game.isLooking()) {
+        drawLookOverlay(game);
+    }
+
     if (game.isTargeting()) {
         drawTargetingOverlay(game);
     }
@@ -356,6 +372,7 @@ void Renderer::drawHud(const Game& game) {
            << "  DEF " << game.playerDefense()
            << "  GOLD " << game.goldCount()
            << "  DEPTH " << game.depth()
+           << "  TURN " << game.turns()
            << "  LVL " << game.characterLevel()
            << "  XP " << game.experience() << "/" << game.experienceToNext();
         if (game.playerHasAmulet()) ss << "  AMULET";
@@ -365,6 +382,8 @@ void Renderer::drawHud(const Game& game) {
         if (p.poisonTurns > 0) ss << "  POISON(" << p.poisonTurns << ")";
         if (p.regenTurns > 0) ss << "  REGEN(" << p.regenTurns << ")";
         if (p.shieldTurns > 0) ss << "  SHIELD(" << p.shieldTurns << ")";
+        if (p.hasteTurns > 0) ss << "  HASTE(" << p.hasteTurns << ")";
+        if (p.visionTurns > 0) ss << "  VISION(" << p.visionTurns << ")";
         drawText5x7(renderer, 4, hudTop + 2, scale, white, ss.str());
     }
 
@@ -421,7 +440,7 @@ void Renderer::drawHud(const Game& game) {
     // Controls line
     {
         const std::string help =
-            "MOVE WASD/ARROWS  . WAIT  G GET  I INV  C SEARCH  P AUTO$  ? HELP  F FIRE  < UP  > DOWN  F5 SAVE  F9 LOAD  PGUP/PGDN LOG  R RESTART";
+            "MOVE WASD/ARROWS  . WAIT  G GET  I INV  L LOOK  Z REST  C SEARCH  P AUTO$  ? HELP  F FIRE  < UP  > DOWN  F11 FULL  F5 SAVE  F9 LOAD  PGUP/PGDN LOG  R RESTART";
         drawText5x7(renderer, 4, hudTop + hudH - 16, scale, gray, help);
     }
 
@@ -524,6 +543,8 @@ void Renderer::drawHelpOverlay(const Game& game) {
 
     line("MOVE: WASD / ARROW KEYS");
     line("WAIT: . (PERIOD)");
+    line("LOOK: L / V (EXAMINE WITHOUT A TURN)");
+    line("REST: Z (WAIT UNTIL HEALED; STOPS ON DANGER)");
     line("PICK UP: G");
     line("SEARCH: C (REVEAL NEARBY TRAPS)");
     line("AUTO-PICKUP GOLD: P (TOGGLE)");
@@ -531,6 +552,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     line("RANGED: F TARGET, ENTER FIRE, ESC CANCEL");
     line("STAIRS: < UP, > DOWN   (ENTER ALSO WORKS WHILE STANDING ON STAIRS)");
     line("LOG SCROLL: PAGEUP / PAGEDOWN");
+    line("FULLSCREEN: F11 (TOGGLE)");
     line("SAVE / LOAD: F5 / F9");
     line("RESTART: R");
 
@@ -541,6 +563,8 @@ void Renderer::drawHelpOverlay(const Game& game) {
     line("- POTION OF ANTIDOTE CURES POISON.");
     line("- POTION OF REGENERATION HEALS OVER TIME.");
     line("- POTION OF SHIELDING TEMPORARILY BOOSTS DEF.");
+    line("- POTION OF HASTE GRANTS EXTRA ACTIONS.");
+    line("- POTION OF VISION INCREASES SIGHT RANGE.");
     line("- ENCHANTMENT SCROLLS IMPROVE EQUIPPED GEAR.");
     line("- DISCOVERED TRAPS ARE DRAWN AS X.");
     line("- SCROLL OF MAPPING REVEALS THE WHOLE FLOOR.");
@@ -571,4 +595,31 @@ void Renderer::drawTargetingOverlay(const Game& game) {
     const Color yellow{ 255, 230, 120, 255 };
     int hudTop = Game::MAP_H * tile;
     drawText5x7(renderer, 10, hudTop - 18, scale, yellow, ok ? "TARGET: ENTER TO FIRE, ESC TO CANCEL" : "TARGET: OUT OF RANGE/NO LOS");
+}
+
+void Renderer::drawLookOverlay(const Game& game) {
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    const Dungeon& d = game.dungeon();
+    Vec2i cursor = game.lookCursor();
+    if (!d.inBounds(cursor.x, cursor.y)) return;
+
+    // Cursor box
+    SDL_Rect c{ cursor.x * tile, cursor.y * tile, tile, tile };
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 200);
+    SDL_RenderDrawRect(renderer, &c);
+
+    // Crosshair lines (subtle)
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 90);
+    SDL_RenderDrawLine(renderer, c.x, c.y + tile / 2, c.x + tile, c.y + tile / 2);
+    SDL_RenderDrawLine(renderer, c.x + tile / 2, c.y, c.x + tile / 2, c.y + tile);
+
+    // Label near bottom of map
+    const int scale = 2;
+    const Color yellow{ 255, 230, 120, 255 };
+    int hudTop = Game::MAP_H * tile;
+
+    std::string s = game.lookInfoText();
+    if (s.empty()) s = "LOOK";
+    drawText5x7(renderer, 10, hudTop - 18, scale, yellow, s);
 }

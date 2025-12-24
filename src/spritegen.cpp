@@ -384,6 +384,32 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
             if (frame % 2 == 1) setPx(s, 9, 6, {255,255,255,200});
             break;
         }
+        case ItemKind::PotionHaste: {
+            Color glass = {200,200,220,180};
+            Color fluid = {255,170,80,220};
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+            // a tiny "bolt" shimmer
+            if (frame % 2 == 1) {
+                setPx(s, 8, 8, {255,255,255,180});
+                setPx(s, 9, 6, {255,255,255,200});
+            }
+            break;
+        }
+        case ItemKind::PotionVision: {
+            Color glass = {200,200,220,180};
+            Color fluid = {90,220,220,220};
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+            // eye highlight
+            setPx(s, 8, 8, {255,255,255,160});
+            setPx(s, 7, 8, {40,40,40,200});
+            setPx(s, 9, 8, {40,40,40,200});
+            if (frame % 2 == 1) setPx(s, 9, 6, {255,255,255,200});
+            break;
+        }
         case ItemKind::ScrollTeleport: {
             Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
             outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));

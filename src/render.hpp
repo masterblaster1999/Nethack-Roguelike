@@ -23,6 +23,9 @@ public:
 
     void render(const Game& game);
 
+    // Window controls
+    void toggleFullscreen();
+
 private:
     static constexpr int FRAMES = 2;
 
@@ -62,4 +65,5 @@ private:
     void drawInventoryOverlay(const Game& game);
     void drawHelpOverlay(const Game& game);
     void drawTargetingOverlay(const Game& game);
+    void drawLookOverlay(const Game& game);
 };

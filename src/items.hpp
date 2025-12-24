@@ -55,6 +55,10 @@ enum class ItemKind : uint8_t {
     PotionShielding,
     ScrollEnchantWeapon,
     ScrollEnchantArmor,
+
+    // --- Even newer consumables (append-only to keep save compatibility) ---
+    PotionHaste,
+    PotionVision,
 };
 
 struct ItemDef {

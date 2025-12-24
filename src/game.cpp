@@ -304,6 +304,12 @@ void Game::newGame(uint32_t seed) {
 
     autoPickupGold = true;
 
+    turnCount = 0;
+    naturalRegenCounter = 0;
+    hastePhase = false;
+    looking = false;
+    lookPos = {0,0};
+
     inputLock = false;
     gameOver = false;
     gameWon = false;
@@ -427,7 +433,6 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         }), ents.end());
         ground.clear();
         trapsCur.clear();
-        trapsCur.clear();
 
         dung.generate(rng);
 
@@ -465,7 +470,7 @@ std::string Game::defaultSavePath() const {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 2u;
+constexpr uint32_t SAVE_VERSION = 3u;
 
 template <typename T>
 void writePod(std::ostream& out, const T& v) {
@@ -582,6 +587,12 @@ void writeEntity(std::ostream& out, const Entity& e) {
     writePod(out, poison);
     writePod(out, regenTurns);
     writePod(out, shieldTurns);
+
+    // v3+: additional buffs
+    int32_t hasteTurns = e.hasteTurns;
+    int32_t visionTurns = e.visionTurns;
+    writePod(out, hasteTurns);
+    writePod(out, visionTurns);
 }
 
 bool readEntity(std::istream& in, Entity& e, uint32_t version) {
@@ -609,6 +620,8 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     int32_t poison = 0;
     int32_t regenTurns = 0;
     int32_t shieldTurns = 0;
+    int32_t hasteTurns = 0;
+    int32_t visionTurns = 0;
 
     if (!readPod(in, id)) return false;
     if (!readPod(in, kind)) return false;
@@ -638,6 +651,11 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         if (!readPod(in, poison)) return false;
         if (!readPod(in, regenTurns)) return false;
         if (!readPod(in, shieldTurns)) return false;
+
+        if (version >= 3u) {
+            if (!readPod(in, hasteTurns)) return false;
+            if (!readPod(in, visionTurns)) return false;
+        }
     }
 
     e.id = id;
@@ -666,6 +684,8 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     e.poisonTurns = poison;
     e.regenTurns = regenTurns;
     e.shieldTurns = shieldTurns;
+    e.hasteTurns = hasteTurns;
+    e.visionTurns = visionTurns;
     return true;
 }
 
@@ -720,6 +740,14 @@ bool Game::saveToFile(const std::string& path) {
     // v2+: user/options
     uint8_t autoPick = autoPickupGold ? 1 : 0;
     writePod(out, autoPick);
+
+    // v3+: pacing state
+    uint32_t turnsNow = turnCount;
+    int32_t natRegen = naturalRegenCounter;
+    uint8_t hasteP = hastePhase ? 1 : 0;
+    writePod(out, turnsNow);
+    writePod(out, natRegen);
+    writePod(out, hasteP);
 
     // Player
     writeEntity(out, player());
@@ -857,6 +885,9 @@ bool Game::loadFromFile(const std::string& path) {
     uint8_t over = 0;
     uint8_t won = 0;
     uint8_t autoPick = 1; // v2+, default enabled for v1
+    uint32_t turnsNow = 0;
+    int32_t natRegen = 0;
+    uint8_t hasteP = 0;
 
     if (!readPod(in, rngState)) return false;
     if (!readPod(in, depth)) return false;
@@ -874,6 +905,12 @@ bool Game::loadFromFile(const std::string& path) {
 
     if (version >= 2u) {
         if (!readPod(in, autoPick)) return false;
+    }
+
+    if (version >= 3u) {
+        if (!readPod(in, turnsNow)) return false;
+        if (!readPod(in, natRegen)) return false;
+        if (!readPod(in, hasteP)) return false;
     }
 
     Entity p;
@@ -1035,6 +1072,11 @@ bool Game::loadFromFile(const std::string& path) {
     gameWon = won != 0;
     autoPickupGold = autoPick != 0;
 
+    // v3+: pacing state
+    turnCount = turnsNow;
+    naturalRegenCounter = natRegen;
+    hastePhase = (hasteP != 0);
+
     inv = std::move(invTmp);
     msgs = std::move(msgsTmp);
     msgScroll = 0;
@@ -1055,6 +1097,8 @@ bool Game::loadFromFile(const std::string& path) {
     invOpen = false;
     targeting = false;
     helpOpen = false;
+    looking = false;
+    lookPos = {0,0};
     inputLock = false;
     fx.clear();
 
@@ -1122,6 +1166,7 @@ void Game::handleAction(Action a) {
             // Close other overlays when opening help.
             invOpen = false;
             targeting = false;
+            looking = false;
             msgScroll = 0;
         }
         return;
@@ -1142,10 +1187,11 @@ void Game::handleAction(Action a) {
 
     if (inputLock) {
         // Ignore actions while animating.
-        if (a == Action::Cancel && (invOpen || targeting || helpOpen)) {
+        if (a == Action::Cancel && (invOpen || targeting || helpOpen || looking)) {
             invOpen = false;
             targeting = false;
             helpOpen = false;
+            looking = false;
         }
         return;
     }
@@ -1156,6 +1202,41 @@ void Game::handleAction(Action a) {
     if (helpOpen) {
         if (a == Action::Cancel || a == Action::Inventory || a == Action::Help) {
             helpOpen = false;
+        }
+        return;
+    }
+
+    // Look / examine mode.
+    if (looking) {
+        switch (a) {
+            case Action::Up:    moveLookCursor(0, -1); break;
+            case Action::Down:  moveLookCursor(0, 1); break;
+            case Action::Left:  moveLookCursor(-1, 0); break;
+            case Action::Right: moveLookCursor(1, 0); break;
+            case Action::Inventory:
+                endLook();
+                openInventory();
+                break;
+            case Action::Fire:
+                // Convenient: jump straight from look -> targeting (cursor stays where you were looking).
+                // If we can't target, beginTargeting() will message why.
+                {
+                    Vec2i desired = lookPos;
+                    endLook();
+                    beginTargeting();
+                    if (targeting) {
+                        targetPos = desired;
+                        recomputeTargetLine();
+                    }
+                }
+                break;
+            case Action::Cancel:
+            case Action::Confirm:
+            case Action::Look:
+                endLook();
+                break;
+            default:
+                break;
         }
         return;
     }
@@ -1183,10 +1264,7 @@ void Game::handleAction(Action a) {
         }
 
         if (acted) {
-            monsterTurn();
-            applyEndOfTurnEffects();
-            cleanupDead();
-            recomputeFov();
+            advanceAfterPlayerAction();
         }
         return;
     }
@@ -1211,10 +1289,7 @@ void Game::handleAction(Action a) {
         }
 
         if (acted) {
-            monsterTurn();
-            applyEndOfTurnEffects();
-            cleanupDead();
-            recomputeFov();
+            advanceAfterPlayerAction();
         }
         return;
     }
@@ -1241,6 +1316,14 @@ void Game::handleAction(Action a) {
             break;
         case Action::Fire:
             beginTargeting();
+            break;
+        case Action::Look:
+            beginLook();
+            acted = false;
+            break;
+        case Action::Rest:
+            restUntilSafe();
+            acted = false;
             break;
         case Action::Confirm: {
             if (p.pos == dung.stairsDown) {
@@ -1299,10 +1382,186 @@ void Game::handleAction(Action a) {
     }
 
     if (acted) {
-        monsterTurn();
-        applyEndOfTurnEffects();
+        advanceAfterPlayerAction();
+    }
+}
+
+void Game::advanceAfterPlayerAction() {
+    // One "turn" = one player action that consumes time.
+    // Haste gives the player an extra action every other turn by skipping the monster turn.
+    ++turnCount;
+
+    if (isFinished()) {
+        // Don't let monsters act after a decisive player action.
         cleanupDead();
         recomputeFov();
+        return;
+    }
+
+    Entity& p = playerMut();
+
+    bool runMonsters = true;
+    if (p.hasteTurns > 0) {
+        if (!hastePhase) {
+            // Free haste action: skip monsters this time.
+            runMonsters = false;
+            hastePhase = true;
+        } else {
+            // Monster turn occurs, and one haste "cycle" is consumed.
+            runMonsters = true;
+            hastePhase = false;
+            p.hasteTurns = std::max(0, p.hasteTurns - 1);
+            if (p.hasteTurns == 0) {
+                pushMsg("YOUR SPEED RETURNS TO NORMAL.", MessageKind::System, true);
+            }
+        }
+    } else {
+        hastePhase = false;
+    }
+
+    if (runMonsters) {
+        monsterTurn();
+    }
+
+    applyEndOfTurnEffects();
+    cleanupDead();
+    recomputeFov();
+}
+
+bool Game::anyVisibleHostiles() const {
+    for (const auto& e : ents) {
+        if (e.id == playerId_) continue;
+        if (e.hp <= 0) continue;
+        if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
+        if (dung.at(e.pos.x, e.pos.y).visible) return true;
+    }
+    return false;
+}
+
+void Game::beginLook() {
+    // Close other overlays
+    invOpen = false;
+    targeting = false;
+    helpOpen = false;
+    msgScroll = 0;
+
+    looking = true;
+    lookPos = player().pos;
+}
+
+void Game::endLook() {
+    looking = false;
+}
+
+void Game::moveLookCursor(int dx, int dy) {
+    if (!looking) return;
+    Vec2i p = lookPos;
+    p.x = clampi(p.x + dx, 0, MAP_W - 1);
+    p.y = clampi(p.y + dy, 0, MAP_H - 1);
+    lookPos = p;
+}
+
+std::string Game::describeAt(Vec2i p) const {
+    if (!dung.inBounds(p.x, p.y)) return "OUT OF BOUNDS";
+
+    const Tile& t = dung.at(p.x, p.y);
+    if (!t.explored) {
+        return "UNKNOWN";
+    }
+
+    std::ostringstream ss;
+
+    // Base tile description
+    switch (t.type) {
+        case TileType::Wall: ss << "WALL"; break;
+        case TileType::Floor: ss << "FLOOR"; break;
+        case TileType::StairsUp: ss << "STAIRS UP"; break;
+        case TileType::StairsDown: ss << "STAIRS DOWN"; break;
+        case TileType::DoorClosed: ss << "DOOR (CLOSED)"; break;
+        case TileType::DoorOpen: ss << "DOOR (OPEN)"; break;
+        default: ss << "TILE"; break;
+    }
+
+    // Trap (can be remembered once discovered)
+    for (const auto& tr : trapsCur) {
+        if (!tr.discovered) continue;
+        if (tr.pos.x != p.x || tr.pos.y != p.y) continue;
+        ss << " | TRAP: ";
+        switch (tr.kind) {
+            case TrapKind::Spike: ss << "SPIKE"; break;
+            case TrapKind::PoisonDart: ss << "POISON DART"; break;
+            case TrapKind::Teleport: ss << "TELEPORT"; break;
+            case TrapKind::Alarm: ss << "ALARM"; break;
+        }
+        break;
+    }
+
+    // Entities/items: only if currently visible.
+    if (t.visible) {
+        if (const Entity* e = entityAt(p.x, p.y)) {
+            if (e->id == playerId_) {
+                ss << " | YOU";
+            } else {
+                ss << " | " << kindName(e->kind) << " " << e->hp << "/" << e->hpMax;
+            }
+        }
+
+        // Items (show first one + count)
+        int itemCount = 0;
+        const GroundItem* first = nullptr;
+        for (const auto& gi : ground) {
+            if (gi.pos.x == p.x && gi.pos.y == p.y) {
+                ++itemCount;
+                if (!first) first = &gi;
+            }
+        }
+        if (itemCount > 0 && first) {
+            ss << " | ITEM: " << itemDisplayName(first->item);
+            if (itemCount > 1) ss << " (+" << (itemCount - 1) << ")";
+        }
+    }
+
+    // Distance (Manhattan for clarity)
+    Vec2i pp = player().pos;
+    int dist = std::abs(p.x - pp.x) + std::abs(p.y - pp.y);
+    ss << " | DIST " << dist;
+
+    return ss.str();
+}
+
+std::string Game::lookInfoText() const {
+    if (!looking) return std::string();
+    return describeAt(lookPos);
+}
+
+void Game::restUntilSafe() {
+    if (isFinished()) return;
+    if (inputLock) return;
+
+    // If nothing to do, don't burn time.
+    if (player().hp >= player().hpMax) {
+        pushMsg("YOU ARE ALREADY AT FULL HEALTH.", MessageKind::System, true);
+        return;
+    }
+
+    pushMsg("YOU REST...", MessageKind::Info, true);
+
+    // Safety valve to prevent accidental infinite loops.
+    const int maxSteps = 2000;
+    int steps = 0;
+    while (!isFinished() && steps < maxSteps) {
+        if (anyVisibleHostiles()) {
+            pushMsg("REST INTERRUPTED!", MessageKind::Warning, true);
+            break;
+        }
+        if (player().hp >= player().hpMax) {
+            pushMsg("YOU FEEL RESTED.", MessageKind::Success, true);
+            break;
+        }
+
+        // Consume a "wait" turn without spamming the log.
+        advanceAfterPlayerAction();
+        ++steps;
     }
 }
 
@@ -1612,7 +1871,9 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atk, Proj
 
 void Game::recomputeFov() {
     Entity& p = playerMut();
-    dung.computeFov(p.pos.x, p.pos.y, 9);
+    int radius = 9;
+    if (p.visionTurns > 0) radius += 3;
+    dung.computeFov(p.pos.x, p.pos.y, radius);
 }
 
 void Game::openInventory() {
@@ -1876,6 +2137,24 @@ bool Game::useSelected() {
         p.shieldTurns = std::max(p.shieldTurns, 14);
         pushMsg("YOU FEEL PROTECTED.", MessageKind::Success, true);
         consumeOneStackable();
+        return true;
+    }
+
+    if (it.kind == ItemKind::PotionHaste) {
+        Entity& p = playerMut();
+        p.hasteTurns = std::min(40, p.hasteTurns + 6);
+        hastePhase = false; // ensure the next action is the "free" haste action
+        pushMsg("YOU FEEL QUICK!", MessageKind::Success, true);
+        consumeOneStackable();
+        return true;
+    }
+
+    if (it.kind == ItemKind::PotionVision) {
+        Entity& p = playerMut();
+        p.visionTurns = std::min(60, p.visionTurns + 20);
+        pushMsg("YOUR EYES SHINE WITH INNER LIGHT.", MessageKind::Success, true);
+        consumeOneStackable();
+        recomputeFov();
         return true;
     }
 
@@ -2214,8 +2493,10 @@ void Game::spawnItems() {
         else if (roll < 82) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), rng.range(1, 2));
         else if (roll < 88) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
         else if (roll < 92) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
-        else if (roll < 95) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
-        else if (roll < 97) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
+        else if (roll < 94) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
+        else if (roll < 96) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
+        else if (roll < 97) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
+        else if (roll < 98) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
         else if (roll < 99) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
         else dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
     };
@@ -2235,6 +2516,8 @@ void Game::spawnItems() {
             if (rng.chance(0.35f)) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.30f)) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.22f)) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.15f)) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.15f)) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.18f)) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.12f)) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.45f)) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
@@ -2261,11 +2544,13 @@ void Game::spawnItems() {
             else if (roll < 72) dropItemAt(ItemKind::ScrollMapping, p, 1);
             else if (roll < 76) dropItemAt(ItemKind::ScrollEnchantWeapon, p, 1);
             else if (roll < 80) dropItemAt(ItemKind::ScrollEnchantArmor, p, 1);
-            else if (roll < 88) dropItemAt(ItemKind::Arrow, p, rng.range(4, 10));
-            else if (roll < 94) dropItemAt(ItemKind::Rock, p, rng.range(3, 8));
-            else if (roll < 97) dropItemAt(ItemKind::Dagger, p, 1);
-            else if (roll < 99) dropItemAt(ItemKind::LeatherArmor, p, 1);
-            else dropItemAt(ItemKind::PotionShielding, p, 1);
+            else if (roll < 87) dropItemAt(ItemKind::Arrow, p, rng.range(4, 10));
+            else if (roll < 92) dropItemAt(ItemKind::Rock, p, rng.range(3, 8));
+            else if (roll < 95) dropItemAt(ItemKind::Dagger, p, 1);
+            else if (roll < 97) dropItemAt(ItemKind::LeatherArmor, p, 1);
+            else if (roll < 98) dropItemAt(ItemKind::PotionShielding, p, 1);
+            else if (roll < 99) dropItemAt(ItemKind::PotionHaste, p, 1);
+            else dropItemAt(ItemKind::PotionVision, p, 1);
         }
     }
 
@@ -2577,6 +2862,28 @@ void Game::applyEndOfTurnEffects() {
             pushMsg("YOUR SHIELDING FADES.", MessageKind::System, true);
         }
     }
+
+    // Timed vision boost
+    if (p.visionTurns > 0) {
+        p.visionTurns = std::max(0, p.visionTurns - 1);
+        if (p.visionTurns == 0) {
+            pushMsg("YOUR VISION RETURNS TO NORMAL.", MessageKind::System, true);
+        }
+    }
+
+    // Natural regeneration (slow baseline healing).
+    // Intentionally disabled while poisoned to keep poison meaningful.
+    if (p.poisonTurns > 0 || p.hp >= p.hpMax) {
+        naturalRegenCounter = 0;
+    } else if (p.regenTurns <= 0) {
+        // Faster natural regen as you level.
+        const int interval = std::max(6, 14 - charLevel); // L1:13, L5:9, L10+:6
+        naturalRegenCounter++;
+        if (naturalRegenCounter >= interval) {
+            p.hp = std::min(p.hpMax, p.hp + 1);
+            naturalRegenCounter = 0;
+        }
+    }
 }
 
 void Game::cleanupDead() {
@@ -2602,8 +2909,10 @@ void Game::cleanupDead() {
             else if (roll < 88) { gi.item.kind = ItemKind::ScrollTeleport; gi.item.count = 1; }
             else if (roll < 91) { gi.item.kind = ItemKind::ScrollEnchantWeapon; gi.item.count = 1; }
             else if (roll < 94) { gi.item.kind = ItemKind::ScrollEnchantArmor; gi.item.count = 1; }
-            else if (roll < 97) { gi.item.kind = ItemKind::Dagger; gi.item.count = 1; }
-            else { gi.item.kind = ItemKind::PotionShielding; gi.item.count = 1; }
+            else if (roll < 96) { gi.item.kind = ItemKind::Dagger; gi.item.count = 1; }
+            else if (roll < 98) { gi.item.kind = ItemKind::PotionShielding; gi.item.count = 1; }
+            else if (roll < 99) { gi.item.kind = ItemKind::PotionHaste; gi.item.count = 1; }
+            else { gi.item.kind = ItemKind::PotionVision; gi.item.count = 1; }
 
             // Chance for dropped gear to be lightly enchanted on deeper floors.
             if ((isWeapon(gi.item.kind) || isArmor(gi.item.kind)) && depth_ >= 3) {

@@ -38,7 +38,8 @@ A tiny NetHack-inspired roguelike with:
 
 ### Meta
 - **Help**: `?` or `H`
-- **Save / Load**: `F5` / `F9`
+- **Save / Load**: `F5` / `F9`![game nethack](https://github.com/user-attachments/assets/fc0e0902-b161-47e6-b2f3-cc6f88100548)
+
 - **Fullscreen**: `F11`
 - **Message log scroll**: PageUp / PageDown (or mouse wheel)
 - **Restart**: `R`

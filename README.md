@@ -23,6 +23,8 @@ A tiny NetHack-inspired roguelike with:
   - **Mouse move**: moves the look cursor / aiming cursor
   - **Mouse wheel**: scroll message log
 - **Settings file** (auto-created on first run): lets you tweak tile size, HUD height, fullscreen, auto-move speed, auto-pickup mode, and autosave interval.
+- **NetHack-style item identification**: potions + scrolls start unknown each run (randomized appearances). Using them identifies the item type; you can also find/read a **Scroll of Identify**. (Toggle via `identify_items` in settings.)
+- **New combat spice**: spiders can web you (movement blocked for a few turns), and wizards can occasionally "blink" (teleport) to reposition.
 - **CI build workflow** for Linux/macOS/Windows.
 
 ## Controls

@@ -87,6 +87,9 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "autosave_every_turns") {
             int v = 0;
             if (parseInt(val, v)) s.autosaveEveryTurns = std::clamp(v, 0, 5000);
+        } else if (key == "identify_items") {
+            bool b = true;
+            if (parseBool(val, b)) s.identifyItems = b;
         }
     }
 
@@ -110,6 +113,10 @@ bool writeDefaultSettings(const std::string& path) {
     f << "auto_pickup = gold\n";
     f << "# auto_step_delay_ms: 10..500 (lower = faster auto-move)\n";
     f << "auto_step_delay_ms = 45\n\n";
+
+    f << "# Item identification\n";
+    f << "# identify_items: true/false  (true = potions/scrolls start unidentified)\n";
+    f << "identify_items = true\n\n";
 
     f << "# Autosave\n";
     f << "# autosave_every_turns: 0 disables; otherwise saves an autosave file every N turns.\n";

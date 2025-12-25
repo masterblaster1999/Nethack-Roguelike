@@ -195,6 +195,7 @@ game.setAutosavePath(autosavePath);
 game.setScoresPath(scoresPath);
 game.setAutosaveEveryTurns(settings.autosaveEveryTurns);
 game.setAutoPickupMode(settings.autoPickup);
+game.setIdentificationEnabled(settings.identifyItems);
 
     const bool loadOnStart = hasFlag(argc, argv, "--load") || hasFlag(argc, argv, "--continue");
 

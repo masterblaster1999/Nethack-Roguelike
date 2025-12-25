@@ -59,7 +59,45 @@ enum class ItemKind : uint8_t {
     // --- Even newer consumables (append-only to keep save compatibility) ---
     PotionHaste,
     PotionVision,
+
+    // --- Identification / utility (append-only) ---
+    ScrollIdentify,
 };
+
+// Keep in sync with the last enum value (append-only).
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollIdentify) + 1;
+
+inline bool isPotionKind(ItemKind k) {
+    switch (k) {
+        case ItemKind::PotionHealing:
+        case ItemKind::PotionStrength:
+        case ItemKind::PotionAntidote:
+        case ItemKind::PotionRegeneration:
+        case ItemKind::PotionShielding:
+        case ItemKind::PotionHaste:
+        case ItemKind::PotionVision:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool isScrollKind(ItemKind k) {
+    switch (k) {
+        case ItemKind::ScrollTeleport:
+        case ItemKind::ScrollMapping:
+        case ItemKind::ScrollEnchantWeapon:
+        case ItemKind::ScrollEnchantArmor:
+        case ItemKind::ScrollIdentify:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool isIdentifiableKind(ItemKind k) {
+    return isPotionKind(k) || isScrollKind(k);
+}
 
 struct ItemDef {
     ItemKind kind;

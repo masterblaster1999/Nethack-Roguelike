@@ -48,6 +48,39 @@ bool diagonalPassable(const Dungeon& dung, const Vec2i& from, int dx, int dy) {
     return o1 || o2;
 }
 
+// ------------------------------------------------------------
+// Identification visuals (run-randomized potion colors / scroll glyphs)
+// ------------------------------------------------------------
+
+constexpr const char* POTION_APPEARANCES[] = {
+    "RUBY", "EMERALD", "SAPPHIRE", "AMBER", "TOPAZ", "ONYX", "PEARL", "IVORY",
+    "AZURE", "VIOLET", "CRIMSON", "VERDANT", "SILVER", "GOLDEN", "SMOKE", "MURKY",
+};
+
+constexpr const char* SCROLL_APPEARANCES[] = {
+    "ZELGO", "XANATH", "KERNOD", "ELBERR", "MAPIRO", "VORPAL", "KLAATU", "BARADA",
+    "NIKTO", "RAGNAR", "YENDOR", "MORDOR", "AZATHO", "ALOHOM", "OROBO", "NYARLA",
+};
+
+// Fixed sets of identifiable kinds (append-only behavior is handled elsewhere).
+constexpr ItemKind POTION_KINDS[] = {
+    ItemKind::PotionHealing,
+    ItemKind::PotionStrength,
+    ItemKind::PotionAntidote,
+    ItemKind::PotionRegeneration,
+    ItemKind::PotionShielding,
+    ItemKind::PotionHaste,
+    ItemKind::PotionVision,
+};
+
+constexpr ItemKind SCROLL_KINDS[] = {
+    ItemKind::ScrollTeleport,
+    ItemKind::ScrollMapping,
+    ItemKind::ScrollEnchantWeapon,
+    ItemKind::ScrollEnchantArmor,
+    ItemKind::ScrollIdentify,
+};
+
 } // namespace
 
 Game::Game() : dung(MAP_W, MAP_H) {}
@@ -150,17 +183,17 @@ std::string Game::equippedTag(int itemId) const {
 
 std::string Game::equippedMeleeName() const {
     const Item* w = equippedMelee();
-    return w ? itemDisplayName(*w) : std::string("(NONE)");
+    return w ? displayItemName(*w) : std::string("(NONE)");
 }
 
 std::string Game::equippedRangedName() const {
     const Item* w = equippedRanged();
-    return w ? itemDisplayName(*w) : std::string("(NONE)");
+    return w ? displayItemName(*w) : std::string("(NONE)");
 }
 
 std::string Game::equippedArmorName() const {
     const Item* a = equippedArmor();
-    return a ? itemDisplayName(*a) : std::string("(NONE)");
+    return a ? displayItemName(*a) : std::string("(NONE)");
 }
 
 int Game::playerAttack() const {
@@ -292,6 +325,140 @@ bool Game::playerHasAmulet() const {
     return false;
 }
 
+// ------------------------------------------------------------
+// Identification (potions/scrolls start unknown; appearances randomized per run)
+// ------------------------------------------------------------
+
+void Game::initIdentificationTables() {
+    identKnown.fill(1);
+    identAppearance.fill(0);
+
+    if (!identifyItemsEnabled) {
+        // All items show true names.
+        return;
+    }
+
+    // Mark potions + scrolls as unknown by default.
+    for (ItemKind k : POTION_KINDS) {
+        identKnown[static_cast<size_t>(k)] = 0;
+    }
+    for (ItemKind k : SCROLL_KINDS) {
+        identKnown[static_cast<size_t>(k)] = 0;
+    }
+
+    // Build a random 1:1 mapping of appearance tokens to each kind.
+    auto shuffledIndices = [&](size_t n) {
+        std::vector<uint8_t> idx;
+        idx.reserve(n);
+        for (size_t i = 0; i < n; ++i) idx.push_back(static_cast<uint8_t>(i));
+        for (size_t i = n; i-- > 1;) {
+            const int j = rng.range(0, static_cast<int>(i));
+            std::swap(idx[i], idx[static_cast<size_t>(j)]);
+        }
+        return idx;
+    };
+
+    const size_t potionN = sizeof(POTION_KINDS) / sizeof(POTION_KINDS[0]);
+    const size_t scrollN = sizeof(SCROLL_KINDS) / sizeof(SCROLL_KINDS[0]);
+    const size_t potionAppearN = sizeof(POTION_APPEARANCES) / sizeof(POTION_APPEARANCES[0]);
+    const size_t scrollAppearN = sizeof(SCROLL_APPEARANCES) / sizeof(SCROLL_APPEARANCES[0]);
+
+    std::vector<uint8_t> p = shuffledIndices(potionAppearN);
+    std::vector<uint8_t> s = shuffledIndices(scrollAppearN);
+
+    // If someone later adds more potion/scroll kinds than appearances, we still function
+    // (we'll reuse appearances), but keep the common case unique.
+    for (size_t i = 0; i < potionN; ++i) {
+        const uint8_t app = p[i % p.size()];
+        identAppearance[static_cast<size_t>(POTION_KINDS[i])] = app;
+    }
+    for (size_t i = 0; i < scrollN; ++i) {
+        const uint8_t app = s[i % s.size()];
+        identAppearance[static_cast<size_t>(SCROLL_KINDS[i])] = app;
+    }
+}
+
+bool Game::isIdentified(ItemKind k) const {
+    if (!identifyItemsEnabled) return true;
+    const size_t idx = static_cast<size_t>(k);
+    if (idx >= static_cast<size_t>(ITEM_KIND_COUNT)) return true;
+    return identKnown[idx] != 0;
+}
+
+uint8_t Game::appearanceFor(ItemKind k) const {
+    const size_t idx = static_cast<size_t>(k);
+    if (idx >= static_cast<size_t>(ITEM_KIND_COUNT)) return 0;
+    return identAppearance[idx];
+}
+
+std::string Game::appearanceName(ItemKind k) const {
+    if (isPotionKind(k)) {
+        const auto n = sizeof(POTION_APPEARANCES) / sizeof(POTION_APPEARANCES[0]);
+        uint8_t a = appearanceFor(k);
+        if (n == 0) return "";
+        if (a >= n) a = static_cast<uint8_t>(a % n);
+        return POTION_APPEARANCES[a];
+    }
+    if (isScrollKind(k)) {
+        const auto n = sizeof(SCROLL_APPEARANCES) / sizeof(SCROLL_APPEARANCES[0]);
+        uint8_t a = appearanceFor(k);
+        if (n == 0) return "";
+        if (a >= n) a = static_cast<uint8_t>(a % n);
+        return SCROLL_APPEARANCES[a];
+    }
+    return "";
+}
+
+std::string Game::unknownDisplayName(const Item& it) const {
+    std::ostringstream ss;
+    if (isPotionKind(it.kind)) {
+        const std::string app = appearanceName(it.kind);
+        if (it.count > 1) ss << it.count << " " << app << " POTIONS";
+        else ss << app << " POTION";
+        return ss.str();
+    }
+    if (isScrollKind(it.kind)) {
+        const std::string app = appearanceName(it.kind);
+        if (it.count > 1) ss << it.count << " SCROLLS '" << app << "'";
+        else ss << "SCROLL '" << app << "'";
+        return ss.str();
+    }
+    return itemDisplayName(it);
+}
+
+bool Game::markIdentified(ItemKind k, bool quiet) {
+    if (!identifyItemsEnabled) return false;
+    if (!isIdentifiableKind(k)) return false;
+    const size_t idx = static_cast<size_t>(k);
+    if (idx >= static_cast<size_t>(ITEM_KIND_COUNT)) return false;
+    if (identKnown[idx] != 0) return false;
+    identKnown[idx] = 1;
+
+    if (!quiet) {
+        Item tmp;
+        tmp.kind = k;
+        tmp.count = 1;
+        const std::string oldName = unknownDisplayName(tmp);
+        const std::string newName = itemDisplayNameSingle(k);
+        pushMsg("IDENTIFIED: " + oldName + " = " + newName + ".", MessageKind::System, true);
+    }
+
+    return true;
+}
+
+std::string Game::displayItemName(const Item& it) const {
+    if (!identifyItemsEnabled) return itemDisplayName(it);
+    if (!isIdentifiableKind(it.kind)) return itemDisplayName(it);
+    return isIdentified(it.kind) ? itemDisplayName(it) : unknownDisplayName(it);
+}
+
+std::string Game::displayItemNameSingle(ItemKind k) const {
+    Item tmp;
+    tmp.kind = k;
+    tmp.count = 1;
+    return displayItemName(tmp);
+}
+
 void Game::newGame(uint32_t seed) {
     if (seed == 0) {
         // Fall back to a simple randomized seed if user passes 0.
@@ -328,6 +495,9 @@ void Game::newGame(uint32_t seed) {
     msgScroll = 0;
 
     autoPickup = AutoPickupMode::Gold;
+
+    // Randomize potion/scroll appearances and reset identification knowledge.
+    initIdentificationTables();
 
     autoMode = AutoMoveMode::None;
     autoPathTiles.clear();
@@ -552,6 +722,10 @@ void Game::setAutoPickupMode(AutoPickupMode m) {
     autoPickup = m;
 }
 
+void Game::setIdentificationEnabled(bool enabled) {
+    identifyItemsEnabled = enabled;
+}
+
 void Game::setAutoStepDelayMs(int ms) {
     // Clamp to sane values to avoid accidental 0ms "teleport walking".
     const int clamped = clampi(ms, 10, 500);
@@ -560,7 +734,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 5u;
+constexpr uint32_t SAVE_VERSION = 6u;
 
 template <typename T>
 void writePod(std::ostream& out, const T& v) {
@@ -683,6 +857,10 @@ void writeEntity(std::ostream& out, const Entity& e) {
     int32_t visionTurns = e.visionTurns;
     writePod(out, hasteTurns);
     writePod(out, visionTurns);
+
+    // v6+: additional debuffs
+    int32_t webTurns = e.webTurns;
+    writePod(out, webTurns);
 }
 
 bool readEntity(std::istream& in, Entity& e, uint32_t version) {
@@ -712,6 +890,7 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     int32_t shieldTurns = 0;
     int32_t hasteTurns = 0;
     int32_t visionTurns = 0;
+    int32_t webTurns = 0;
 
     if (!readPod(in, id)) return false;
     if (!readPod(in, kind)) return false;
@@ -746,6 +925,10 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
             if (!readPod(in, hasteTurns)) return false;
             if (!readPod(in, visionTurns)) return false;
         }
+
+        if (version >= 6u) {
+            if (!readPod(in, webTurns)) return false;
+        }
     }
 
     e.id = id;
@@ -776,6 +959,7 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     e.shieldTurns = shieldTurns;
     e.hasteTurns = hasteTurns;
     e.visionTurns = visionTurns;
+    e.webTurns = webTurns;
     return true;
 }
 
@@ -855,6 +1039,16 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     writePod(out, seedNow);
     writePod(out, killsNow);
     writePod(out, maxD);
+
+    // v6+: item identification tables (run knowledge + randomized appearances)
+    uint32_t kindCount = static_cast<uint32_t>(ITEM_KIND_COUNT);
+    writePod(out, kindCount);
+    for (uint32_t i = 0; i < kindCount; ++i) {
+        const uint8_t known = identKnown[static_cast<size_t>(i)];
+        const uint8_t app = identAppearance[static_cast<size_t>(i)];
+        writePod(out, known);
+        writePod(out, app);
+    }
 
     // Player
     writeEntity(out, player());
@@ -1055,6 +1249,27 @@ bool Game::loadFromFile(const std::string& path) {
         if (!readPod(in, maxD)) return false;
     }
 
+    // v6+: item identification tables
+    std::array<uint8_t, ITEM_KIND_COUNT> identKnownTmp{};
+    std::array<uint8_t, ITEM_KIND_COUNT> identAppTmp{};
+    identKnownTmp.fill(1); // older saves had fully-known item names
+    identAppTmp.fill(0);
+
+    if (version >= 6u) {
+        uint32_t kindCount = 0;
+        if (!readPod(in, kindCount)) return false;
+        for (uint32_t i = 0; i < kindCount; ++i) {
+            uint8_t known = 1;
+            uint8_t app = 0;
+            if (!readPod(in, known)) return false;
+            if (!readPod(in, app)) return false;
+            if (i < static_cast<uint32_t>(ITEM_KIND_COUNT)) {
+                identKnownTmp[static_cast<size_t>(i)] = known;
+                identAppTmp[static_cast<size_t>(i)] = app;
+            }
+        }
+    }
+
     Entity p;
     if (!readEntity(in, p, version)) return false;
 
@@ -1233,6 +1448,10 @@ bool Game::loadFromFile(const std::string& path) {
     runRecorded = isFinished();
 
     lastAutosaveTurn = 0;
+
+    // v6+: identification tables (or default "all known" for older saves)
+    identKnown = identKnownTmp;
+    identAppearance = identAppTmp;
 
     inv = std::move(invTmp);
     msgs = std::move(msgsTmp);
@@ -2248,7 +2467,7 @@ std::string Game::describeAt(Vec2i p) const {
             }
         }
         if (itemCount > 0 && first) {
-            ss << " | ITEM: " << itemDisplayName(first->item);
+            ss << " | ITEM: " << displayItemName(first->item);
             if (itemCount > 1) ss << " (+" << (itemCount - 1) << ")";
         }
     }
@@ -2300,6 +2519,13 @@ void Game::restUntilSafe() {
 bool Game::tryMove(Entity& e, int dx, int dy) {
     if (e.hp <= 0) return false;
     if (dx == 0 && dy == 0) return false;
+
+    // Webbed: you can still act (use items, fire, etc.) but cannot move.
+    // Attempting to move consumes a turn (so the web can wear off).
+    if (e.kind == EntityKind::Player && e.webTurns > 0) {
+        pushMsg("YOU STRUGGLE AGAINST STICKY WEBBING!", MessageKind::Warning, true);
+        return true;
+    }
 
     // Clamp to single-tile steps (safety: AI/pathing should only request these).
     dx = clampi(dx, -1, 1);
@@ -2476,15 +2702,15 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
     const bool msgFromPlayer = (attacker.kind == EntityKind::Player);
     pushMsg(ss.str(), MessageKind::Combat, msgFromPlayer);
 
-    // Venomous monsters can inflict poison.
+    // Monster special effects.
     if (defender.hp > 0 && defender.kind == EntityKind::Player) {
         if (attacker.kind == EntityKind::Snake && rng.chance(0.35f)) {
             defender.poisonTurns = std::max(defender.poisonTurns, rng.range(4, 8));
             pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
         }
         if (attacker.kind == EntityKind::Spider && rng.chance(0.45f)) {
-            defender.poisonTurns = std::max(defender.poisonTurns, rng.range(6, 10));
-            pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
+            defender.webTurns = std::max(defender.webTurns, rng.range(2, 4));
+            pushMsg("YOU ARE ENSNARED BY WEBBING!", MessageKind::Warning, false);
         }
     }
 
@@ -2675,7 +2901,7 @@ bool Game::autoPickupAtPlayer() {
             }
 
             ++pickedCount;
-            if (sampleNames.size() < 3) sampleNames.push_back(itemDisplayName(it));
+            if (sampleNames.size() < 3) sampleNames.push_back(displayItemName(it));
 
             ground.erase(ground.begin() + static_cast<long>(i));
             continue;
@@ -2728,7 +2954,7 @@ bool Game::pickupAtPlayer() {
         if (tryStackItem(inv, it)) {
             // stacked
             pickedAny = true;
-            pushMsg("YOU PICK UP " + itemDisplayName(it) + ".", MessageKind::Loot, true);
+            pushMsg("YOU PICK UP " + displayItemName(it) + ".", MessageKind::Loot, true);
             if (it.kind == ItemKind::AmuletYendor) {
                 pushMsg("YOU HAVE FOUND THE AMULET OF YENDOR! RETURN TO THE EXIT (<) TO WIN.", MessageKind::Success, true);
             }
@@ -2743,7 +2969,7 @@ bool Game::pickupAtPlayer() {
 
         inv.push_back(it);
         pickedAny = true;
-        pushMsg("YOU PICK UP " + itemDisplayName(it) + ".", MessageKind::Loot, true);
+        pushMsg("YOU PICK UP " + displayItemName(it) + ".", MessageKind::Loot, true);
         if (it.kind == ItemKind::AmuletYendor) {
             pushMsg("YOU HAVE FOUND THE AMULET OF YENDOR! RETURN TO THE EXIT (<) TO WIN.", MessageKind::Success, true);
         }
@@ -2782,7 +3008,7 @@ bool Game::dropSelected() {
     gi.pos = player().pos;
     ground.push_back(gi);
 
-    pushMsg("YOU DROP " + itemDisplayName(drop) + ".");
+    pushMsg("YOU DROP " + displayItemName(drop) + ".");
     return true;
 }
 
@@ -2798,10 +3024,10 @@ bool Game::equipSelected() {
     if (d.slot == EquipSlot::MeleeWeapon) {
         if (equipMeleeId == it.id) {
             equipMeleeId = 0;
-            pushMsg("YOU UNWIELD " + itemDisplayName(it) + ".");
+            pushMsg("YOU UNWIELD " + displayItemName(it) + ".");
         } else {
             equipMeleeId = it.id;
-            pushMsg("YOU WIELD " + itemDisplayName(it) + ".");
+            pushMsg("YOU WIELD " + displayItemName(it) + ".");
         }
         return true;
     }
@@ -2809,20 +3035,20 @@ bool Game::equipSelected() {
     if (d.slot == EquipSlot::RangedWeapon) {
         if (equipRangedId == it.id) {
             equipRangedId = 0;
-            pushMsg("YOU UNEQUIP " + itemDisplayName(it) + ".");
+            pushMsg("YOU UNEQUIP " + displayItemName(it) + ".");
         } else {
             equipRangedId = it.id;
-            pushMsg("YOU READY " + itemDisplayName(it) + ".");
+            pushMsg("YOU READY " + displayItemName(it) + ".");
         }
         return true;
     }
     if (d.slot == EquipSlot::Armor) {
         if (equipArmorId == it.id) {
             equipArmorId = 0;
-            pushMsg("YOU REMOVE " + itemDisplayName(it) + ".");
+            pushMsg("YOU REMOVE " + displayItemName(it) + ".");
         } else {
             equipArmorId = it.id;
-            pushMsg("YOU WEAR " + itemDisplayName(it) + ".");
+            pushMsg("YOU WEAR " + displayItemName(it) + ".");
         }
         return true;
     }
@@ -2857,7 +3083,7 @@ bool Game::useSelected() {
         std::ostringstream ss;
         ss << "YOU DRINK A POTION. HP " << before << "->" << p.hp << ".";
         pushMsg(ss.str(), MessageKind::Success, true);
-
+        (void)markIdentified(it.kind, false);
         consumeOneStackable();
         return true;
     }
@@ -2868,6 +3094,7 @@ bool Game::useSelected() {
         std::ostringstream ss;
         ss << "YOU FEEL STRONGER! ATK IS NOW " << p.baseAtk << ".";
         pushMsg(ss.str(), MessageKind::Success, true);
+        (void)markIdentified(it.kind, false);
         consumeOneStackable();
         return true;
     }
@@ -2881,6 +3108,7 @@ bool Game::useSelected() {
             break;
         }
         pushMsg("YOU READ A SCROLL. YOU VANISH!", MessageKind::Info, true);
+        (void)markIdentified(it.kind, false);
         consumeOneStackable();
         recomputeFov();
         return true;
@@ -2889,6 +3117,7 @@ bool Game::useSelected() {
     if (it.kind == ItemKind::ScrollMapping) {
         dung.revealAll();
         pushMsg("THE DUNGEON MAP IS REVEALED.", MessageKind::Info, true);
+        (void)markIdentified(it.kind, false);
         consumeOneStackable();
         recomputeFov();
         return true;
@@ -2902,6 +3131,7 @@ bool Game::useSelected() {
         } else {
             pushMsg("YOU FEEL CLEAN.", MessageKind::Info, true);
         }
+        (void)markIdentified(it.kind, false);
         consumeOneStackable();
         return true;
     }
@@ -2910,6 +3140,7 @@ bool Game::useSelected() {
         Entity& p = playerMut();
         p.regenTurns = std::max(p.regenTurns, 18);
         pushMsg("YOUR WOUNDS BEGIN TO KNIT.", MessageKind::Success, true);
+        (void)markIdentified(it.kind, false);
         consumeOneStackable();
         return true;
     }
@@ -2918,6 +3149,7 @@ bool Game::useSelected() {
         Entity& p = playerMut();
         p.shieldTurns = std::max(p.shieldTurns, 14);
         pushMsg("YOU FEEL PROTECTED.", MessageKind::Success, true);
+        (void)markIdentified(it.kind, false);
         consumeOneStackable();
         return true;
     }
@@ -2927,6 +3159,7 @@ bool Game::useSelected() {
         p.hasteTurns = std::min(40, p.hasteTurns + 6);
         hastePhase = false; // ensure the next action is the "free" haste action
         pushMsg("YOU FEEL QUICK!", MessageKind::Success, true);
+        (void)markIdentified(it.kind, false);
         consumeOneStackable();
         return true;
     }
@@ -2935,6 +3168,7 @@ bool Game::useSelected() {
         Entity& p = playerMut();
         p.visionTurns = std::min(60, p.visionTurns + 20);
         pushMsg("YOUR EYES SHINE WITH INNER LIGHT.", MessageKind::Success, true);
+        (void)markIdentified(it.kind, false);
         consumeOneStackable();
         recomputeFov();
         return true;
@@ -2949,6 +3183,7 @@ bool Game::useSelected() {
             w.enchant += 1;
             pushMsg("YOUR WEAPON GLOWS BRIEFLY.", MessageKind::Success, true);
         }
+        (void)markIdentified(it.kind, false);
         consumeOneStackable();
         return true;
     }
@@ -2962,6 +3197,42 @@ bool Game::useSelected() {
             a.enchant += 1;
             pushMsg("YOUR ARMOR GLOWS BRIEFLY.", MessageKind::Success, true);
         }
+        (void)markIdentified(it.kind, false);
+        consumeOneStackable();
+        return true;
+    }
+
+    if (it.kind == ItemKind::ScrollIdentify) {
+        // Using an identify scroll reveals the true name of one random unidentified potion/scroll.
+        (void)markIdentified(it.kind, false);
+
+        if (!identifyItemsEnabled) {
+            pushMsg("YOUR MIND FEELS CLEAR.", MessageKind::Info, true);
+            consumeOneStackable();
+            return true;
+        }
+
+        std::vector<ItemKind> candidates;
+        candidates.reserve(16);
+        auto seen = [&](ItemKind k) {
+            for (ItemKind x : candidates) if (x == k) return true;
+            return false;
+        };
+
+        for (const auto& invIt : inv) {
+            if (!isIdentifiableKind(invIt.kind)) continue;
+            if (invIt.kind == ItemKind::ScrollIdentify) continue;
+            if (isIdentified(invIt.kind)) continue;
+            if (!seen(invIt.kind)) candidates.push_back(invIt.kind);
+        }
+
+        if (candidates.empty()) {
+            pushMsg("YOU STUDY THE SCROLL, BUT LEARN NOTHING NEW.", MessageKind::Info, true);
+        } else {
+            ItemKind k = candidates[static_cast<size_t>(rng.range(0, static_cast<int>(candidates.size()) - 1))];
+            (void)markIdentified(k, false);
+        }
+
         consumeOneStackable();
         return true;
     }
@@ -3279,21 +3550,22 @@ void Game::spawnItems() {
     };
 
     auto dropGoodItem = [&](const Room& r) {
-        int roll = rng.range(0, 99);
+        int roll = rng.range(0, 119);
         if (roll < 18) dropItemAt(ItemKind::Sword, randomFreeTileInRoom(r));
         else if (roll < 32) dropItemAt(ItemKind::ChainArmor, randomFreeTileInRoom(r));
         else if (roll < 44) dropItemAt(ItemKind::WandSparks, randomFreeTileInRoom(r));
         else if (roll < 54) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r));
-        else if (roll < 64) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), rng.range(1, 2));
-        else if (roll < 74) dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), rng.range(1, 2));
-        else if (roll < 82) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), rng.range(1, 2));
-        else if (roll < 88) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
-        else if (roll < 92) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
-        else if (roll < 94) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
-        else if (roll < 96) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
-        else if (roll < 97) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
-        else if (roll < 98) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
-        else if (roll < 99) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
+        else if (roll < 66) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), rng.range(1, 2));
+        else if (roll < 78) dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), rng.range(1, 2));
+        else if (roll < 88) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), rng.range(1, 2));
+        else if (roll < 96) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
+        else if (roll < 102) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
+        else if (roll < 106) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
+        else if (roll < 110) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
+        else if (roll < 113) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
+        else if (roll < 115) dropItemAt(ItemKind::ScrollIdentify, randomFreeTileInRoom(r), 1);
+        else if (roll < 117) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
+        else if (roll < 119) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
         else dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
     };
 
@@ -3316,6 +3588,7 @@ void Game::spawnItems() {
             if (rng.chance(0.15f)) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.18f)) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.12f)) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.20f)) dropItemAt(ItemKind::ScrollIdentify, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.45f)) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.35f)) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.50f)) dropItemAt(ItemKind::Gold, randomFreeTileInRoom(r), rng.range(6, 18));
@@ -3338,8 +3611,9 @@ void Game::spawnItems() {
             else if (roll < 60) dropItemAt(ItemKind::PotionRegeneration, p, 1);
             else if (roll < 66) dropItemAt(ItemKind::ScrollTeleport, p, 1);
             else if (roll < 72) dropItemAt(ItemKind::ScrollMapping, p, 1);
-            else if (roll < 76) dropItemAt(ItemKind::ScrollEnchantWeapon, p, 1);
-            else if (roll < 80) dropItemAt(ItemKind::ScrollEnchantArmor, p, 1);
+            else if (roll < 74) dropItemAt(ItemKind::ScrollIdentify, p, 1);
+            else if (roll < 78) dropItemAt(ItemKind::ScrollEnchantWeapon, p, 1);
+            else if (roll < 82) dropItemAt(ItemKind::ScrollEnchantArmor, p, 1);
             else if (roll < 87) dropItemAt(ItemKind::Arrow, p, rng.range(4, 10));
             else if (roll < 92) dropItemAt(ItemKind::Rock, p, rng.range(3, 8));
             else if (roll < 95) dropItemAt(ItemKind::Dagger, p, 1);
@@ -3541,6 +3815,29 @@ void Game::monsterTurn() {
             continue;
         }
 
+        // Wizard: occasionally "blinks" (teleports) to reposition, especially when wounded.
+        if (m.kind == EntityKind::Wizard && seesPlayer) {
+            const bool lowHp = (m.hp <= std::max(2, m.hpMax / 3));
+            const bool close = (man <= 3);
+            if (lowHp || (close && rng.chance(0.25f)) || rng.chance(0.08f)) {
+                Vec2i dst = m.pos;
+                for (int tries = 0; tries < 300; ++tries) {
+                    Vec2i cand = dung.randomFloor(rng, true);
+                    if (entityAt(cand.x, cand.y)) continue;
+                    if (cand == dung.stairsUp || cand == dung.stairsDown) continue;
+                    if (manhattan(cand, p.pos) < 6) continue;
+                    dst = cand;
+                    break;
+                }
+                if (dst != m.pos) {
+                    const bool wasVisible = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+                    m.pos = dst;
+                    if (wasVisible) pushMsg("THE WIZARD BLINKS AWAY!", MessageKind::Warning, false);
+                    continue;
+                }
+            }
+        }
+
         // Fleeing behavior
         if (m.willFlee && m.hp <= std::max(1, m.hpMax / 3) && d0 >= 0) {
             Vec2i to = stepAway(m);
@@ -3673,6 +3970,14 @@ void Game::applyEndOfTurnEffects() {
         }
     }
 
+    // Timed webbing: prevents movement.
+    if (p.webTurns > 0) {
+        p.webTurns = std::max(0, p.webTurns - 1);
+        if (p.webTurns == 0) {
+            pushMsg("YOU BREAK FREE OF THE WEB.", MessageKind::System, true);
+        }
+    }
+
     // Natural regeneration (slow baseline healing).
     // Intentionally disabled while poisoned to keep poison meaningful.
     if (p.poisonTurns > 0 || p.hp >= p.hpMax) {
@@ -3709,9 +4014,10 @@ void Game::cleanupDead() {
             else if (roll < 80) { gi.item.kind = ItemKind::PotionAntidote; gi.item.count = 1; }
             else if (roll < 84) { gi.item.kind = ItemKind::PotionRegeneration; gi.item.count = 1; }
             else if (roll < 88) { gi.item.kind = ItemKind::ScrollTeleport; gi.item.count = 1; }
-            else if (roll < 91) { gi.item.kind = ItemKind::ScrollEnchantWeapon; gi.item.count = 1; }
-            else if (roll < 94) { gi.item.kind = ItemKind::ScrollEnchantArmor; gi.item.count = 1; }
-            else if (roll < 96) { gi.item.kind = ItemKind::Dagger; gi.item.count = 1; }
+            else if (roll < 90) { gi.item.kind = ItemKind::ScrollIdentify; gi.item.count = 1; }
+            else if (roll < 93) { gi.item.kind = ItemKind::ScrollEnchantWeapon; gi.item.count = 1; }
+            else if (roll < 96) { gi.item.kind = ItemKind::ScrollEnchantArmor; gi.item.count = 1; }
+            else if (roll < 97) { gi.item.kind = ItemKind::Dagger; gi.item.count = 1; }
             else if (roll < 98) { gi.item.kind = ItemKind::PotionShielding; gi.item.count = 1; }
             else if (roll < 99) { gi.item.kind = ItemKind::PotionHaste; gi.item.count = 1; }
             else { gi.item.kind = ItemKind::PotionVision; gi.item.count = 1; }

@@ -49,3 +49,7 @@ Comments start with `#` or `;`.
   - Clamped to `0..5000`
   - `0` disables autosave
   - Autosave writes to `procrogue_autosave.dat`
+
+- `identify_items` (`true/false`, default `true`)
+  - `true`: potions/scrolls start unidentified each run (NetHack-style)
+  - `false`: items always show their true names (more "arcade" / beginner-friendly)

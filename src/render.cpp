@@ -473,8 +473,16 @@ void Renderer::drawHud(const Game& game) {
     ss << " | GOLD: " << game.goldCount();
     ss << " | DEPTH: " << game.depth();
     ss << " | MAX: " << game.maxDepthReached();
-    ss << " | TURNS: " << game.turnNumber();
+    ss << " | TURNS: " << game.turns();
     ss << " | KILLS: " << game.kills();
+
+    // Status effects (compact)
+    if (p.poisonTurns > 0) ss << " | POISON";
+    if (p.webTurns > 0) ss << " | WEB";
+    if (p.regenTurns > 0) ss << " | REGEN";
+    if (p.shieldTurns > 0) ss << " | SHIELD";
+    if (p.hasteTurns > 0) ss << " | HASTE";
+    if (p.visionTurns > 0) ss << " | VISION";
     if (game.autosaveEveryTurns() > 0) {
         ss << " | AS: " << game.autosaveEveryTurns();
     }
@@ -498,7 +506,7 @@ void Renderer::drawHud(const Game& game) {
 
     // Leave room for 3 control lines.
     const int maxLines = (hudH - 44 - 52) / lineH;
-    int start = std::max(0, (int)msgs.size() - maxLines - game.messageScrollOffset());
+    int start = std::max(0, (int)msgs.size() - maxLines - game.messageScroll());
     int end = std::min((int)msgs.size(), start + maxLines);
 
     int y = winH - hudH + 44;
@@ -507,8 +515,9 @@ void Renderer::drawHud(const Game& game) {
         Color c = white;
         switch (msg.kind) {
             case MessageKind::Info: c = white; break;
+            case MessageKind::Combat: c = red; break;
+            case MessageKind::Loot: c = yellow; break;
             case MessageKind::Warning: c = yellow; break;
-            case MessageKind::Error: c = red; break;
             case MessageKind::Success: c = green; break;
             case MessageKind::System: c = gray; break;
         }
@@ -563,7 +572,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         std::string tag = game.equippedTag(it.id);
         if (!tag.empty()) line += "[" + tag + "] ";
         else line += "    ";
-        line += itemDisplayName(it);
+        line += game.displayItemName(it);
 
         drawText5x7(renderer, x, y, scale, (i == sel ? white : gray), toUpper(line));
         y += 7 * scale + 4;
@@ -573,7 +582,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 
     // Footer hints about current selection
     const Item& cur = inv[static_cast<size_t>(clampi(sel, 0, static_cast<int>(inv.size()) - 1))];
-    std::string hint = "SELECTED: " + itemDisplayName(cur);
+    std::string hint = "SELECTED: " + game.displayItemName(cur);
     drawText5x7(renderer, x, bg.y + bg.h - 40, scale, yellow, toUpper(hint));
 }
 
@@ -646,6 +655,8 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("- POTION OF HASTE GRANTS EXTRA ACTIONS.");
     lineGray("- POTION OF VISION INCREASES SIGHT RANGE.");
     lineGray("- ENCHANTMENT SCROLLS IMPROVE EQUIPPED GEAR.");
+    lineGray("- POTIONS/SCROLLS START UNIDENTIFIED (USE THEM OR READ AN IDENTIFY SCROLL).");
+    lineGray("- SPIDERS CAN WEB YOU (YOU CAN'T MOVE UNTIL THE WEB WEARS OFF).");
     lineGray("- DISCOVERED TRAPS ARE DRAWN AS X.");
     lineGray("- SCROLL OF MAPPING REVEALS THE WHOLE FLOOR.");
 }
@@ -737,6 +748,10 @@ void Renderer::drawMinimapOverlay(const Game& game) {
 }
 
 void Renderer::drawStatsOverlay(const Game& game) {
+    const Color white{240,240,240,255};
+    const Color gray{160,160,160,255};
+    const Color yellow{255,230,120,255};
+
     // Center panel
     const int panelW = winW * 4 / 5;
     const int panelH = (winH - hudH) * 4 / 5;
@@ -778,7 +793,7 @@ void Renderer::drawStatsOverlay(const Game& game) {
     }
     {
         std::stringstream ss;
-        ss << "TURNS: " << game.turnNumber() << "  KILLS: " << game.kills() << "  GOLD: " << game.goldCount();
+        ss << "TURNS: " << game.turns() << "  KILLS: " << game.kills() << "  GOLD: " << game.goldCount();
         drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
         y += 18;
     }
@@ -803,7 +818,7 @@ void Renderer::drawStatsOverlay(const Game& game) {
     drawText5x7(renderer, x0 + pad, y, 2, white, "TOP RUNS");
     y += 18;
 
-    const auto& entries = game.highScores();
+    const auto& entries = game.scoreBoard().entries();
     const int maxShown = 10;
 
     if (entries.empty()) {

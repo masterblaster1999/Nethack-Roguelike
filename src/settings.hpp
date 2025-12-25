@@ -17,6 +17,10 @@ struct Settings {
 
     // Autosave (0 = off)
     int autosaveEveryTurns = 200;
+
+    // NetHack-style item identification (potions/scrolls start unknown each run).
+    // If false, items always show their true names (more "arcade" / beginner-friendly).
+    bool identifyItems = true;
 };
 
 // Loads settings from disk. If the file is missing or invalid, defaults are used.

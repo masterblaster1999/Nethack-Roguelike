@@ -6,6 +6,7 @@
 #include "scores.hpp"
 
 #include <cstdint>
+#include <array>
 #include <map>
 #include <string>
 #include <vector>
@@ -155,6 +156,9 @@ struct Entity {
     int hasteTurns = 0;    // grants extra player actions (decrements on monster turns)
     int visionTurns = 0;   // increases FOV radius
 
+    // New timed debuffs
+    int webTurns = 0;      // prevents movement while >0
+
     uint32_t spriteSeed = 0;
 };
 
@@ -234,6 +238,13 @@ public:
     void setAutoPickupMode(AutoPickupMode m);
 
     bool playerHasAmulet() const;
+
+    // Item display helpers (respect identification settings + run knowledge).
+    std::string displayItemName(const Item& it) const;
+    std::string displayItemNameSingle(ItemKind k) const;
+
+    void setIdentificationEnabled(bool enabled);
+    bool identificationEnabled() const { return identifyItemsEnabled; }
 
     // Targeting
     bool isTargeting() const { return targeting; }
@@ -349,6 +360,12 @@ private:
     // Options / quality-of-life
     AutoPickupMode autoPickup = AutoPickupMode::Gold;
 
+    // Item identification (NetHack-style). When enabled, potions/scrolls start unknown each run
+    // and become identified through use/identify scrolls.
+    bool identifyItemsEnabled = true;
+    std::array<uint8_t, ITEM_KIND_COUNT> identKnown{};       // 0/1
+    std::array<uint8_t, ITEM_KIND_COUNT> identAppearance{};  // appearance id (category-local)
+
     // Auto-move / auto-explore state (stepped in update() for UX)
     AutoMoveMode autoMode = AutoMoveMode::None;
     std::vector<Vec2i> autoPathTiles;
@@ -457,6 +474,14 @@ private:
     void spawnMonsters();
     void spawnItems();
     void spawnTraps();
+
+    // Identification
+    void initIdentificationTables();
+    bool isIdentified(ItemKind k) const;
+    bool markIdentified(ItemKind k, bool quiet = false);
+    uint8_t appearanceFor(ItemKind k) const;
+    std::string appearanceName(ItemKind k) const;
+    std::string unknownDisplayName(const Item& it) const;
 
     // QoL / traps / status
     bool autoPickupAtPlayer();

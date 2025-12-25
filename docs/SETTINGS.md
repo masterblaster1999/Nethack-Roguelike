@@ -7,6 +7,12 @@ On first run, ProcRogue creates a simple settings file next to the save file:
 
 The exact folder is provided by **SDL_GetPrefPath** (a per-user writable directory).
 
+Related files created in the same folder:
+
+- `procrogue_autosave.dat` (automatic periodic save)
+- `procrogue_scores.csv` (run history / high scores)
+- `screenshots/` (F12 BMP screenshots)
+
 ## Keys
 
 All keys use the form:
@@ -38,3 +44,8 @@ Comments start with `#` or `;`.
 - `auto_step_delay_ms` (int, default `45`)
   - Clamped to `10..500`
   - Lower = faster auto-travel / auto-explore
+
+- `autosave_every_turns` (int, default `200`)
+  - Clamped to `0..5000`
+  - `0` disables autosave
+  - Autosave writes to `procrogue_autosave.dat`

@@ -379,6 +379,14 @@ void Renderer::render(const Game& game) {
     // HUD (messages, stats)
     drawHud(game);
 
+    if (game.isMinimapOpen()) {
+        drawMinimapOverlay(game);
+    }
+
+    if (game.isStatsOpen()) {
+        drawStatsOverlay(game);
+    }
+
     if (game.isInventoryOpen()) {
         drawInventoryOverlay(game);
     }
@@ -390,121 +398,132 @@ void Renderer::render(const Game& game) {
     SDL_RenderPresent(renderer);
 }
 
+
+std::string Renderer::saveScreenshotBMP(const std::string& directory, const std::string& prefix) const {
+    namespace fs = std::filesystem;
+
+    std::error_code ec;
+    if (!directory.empty()) {
+        fs::create_directories(fs::path(directory), ec);
+    }
+
+    // Timestamp for filename.
+    std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    tm = *std::localtime(&t);
+#endif
+
+    std::ostringstream name;
+    name << prefix << "_" << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".bmp";
+
+    fs::path outPath;
+    if (directory.empty()) {
+        outPath = fs::path(name.str());
+    } else {
+        outPath = fs::path(directory) / name.str();
+    }
+
+    // Read back the current backbuffer.
+    int w = 0, h = 0;
+    if (SDL_GetRendererOutputSize(renderer, &w, &h) != 0) {
+        w = winW;
+        h = winH;
+    }
+
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
+    if (!surface) return {};
+
+    if (SDL_RenderReadPixels(renderer, nullptr, surface->format->format, surface->pixels, surface->pitch) != 0) {
+        SDL_FreeSurface(surface);
+        return {};
+    }
+
+    if (SDL_SaveBMP(surface, outPath.string().c_str()) != 0) {
+        SDL_FreeSurface(surface);
+        return {};
+    }
+
+    SDL_FreeSurface(surface);
+    return outPath.string();
+}
+
 void Renderer::drawHud(const Game& game) {
-    const int hudTop = Game::MAP_H * tile;
-    SDL_Rect r{ 0, hudTop, winW, hudH };
+    // HUD background
+    SDL_Rect hudRect = {0, winH - hudH, winW, hudH};
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
+    SDL_RenderFillRect(renderer, &hudRect);
 
-    SDL_SetRenderDrawColor(renderer, 15, 15, 20, 255);
-    SDL_RenderFillRect(renderer, &r);
+    const Color white{240,240,240,255};
+    const Color gray{160,160,160,255};
+    const Color yellow{255,230,120,255};
+    const Color red{255,80,80,255};
+    const Color green{120,255,120,255};
 
-    const int scale = 2;
-    const Color white{ 240, 240, 240, 255 };
-    const Color gray{ 170, 170, 170, 255 };
-    const Color red{ 255, 90, 90, 255 };
-    const Color green{ 120, 255, 120, 255 };
-    const Color yellow{ 255, 230, 120, 255 };
-    const Color orange{ 255, 190, 120, 255 };
+    // Top row: Title and basic stats
+    drawText5x7(renderer, 8, winH - hudH + 8, 2, white, "PROCROGUE++");
 
     const Entity& p = game.player();
-
-    // Stats line
-    {
-        std::stringstream ss;
-        ss << "HP " << p.hp << "/" << p.hpMax
-           << "  ATK " << game.playerAttack()
-           << "  DEF " << game.playerDefense()
-           << "  GOLD " << game.goldCount()
-           << "  DEPTH " << game.depth()
-           << "  TURN " << game.turns()
-           << "  LVL " << game.characterLevel()
-           << "  XP " << game.experience() << "/" << game.experienceToNext();
-        if (game.playerHasAmulet()) ss << "  AMULET";
-
-        // QoL / status indicators
-        // Auto-pickup
-        const AutoPickupMode ap = game.autoPickupMode();
-        if (ap == AutoPickupMode::Off) ss << "  AUTO:OFF";
-        else if (ap == AutoPickupMode::Gold) ss << "  AUTO:$";
-        else ss << "  AUTO:ALL";
-
-        // Auto-move indicator
-        if (game.isAutoActive()) {
-            ss << (game.isAutoExploring() ? "  AUTO-EXPLORE" : "  AUTO-TRAVEL");
-        }
-        if (p.poisonTurns > 0) ss << "  POISON(" << p.poisonTurns << ")";
-        if (p.regenTurns > 0) ss << "  REGEN(" << p.regenTurns << ")";
-        if (p.shieldTurns > 0) ss << "  SHIELD(" << p.shieldTurns << ")";
-        if (p.hasteTurns > 0) ss << "  HASTE(" << p.hasteTurns << ")";
-        if (p.visionTurns > 0) ss << "  VISION(" << p.visionTurns << ")";
-        drawText5x7(renderer, 4, hudTop + 2, scale, white, ss.str());
+    std::stringstream ss;
+    ss << "HP: " << p.hp << "/" << p.hpMax;
+    ss << " | LV: " << game.playerCharLevel();
+    ss << " | XP: " << game.playerXp() << "/" << game.playerXpToNext();
+    ss << " | GOLD: " << game.goldCount();
+    ss << " | DEPTH: " << game.depth();
+    ss << " | MAX: " << game.maxDepthReached();
+    ss << " | TURNS: " << game.turnNumber();
+    ss << " | KILLS: " << game.kills();
+    if (game.autosaveEveryTurns() > 0) {
+        ss << " | AS: " << game.autosaveEveryTurns();
     }
+    drawText5x7(renderer, 8, winH - hudH + 24, 2, white, ss.str());
 
-    // Equipped gear line
-    {
-        std::stringstream eq;
-        eq << "EQUIP: "
-           << "MELEE=" << game.equippedMeleeName() << "  "
-           << "RANGED=" << game.equippedRangedName() << "  "
-           << "ARMOR=" << game.equippedArmorName();
-        drawText5x7(renderer, 4, hudTop + 16, scale, gray, eq.str());
-    }
+    // Controls (3 compact lines)
+    const int controlY1 = winH - 48;
+    const int controlY2 = winH - 32;
+    const int controlY3 = winH - 16;
 
-    // Objective line
-    {
-        std::string obj = game.playerHasAmulet()
-            ? "OBJECTIVE: RETURN TO THE EXIT (<) ON DEPTH 1."
-            : "OBJECTIVE: FIND THE AMULET OF YENDOR ON DEPTH 5.";
-        drawText5x7(renderer, 4, hudTop + 30, scale, yellow, obj);
-    }
+    drawText5x7(renderer, 8, controlY1, 2, gray,
+        "MOVE: WASD/ARROWS/YUBN | . WAIT | Z REST | < > STAIRS");
+    drawText5x7(renderer, 8, controlY2, 2, gray,
+        "G PICK | I INV | F FIRE | L LOOK | C SRCH | O AUTO | P PICK");
+    drawText5x7(renderer, 8, controlY3, 2, gray,
+        "M MINI | TAB STATS | F5 SAVE | F9 LOAD | F12 SHOT | ? HELP");
 
-    // Messages (scrolled)
+    // Message log
     const auto& msgs = game.messages();
-    const int scroll = game.messageScroll();
     const int lineH = 16;
-    const int startY = hudTop + 44;
-    const int maxLines = (hudH - 44 - 20) / lineH;
 
-    int end = static_cast<int>(msgs.size()) - scroll;
-    end = clampi(end, 0, static_cast<int>(msgs.size()));
-    int start = std::max(0, end - maxLines);
+    // Leave room for 3 control lines.
+    const int maxLines = (hudH - 44 - 52) / lineH;
+    int start = std::max(0, (int)msgs.size() - maxLines - game.messageScrollOffset());
+    int end = std::min((int)msgs.size(), start + maxLines);
 
+    int y = winH - hudH + 44;
     for (int i = start; i < end; ++i) {
-        const int y = startY + (i - start) * lineH;
+        const auto& msg = msgs[i];
         Color c = white;
-        switch (msgs[i].kind) {
-            case MessageKind::Combat:  c = red; break;
-            case MessageKind::Loot:    c = yellow; break;
+        switch (msg.kind) {
+            case MessageKind::Info: c = white; break;
+            case MessageKind::Warning: c = yellow; break;
+            case MessageKind::Error: c = red; break;
             case MessageKind::Success: c = green; break;
-            case MessageKind::Warning: c = orange; break;
-            case MessageKind::System:  c = gray; break;
-            case MessageKind::Info:
-            default: c = msgs[i].fromPlayer ? white : gray; break;
+            case MessageKind::System: c = gray; break;
         }
-        drawText5x7(renderer, 4, y, scale, c, msgs[i].text);
+        drawText5x7(renderer, 8, y, 2, c, msg.text);
+        y += lineH;
     }
 
-    if (scroll > 0) {
-        std::stringstream ss;
-        ss << "LOG -" << scroll;
-        drawText5x7(renderer, winW - 130, hudTop + 2, scale, gray, ss.str());
-    }
-
-    // Controls line
-    {
-        const std::string help =
-            "MOVE WASD/ARROWS  . WAIT  G GET  I INV  L LOOK  Z REST  C SEARCH  P AUTO$  ? HELP  F FIRE  < UP  > DOWN  F11 FULL  F5 SAVE  F9 LOAD  PGUP/PGDN LOG  R RESTART";
-        drawText5x7(renderer, 4, hudTop + hudH - 16, scale, gray, help);
-    }
-
-    // Game over / win overlays
-    if (game.isGameWon()) {
-        drawText5x7(renderer, winW / 2 - 60, hudTop + 54, 4, green, "VICTORY!");
-        drawText5x7(renderer, winW / 2 - 110, hudTop + 82, 3, gray, "R RESTART   F9 LOAD");
-    } else if (game.isGameOver()) {
-        drawText5x7(renderer, winW / 2 - 70, hudTop + 54, 4, red, "GAME OVER");
-        drawText5x7(renderer, winW / 2 - 110, hudTop + 82, 3, gray, "R RESTART   F9 LOAD");
+    // End-game banner
+    if (game.isGameOver()) {
+        drawText5x7(renderer, winW/2 - 80, winH - hudH + 70, 3, red, "GAME OVER");
+    } else if (game.isGameWon()) {
+        drawText5x7(renderer, winW/2 - 90, winH - hudH + 70, 3, green, "YOU ESCAPED!");
     }
 }
+
 
 void Renderer::drawInventoryOverlay(const Game& game) {
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
@@ -597,7 +616,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     line("      RETURN TO THE EXIT (<) ON DEPTH 1 TO WIN.", white);
     y += 6;
 
-    lineGray("MOVE: WASD / ARROW KEYS");
+    lineGray("MOVE: WASD / ARROWS / YUBN (DIAGONALS)");
     lineGray("WAIT: . (PERIOD)");
     lineGray("LOOK: L / V (EXAMINE WITHOUT A TURN)");
     lineGray("REST: Z (WAIT UNTIL HEALED; STOPS ON DANGER)");
@@ -605,13 +624,16 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("SEARCH: C (REVEAL NEARBY TRAPS)");
     lineGray("AUTO-EXPLORE: O (EXPLORE UNTIL INTERRUPTED)");
     lineGray("AUTO-PICKUP: P (CYCLE OFF/GOLD/ALL)");
+    lineGray("MINIMAP: M");
+    lineGray("STATS / SCORES: TAB");
+    lineGray("SCREENSHOT: F12 (SAVES A .BMP)");
     lineGray("MOUSE: LMB AUTO-TRAVEL, RMB LOOK");
     lineGray("INVENTORY: I   (E EQUIP, U USE, X DROP, ESC CLOSE)");
     lineGray("RANGED: F TARGET, ENTER FIRE, ESC CANCEL");
     lineGray("STAIRS: < UP, > DOWN   (ENTER ALSO WORKS WHILE STANDING ON STAIRS)");
     lineGray("LOG SCROLL: PAGEUP / PAGEDOWN");
     lineGray("FULLSCREEN: F11 (TOGGLE)");
-    lineGray("SAVE / LOAD: F5 / F9");
+    lineGray("SAVE / LOAD: F5 / F9 (SEE AUTOSAVES IN SETTINGS)");
     lineGray("RESTART: R");
 
     y += 10;
@@ -626,6 +648,188 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("- ENCHANTMENT SCROLLS IMPROVE EQUIPPED GEAR.");
     lineGray("- DISCOVERED TRAPS ARE DRAWN AS X.");
     lineGray("- SCROLL OF MAPPING REVEALS THE WHOLE FLOOR.");
+}
+
+
+void Renderer::drawMinimapOverlay(const Game& game) {
+    const Dungeon& d = game.dungeon();
+    const int W = d.width();
+    const int H = d.height();
+
+    // Choose a small per-tile pixel size that fits comfortably on screen.
+    int px = 4;
+    const int pad = 10;
+    const int margin = 10;
+    // Don't let the minimap eat the whole window.
+    const int maxW = winW / 2;
+    const int maxH = (winH - hudH) / 2;
+    while (px > 2 && (W * px + pad * 2) > maxW) px--;
+    while (px > 2 && (H * px + pad * 2) > maxH) px--;
+
+    const int titleH = 16;
+    const int panelW = W * px + pad * 2;
+    const int panelH = H * px + pad * 2 + titleH;
+
+    const int x0 = winW - panelW - margin;
+    const int y0 = margin;
+
+    SDL_Rect panel { x0, y0, panelW, panelH };
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
+    SDL_RenderFillRect(renderer, &panel);
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 120);
+    SDL_RenderDrawRect(renderer, &panel);
+
+    // Title
+    drawText5x7(renderer, x0 + pad, y0 + 4, 2, white, "MINIMAP (M)");
+
+    const int mapX = x0 + pad;
+    const int mapY = y0 + pad + titleH;
+
+    auto drawCell = [&](int tx, int ty, uint8_t r, uint8_t g, uint8_t b, uint8_t a=255) {
+        SDL_Rect rc { mapX + tx * px, mapY + ty * px, px, px };
+        SDL_SetRenderDrawColor(renderer, r, g, b, a);
+        SDL_RenderFillRect(renderer, &rc);
+    };
+
+    // Tiles
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const Tile& t = d.at(x, y);
+            if (!t.explored) {
+                // Unexplored: don't draw (keep the background)
+                continue;
+            }
+
+            const bool vis = t.visible;
+
+            // Basic palette
+            if (t.type == TileType::Wall) {
+                if (vis) drawCell(x, y, 110, 110, 110);
+                else     drawCell(x, y, 60, 60, 60);
+            } else if (t.type == TileType::DoorClosed) {
+                if (vis) drawCell(x, y, 160, 110, 60);
+                else     drawCell(x, y, 90, 70, 40);
+            } else if (t.type == TileType::DoorOpen) {
+                if (vis) drawCell(x, y, 140, 120, 90);
+                else     drawCell(x, y, 80, 70, 55);
+            } else if (t.type == TileType::StairsDown || t.type == TileType::StairsUp) {
+                if (vis) drawCell(x, y, 220, 220, 120);
+                else     drawCell(x, y, 120, 120, 80);
+            } else {
+                // Floor/other passable
+                if (vis) drawCell(x, y, 30, 30, 30);
+                else     drawCell(x, y, 18, 18, 18);
+            }
+        }
+    }
+
+    // Entities (only show visible monsters; always show player)
+    const Entity& p = game.player();
+    drawCell(p.pos.x, p.pos.y, 60, 180, 255);
+
+    for (const auto& e : game.entities()) {
+        if (e.id == p.id) continue;
+        if (e.hp <= 0) continue;
+        const Tile& t = d.at(e.pos.x, e.pos.y);
+        if (!t.visible) continue;
+        drawCell(e.pos.x, e.pos.y, 255, 80, 80);
+    }
+}
+
+void Renderer::drawStatsOverlay(const Game& game) {
+    // Center panel
+    const int panelW = winW * 4 / 5;
+    const int panelH = (winH - hudH) * 4 / 5;
+    const int x0 = (winW - panelW) / 2;
+    const int y0 = (winH - hudH - panelH) / 2;
+
+    SDL_Rect panel { x0, y0, panelW, panelH };
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 220);
+    SDL_RenderFillRect(renderer, &panel);
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 140);
+    SDL_RenderDrawRect(renderer, &panel);
+
+    const int pad = 14;
+    int y = y0 + pad;
+
+    drawText5x7(renderer, x0 + pad, y, 2, white, "STATS / RUN HISTORY (TAB)");
+    y += 22;
+
+    const Entity& p = game.player();
+
+    // Run summary
+    {
+        std::stringstream ss;
+        ss << (game.isGameWon() ? "RESULT: WIN" : (game.isGameOver() ? "RESULT: DEAD" : "RESULT: IN PROGRESS"));
+        drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
+        y += 18;
+    }
+    {
+        std::stringstream ss;
+        ss << "SEED: " << game.seed();
+        drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
+        y += 18;
+    }
+    {
+        std::stringstream ss;
+        ss << "DEPTH: " << game.depth() << "  (MAX: " << game.maxDepthReached() << ")";
+        drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
+        y += 18;
+    }
+    {
+        std::stringstream ss;
+        ss << "TURNS: " << game.turnNumber() << "  KILLS: " << game.kills() << "  GOLD: " << game.goldCount();
+        drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
+        y += 18;
+    }
+    {
+        std::stringstream ss;
+        ss << "HP: " << p.hp << "/" << p.hpMax << "  LV: " << game.playerCharLevel()
+           << "  XP: " << game.playerXp() << "/" << game.playerXpToNext();
+        drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
+        y += 18;
+    }
+    {
+        std::stringstream ss;
+        if (game.autosaveEveryTurns() > 0) {
+            ss << "AUTOSAVE: every " << game.autosaveEveryTurns() << " turns (" << game.defaultAutosavePath() << ")";
+        } else {
+            ss << "AUTOSAVE: OFF";
+        }
+        drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
+        y += 22;
+    }
+
+    drawText5x7(renderer, x0 + pad, y, 2, white, "TOP RUNS");
+    y += 18;
+
+    const auto& entries = game.highScores();
+    const int maxShown = 10;
+
+    if (entries.empty()) {
+        drawText5x7(renderer, x0 + pad, y, 2, white, "(NO RUNS RECORDED YET)");
+        y += 18;
+    } else {
+        for (int i = 0; i < (int)entries.size() && i < maxShown; ++i) {
+            const auto& e = entries[i];
+            std::stringstream ss;
+            ss << "#" << (i + 1)
+               << "  " << e.score
+               << "  " << (e.won ? "WIN" : "DEAD")
+               << "  D" << e.depth
+               << "  T" << e.turns
+               << "  K" << e.kills
+               << "  L" << e.level
+               << "  G" << e.gold
+               << "  SEED " << e.seed;
+            drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
+            y += 16;
+            if (y > y0 + panelH - 36) break;
+        }
+    }
+
+    // Footer
+    drawText5x7(renderer, x0 + pad, y0 + panelH - 20, 2, white, "ESC to close");
 }
 
 void Renderer::drawTargetingOverlay(const Game& game) {

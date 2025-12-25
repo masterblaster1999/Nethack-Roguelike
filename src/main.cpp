@@ -13,50 +13,50 @@
 
 static Action keyToAction(SDL_Keycode key, Uint16 mod) {
     switch (key) {
-        case SDLK_UP:    return Action::Up;
-        case SDLK_DOWN:  return Action::Down;
-        case SDLK_LEFT:  return Action::Left;
-        case SDLK_RIGHT: return Action::Right;
+        // 8-way movement (WASD / arrows / numpad / YUBN)
+        case SDLK_w:
+        case SDLK_UP:
+        case SDLK_KP_8:
+            return Action::Up;
 
-        case SDLK_w: return Action::Up;
-        case SDLK_s: return Action::Down;
-        case SDLK_a: return Action::Left;
-        case SDLK_d: return Action::Right;
+        case SDLK_s:
+        case SDLK_DOWN:
+        case SDLK_KP_2:
+            return Action::Down;
 
-        case SDLK_SPACE:
-            return Action::Wait;
+        case SDLK_a:
+        case SDLK_LEFT:
+        case SDLK_KP_4:
+            return Action::Left;
 
-        case SDLK_c:
-            return Action::Search;
+        case SDLK_d:
+        case SDLK_RIGHT:
+        case SDLK_KP_6:
+            return Action::Right;
 
-        case SDLK_p:
-            return Action::ToggleAutoPickup;
+        case SDLK_y:
+        case SDLK_KP_7:
+            return Action::UpLeft;
 
-        case SDLK_o:
-            return Action::AutoExplore;
+        case SDLK_u:
+        case SDLK_KP_9:
+            return Action::UpRight;
+
+        case SDLK_b:
+        case SDLK_KP_1:
+            return Action::DownLeft;
+
+        case SDLK_n:
+        case SDLK_KP_3:
+            return Action::DownRight;
 
         case SDLK_PERIOD:
-            if ((mod & KMOD_SHIFT) != 0) {
-                // '>' on many keyboards
-                return Action::StairsDown;
-            }
+        case SDLK_SPACE:
+        case SDLK_KP_5:
             return Action::Wait;
 
-        case SDLK_COMMA:
-            if ((mod & KMOD_SHIFT) != 0) {
-                // '<' on many keyboards
-                return Action::StairsUp;
-            }
-            return Action::None;
-
-        case SDLK_GREATER:
-            return Action::StairsDown;
-        case SDLK_LESS:
-            return Action::StairsUp;
-
-        case SDLK_RETURN:
-        case SDLK_KP_ENTER:
-            return Action::Confirm;
+        case SDLK_z:
+            return Action::Rest;
 
         case SDLK_g:
             return Action::Pickup;
@@ -67,34 +67,52 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
         case SDLK_f:
             return Action::Fire;
 
+        case SDLK_c:
+            return Action::Search;
+
         case SDLK_l:
-        case SDLK_v:
             return Action::Look;
 
-        case SDLK_z:
-            return Action::Rest;
+        case SDLK_COMMA:
+            // '<' on most keyboards, but SDL has SDLK_COMMA for the key.
+            return Action::StairsUp;
 
-        case SDLK_QUESTION:
-        case SDLK_h:
-            return Action::Help;
+        case SDLK_GREATER:
+            return Action::StairsDown;
+
+        case SDLK_o:
+            return Action::AutoExplore;
+
+        case SDLK_p:
+            return Action::ToggleAutoPickup;
+
+        case SDLK_m:
+            return Action::ToggleMinimap;
+
+        case SDLK_TAB:
+            return Action::ToggleStats;
 
         case SDLK_F5:
             return Action::Save;
+
         case SDLK_F9:
             return Action::Load;
 
-        // Inventory actions (only do something while inventory is open)
-        case SDLK_e:
-            return Action::Equip;
-        case SDLK_u:
-            return Action::Use;
-        case SDLK_x:
-            return Action::Drop;
+        case SDLK_F10:
+            return Action::LoadAuto;
 
-        case SDLK_PAGEUP:
-            return Action::LogUp;
-        case SDLK_PAGEDOWN:
-            return Action::LogDown;
+        case SDLK_RETURN:
+            return Action::Confirm;
+
+        case SDLK_BACKSPACE:
+            return Action::Cancel;
+
+        case SDLK_SLASH:
+            if (mod & KMOD_SHIFT) return Action::Help;
+            return Action::None;
+
+        case SDLK_QUESTION:
+            return Action::Help;
 
         case SDLK_r:
             return Action::Restart;
@@ -145,6 +163,9 @@ int main(int argc, char** argv) {
     const std::string basePath = prefPath.empty() ? std::string("./") : prefPath;
     const std::string settingsPath = basePath + "procrogue_settings.ini";
     const std::string savePath = basePath + "procrogue_save.dat";
+const std::string autosavePath = basePath + "procrogue_autosave.dat";
+const std::string scoresPath = basePath + "procrogue_scores.csv";
+const std::string screenshotDir = basePath + "screenshots";
 
     // Load or create settings.
     if (!std::filesystem::exists(settingsPath)) {
@@ -170,6 +191,10 @@ int main(int argc, char** argv) {
     Game game;
     game.setSavePath(savePath);
     game.setAutoStepDelayMs(settings.autoStepDelayMs);
+game.setAutosavePath(autosavePath);
+game.setScoresPath(scoresPath);
+game.setAutosaveEveryTurns(settings.autosaveEveryTurns);
+game.setAutoPickupMode(settings.autoPickup);
 
     const bool loadOnStart = hasFlag(argc, argv, "--load") || hasFlag(argc, argv, "--continue");
 
@@ -186,6 +211,7 @@ int main(int argc, char** argv) {
 
     bool running = true;
     uint32_t lastTicks = SDL_GetTicks();
+    bool wantScreenshot = false;
 
     while (running) {
         uint32_t now = SDL_GetTicks();
@@ -206,6 +232,11 @@ int main(int argc, char** argv) {
                         SDL_Keycode key = ev.key.keysym.sym;
                         Uint16 mod = ev.key.keysym.mod;
 
+                        if (key == SDLK_F12) {
+                            wantScreenshot = true;
+                            break;
+                        }
+
                         if (key == SDLK_F11) {
                             renderer.toggleFullscreen();
                             break;
@@ -213,10 +244,9 @@ int main(int argc, char** argv) {
 
                         if (key == SDLK_ESCAPE) {
                             // ESC cancels UI modes; cancels auto-move; otherwise quit.
-                            if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen() || game.isLooking()) {
+                            if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen() || game.isLooking() ||
+                                game.isMinimapOpen() || game.isStatsOpen() || game.isAutoActive()) {
                                 game.handleAction(Action::Cancel);
-                            } else if (game.isAutoActive()) {
-                                game.cancelAutoMove();
                             } else {
                                 running = false;
                             }
@@ -252,7 +282,7 @@ int main(int argc, char** argv) {
                 case SDL_MOUSEBUTTONDOWN:
                     {
                         // Ignore mouse when menus are open.
-                        if (game.isInventoryOpen() || game.isHelpOpen()) break;
+                        if (game.isInventoryOpen() || game.isHelpOpen() || game.isMinimapOpen() || game.isStatsOpen()) break;
 
                         int tx = 0, ty = 0;
                         if (!renderer.windowToMapTile(ev.button.x, ev.button.y, tx, ty)) break;
@@ -292,6 +322,16 @@ int main(int argc, char** argv) {
 
         game.update(dt);
         renderer.render(game);
+
+        if (wantScreenshot) {
+            std::string outPath = renderer.saveScreenshotBMP(screenshotDir);
+            if (!outPath.empty()) {
+                game.pushSystemMessage("SCREENSHOT SAVED: " + outPath);
+            } else {
+                game.pushSystemMessage("SCREENSHOT FAILED.");
+            }
+            wantScreenshot = false;
+        }
 
         SDL_Delay(8);
     }

@@ -84,6 +84,9 @@ Settings loadSettings(const std::string& path) {
             if (v == "off") s.autoPickup = AutoPickupMode::Off;
             else if (v == "gold") s.autoPickup = AutoPickupMode::Gold;
             else if (v == "all") s.autoPickup = AutoPickupMode::All;
+        } else if (key == "autosave_every_turns") {
+            int v = 0;
+            if (parseInt(val, v)) s.autosaveEveryTurns = std::clamp(v, 0, 5000);
         }
     }
 
@@ -106,7 +109,11 @@ bool writeDefaultSettings(const std::string& path) {
     f << "# auto_pickup: off | gold | all\n";
     f << "auto_pickup = gold\n";
     f << "# auto_step_delay_ms: 10..500 (lower = faster auto-move)\n";
-    f << "auto_step_delay_ms = 45\n";
+    f << "auto_step_delay_ms = 45\n\n";
+
+    f << "# Autosave\n";
+    f << "# autosave_every_turns: 0 disables; otherwise saves an autosave file every N turns.\n";
+    f << "autosave_every_turns = 200\n";
 
     return true;
 }

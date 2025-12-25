@@ -31,6 +31,10 @@ public:
     // Returns false if the coordinate is outside the map region.
     bool windowToMapTile(int winX, int winY, int& tileX, int& tileY) const;
 
+    // Screenshot helper: saves a BMP of the current frame.
+    // Returns the full path written, or an empty string on failure.
+    std::string saveScreenshotBMP(const std::string& directory, const std::string& prefix = "procrogue_shot") const;
+
 private:
     static constexpr int FRAMES = 2;
 
@@ -71,4 +75,8 @@ private:
     void drawHelpOverlay(const Game& game);
     void drawTargetingOverlay(const Game& game);
     void drawLookOverlay(const Game& game);
+
+    // New overlays
+    void drawMinimapOverlay(const Game& game);
+    void drawStatsOverlay(const Game& game);
 };

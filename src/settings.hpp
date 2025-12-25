@@ -14,6 +14,9 @@ struct Settings {
     // Gameplay QoL
     AutoPickupMode autoPickup = AutoPickupMode::Gold; // off|gold|all
     int autoStepDelayMs = 45; // auto-move speed (10..500)
+
+    // Autosave (0 = off)
+    int autosaveEveryTurns = 200;
 };
 
 // Loads settings from disk. If the file is missing or invalid, defaults are used.

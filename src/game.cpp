@@ -5,6 +5,9 @@
 #include <sstream>
 #include <fstream>
 #include <cstring>
+#include <filesystem>
+#include <iomanip>
+#include <ctime>
 
 namespace {
 
@@ -26,8 +29,23 @@ const char* kindName(EntityKind k) {
     }
 }
 
-bool isAdjacent4(const Vec2i& a, const Vec2i& b) {
-    return (std::abs(a.x - b.x) + std::abs(a.y - b.y)) == 1;
+bool isAdjacent8(const Vec2i& a, const Vec2i& b) {
+    const int dx = std::abs(a.x - b.x);
+    const int dy = std::abs(a.y - b.y);
+    return (dx <= 1 && dy <= 1 && (dx + dy) != 0);
+}
+
+bool diagonalPassable(const Dungeon& dung, const Vec2i& from, int dx, int dy) {
+    // Prevent corner-cutting through two blocked orthogonal tiles.
+    if (dx == 0 || dy == 0) return true;
+    const int ox1 = from.x + dx;
+    const int oy1 = from.y;
+    const int ox2 = from.x;
+    const int oy2 = from.y + dy;
+    // Closed doors are treated as blocking here so you can't slip around them.
+    const bool o1 = dung.isWalkable(ox1, oy1);
+    const bool o2 = dung.isWalkable(ox2, oy2);
+    return o1 || o2;
 }
 
 } // namespace
@@ -58,6 +76,10 @@ void Game::pushMsg(const std::string& s, MessageKind kind, bool fromPlayer) {
         // keep viewing older lines; new messages increase effective scroll
         msgScroll = std::min(msgScroll + 1, static_cast<int>(msgs.size()));
     }
+}
+
+void Game::pushSystemMessage(const std::string& msg) {
+    pushMsg(msg, MessageKind::System, false);
 }
 
 Entity* Game::entityById(int id) {
@@ -277,6 +299,7 @@ void Game::newGame(uint32_t seed) {
     }
 
     rng = RNG(seed);
+    seed_ = seed;
     depth_ = 1;
     levels.clear();
 
@@ -298,6 +321,8 @@ void Game::newGame(uint32_t seed) {
     targetLine.clear();
     targetValid = false;
     helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
 
     msgs.clear();
     msgScroll = 0;
@@ -311,6 +336,11 @@ void Game::newGame(uint32_t seed) {
 
     turnCount = 0;
     naturalRegenCounter = 0;
+    lastAutosaveTurn = 0;
+
+    killCount = 0;
+    maxDepth = 1;
+    runRecorded = false;
     hastePhase = false;
     looking = false;
     lookPos = {0,0};
@@ -374,8 +404,9 @@ void Game::newGame(uint32_t seed) {
 
     pushMsg("WELCOME TO PROCROGUE++.", MessageKind::System);
     pushMsg("GOAL: FIND THE AMULET OF YENDOR (DEPTH 5), THEN RETURN TO THE EXIT (<) TO WIN.", MessageKind::System);
-    pushMsg("PRESS ? FOR HELP. PRESS I FOR INVENTORY. PRESS F TO TARGET/FIRE.", MessageKind::System);
-    pushMsg("TIP: C SEARCH REVEALS TRAPS. O AUTO-EXPLORE. P CYCLES AUTO-PICKUP.", MessageKind::System);
+    pushMsg("PRESS ? FOR HELP. I INVENTORY. F TARGET/FIRE. M MINIMAP. TAB STATS. F12 SCREENSHOT.", MessageKind::System);
+    pushMsg("MOVE: WASD/ARROWS + Y/U/B/N DIAGONALS. TIP: C SEARCH. O AUTO-EXPLORE. P AUTO-PICKUP.", MessageKind::System);
+    pushMsg("SAVE: F5   LOAD: F9   LOAD AUTO: F10", MessageKind::System);
 }
 
 void Game::storeCurrentLevel() {
@@ -428,9 +459,12 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     invOpen = false;
     targeting = false;
     helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
     msgScroll = 0;
 
     depth_ = newDepth;
+    maxDepth = std::max(maxDepth, depth_);
 
     bool restored = restoreLevel(depth_);
 
@@ -483,6 +517,37 @@ void Game::setSavePath(const std::string& path) {
     savePathOverride = path;
 }
 
+std::string Game::defaultAutosavePath() const {
+    if (!autosavePathOverride.empty()) return autosavePathOverride;
+
+    // Default autosave goes next to the normal save file.
+    std::filesystem::path basePath = std::filesystem::path(defaultSavePath()).parent_path();
+    if (basePath.empty()) return "procrogue_autosave.dat";
+    return (basePath / "procrogue_autosave.dat").string();
+}
+
+void Game::setAutosavePath(const std::string& path) {
+    autosavePathOverride = path;
+}
+
+void Game::setAutosaveEveryTurns(int turns) {
+    autosaveInterval = std::max(0, std::min(5000, turns));
+}
+
+std::string Game::defaultScoresPath() const {
+    if (!scoresPathOverride.empty()) return scoresPathOverride;
+
+    std::filesystem::path basePath = std::filesystem::path(defaultSavePath()).parent_path();
+    if (basePath.empty()) return "procrogue_scores.csv";
+    return (basePath / "procrogue_scores.csv").string();
+}
+
+void Game::setScoresPath(const std::string& path) {
+    scoresPathOverride = path;
+    // Non-fatal if missing; it will be created on first recorded run.
+    (void)scores.load(defaultScoresPath());
+}
+
 void Game::setAutoPickupMode(AutoPickupMode m) {
     autoPickup = m;
 }
@@ -495,7 +560,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 4u;
+constexpr uint32_t SAVE_VERSION = 5u;
 
 template <typename T>
 void writePod(std::ostream& out, const T& v) {
@@ -716,13 +781,22 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
 
 } // namespace
 
-bool Game::saveToFile(const std::string& path) {
+bool Game::saveToFile(const std::string& path, bool quiet) {
     // Ensure the currently-loaded level is persisted into `levels`.
     storeCurrentLevel();
 
-    std::ofstream out(path, std::ios::binary);
+    std::filesystem::path p(path);
+    std::filesystem::path dir = p.parent_path();
+    if (!dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+    }
+
+    // Write to a temporary file first, then replace the target.
+    std::filesystem::path tmp = p.string() + ".tmp";
+    std::ofstream out(tmp, std::ios::binary);
     if (!out) {
-        pushMsg("FAILED TO SAVE (CANNOT OPEN FILE).");
+        if (!quiet) pushMsg("FAILED TO SAVE (CANNOT OPEN FILE).");
         return false;
     }
 
@@ -773,6 +847,14 @@ bool Game::saveToFile(const std::string& path) {
     writePod(out, turnsNow);
     writePod(out, natRegen);
     writePod(out, hasteP);
+
+    // v5+: run meta
+    uint32_t seedNow = seed_;
+    uint32_t killsNow = killCount;
+    int32_t maxD = maxDepth;
+    writePod(out, seedNow);
+    writePod(out, killsNow);
+    writePod(out, maxD);
 
     // Player
     writeEntity(out, player());
@@ -873,12 +955,38 @@ bool Game::saveToFile(const std::string& path) {
         }
     }
 
+    out.flush();
     if (!out.good()) {
-        pushMsg("FAILED TO SAVE (WRITE ERROR).");
+        if (!quiet) pushMsg("FAILED TO SAVE (WRITE ERROR).");
+        out.close();
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
         return false;
     }
+    out.close();
 
-    pushMsg("GAME SAVED.");
+    // Replace the target.
+    std::error_code ec;
+    std::filesystem::rename(tmp, p, ec);
+    if (ec) {
+        // On Windows, rename fails if destination exists; remove then retry.
+        std::error_code ec2;
+        std::filesystem::remove(p, ec2);
+        ec.clear();
+        std::filesystem::rename(tmp, p, ec);
+    }
+    if (ec) {
+        // Final fallback: copy then remove tmp.
+        std::error_code ec2;
+        std::filesystem::copy_file(tmp, p, std::filesystem::copy_options::overwrite_existing, ec2);
+        std::filesystem::remove(tmp, ec2);
+        if (ec2) {
+            if (!quiet) pushMsg("FAILED TO SAVE (CANNOT REPLACE FILE).");
+            return false;
+        }
+    }
+
+    if (!quiet) pushMsg("GAME SAVED.", MessageKind::Success, false);
     return true;
 }
 
@@ -913,6 +1021,9 @@ bool Game::loadFromFile(const std::string& path) {
     uint32_t turnsNow = 0;
     int32_t natRegen = 0;
     uint8_t hasteP = 0;
+    uint32_t seedNow = 0;
+    uint32_t killsNow = 0;
+    int32_t maxD = 1;
 
     if (!readPod(in, rngState)) return false;
     if (!readPod(in, depth)) return false;
@@ -936,6 +1047,12 @@ bool Game::loadFromFile(const std::string& path) {
         if (!readPod(in, turnsNow)) return false;
         if (!readPod(in, natRegen)) return false;
         if (!readPod(in, hasteP)) return false;
+    }
+
+    if (version >= 5u) {
+        if (!readPod(in, seedNow)) return false;
+        if (!readPod(in, killsNow)) return false;
+        if (!readPod(in, maxD)) return false;
     }
 
     Entity p;
@@ -1107,6 +1224,16 @@ bool Game::loadFromFile(const std::string& path) {
     naturalRegenCounter = natRegen;
     hastePhase = (hasteP != 0);
 
+    // v5+: run meta
+    seed_ = seedNow;
+    killCount = killsNow;
+    maxDepth = (maxD > 0) ? maxD : depth_;
+    if (maxDepth < depth_) maxDepth = depth_;
+    // If we loaded an already-finished run, don't record it again.
+    runRecorded = isFinished();
+
+    lastAutosaveTurn = 0;
+
     inv = std::move(invTmp);
     msgs = std::move(msgsTmp);
     msgScroll = 0;
@@ -1127,6 +1254,8 @@ bool Game::loadFromFile(const std::string& path) {
     invOpen = false;
     targeting = false;
     helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
     looking = false;
     lookPos = {0,0};
     inputLock = false;
@@ -1168,7 +1297,7 @@ void Game::update(float dt) {
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
-        if (invOpen || targeting || helpOpen || looking || isFinished()) {
+        if (invOpen || targeting || helpOpen || looking || minimapOpen || statsOpen || isFinished()) {
             stopAutoMove(true);
             return;
         }
@@ -1203,30 +1332,57 @@ void Game::handleAction(Action a) {
         return;
     }
 
+    auto closeOverlays = [&]() {
+        invOpen = false;
+        targeting = false;
+        helpOpen = false;
+        looking = false;
+        minimapOpen = false;
+        statsOpen = false;
+        msgScroll = 0;
+    };
+
     // Global hotkeys (available even while dead/won).
-    if (a == Action::Save) {
-        (void)saveToFile(defaultSavePath());
-        return;
-    }
-    if (a == Action::Load) {
-        (void)loadFromFile(defaultSavePath());
-        return;
-    }
-    if (a == Action::Help) {
-        // Toggle help overlay.
-        helpOpen = !helpOpen;
-        if (helpOpen) {
-            // Close other overlays when opening help.
-            invOpen = false;
-            targeting = false;
-            looking = false;
-            msgScroll = 0;
-        }
-        return;
+    switch (a) {
+        case Action::Save:
+            (void)saveToFile(defaultSavePath());
+            return;
+        case Action::Load:
+            (void)loadFromFile(defaultSavePath());
+            return;
+        case Action::LoadAuto:
+            (void)loadFromFile(defaultAutosavePath());
+            return;
+        case Action::Help:
+            // Toggle help overlay.
+            helpOpen = !helpOpen;
+            if (helpOpen) {
+                closeOverlays();
+                helpOpen = true;
+            }
+            return;
+        case Action::ToggleMinimap:
+            if (minimapOpen) {
+                minimapOpen = false;
+            } else {
+                closeOverlays();
+                minimapOpen = true;
+            }
+            return;
+        case Action::ToggleStats:
+            if (statsOpen) {
+                statsOpen = false;
+            } else {
+                closeOverlays();
+                statsOpen = true;
+            }
+            return;
+        default:
+            break;
     }
 
+    // Toggle auto-pickup (safe to do in any non-finished state).
     if (a == Action::ToggleAutoPickup) {
-        // Cycle OFF -> GOLD -> ALL -> OFF.
         switch (autoPickup) {
             case AutoPickupMode::Off:  autoPickup = AutoPickupMode::Gold; break;
             case AutoPickupMode::Gold: autoPickup = AutoPickupMode::All;  break;
@@ -1243,11 +1399,13 @@ void Game::handleAction(Action a) {
         return;
     }
 
+    // Auto-explore request.
     if (a == Action::AutoExplore) {
         requestAutoExplore();
         return;
     }
 
+    // Finished runs: allow restart (and global UI hotkeys above).
     if (isFinished()) {
         if (a == Action::Restart) {
             newGame(hash32(rng.nextU32()));
@@ -1255,18 +1413,25 @@ void Game::handleAction(Action a) {
         return;
     }
 
+    // If animating FX, only allow Cancel to close overlays.
     if (inputLock) {
-        // Ignore actions while animating.
-        if (a == Action::Cancel && (invOpen || targeting || helpOpen || looking)) {
-            invOpen = false;
-            targeting = false;
-            helpOpen = false;
-            looking = false;
+        if (a == Action::Cancel) {
+            closeOverlays();
         }
         return;
     }
 
-    bool acted = false;
+    // Overlay: minimap
+    if (minimapOpen) {
+        if (a == Action::Cancel) minimapOpen = false;
+        return;
+    }
+
+    // Overlay: stats
+    if (statsOpen) {
+        if (a == Action::Cancel) statsOpen = false;
+        return;
+    }
 
     // Help overlay mode.
     if (helpOpen) {
@@ -1279,17 +1444,20 @@ void Game::handleAction(Action a) {
     // Look / examine mode.
     if (looking) {
         switch (a) {
-            case Action::Up:    moveLookCursor(0, -1); break;
-            case Action::Down:  moveLookCursor(0, 1); break;
-            case Action::Left:  moveLookCursor(-1, 0); break;
-            case Action::Right: moveLookCursor(1, 0); break;
+            case Action::Up:        moveLookCursor(0, -1); break;
+            case Action::Down:      moveLookCursor(0, 1); break;
+            case Action::Left:      moveLookCursor(-1, 0); break;
+            case Action::Right:     moveLookCursor(1, 0); break;
+            case Action::UpLeft:    moveLookCursor(-1, -1); break;
+            case Action::UpRight:   moveLookCursor(1, -1); break;
+            case Action::DownLeft:  moveLookCursor(-1, 1); break;
+            case Action::DownRight: moveLookCursor(1, 1); break;
             case Action::Inventory:
                 endLook();
                 openInventory();
                 break;
             case Action::Fire:
                 // Convenient: jump straight from look -> targeting (cursor stays where you were looking).
-                // If we can't target, beginTargeting() will message why.
                 {
                     Vec2i desired = lookPos;
                     endLook();
@@ -1315,6 +1483,8 @@ void Game::handleAction(Action a) {
         }
         return;
     }
+
+    bool acted = false;
 
     // Inventory mode.
     if (invOpen) {
@@ -1347,10 +1517,14 @@ void Game::handleAction(Action a) {
     // Targeting mode.
     if (targeting) {
         switch (a) {
-            case Action::Up: moveTargetCursor(0, -1); break;
-            case Action::Down: moveTargetCursor(0, 1); break;
-            case Action::Left: moveTargetCursor(-1, 0); break;
-            case Action::Right: moveTargetCursor(1, 0); break;
+            case Action::Up:        moveTargetCursor(0, -1); break;
+            case Action::Down:      moveTargetCursor(0, 1); break;
+            case Action::Left:      moveTargetCursor(-1, 0); break;
+            case Action::Right:     moveTargetCursor(1, 0); break;
+            case Action::UpLeft:    moveTargetCursor(-1, -1); break;
+            case Action::UpRight:   moveTargetCursor(1, -1); break;
+            case Action::DownLeft:  moveTargetCursor(-1, 1); break;
+            case Action::DownRight: moveTargetCursor(1, 1); break;
             case Action::Confirm:
             case Action::Fire:
                 endTargeting(true);
@@ -1372,10 +1546,14 @@ void Game::handleAction(Action a) {
     // Normal play mode.
     Entity& p = playerMut();
     switch (a) {
-        case Action::Up:    acted = tryMove(p, 0, -1); break;
-        case Action::Down:  acted = tryMove(p, 0, 1); break;
-        case Action::Left:  acted = tryMove(p, -1, 0); break;
-        case Action::Right: acted = tryMove(p, 1, 0); break;
+        case Action::Up:        acted = tryMove(p, 0, -1); break;
+        case Action::Down:      acted = tryMove(p, 0, 1); break;
+        case Action::Left:      acted = tryMove(p, -1, 0); break;
+        case Action::Right:     acted = tryMove(p, 1, 0); break;
+        case Action::UpLeft:    acted = tryMove(p, -1, -1); break;
+        case Action::UpRight:   acted = tryMove(p, 1, -1); break;
+        case Action::DownLeft:  acted = tryMove(p, -1, 1); break;
+        case Action::DownRight: acted = tryMove(p, 1, 1); break;
         case Action::Wait:
             pushMsg("YOU WAIT.", MessageKind::Info);
             acted = true;
@@ -1410,7 +1588,8 @@ void Game::handleAction(Action a) {
                     if (playerHasAmulet()) {
                         gameWon = true;
                         pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!", MessageKind::Success);
-                        pushMsg("VICTORY!");
+                        pushMsg("VICTORY!", MessageKind::Success);
+                        maybeRecordRun();
                     } else {
                         pushMsg("THE EXIT IS HERE... BUT YOU STILL NEED THE AMULET.");
                     }
@@ -1436,7 +1615,8 @@ void Game::handleAction(Action a) {
                     if (playerHasAmulet()) {
                         gameWon = true;
                         pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!", MessageKind::Success);
-                        pushMsg("VICTORY!");
+                        pushMsg("VICTORY!", MessageKind::Success);
+                        maybeRecordRun();
                     } else {
                         pushMsg("THE EXIT IS HERE... BUT YOU STILL NEED THE AMULET.");
                     }
@@ -1470,6 +1650,7 @@ void Game::advanceAfterPlayerAction() {
         // Don't let monsters act after a decisive player action.
         cleanupDead();
         recomputeFov();
+        maybeRecordRun();
         return;
     }
 
@@ -1500,7 +1681,11 @@ void Game::advanceAfterPlayerAction() {
 
     applyEndOfTurnEffects();
     cleanupDead();
+    if (isFinished()) {
+        maybeRecordRun();
+    }
     recomputeFov();
+    maybeAutosave();
 }
 
 bool Game::anyVisibleHostiles() const {
@@ -1511,6 +1696,65 @@ bool Game::anyVisibleHostiles() const {
         if (dung.at(e.pos.x, e.pos.y).visible) return true;
     }
     return false;
+}
+
+
+void Game::maybeAutosave() {
+    if (autosaveInterval <= 0) return;
+    if (isFinished()) return;
+    if (turnCount == 0) return;
+
+    const uint32_t interval = static_cast<uint32_t>(autosaveInterval);
+    if (interval == 0) return;
+
+    if ((turnCount % interval) != 0) return;
+    if (lastAutosaveTurn == turnCount) return;
+
+    const std::string path = defaultAutosavePath();
+    if (path.empty()) return;
+
+    if (saveToFile(path, true)) {
+        lastAutosaveTurn = turnCount;
+    }
+}
+
+static std::string nowTimestampLocal() {
+    std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &t);
+#else
+    tm = *std::localtime(&t);
+#endif
+    std::ostringstream ss;
+    ss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+    return ss.str();
+}
+
+void Game::maybeRecordRun() {
+    if (runRecorded) return;
+    if (!isFinished()) return;
+
+    ScoreEntry e;
+    e.timestamp = nowTimestampLocal();
+    e.won = gameWon;
+    e.depth = maxDepth;
+    e.turns = turnCount;
+    e.kills = killCount;
+    e.level = charLevel;
+    e.gold = goldCount;
+    e.seed = seed_;
+    e.score = computeScore(e);
+
+    const std::string scorePath = defaultScoresPath();
+    if (!scorePath.empty()) {
+        const bool ok = scores.append(scorePath, e);
+        if (ok) {
+            pushMsg("RUN RECORDED.", MessageKind::System);
+        }
+    }
+
+    runRecorded = true;
 }
 
 // ------------------------------------------------------------
@@ -1542,6 +1786,8 @@ bool Game::requestAutoTravel(Vec2i goal) {
     invOpen = false;
     targeting = false;
     helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
     msgScroll = 0;
 
     // Don't auto-travel into the unknown: keep it deterministic and safe.
@@ -1592,6 +1838,8 @@ void Game::requestAutoExplore() {
     invOpen = false;
     targeting = false;
     helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
     looking = false;
     msgScroll = 0;
 
@@ -1661,7 +1909,7 @@ bool Game::stepAutoMove() {
     const Vec2i next = autoPathTiles[autoPathIndex];
 
     // Sanity: we expect a 4-neighbor path.
-    if (!isAdjacent4(p.pos, next)) {
+    if (!isAdjacent8(p.pos, next)) {
         // The world changed (door opened, trap teleported you, etc). Rebuild if exploring, otherwise stop.
         if (autoMode == AutoMoveMode::Explore) {
             if (!buildAutoExplorePath()) {
@@ -1775,7 +2023,7 @@ Vec2i Game::findNearestExploreFrontier() const {
         if (isKnownTrap(x, y)) return false;
 
         // Any adjacent unexplored tile means stepping here can reveal something.
-        const int dirs[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
+        const int dirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
         for (const auto& d : dirs) {
             int nx = x + d[0], ny = y + d[1];
             if (!dung.inBounds(nx, ny)) continue;
@@ -1784,7 +2032,7 @@ Vec2i Game::findNearestExploreFrontier() const {
         return false;
     };
 
-    const int dirs[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
+    const int dirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
 
     while (!q.empty()) {
         Vec2i cur = q.front();
@@ -1793,8 +2041,10 @@ Vec2i Game::findNearestExploreFrontier() const {
         if (!(cur == start) && isFrontier(cur.x, cur.y)) return cur;
 
         for (const auto& d : dirs) {
-            int nx = cur.x + d[0], ny = cur.y + d[1];
+            int dx = d[0], dy = d[1];
+            int nx = cur.x + dx, ny = cur.y + dy;
             if (!dung.inBounds(nx, ny)) continue;
+            if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
 
             const int ii = idxOf(nx, ny);
             if (visited[ii]) continue;
@@ -1841,7 +2091,7 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
     visited[startIdx] = 1;
     q.push_back(start);
 
-    const int dirs[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
+    const int dirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
 
     while (!q.empty()) {
         Vec2i cur = q.front();
@@ -1850,8 +2100,10 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
         if (cur == goal) break;
 
         for (const auto& d : dirs) {
-            int nx = cur.x + d[0], ny = cur.y + d[1];
+            int dx = d[0], dy = d[1];
+            int nx = cur.x + dx, ny = cur.y + dy;
             if (!inb(nx, ny)) continue;
+            if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
 
             const int ni = idxOf(nx, ny);
             if (visited[ni]) continue;
@@ -1901,6 +2153,8 @@ void Game::beginLook() {
     invOpen = false;
     targeting = false;
     helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
     msgScroll = 0;
 
     looking = true;
@@ -2044,10 +2298,23 @@ void Game::restUntilSafe() {
 }
 
 bool Game::tryMove(Entity& e, int dx, int dy) {
-    int nx = e.pos.x + dx;
-    int ny = e.pos.y + dy;
+    if (e.hp <= 0) return false;
+    if (dx == 0 && dy == 0) return false;
+
+    // Clamp to single-tile steps (safety: AI/pathing should only request these).
+    dx = clampi(dx, -1, 1);
+    dy = clampi(dy, -1, 1);
+
+    const int nx = e.pos.x + dx;
+    const int ny = e.pos.y + dy;
 
     if (!dung.inBounds(nx, ny)) return false;
+
+    // Prevent diagonal corner-cutting (no slipping between two blocking tiles).
+    if (dx != 0 && dy != 0 && !diagonalPassable(dung, e.pos, dx, dy)) {
+        if (e.kind == EntityKind::Player) pushMsg("YOU CAN'T SQUEEZE THROUGH.");
+        return false;
+    }
 
     // Closed door: opening consumes a turn.
     if (dung.isDoorClosed(nx, ny)) {
@@ -2231,6 +2498,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
             pushMsg(ds.str(), MessageKind::Combat, msgFromPlayer);
 
             if (attacker.kind == EntityKind::Player) {
+                ++killCount;
                 grantXp(xpFor(defender.kind));
             }
         }
@@ -2321,6 +2589,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atk, Proj
                 ds << kindName(hit->kind) << " DIES.";
                 pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
                 if (fromPlayer) {
+                    ++killCount;
                     grantXp(xpFor(hit->kind));
                 }
             }
@@ -2355,6 +2624,14 @@ void Game::recomputeFov() {
 }
 
 void Game::openInventory() {
+    // Close other overlays
+    targeting = false;
+    helpOpen = false;
+    looking = false;
+    minimapOpen = false;
+    statsOpen = false;
+    msgScroll = 0;
+
     invOpen = true;
     invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 }
@@ -2701,6 +2978,11 @@ void Game::beginTargeting() {
     }
     targeting = true;
     invOpen = false;
+    helpOpen = false;
+    looking = false;
+    minimapOpen = false;
+    statsOpen = false;
+    msgScroll = 0;
     targetPos = player().pos;
     recomputeTargetLine();
     pushMsg("TARGETING...");
@@ -3168,16 +3450,18 @@ void Game::monsterTurn() {
     dist[static_cast<size_t>(idx(p.pos.x, p.pos.y))] = 0;
     q.push_back(p.pos);
 
-    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+    const int dirs[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
 
     while (!q.empty()) {
         Vec2i cur = q.front();
         q.pop_front();
         int cd = dist[static_cast<size_t>(idx(cur.x, cur.y))];
         for (auto& dv : dirs) {
-            int nx = cur.x + dv[0];
-            int ny = cur.y + dv[1];
+            int dx = dv[0], dy = dv[1];
+            int nx = cur.x + dx;
+            int ny = cur.y + dy;
             if (!dung.inBounds(nx, ny)) continue;
+            if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
             if (!dung.isPassable(nx, ny)) continue;
             if (dist[static_cast<size_t>(idx(nx, ny))] != -1) continue;
             dist[static_cast<size_t>(idx(nx, ny))] = cd + 1;
@@ -3190,9 +3474,11 @@ void Game::monsterTurn() {
         Vec2i best = m.pos;
         int bestD = 1000000000;
         for (auto& dv : dirs) {
-            int nx = m.pos.x + dv[0];
-            int ny = m.pos.y + dv[1];
+            int dx = dv[0], dy = dv[1];
+            int nx = m.pos.x + dx;
+            int ny = m.pos.y + dy;
             if (!dung.inBounds(nx, ny)) continue;
+            if (dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
             if (!dung.isPassable(nx, ny)) continue;
             if (entityAt(nx, ny) && !(nx == p.pos.x && ny == p.pos.y)) continue;
             int d0 = dist[static_cast<size_t>(idx(nx, ny))];
@@ -3208,9 +3494,11 @@ void Game::monsterTurn() {
         Vec2i best = m.pos;
         int bestD = -1;
         for (auto& dv : dirs) {
-            int nx = m.pos.x + dv[0];
-            int ny = m.pos.y + dv[1];
+            int dx = dv[0], dy = dv[1];
+            int nx = m.pos.x + dx;
+            int ny = m.pos.y + dy;
             if (!dung.inBounds(nx, ny)) continue;
+            if (dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
             if (!dung.isPassable(nx, ny)) continue;
             if (entityAt(nx, ny)) continue;
             int d0 = dist[static_cast<size_t>(idx(nx, ny))];
@@ -3240,14 +3528,14 @@ void Game::monsterTurn() {
             // Idle wander
             float wanderChance = (m.kind == EntityKind::Bat) ? 0.65f : 0.25f;
             if (rng.chance(wanderChance)) {
-                int di = rng.range(0, 3);
+                int di = rng.range(0, 7);
                 tryMove(m, dirs[di][0], dirs[di][1]);
             }
             continue;
         }
 
         // If adjacent, melee attack.
-        if (isAdjacent4(m.pos, p.pos)) {
+        if (isAdjacent8(m.pos, p.pos)) {
             Entity& pm = playerMut();
             attackMelee(m, pm);
             continue;

@@ -3,6 +3,8 @@
 #include "dungeon.hpp"
 #include "items.hpp"
 #include "rng.hpp"
+#include "scores.hpp"
+
 #include <cstdint>
 #include <map>
 #include <string>
@@ -27,10 +29,17 @@ enum class EntityKind : uint8_t {
 
 enum class Action : uint8_t {
     None = 0,
+
+    // Movement
     Up,
     Down,
     Left,
     Right,
+    UpLeft,
+    UpRight,
+    DownLeft,
+    DownRight,
+
     Wait,
 
     Confirm,     // Enter / context confirm
@@ -50,6 +59,7 @@ enum class Action : uint8_t {
 
     Save,
     Load,
+    LoadAuto,
     Help,
 
     LogUp,
@@ -63,6 +73,9 @@ enum class Action : uint8_t {
     // UI / QoL
     Look,               // Examine tiles without taking a turn
     Rest,               // Rest (auto-wait) until healed or interrupted
+
+    ToggleMinimap,
+    ToggleStats,
 };
 
 enum class AutoPickupMode : uint8_t {
@@ -189,6 +202,11 @@ public:
     bool isGameWon() const { return gameWon; }
     bool isFinished() const { return gameOver || gameWon; }
 
+    // Run meta
+    uint32_t seed() const { return seed_; }
+    uint32_t kills() const { return killCount; }
+    int maxDepthReached() const { return maxDepth; }
+
     // Inventory/UI accessors for renderer
     const std::vector<Item>& inventory() const { return inv; }
     bool isInventoryOpen() const { return invOpen; }
@@ -231,6 +249,10 @@ public:
     Vec2i lookCursor() const { return lookPos; }
     std::string lookInfoText() const;
 
+    // Minimap / stats overlays
+    bool isMinimapOpen() const { return minimapOpen; }
+    bool isStatsOpen() const { return statsOpen; }
+
     // Turn counter (increments once per player action that consumes time)
     uint32_t turns() const { return turnCount; }
 
@@ -245,6 +267,21 @@ public:
     // Save/load helpers
     std::string defaultSavePath() const;
     void setSavePath(const std::string& path);
+
+    // Autosave
+    void setAutosavePath(const std::string& path);
+    std::string defaultAutosavePath() const;
+    void setAutosaveEveryTurns(int turns);
+    int autosaveEveryTurns() const { return autosaveInterval; }
+    uint32_t lastAutosaveAtTurn() const { return lastAutosaveTurn; }
+
+    // Scores
+    void setScoresPath(const std::string& path);
+    std::string defaultScoresPath() const;
+    const ScoreBoard& scoreBoard() const { return scores; }
+
+    // Convenience for UI layer
+    void pushSystemMessage(const std::string& msg);
 
     // Auto-move / auto-explore
     bool isAutoActive() const { return autoMode != AutoMoveMode::None; }
@@ -297,6 +334,14 @@ private:
     // Help overlay
     bool helpOpen = false;
 
+    // Look/examine mode
+    bool looking = false;
+    Vec2i lookPos{0,0};
+
+    // Minimap / stats overlays
+    bool minimapOpen = false;
+    bool statsOpen = false;
+
     // Messages
     std::vector<Message> msgs;
     int msgScroll = 0;
@@ -311,9 +356,10 @@ private:
     float autoStepTimer = 0.0f;
     float autoStepDelay = 0.045f; // seconds between auto steps (configurable)
 
-    // Save path override (set by main using SDL_GetPrefPath)
+    // Save path overrides (set by main using SDL_GetPrefPath)
     std::string savePathOverride;
-
+    std::string autosavePathOverride;
+    std::string scoresPathOverride;
 
     // Time / pacing
     uint32_t turnCount = 0;
@@ -322,10 +368,6 @@ private:
     // Haste is handled as "every other player action skips the monster turn".
     // This flag tracks whether we've already taken the "free" haste action.
     bool hastePhase = false;
-
-    // Look/examine mode
-    bool looking = false;
-    Vec2i lookPos{0,0};
 
     // Visual FX
     std::vector<FXProjectile> fx;
@@ -338,6 +380,19 @@ private:
     int charLevel = 1;
     int xp = 0;
     int xpNext = 20;
+
+    // Run meta / stats
+    uint32_t seed_ = 0;
+    uint32_t killCount = 0;
+    int maxDepth = 1;
+
+    // Autosave
+    int autosaveInterval = 0; // 0 = off
+    uint32_t lastAutosaveTurn = 0;
+
+    // Scoreboard
+    ScoreBoard scores;
+    bool runRecorded = false;
 
 private:
     void pushMsg(const std::string& s, MessageKind kind = MessageKind::Info, bool fromPlayer = true);
@@ -379,7 +434,7 @@ private:
 
     // Save/load
 public:
-    bool saveToFile(const std::string& path);
+    bool saveToFile(const std::string& path, bool quiet = false);
     bool loadFromFile(const std::string& path);
 private:
 
@@ -431,6 +486,10 @@ private:
 
     // Rest action
     void restUntilSafe();
+
+    // Autosave / run history
+    void maybeAutosave();
+    void maybeRecordRun();
 
     // Line util
     static std::vector<Vec2i> bresenhamLine(Vec2i a, Vec2i b);

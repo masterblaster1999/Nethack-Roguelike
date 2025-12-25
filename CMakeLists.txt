@@ -32,6 +32,7 @@ set(PROCROGUE_SOURCES
     src/render.cpp
     src/spritegen.cpp
     src/items.cpp
+    src/scores.cpp
 )
 
 # Optional sources (present in some forks/patches)

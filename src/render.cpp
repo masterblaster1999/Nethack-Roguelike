@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <sstream>
 
 Renderer::Renderer(int windowW, int windowH, int tileSize, int hudHeight)
     : winW(windowW), winH(windowH), tile(tileSize), hudH(hudHeight) {}
@@ -583,44 +584,48 @@ void Renderer::drawHelpOverlay(const Game& game) {
     drawText5x7(renderer, x, y, scale, yellow, "HELP  (PRESS ? OR ESC TO CLOSE)");
     y += 7 * scale + 10;
 
-    auto line = [&](const std::string& s, Color c = gray) {
+    auto line = [&](const std::string& s, const Color& c) {
         drawText5x7(renderer, x, y, scale, c, s);
         y += 7 * scale + 6;
+    };
+
+    auto lineGray = [&](const std::string& s) {
+        line(s, gray);
     };
 
     line("GOAL: FIND THE AMULET OF YENDOR ON DEPTH 5.", white);
     line("      RETURN TO THE EXIT (<) ON DEPTH 1 TO WIN.", white);
     y += 6;
 
-    line("MOVE: WASD / ARROW KEYS");
-    line("WAIT: . (PERIOD)");
-    line("LOOK: L / V (EXAMINE WITHOUT A TURN)");
-    line("REST: Z (WAIT UNTIL HEALED; STOPS ON DANGER)");
-    line("PICK UP: G");
-    line("SEARCH: C (REVEAL NEARBY TRAPS)");
-    line("AUTO-EXPLORE: O (EXPLORE UNTIL INTERRUPTED)");
-    line("AUTO-PICKUP: P (CYCLE OFF/GOLD/ALL)");
-    line("MOUSE: LMB AUTO-TRAVEL, RMB LOOK");
-    line("INVENTORY: I   (E EQUIP, U USE, X DROP, ESC CLOSE)");
-    line("RANGED: F TARGET, ENTER FIRE, ESC CANCEL");
-    line("STAIRS: < UP, > DOWN   (ENTER ALSO WORKS WHILE STANDING ON STAIRS)");
-    line("LOG SCROLL: PAGEUP / PAGEDOWN");
-    line("FULLSCREEN: F11 (TOGGLE)");
-    line("SAVE / LOAD: F5 / F9");
-    line("RESTART: R");
+    lineGray("MOVE: WASD / ARROW KEYS");
+    lineGray("WAIT: . (PERIOD)");
+    lineGray("LOOK: L / V (EXAMINE WITHOUT A TURN)");
+    lineGray("REST: Z (WAIT UNTIL HEALED; STOPS ON DANGER)");
+    lineGray("PICK UP: G");
+    lineGray("SEARCH: C (REVEAL NEARBY TRAPS)");
+    lineGray("AUTO-EXPLORE: O (EXPLORE UNTIL INTERRUPTED)");
+    lineGray("AUTO-PICKUP: P (CYCLE OFF/GOLD/ALL)");
+    lineGray("MOUSE: LMB AUTO-TRAVEL, RMB LOOK");
+    lineGray("INVENTORY: I   (E EQUIP, U USE, X DROP, ESC CLOSE)");
+    lineGray("RANGED: F TARGET, ENTER FIRE, ESC CANCEL");
+    lineGray("STAIRS: < UP, > DOWN   (ENTER ALSO WORKS WHILE STANDING ON STAIRS)");
+    lineGray("LOG SCROLL: PAGEUP / PAGEDOWN");
+    lineGray("FULLSCREEN: F11 (TOGGLE)");
+    lineGray("SAVE / LOAD: F5 / F9");
+    lineGray("RESTART: R");
 
     y += 10;
     line("TIPS:", yellow);
-    line("- BUMP ENEMIES TO MELEE ATTACK.");
-    line("- POTIONS OF STRENGTH PERMANENTLY INCREASE ATK.");
-    line("- POTION OF ANTIDOTE CURES POISON.");
-    line("- POTION OF REGENERATION HEALS OVER TIME.");
-    line("- POTION OF SHIELDING TEMPORARILY BOOSTS DEF.");
-    line("- POTION OF HASTE GRANTS EXTRA ACTIONS.");
-    line("- POTION OF VISION INCREASES SIGHT RANGE.");
-    line("- ENCHANTMENT SCROLLS IMPROVE EQUIPPED GEAR.");
-    line("- DISCOVERED TRAPS ARE DRAWN AS X.");
-    line("- SCROLL OF MAPPING REVEALS THE WHOLE FLOOR.");
+    lineGray("- BUMP ENEMIES TO MELEE ATTACK.");
+    lineGray("- POTIONS OF STRENGTH PERMANENTLY INCREASE ATK.");
+    lineGray("- POTION OF ANTIDOTE CURES POISON.");
+    lineGray("- POTION OF REGENERATION HEALS OVER TIME.");
+    lineGray("- POTION OF SHIELDING TEMPORARILY BOOSTS DEF.");
+    lineGray("- POTION OF HASTE GRANTS EXTRA ACTIONS.");
+    lineGray("- POTION OF VISION INCREASES SIGHT RANGE.");
+    lineGray("- ENCHANTMENT SCROLLS IMPROVE EQUIPPED GEAR.");
+    lineGray("- DISCOVERED TRAPS ARE DRAWN AS X.");
+    lineGray("- SCROLL OF MAPPING REVEALS THE WHOLE FLOOR.");
 }
 
 void Renderer::drawTargetingOverlay(const Game& game) {

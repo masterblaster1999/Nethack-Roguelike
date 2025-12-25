@@ -378,8 +378,10 @@ private:
     void changeLevel(int newDepth, bool goingDown);
 
     // Save/load
+public:
     bool saveToFile(const std::string& path);
     bool loadFromFile(const std::string& path);
+private:
 
     // Helpers
     int equippedMeleeIndex() const;
@@ -401,7 +403,8 @@ private:
     void spawnItems();
     void spawnTraps();
 
-    // QoL / traps / status    bool autoPickupAtPlayer();
+    // QoL / traps / status
+    bool autoPickupAtPlayer();
 
     // Auto-move helpers
     bool stepAutoMove();

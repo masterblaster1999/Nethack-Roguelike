@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
 
                         if (key == SDLK_ESCAPE) {
                             // ESC cancels UI modes; cancels auto-move; otherwise quit.
-                            if (game.inventoryOpen() || game.isTargeting() || game.helpIsOpen() || game.isLooking()) {
+                            if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen() || game.isLooking()) {
                                 game.handleAction(Action::Cancel);
                             } else if (game.isAutoActive()) {
                                 game.cancelAutoMove();
@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
                 case SDL_MOUSEBUTTONDOWN:
                     {
                         // Ignore mouse when menus are open.
-                        if (game.inventoryOpen() || game.helpIsOpen()) break;
+                        if (game.isInventoryOpen() || game.isHelpOpen()) break;
 
                         int tx = 0, ty = 0;
                         if (!renderer.windowToMapTile(ev.button.x, ev.button.y, tx, ty)) break;

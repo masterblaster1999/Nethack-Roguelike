@@ -12,8 +12,7 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/ninja-debug",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "PROCROGUE_FETCH_SDL2": "OFF"
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
@@ -22,8 +21,7 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/ninja-release",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "PROCROGUE_FETCH_SDL2": "OFF"
+        "CMAKE_BUILD_TYPE": "Release"
       }
     },
     {

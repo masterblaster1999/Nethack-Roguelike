@@ -26,6 +26,11 @@ public:
     // Window controls
     void toggleFullscreen();
 
+    // Input helpers
+    // Converts a window pixel coordinate to a map tile coordinate.
+    // Returns false if the coordinate is outside the map region.
+    bool windowToMapTile(int winX, int winY, int& tileX, int& tileY) const;
+
 private:
     static constexpr int FRAMES = 2;
 

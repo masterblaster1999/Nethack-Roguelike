@@ -302,7 +302,12 @@ void Game::newGame(uint32_t seed) {
     msgs.clear();
     msgScroll = 0;
 
-    autoPickupGold = true;
+    autoPickup = AutoPickupMode::Gold;
+
+    autoMode = AutoMoveMode::None;
+    autoPathTiles.clear();
+    autoPathIndex = 0;
+    autoStepTimer = 0.0f;
 
     turnCount = 0;
     naturalRegenCounter = 0;
@@ -370,7 +375,7 @@ void Game::newGame(uint32_t seed) {
     pushMsg("WELCOME TO PROCROGUE++.", MessageKind::System);
     pushMsg("GOAL: FIND THE AMULET OF YENDOR (DEPTH 5), THEN RETURN TO THE EXIT (<) TO WIN.", MessageKind::System);
     pushMsg("PRESS ? FOR HELP. PRESS I FOR INVENTORY. PRESS F TO TARGET/FIRE.", MessageKind::System);
-    pushMsg("NEW: C SEARCH REVEALS TRAPS. P TOGGLE AUTO-PICKUP GOLD.", MessageKind::System);
+    pushMsg("TIP: C SEARCH REVEALS TRAPS. O AUTO-EXPLORE. P CYCLES AUTO-PICKUP.", MessageKind::System);
 }
 
 void Game::storeCurrentLevel() {
@@ -415,6 +420,11 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     // Clear transient states.
     fx.clear();
     inputLock = false;
+
+    autoMode = AutoMoveMode::None;
+    autoPathTiles.clear();
+    autoPathIndex = 0;
+    autoStepTimer = 0.0f;
     invOpen = false;
     targeting = false;
     helpOpen = false;
@@ -465,12 +475,27 @@ void Game::changeLevel(int newDepth, bool goingDown) {
 
 
 std::string Game::defaultSavePath() const {
+    if (!savePathOverride.empty()) return savePathOverride;
     return "procrogue_save.dat";
+}
+
+void Game::setSavePath(const std::string& path) {
+    savePathOverride = path;
+}
+
+void Game::setAutoPickupMode(AutoPickupMode m) {
+    autoPickup = m;
+}
+
+void Game::setAutoStepDelayMs(int ms) {
+    // Clamp to sane values to avoid accidental 0ms "teleport walking".
+    const int clamped = clampi(ms, 10, 500);
+    autoStepDelay = clamped / 1000.0f;
 }
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 3u;
+constexpr uint32_t SAVE_VERSION = 4u;
 
 template <typename T>
 void writePod(std::ostream& out, const T& v) {
@@ -738,7 +763,7 @@ bool Game::saveToFile(const std::string& path) {
     writePod(out, won);
 
     // v2+: user/options
-    uint8_t autoPick = autoPickupGold ? 1 : 0;
+    uint8_t autoPick = static_cast<uint8_t>(autoPickup);
     writePod(out, autoPick);
 
     // v3+: pacing state
@@ -884,7 +909,7 @@ bool Game::loadFromFile(const std::string& path) {
     int32_t xpNeed = 20;
     uint8_t over = 0;
     uint8_t won = 0;
-    uint8_t autoPick = 1; // v2+, default enabled for v1
+    uint8_t autoPick = 1; // v2+: default enabled (gold). v4+: mode enum (0/1/2)
     uint32_t turnsNow = 0;
     int32_t natRegen = 0;
     uint8_t hasteP = 0;
@@ -1070,7 +1095,12 @@ bool Game::loadFromFile(const std::string& path) {
     xpNext = xpNeed;
     gameOver = over != 0;
     gameWon = won != 0;
-    autoPickupGold = autoPick != 0;
+    if (version >= 4u) {
+        autoPickup = static_cast<AutoPickupMode>(autoPick);
+        if (autoPickup > AutoPickupMode::All) autoPickup = AutoPickupMode::Gold;
+    } else {
+        autoPickup = (autoPick != 0) ? AutoPickupMode::Gold : AutoPickupMode::Off;
+    }
 
     // v3+: pacing state
     turnCount = turnsNow;
@@ -1133,10 +1163,33 @@ void Game::update(float dt) {
     if (fx.empty()) {
         inputLock = false;
     }
+
+    // Auto-move (travel / explore) steps are processed here to keep the game turn-based
+    // while still providing smooth-ish movement.
+    if (autoMode != AutoMoveMode::None) {
+        // If the player opened an overlay, stop (don't keep walking while in menus).
+        if (invOpen || targeting || helpOpen || looking || isFinished()) {
+            stopAutoMove(true);
+            return;
+        }
+
+        if (!inputLock) {
+            autoStepTimer += dt;
+            if (autoStepTimer >= autoStepDelay) {
+                autoStepTimer = 0.0f;
+                (void)stepAutoMove();
+            }
+        }
+    }
 }
 
 void Game::handleAction(Action a) {
     if (a == Action::None) return;
+
+    // Any manual action stops auto-move (except log scrolling).
+    if (autoMode != AutoMoveMode::None && a != Action::LogUp && a != Action::LogDown) {
+        stopAutoMove(true);
+    }
 
     // Message log scroll works in any mode.
     if (a == Action::LogUp) {
@@ -1173,8 +1226,25 @@ void Game::handleAction(Action a) {
     }
 
     if (a == Action::ToggleAutoPickup) {
-        autoPickupGold = !autoPickupGold;
-        pushMsg(autoPickupGold ? "AUTO-PICKUP GOLD: ON." : "AUTO-PICKUP GOLD: OFF.", MessageKind::System);
+        // Cycle OFF -> GOLD -> ALL -> OFF.
+        switch (autoPickup) {
+            case AutoPickupMode::Off:  autoPickup = AutoPickupMode::Gold; break;
+            case AutoPickupMode::Gold: autoPickup = AutoPickupMode::All;  break;
+            case AutoPickupMode::All:  autoPickup = AutoPickupMode::Off;  break;
+            default:                   autoPickup = AutoPickupMode::Gold; break;
+        }
+
+        const char* mode =
+            (autoPickup == AutoPickupMode::Off)  ? "OFF" :
+            (autoPickup == AutoPickupMode::Gold) ? "GOLD" : "ALL";
+
+        std::string msg = std::string("AUTO-PICKUP: ") + mode + ".";
+        pushMsg(msg, MessageKind::System);
+        return;
+    }
+
+    if (a == Action::AutoExplore) {
+        requestAutoExplore();
         return;
     }
 
@@ -1230,8 +1300,13 @@ void Game::handleAction(Action a) {
                     }
                 }
                 break;
-            case Action::Cancel:
             case Action::Confirm:
+                // Auto-travel to the looked-at tile (doesn't consume a turn by itself).
+                if (requestAutoTravel(lookPos)) {
+                    endLook();
+                }
+                break;
+            case Action::Cancel:
             case Action::Look:
                 endLook();
                 break;
@@ -1438,6 +1513,389 @@ bool Game::anyVisibleHostiles() const {
     return false;
 }
 
+// ------------------------------------------------------------
+// Auto-move / auto-explore
+// ------------------------------------------------------------
+
+void Game::cancelAutoMove(bool silent) {
+    stopAutoMove(silent);
+}
+
+void Game::stopAutoMove(bool silent) {
+    if (autoMode == AutoMoveMode::None) return;
+
+    autoMode = AutoMoveMode::None;
+    autoPathTiles.clear();
+    autoPathIndex = 0;
+    autoStepTimer = 0.0f;
+
+    if (!silent) {
+        pushMsg("AUTO-MOVE: OFF.", MessageKind::System);
+    }
+}
+
+bool Game::requestAutoTravel(Vec2i goal) {
+    if (isFinished()) return false;
+    if (!dung.inBounds(goal.x, goal.y)) return false;
+
+    // Close overlays so you can see the walk.
+    invOpen = false;
+    targeting = false;
+    helpOpen = false;
+    msgScroll = 0;
+
+    // Don't auto-travel into the unknown: keep it deterministic and safe.
+    if (!dung.at(goal.x, goal.y).explored) {
+        pushMsg("CAN'T AUTO-TRAVEL TO AN UNEXPLORED TILE.", MessageKind::System);
+        return false;
+    }
+
+    if (!dung.isPassable(goal.x, goal.y)) {
+        pushMsg("NO PATH (BLOCKED).", MessageKind::Warning);
+        return false;
+    }
+
+    if (goal == player().pos) {
+        pushMsg("YOU ARE ALREADY THERE.", MessageKind::System);
+        return false;
+    }
+
+    if (const Entity* occ = entityAt(goal.x, goal.y)) {
+        if (occ->id != playerId_) {
+            pushMsg("DESTINATION IS OCCUPIED.", MessageKind::Warning);
+            return false;
+        }
+    }
+
+    stopAutoMove(true);
+
+    if (!buildAutoTravelPath(goal, /*requireExplored*/true)) {
+        pushMsg("NO PATH FOUND.", MessageKind::Warning);
+        return false;
+    }
+
+    autoMode = AutoMoveMode::Travel;
+    pushMsg("AUTO-TRAVEL: ON (ESC TO CANCEL).", MessageKind::System);
+    return true;
+}
+
+void Game::requestAutoExplore() {
+    if (isFinished()) return;
+
+    // Toggle off if already exploring.
+    if (autoMode == AutoMoveMode::Explore) {
+        stopAutoMove(false);
+        return;
+    }
+
+    // Close overlays.
+    invOpen = false;
+    targeting = false;
+    helpOpen = false;
+    looking = false;
+    msgScroll = 0;
+
+    if (anyVisibleHostiles()) {
+        pushMsg("CANNOT AUTO-EXPLORE: DANGER NEARBY.", MessageKind::Warning);
+        return;
+    }
+
+    stopAutoMove(true);
+
+    autoMode = AutoMoveMode::Explore;
+    if (!buildAutoExplorePath()) {
+        autoMode = AutoMoveMode::None;
+        pushMsg("NOTHING LEFT TO EXPLORE.", MessageKind::System);
+        return;
+    }
+
+    pushMsg("AUTO-EXPLORE: ON (ESC TO CANCEL).", MessageKind::System);
+}
+
+bool Game::stepAutoMove() {
+    if (autoMode == AutoMoveMode::None) return false;
+
+    if (isFinished()) {
+        stopAutoMove(true);
+        return false;
+    }
+
+    // Safety stops.
+    if (anyVisibleHostiles()) {
+        pushMsg("AUTO-MOVE INTERRUPTED!", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
+    // In auto-explore mode, stop when you see non-gold loot so you can decide what to do.
+    if (autoMode == AutoMoveMode::Explore) {
+        for (const auto& gi : ground) {
+            if (gi.item.kind == ItemKind::Gold) continue;
+            if (dung.inBounds(gi.pos.x, gi.pos.y) && dung.at(gi.pos.x, gi.pos.y).visible) {
+                pushMsg("AUTO-EXPLORE STOPPED (LOOT SPOTTED).", MessageKind::System);
+                stopAutoMove(true);
+                return false;
+            }
+        }
+    }
+
+    // If we're out of path, rebuild (explore) or finish (travel).
+    if (autoPathIndex >= autoPathTiles.size()) {
+        if (autoMode == AutoMoveMode::Travel) {
+            pushMsg("AUTO-TRAVEL COMPLETE.", MessageKind::System);
+            stopAutoMove(true);
+            return false;
+        }
+
+        // Explore: find the next frontier.
+        if (!buildAutoExplorePath()) {
+            pushMsg("FLOOR FULLY EXPLORED.", MessageKind::System);
+            stopAutoMove(true);
+            return false;
+        }
+    }
+
+    if (autoPathIndex >= autoPathTiles.size()) return false;
+
+    Entity& p = playerMut();
+    const Vec2i next = autoPathTiles[autoPathIndex];
+
+    // Sanity: we expect a 4-neighbor path.
+    if (!isAdjacent4(p.pos, next)) {
+        // The world changed (door opened, trap teleported you, etc). Rebuild if exploring, otherwise stop.
+        if (autoMode == AutoMoveMode::Explore) {
+            if (!buildAutoExplorePath()) {
+                pushMsg("AUTO-EXPLORE STOPPED.", MessageKind::System);
+                stopAutoMove(true);
+                return false;
+            }
+            return true;
+        }
+        pushMsg("AUTO-TRAVEL STOPPED (PATH INVALID).", MessageKind::System);
+        stopAutoMove(true);
+        return false;
+    }
+
+    // If a monster blocks the next tile, stop and let the player decide.
+    if (const Entity* occ = entityAt(next.x, next.y)) {
+        if (occ->id != playerId_) {
+            pushMsg("AUTO-MOVE STOPPED (MONSTER BLOCKING).", MessageKind::Warning);
+            stopAutoMove(true);
+            return false;
+        }
+    }
+
+    const int dx = next.x - p.pos.x;
+    const int dy = next.y - p.pos.y;
+
+    const int hpBefore = p.hp;
+    const Vec2i posBefore = p.pos;
+
+    const bool acted = tryMove(p, dx, dy);
+    if (!acted) {
+        pushMsg("AUTO-MOVE STOPPED (BLOCKED).", MessageKind::System);
+        stopAutoMove(true);
+        return false;
+    }
+
+    // If we moved onto the intended next tile, advance. If we opened a door, the position won't change,
+    // so we'll try again on the next auto-step.
+    if (p.pos == next) {
+        autoPathIndex++;
+    } else if (p.pos != posBefore) {
+        // We moved, but not where we expected (shouldn't happen in 4-neighbor movement).
+        pushMsg("AUTO-MOVE STOPPED (DESYNC).", MessageKind::System);
+        stopAutoMove(true);
+        return false;
+    }
+
+    advanceAfterPlayerAction();
+
+    if (p.hp < hpBefore) {
+        pushMsg("AUTO-MOVE STOPPED (YOU TOOK DAMAGE).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
+    // If travel completed after this step, finish.
+    if (autoMode == AutoMoveMode::Travel && autoPathIndex >= autoPathTiles.size()) {
+        pushMsg("AUTO-TRAVEL COMPLETE.", MessageKind::System);
+        stopAutoMove(true);
+        return false;
+    }
+
+    return true;
+}
+
+bool Game::buildAutoTravelPath(Vec2i goal, bool requireExplored) {
+    autoPathTiles = findPathBfs(player().pos, goal, requireExplored);
+    if (autoPathTiles.empty()) return false;
+
+    // Remove start tile so the vector becomes a list of "next tiles to step into".
+    if (!autoPathTiles.empty() && autoPathTiles.front() == player().pos) {
+        autoPathTiles.erase(autoPathTiles.begin());
+    }
+
+    autoPathIndex = 0;
+    autoStepTimer = 0.0f;
+
+    return !autoPathTiles.empty();
+}
+
+bool Game::buildAutoExplorePath() {
+    Vec2i goal = findNearestExploreFrontier();
+    if (goal.x < 0 || goal.y < 0) return false;
+    return buildAutoTravelPath(goal, /*requireExplored*/true);
+}
+
+Vec2i Game::findNearestExploreFrontier() const {
+    const Vec2i start = player().pos;
+
+    std::vector<uint8_t> visited(MAP_W * MAP_H, 0);
+    std::deque<Vec2i> q;
+
+    auto idxOf = [](int x, int y) { return y * MAP_W + x; };
+
+    visited[idxOf(start.x, start.y)] = 1;
+    q.push_back(start);
+
+    auto isKnownTrap = [&](int x, int y) -> bool {
+        for (const auto& t : trapsCur) {
+            if (!t.discovered) continue;
+            if (t.pos.x == x && t.pos.y == y) return true;
+        }
+        return false;
+    };
+
+    auto isFrontier = [&](int x, int y) -> bool {
+        if (!dung.inBounds(x, y)) return false;
+        const Tile& t = dung.at(x, y);
+        if (!t.explored) return false;
+        if (!dung.isPassable(x, y)) return false;
+        if (isKnownTrap(x, y)) return false;
+
+        // Any adjacent unexplored tile means stepping here can reveal something.
+        const int dirs[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
+        for (const auto& d : dirs) {
+            int nx = x + d[0], ny = y + d[1];
+            if (!dung.inBounds(nx, ny)) continue;
+            if (!dung.at(nx, ny).explored) return true;
+        }
+        return false;
+    };
+
+    const int dirs[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
+
+    while (!q.empty()) {
+        Vec2i cur = q.front();
+        q.pop_front();
+
+        if (!(cur == start) && isFrontier(cur.x, cur.y)) return cur;
+
+        for (const auto& d : dirs) {
+            int nx = cur.x + d[0], ny = cur.y + d[1];
+            if (!dung.inBounds(nx, ny)) continue;
+
+            const int ii = idxOf(nx, ny);
+            if (visited[ii]) continue;
+
+            const Tile& t = dung.at(nx, ny);
+            if (!t.explored) continue; // don't route through unknown
+            if (!dung.isPassable(nx, ny)) continue;
+            if (isKnownTrap(nx, ny)) continue;
+
+            if (const Entity* occ = entityAt(nx, ny)) {
+                if (occ->id != playerId_) continue;
+            }
+
+            visited[ii] = 1;
+            q.push_back({nx, ny});
+        }
+    }
+
+    return {-1, -1};
+}
+
+std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplored) const {
+    if (!dung.inBounds(start.x, start.y) || !dung.inBounds(goal.x, goal.y)) return {};
+    if (start == goal) return { start };
+
+    std::vector<int> prev(MAP_W * MAP_H, -1);
+    std::vector<uint8_t> visited(MAP_W * MAP_H, 0);
+    std::deque<Vec2i> q;
+
+    auto idxOf = [](int x, int y) { return y * MAP_W + x; };
+    auto inb = [&](int x, int y) { return dung.inBounds(x, y); };
+
+    auto isKnownTrap = [&](int x, int y) -> bool {
+        for (const auto& t : trapsCur) {
+            if (!t.discovered) continue;
+            if (t.pos.x == x && t.pos.y == y) return true;
+        }
+        return false;
+    };
+
+    const int startIdx = idxOf(start.x, start.y);
+    const int goalIdx = idxOf(goal.x, goal.y);
+
+    visited[startIdx] = 1;
+    q.push_back(start);
+
+    const int dirs[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
+
+    while (!q.empty()) {
+        Vec2i cur = q.front();
+        q.pop_front();
+
+        if (cur == goal) break;
+
+        for (const auto& d : dirs) {
+            int nx = cur.x + d[0], ny = cur.y + d[1];
+            if (!inb(nx, ny)) continue;
+
+            const int ni = idxOf(nx, ny);
+            if (visited[ni]) continue;
+
+            if (requireExplored && !dung.at(nx, ny).explored && !(nx == goal.x && ny == goal.y)) {
+                continue;
+            }
+
+            if (!dung.isPassable(nx, ny)) continue;
+
+            // Avoid known traps if possible.
+            if (isKnownTrap(nx, ny) && !(nx == goal.x && ny == goal.y)) continue;
+
+            // Don't path through monsters.
+            if (const Entity* occ = entityAt(nx, ny)) {
+                if (occ->id != playerId_) {
+                    // allow goal only if it's the player (it won't be)
+                    continue;
+                }
+            }
+
+            visited[ni] = 1;
+            prev[ni] = idxOf(cur.x, cur.y);
+            q.push_back({nx, ny});
+        }
+    }
+
+    if (!visited[goalIdx]) return {};
+
+    // Reconstruct
+    std::vector<Vec2i> path;
+    int cur = goalIdx;
+    while (cur != -1) {
+        int x = cur % MAP_W;
+        int y = cur / MAP_W;
+        path.push_back({x, y});
+        if (cur == startIdx) break;
+        cur = prev[cur];
+    }
+
+    std::reverse(path.begin(), path.end());
+    return path;
+}
+
 void Game::beginLook() {
     // Close other overlays
     invOpen = false;
@@ -1451,6 +1909,26 @@ void Game::beginLook() {
 
 void Game::endLook() {
     looking = false;
+}
+
+void Game::beginLookAt(Vec2i p) {
+    beginLook();
+    setLookCursor(p);
+}
+
+void Game::setLookCursor(Vec2i p) {
+    if (!looking) return;
+    p.x = clampi(p.x, 0, MAP_W - 1);
+    p.y = clampi(p.y, 0, MAP_H - 1);
+    lookPos = p;
+}
+
+void Game::setTargetCursor(Vec2i p) {
+    if (!targeting) return;
+    p.x = clampi(p.x, 0, MAP_W - 1);
+    p.y = clampi(p.y, 0, MAP_H - 1);
+    targetPos = p;
+    recomputeTargetLine();
 }
 
 void Game::moveLookCursor(int dx, int dy) {
@@ -1593,9 +2071,9 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     e.pos.y = ny;
 
     if (e.kind == EntityKind::Player) {
-        // Convenience / QoL: auto-pick up gold when stepping on it.
-        if (autoPickupGold) {
-            (void)autoPickupGoldAtPlayer();
+        // Convenience / QoL: auto-pickup when stepping on items.
+        if (autoPickup != AutoPickupMode::Off) {
+            (void)autoPickupAtPlayer();
         }
         // Traps trigger on enter.
         triggerTrapAt(e.pos, e);
@@ -1890,14 +2368,23 @@ void Game::moveInventorySelection(int dy) {
     invSel = clampi(invSel + dy, 0, static_cast<int>(inv.size()) - 1);
 }
 
-bool Game::autoPickupGoldAtPlayer() {
+bool Game::autoPickupAtPlayer() {
     const Vec2i pos = player().pos;
     const int maxInv = 26;
 
-    bool pickedAny = false;
+    if (autoPickup == AutoPickupMode::Off) return false;
+
+    auto shouldPick = [&](const Item& it) -> bool {
+        if (autoPickup == AutoPickupMode::Gold) return it.kind == ItemKind::Gold;
+        // AutoPickupMode::All
+        return true;
+    };
+
+    int pickedCount = 0;
+    std::vector<std::string> sampleNames;
 
     for (size_t i = 0; i < ground.size();) {
-        if (ground[i].pos == pos && ground[i].item.kind == ItemKind::Gold) {
+        if (ground[i].pos == pos && shouldPick(ground[i].item)) {
             Item it = ground[i].item;
 
             // Merge into existing stacks if possible.
@@ -1910,15 +2397,33 @@ bool Game::autoPickupGoldAtPlayer() {
                 inv.push_back(it);
             }
 
-            pickedAny = true;
-            pushMsg("YOU PICK UP " + itemDisplayName(it) + ".", MessageKind::Loot, true);
+            ++pickedCount;
+            if (sampleNames.size() < 3) sampleNames.push_back(itemDisplayName(it));
+
             ground.erase(ground.begin() + static_cast<long>(i));
             continue;
         }
         ++i;
     }
 
-    return pickedAny;
+    if (pickedCount <= 0) return false;
+
+    // Aggregate to reduce log spam during auto-travel.
+    if (pickedCount == 1) {
+        pushMsg("YOU PICK UP " + sampleNames[0] + ".", MessageKind::Loot, true);
+    } else {
+        std::ostringstream ss;
+        ss << "YOU PICK UP " << sampleNames[0];
+        if (sampleNames.size() >= 2) ss << ", " << sampleNames[1];
+        if (sampleNames.size() >= 3) ss << ", " << sampleNames[2];
+        if (pickedCount > static_cast<int>(sampleNames.size())) {
+            ss << " (+" << (pickedCount - static_cast<int>(sampleNames.size())) << " MORE)";
+        }
+        ss << ".";
+        pushMsg(ss.str(), MessageKind::Loot, true);
+    }
+
+    return true;
 }
 
 bool Game::pickupAtPlayer() {

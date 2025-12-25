@@ -1,10 +1,15 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
+
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
+#include <optional>
+#include <string>
 
 #include "game.hpp"
 #include "render.hpp"
+#include "settings.hpp"
 
 static Action keyToAction(SDL_Keycode key, Uint16 mod) {
     switch (key) {
@@ -26,6 +31,9 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
 
         case SDLK_p:
             return Action::ToggleAutoPickup;
+
+        case SDLK_o:
+            return Action::AutoExplore;
 
         case SDLK_PERIOD:
             if ((mod & KMOD_SHIFT) != 0) {
@@ -91,26 +99,61 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
         case SDLK_r:
             return Action::Restart;
 
+        case SDLK_ESCAPE:
+            return Action::Cancel;
+
         default:
             return Action::None;
     }
 }
 
-int main(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
+static std::optional<uint32_t> parseSeedArg(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--seed" && i + 1 < argc) {
+            try {
+                unsigned long v = std::stoul(argv[i + 1]);
+                return static_cast<uint32_t>(v);
+            } catch (...) {
+                return std::nullopt;
+            }
+        }
+    }
+    return std::nullopt;
+}
 
+static bool hasFlag(int argc, char** argv, const char* flag) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == flag) return true;
+    }
+    return false;
+}
+
+int main(int argc, char** argv) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
         return 1;
     }
 
-    Game game;
-    uint32_t seed = static_cast<uint32_t>(SDL_GetTicks());
-    game.newGame(seed);
+    // Prefer a per-user writable directory for config/saves.
+    std::string prefPath;
+    if (char* p = SDL_GetPrefPath("masterblaster1999", "ProcRogue")) {
+        prefPath = p;
+        SDL_free(p);
+    }
 
-    const int tileSize = 32;
-    const int hudHeight = 160;
+    const std::string basePath = prefPath.empty() ? std::string("./") : prefPath;
+    const std::string settingsPath = basePath + "procrogue_settings.ini";
+    const std::string savePath = basePath + "procrogue_save.dat";
+
+    // Load or create settings.
+    if (!std::filesystem::exists(settingsPath)) {
+        writeDefaultSettings(settingsPath);
+    }
+    Settings settings = loadSettings(settingsPath);
+
+    const int tileSize = settings.tileSize;
+    const int hudHeight = settings.hudHeight;
     const int winW = Game::MAP_W * tileSize;
     const int winH = Game::MAP_H * tileSize + hudHeight;
 
@@ -118,6 +161,27 @@ int main(int argc, char** argv) {
     if (!renderer.init()) {
         SDL_Quit();
         return 1;
+    }
+
+    if (settings.startFullscreen) {
+        renderer.toggleFullscreen();
+    }
+
+    Game game;
+    game.setSavePath(savePath);
+    game.setAutoStepDelayMs(settings.autoStepDelayMs);
+
+    const bool loadOnStart = hasFlag(argc, argv, "--load") || hasFlag(argc, argv, "--continue");
+
+    bool loaded = false;
+    if (loadOnStart && std::filesystem::exists(savePath)) {
+        loaded = game.loadFromFile(savePath);
+    }
+
+    if (!loaded) {
+        const uint32_t seed = parseSeedArg(argc, argv).value_or(static_cast<uint32_t>(SDL_GetTicks()));
+        game.newGame(seed);
+        game.setAutoPickupMode(settings.autoPickup);
     }
 
     bool running = true;
@@ -131,39 +195,99 @@ int main(int argc, char** argv) {
 
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT) {
-                running = false;
-                break;
-            }
-            if (ev.type == SDL_KEYDOWN && ev.key.repeat == 0) {
-                SDL_Keycode key = ev.key.keysym.sym;
-                Uint16 mod = ev.key.keysym.mod;
+            switch (ev.type) {
+                case SDL_QUIT:
+                    running = false;
+                    break;
 
-                if (key == SDLK_F11) {
-                    renderer.toggleFullscreen();
-                    continue;
-                }
+                case SDL_KEYDOWN:
+                    if (ev.key.repeat != 0) break;
+                    {
+                        SDL_Keycode key = ev.key.keysym.sym;
+                        Uint16 mod = ev.key.keysym.mod;
 
-                if (key == SDLK_ESCAPE) {
-                    // ESC cancels UI modes; otherwise quit.
-                    if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen() || game.isLooking()) {
-                        game.handleAction(Action::Cancel);
-                    } else {
-                        running = false;
+                        if (key == SDLK_F11) {
+                            renderer.toggleFullscreen();
+                            break;
+                        }
+
+                        if (key == SDLK_ESCAPE) {
+                            // ESC cancels UI modes; cancels auto-move; otherwise quit.
+                            if (game.inventoryOpen() || game.isTargeting() || game.helpIsOpen() || game.isLooking()) {
+                                game.handleAction(Action::Cancel);
+                            } else if (game.isAutoActive()) {
+                                game.cancelAutoMove();
+                            } else {
+                                running = false;
+                            }
+                            break;
+                        }
+
+                        Action a = keyToAction(key, mod);
+                        if (a != Action::None) {
+                            game.handleAction(a);
+                        }
                     }
-                    continue;
-                }
+                    break;
 
-                if (key == SDLK_F11) {
-                    renderer.toggleFullscreen();
-                    continue;
-                }
+                case SDL_MOUSEWHEEL:
+                    if (ev.wheel.y > 0) game.handleAction(Action::LogUp);
+                    else if (ev.wheel.y < 0) game.handleAction(Action::LogDown);
+                    break;
 
-                Action a = keyToAction(key, mod);
-                if (a != Action::None) {
-                    game.handleAction(a);
-                }
+                case SDL_MOUSEMOTION:
+                    {
+                        int tx = 0, ty = 0;
+                        if (!renderer.windowToMapTile(ev.motion.x, ev.motion.y, tx, ty)) break;
+                        Vec2i p{tx, ty};
+
+                        if (game.isTargeting()) {
+                            game.setTargetCursor(p);
+                        } else if (game.isLooking()) {
+                            game.setLookCursor(p);
+                        }
+                    }
+                    break;
+
+                case SDL_MOUSEBUTTONDOWN:
+                    {
+                        // Ignore mouse when menus are open.
+                        if (game.inventoryOpen() || game.helpIsOpen()) break;
+
+                        int tx = 0, ty = 0;
+                        if (!renderer.windowToMapTile(ev.button.x, ev.button.y, tx, ty)) break;
+                        Vec2i p{tx, ty};
+
+                        if (game.isTargeting()) {
+                            if (ev.button.button == SDL_BUTTON_LEFT) {
+                                game.setTargetCursor(p);
+                                game.handleAction(Action::Confirm);
+                            } else if (ev.button.button == SDL_BUTTON_RIGHT) {
+                                game.handleAction(Action::Cancel);
+                            }
+                            break;
+                        }
+
+                        if (game.isLooking()) {
+                            if (ev.button.button == SDL_BUTTON_LEFT) {
+                                game.setLookCursor(p);
+                            } else if (ev.button.button == SDL_BUTTON_RIGHT) {
+                                game.handleAction(Action::Cancel);
+                            }
+                            break;
+                        }
+
+                        // Normal mode: left-click auto-travels; right-click enters look mode.
+                        if (ev.button.button == SDL_BUTTON_LEFT) {
+                            game.requestAutoTravel(p);
+                        } else if (ev.button.button == SDL_BUTTON_RIGHT) {
+                            game.beginLookAt(p);
+                        }
+                    }
+                    break;
             }
+
+            if (!running) break;
         }
 
         game.update(dt);

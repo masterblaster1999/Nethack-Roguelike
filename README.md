@@ -1,65 +1,65 @@
-# Nethack-Roguelike (ProcRogue)
+# Nethack Roguelike
 
-A small NetHack-inspired roguelike written in **C++17** using **SDL2**.
+A tiny NetHack-inspired roguelike with:
+- Turn-based combat and dungeon crawling
+- Procedurally generated pixel sprites (player, monsters, items)
+- Field-of-view + explored/seen tiles
+- Traps, potions/scrolls, ranged attacks, stairs, saving/loading
 
-Sprites are procedurally generated at runtime (no external art assets), and the game features multiple dungeon floors, traps, ranged combat, equipment, and save/load.
+## New in this build (QoL + big usability upgrades)
 
----
-
-## What's new in this upgraded build
-
-* **Modernized CMake**: clearer errors, better Windows support, optional auto-download of SDL2.
-* **Improved Field-of-View**: replaced per-tile raycasts with **shadowcasting** for smoother visibility.
-* **Look/Examine mode**: press **L** (or **V**) to move a cursor and inspect tiles (**no turn consumed**).
-* **Rest command**: press **Z** to rest until healed (interrupts if an enemy becomes visible).
-* **New consumables**:
-  * **Potion of Haste** – grants extra actions (monsters act every other player action).
-  * **Potion of Vision** – increases sight radius temporarily.
-* **Resizable window + fullscreen toggle**: resize freely, toggle fullscreen with **F11**.
-* **HUD improvements**: status effects now display HASTE/VISION and a turn counter.
-
----
+- **Auto-travel**: enter look mode (`L` / `V` or **right-click**) and press **Enter** to auto-walk to the cursor tile.
+- **Auto-explore**: press **O** to walk to the nearest unexplored frontier until interrupted.
+- **Auto-pickup modes**: press **P** to cycle **OFF → GOLD → ALL → OFF**.
+- **Mouse support**:
+  - **Left click**: auto-travel to the clicked tile
+  - **Right click**: enter look mode at the clicked tile
+  - **Mouse move**: moves the look cursor / aiming cursor
+  - **Mouse wheel**: scroll message log
+- **Settings file** (auto-created on first run): lets you tweak tile size, HUD height, fullscreen, auto-move speed, and default auto-pickup mode.
+- **CI build workflow** for Linux/macOS/Windows.
 
 ## Controls
 
-| Action | Keys |
-|---|---|
-| Move | WASD / Arrow Keys |
-| Wait | `.` |
-| Pick up | `G` |
-| Inventory | `I` |
-| Target ranged | `F` |
-| Look / examine | `L` / `V` |
-| Rest | `Z` |
-| Search for traps | `C` |
-| Toggle auto-pickup gold | `P` |
-| Use stairs | `<` / `>` |
-| Help overlay | `?` |
-| Save / Load | `F5` / `F9` |
-| Fullscreen | `F11` |
-| Restart | `R` |
-| Cancel / Exit overlays | `Esc` |
+### Movement / exploration
+- **Move**: WASD / Arrow keys
+- **Wait**: Space
+- **Look**: `L` or `V` (or right-click)
+- **Auto-travel**: Enter while looking (or left-click a tile)
+- **Auto-explore**: `O`
+- **Search (reveal traps)**: `C`
+- **Auto-pickup mode**: `P` (cycles OFF/GOLD/ALL)
 
----
+### Interaction
+- **Pick up**: `G`
+- **Inventory**: `I`
+- **Fire ranged**: `F` (aim with mouse or WASD/arrows, **Enter** or **left-click** to fire, **right-click** or **Esc** cancels)
+- **Use stairs**: `<` up, `>` down
+
+### Meta
+- **Help**: `?` or `H`
+- **Save / Load**: `F5` / `F9`
+- **Fullscreen**: `F11`
+- **Message log scroll**: PageUp / PageDown (or mouse wheel)
+- **Restart**: `R`
+- **Quit**: Esc (when no UI mode is active)
+
+## Save files + settings location
+
+This build uses **SDL_GetPrefPath** so saves and settings live in a per-user writable folder:
+
+- `procrogue_save.dat`
+- `procrogue_settings.ini`
+
+The settings file is created automatically on first run.
+
+## Command-line
+
+- Start with a specific seed:
+  - `procrogue --seed 12345`
+- Auto-load the save on startup:
+  - `procrogue --load`
 
 ## Building
 
-This project uses CMake. SDL2 can be provided three ways:
-
-1) **Windows**: CMake can **FetchContent** SDL2 automatically (recommended).
-2) **Windows**: use **vcpkg** (`vcpkg.json` is included).
-3) **Linux/macOS**: install SDL2 from your package manager.
-
-See **[docs/BUILDING.md](docs/BUILDING.md)** for detailed, copy/pasteable steps.
-
----
-
-## Save files
-
-The game writes a save file to the working directory (same folder you run the executable from).
-
----
-
-## License
-
-See [LICENSE](LICENSE).
+See `docs/BUILDING.md`.

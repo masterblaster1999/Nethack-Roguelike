@@ -116,6 +116,25 @@ void Renderer::toggleFullscreen() {
     SDL_SetWindowFullscreen(window, isFs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
 }
 
+bool Renderer::windowToMapTile(int winX, int winY, int& tileX, int& tileY) const {
+    if (!renderer) return false;
+
+    float lx = 0.0f, ly = 0.0f;
+    SDL_RenderWindowToLogical(renderer, winX, winY, &lx, &ly);
+
+    const int x = static_cast<int>(lx);
+    const int y = static_cast<int>(ly);
+
+    if (x < 0 || y < 0) return false;
+
+    tileX = x / tile;
+    tileY = y / tile;
+
+    if (tileX < 0 || tileY < 0 || tileX >= Game::MAP_W || tileY >= Game::MAP_H) return false;
+    return true;
+}
+
+
 SDL_Texture* Renderer::textureFromSprite(const SpritePixels& s) {
     if (!renderer || !pixfmt) return nullptr;
 
@@ -248,6 +267,29 @@ void Renderer::render(const Game& game) {
         }
     }
 
+
+    // Auto-move path overlay
+    if (game.isAutoActive()) {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+        if (game.isAutoExploring()) {
+            SDL_SetRenderDrawColor(renderer, 80, 220, 140, 90);
+        } else {
+            SDL_SetRenderDrawColor(renderer, 80, 170, 255, 90);
+        }
+
+        for (const Vec2i& p : game.autoPath()) {
+            if (!d.inBounds(p.x, p.y)) continue;
+            const Tile& t = d.at(p.x, p.y);
+            if (!t.explored) continue;
+
+            SDL_Rect r{ p.x * tile + tile / 3, p.y * tile + tile / 3, tile / 3, tile / 3 };
+            SDL_RenderFillRect(renderer, &r);
+        }
+
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    }
+
     // Draw items (visible only)
     for (const auto& gi : game.groundItems()) {
         if (!d.inBounds(gi.pos.x, gi.pos.y)) continue;
@@ -378,7 +420,16 @@ void Renderer::drawHud(const Game& game) {
         if (game.playerHasAmulet()) ss << "  AMULET";
 
         // QoL / status indicators
-        ss << (game.autoPickupEnabled() ? "  AUTO$" : "  AUTO$OFF");
+        // Auto-pickup
+        const AutoPickupMode ap = game.autoPickupMode();
+        if (ap == AutoPickupMode::Off) ss << "  AUTO:OFF";
+        else if (ap == AutoPickupMode::Gold) ss << "  AUTO:$";
+        else ss << "  AUTO:ALL";
+
+        // Auto-move indicator
+        if (game.isAutoActive()) {
+            ss << (game.isAutoExploring() ? "  AUTO-EXPLORE" : "  AUTO-TRAVEL");
+        }
         if (p.poisonTurns > 0) ss << "  POISON(" << p.poisonTurns << ")";
         if (p.regenTurns > 0) ss << "  REGEN(" << p.regenTurns << ")";
         if (p.shieldTurns > 0) ss << "  SHIELD(" << p.shieldTurns << ")";
@@ -547,7 +598,9 @@ void Renderer::drawHelpOverlay(const Game& game) {
     line("REST: Z (WAIT UNTIL HEALED; STOPS ON DANGER)");
     line("PICK UP: G");
     line("SEARCH: C (REVEAL NEARBY TRAPS)");
-    line("AUTO-PICKUP GOLD: P (TOGGLE)");
+    line("AUTO-EXPLORE: O (EXPLORE UNTIL INTERRUPTED)");
+    line("AUTO-PICKUP: P (CYCLE OFF/GOLD/ALL)");
+    line("MOUSE: LMB AUTO-TRAVEL, RMB LOOK");
     line("INVENTORY: I   (E EQUIP, U USE, X DROP, ESC CLOSE)");
     line("RANGED: F TARGET, ENTER FIRE, ESC CANCEL");
     line("STAIRS: < UP, > DOWN   (ENTER ALSO WORKS WHILE STANDING ON STAIRS)");

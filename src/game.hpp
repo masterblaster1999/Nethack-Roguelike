@@ -34,7 +34,7 @@ enum class Action : uint8_t {
     Wait,
 
     Confirm,     // Enter / context confirm
-    Cancel,      // Escape (close UI modes)
+    Cancel,      // Escape (close UI modes / cancel targeting / cancel auto-move)
 
     StairsUp,
     StairsDown,
@@ -56,12 +56,25 @@ enum class Action : uint8_t {
     LogDown,
 
     // New actions
-    Search,            // Spend a turn searching for nearby traps
-    ToggleAutoPickup,  // Toggle auto-pickup of gold
+    Search,             // Spend a turn searching for nearby traps
+    ToggleAutoPickup,   // Cycle auto-pickup mode (OFF/GOLD/ALL)
+    AutoExplore,        // Auto-explore (walk to nearest unexplored frontier)
 
     // UI / QoL
-    Look,              // Examine tiles without taking a turn
-    Rest,              // Rest (auto-wait) until healed or interrupted
+    Look,               // Examine tiles without taking a turn
+    Rest,               // Rest (auto-wait) until healed or interrupted
+};
+
+enum class AutoPickupMode : uint8_t {
+    Off = 0,
+    Gold,
+    All,
+};
+
+enum class AutoMoveMode : uint8_t {
+    None = 0,
+    Travel,
+    Explore,
 };
 
 enum class MessageKind : uint8_t {
@@ -198,8 +211,10 @@ public:
     int characterLevel() const { return charLevel; }
     int experience() const { return xp; }
     int experienceToNext() const { return xpNext; }
+    AutoPickupMode autoPickupMode() const { return autoPickup; }
+    bool autoPickupEnabled() const { return autoPickup != AutoPickupMode::Off; }
+    void setAutoPickupMode(AutoPickupMode m);
 
-    bool autoPickupEnabled() const { return autoPickupGold; }
     bool playerHasAmulet() const;
 
     // Targeting
@@ -229,6 +244,22 @@ public:
 
     // Save/load helpers
     std::string defaultSavePath() const;
+    void setSavePath(const std::string& path);
+
+    // Auto-move / auto-explore
+    bool isAutoActive() const { return autoMode != AutoMoveMode::None; }
+    bool isAutoTraveling() const { return autoMode == AutoMoveMode::Travel; }
+    bool isAutoExploring() const { return autoMode == AutoMoveMode::Explore; }
+    const std::vector<Vec2i>& autoPath() const { return autoPathTiles; }
+    bool requestAutoTravel(Vec2i goal);
+    void requestAutoExplore();
+    void cancelAutoMove(bool silent = false);
+    void setAutoStepDelayMs(int ms);
+
+    // Mouse helpers (do not consume turns directly)
+    void beginLookAt(Vec2i p);
+    void setLookCursor(Vec2i p);
+    void setTargetCursor(Vec2i p);
 
 private:
     Dungeon dung;
@@ -271,7 +302,18 @@ private:
     int msgScroll = 0;
 
     // Options / quality-of-life
-    bool autoPickupGold = true;
+    AutoPickupMode autoPickup = AutoPickupMode::Gold;
+
+    // Auto-move / auto-explore state (stepped in update() for UX)
+    AutoMoveMode autoMode = AutoMoveMode::None;
+    std::vector<Vec2i> autoPathTiles;
+    size_t autoPathIndex = 0;
+    float autoStepTimer = 0.0f;
+    float autoStepDelay = 0.045f; // seconds between auto steps (configurable)
+
+    // Save path override (set by main using SDL_GetPrefPath)
+    std::string savePathOverride;
+
 
     // Time / pacing
     uint32_t turnCount = 0;
@@ -359,8 +401,15 @@ private:
     void spawnItems();
     void spawnTraps();
 
-    // QoL / traps / status
-    bool autoPickupGoldAtPlayer();
+    // QoL / traps / status    bool autoPickupAtPlayer();
+
+    // Auto-move helpers
+    bool stepAutoMove();
+    bool buildAutoTravelPath(Vec2i goal, bool requireExplored);
+    bool buildAutoExplorePath();
+    Vec2i findNearestExploreFrontier() const;
+    std::vector<Vec2i> findPathBfs(Vec2i start, Vec2i goal, bool requireExplored) const;
+    void stopAutoMove(bool silent);
     bool searchForTraps();
     Trap* trapAtMut(int x, int y);
     void triggerTrapAt(Vec2i pos, Entity& victim);

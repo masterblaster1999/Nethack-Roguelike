@@ -2755,6 +2755,15 @@ void Game::endTargeting(bool fire) {
     targetValid = false;
 }
 
+
+void Game::moveTargetCursor(int dx, int dy) {
+    if (!targeting) return;
+    Vec2i p = targetPos;
+    p.x = clampi(p.x + dx, 0, MAP_W - 1);
+    p.y = clampi(p.y + dy, 0, MAP_H - 1);
+    setTargetCursor(p);
+}
+
 void Game::recomputeTargetLine() {
     targetLine = bresenhamLine(player().pos, targetPos);
 
@@ -3179,7 +3188,7 @@ void Game::monsterTurn() {
     // Helper to choose move based on dist map.
     auto stepToward = [&](const Entity& m) -> Vec2i {
         Vec2i best = m.pos;
-        int bestD = 1e9;
+        int bestD = 1000000000;
         for (auto& dv : dirs) {
             int nx = m.pos.x + dv[0];
             int ny = m.pos.y + dv[1];

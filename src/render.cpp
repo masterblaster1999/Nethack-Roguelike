@@ -398,8 +398,16 @@ void Renderer::render(const Game& game) {
         drawInventoryOverlay(game);
     }
 
+    if (game.isOptionsOpen()) {
+        drawOptionsOverlay(game);
+    }
+
     if (game.isHelpOpen()) {
         drawHelpOverlay(game);
+    }
+
+    if (game.isCommandOpen()) {
+        drawCommandOverlay(game);
     }
 
     SDL_RenderPresent(renderer);
@@ -504,11 +512,11 @@ void Renderer::drawHud(const Game& game) {
     const int controlY3 = winH - 16;
 
     drawText5x7(renderer, 8, controlY1, 2, gray,
-        "MOVE: WASD/ARROWS/YUBN | . WAIT | Z REST | < > STAIRS");
+        "MOVE: WASD/ARROWS/NUMPAD | SPACE/. WAIT | R REST | < > STAIRS");
     drawText5x7(renderer, 8, controlY2, 2, gray,
-        "G PICK | I INV (E EQUIP U USE X DROP) | F FIRE | L/V LOOK");
+        "F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH");
     drawText5x7(renderer, 8, controlY3, 2, gray,
-        "M MINI | TAB STATS | F5 SAVE | F9 LOAD | PGUP/PGDN LOG | F12 SHOT | ?/H HELP");
+        "F2 OPT | # CMD | M MAP | SHIFT+TAB STATS | F5 SAVE | F9 LOAD | PGUP/PGDN LOG | ? HELP");
 
     // Message log
     const auto& msgs = game.messages();
@@ -600,80 +608,171 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 }
 
 
-void Renderer::drawHelpOverlay(const Game& game) {
-    (void)game;
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
-    const int panelW = winW - 40;
-    const int panelH = winH - 40;
-    SDL_Rect bg{ 20, 20, panelW, panelH };
+void Renderer::drawOptionsOverlay(const Game& game) {
+    const int panelW = std::min(winW - 80, 760);
+    const int panelH = 230;
+    const int x0 = (winW - panelW) / 2;
+    const int y0 = (winH - panelH) / 2;
 
+    SDL_Rect bg{x0, y0, panelW, panelH};
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 210);
     SDL_RenderFillRect(renderer, &bg);
 
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 60);
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
     SDL_RenderDrawRect(renderer, &bg);
 
-    const int scale = 2;
-    const Color white{ 240, 240, 240, 255 };
-    const Color gray{ 170, 170, 170, 255 };
-    const Color yellow{ 255, 230, 120, 255 };
+    const int pad = 12;
+    int x = x0 + pad;
+    int y = y0 + pad;
 
-    int x = bg.x + 12;
-    int y = bg.y + 12;
+    drawText5x7(renderer, x, y, 2, white, "OPTIONS");
+    y += 24;
+    drawText5x7(renderer, x, y, 1, gray, "UP/DOWN SELECT  LEFT/RIGHT CHANGE  ESC CLOSE");
+    y += 18;
 
-    drawText5x7(renderer, x, y, scale, yellow, "HELP  (PRESS ? OR ESC TO CLOSE)");
-    y += 7 * scale + 10;
-
-    auto line = [&](const std::string& s, const Color& c) {
-        drawText5x7(renderer, x, y, scale, c, s);
-        y += 7 * scale + 6;
+    auto apLabel = [&]() -> const char* {
+        switch (game.autoPickupMode()) {
+            case AutoPickupMode::Off: return "OFF";
+            case AutoPickupMode::Gold: return "GOLD";
+            case AutoPickupMode::All: return "ALL";
+        }
+        return "GOLD";
     };
 
-    auto lineGray = [&](const std::string& s) {
-        line(s, gray);
+    const int sel = game.optionsSelection();
+
+    auto drawOpt = [&](int idx, const std::string& label, const std::string& value) {
+        const SDL_Color c = (sel == idx) ? white : gray;
+        const std::string line = (sel == idx ? "> " : "  ") + label + value;
+        drawText5x7(renderer, x, y, 2, c, line);
+        y += 22;
     };
 
-    line("GOAL: FIND THE AMULET OF YENDOR ON DEPTH 5.", white);
-    line("      RETURN TO THE EXIT (<) ON DEPTH 1 TO WIN.", white);
-    y += 6;
+    drawOpt(0, "AUTO-PICKUP: ", apLabel());
+    drawOpt(1, "AUTO-STEP DELAY: ", std::to_string(game.autoStepDelayMs()) + " MS");
+    drawOpt(2, "AUTOSAVE EVERY: ", std::to_string(game.autosaveEveryTurns()) + " TURNS");
+    drawOpt(3, "IDENTIFY ITEMS: ", game.identificationEnabled() ? "ON" : "OFF");
+    drawOpt(4, "", "CLOSE");
 
-    lineGray("MOVE: WASD / ARROWS / YUBN (DIAGONALS)");
-    lineGray("WAIT: . (PERIOD)");
-    lineGray("LOOK: L / V (EXAMINE WITHOUT A TURN)");
-    lineGray("REST: Z (WAIT UNTIL HEALED; STOPS ON DANGER)");
-    lineGray("PICK UP: G");
-    lineGray("SEARCH: C (REVEAL NEARBY TRAPS)");
-    lineGray("AUTO-EXPLORE: O (EXPLORE UNTIL INTERRUPTED)");
-    lineGray("AUTO-PICKUP: P (CYCLE OFF/GOLD/ALL)");
-    lineGray("MINIMAP: M");
-    lineGray("STATS / SCORES: TAB");
-    lineGray("SCREENSHOT: F12 (SAVES A .BMP)");
-    lineGray("MOUSE: LMB AUTO-TRAVEL, RMB LOOK");
-    lineGray("INVENTORY: I   (ENTER ACT, E EQUIP, U USE, X DROP)");
-    lineGray("           (SHIFT+X DROP ALL, SHIFT+S SORT, ESC CLOSE)");
-    lineGray("RANGED: F TARGET, ENTER FIRE, ESC CANCEL");
-    lineGray("STAIRS: < UP, > DOWN   (ENTER ALSO WORKS WHILE STANDING ON STAIRS)");
-    lineGray("LOG SCROLL: PAGEUP / PAGEDOWN");
-    lineGray("FULLSCREEN: F11 (TOGGLE)");
-    lineGray("SAVE / LOAD: F5 / F9 (SEE AUTOSAVES IN SETTINGS)");
-    lineGray("RESTART: R");
+    y = y0 + panelH - 42;
 
-    y += 10;
-    line("TIPS:", yellow);
-    lineGray("- BUMP ENEMIES TO MELEE ATTACK.");
-    lineGray("- POTIONS OF STRENGTH PERMANENTLY INCREASE ATK.");
-    lineGray("- POTION OF ANTIDOTE CURES POISON.");
-    lineGray("- POTION OF REGENERATION HEALS OVER TIME.");
-    lineGray("- POTION OF SHIELDING TEMPORARILY BOOSTS DEF.");
-    lineGray("- POTION OF HASTE GRANTS EXTRA ACTIONS.");
-    lineGray("- POTION OF VISION INCREASES SIGHT RANGE.");
-    lineGray("- ENCHANTMENT SCROLLS IMPROVE EQUIPPED GEAR.");
-    lineGray("- POTIONS/SCROLLS START UNIDENTIFIED (USE THEM OR READ AN IDENTIFY SCROLL).");
-    lineGray("- SPIDERS CAN WEB YOU (YOU CAN'T MOVE UNTIL THE WEB WEARS OFF).");
-    lineGray("- DISCOVERED TRAPS ARE DRAWN AS X.");
-    lineGray("- SCROLL OF MAPPING REVEALS THE WHOLE FLOOR.");
+    auto baseName = [](const std::string& p) -> std::string {
+        if (p.empty()) return {};
+        size_t i = p.find_last_of("/\\");
+        if (i == std::string::npos) return p;
+        return p.substr(i + 1);
+    };
+
+    const std::string settingsFile = baseName(game.settingsPath());
+    if (!settingsFile.empty()) {
+        drawText5x7(renderer, x, y, 1, gray, "KEYBINDS: EDIT " + settingsFile + " (bind_*)");
+    } else {
+        drawText5x7(renderer, x, y, 1, gray, "KEYBINDS: EDIT procrogue_settings.ini (bind_*)");
+    }
+    y += 14;
+    drawText5x7(renderer, x, y, 1, gray, "TIP: PRESS # FOR EXTENDED COMMANDS (save, load, quit...)");
 }
+
+void Renderer::drawCommandOverlay(const Game& game) {
+    const int barH = 52;
+    int y0 = winH - hudH - barH - 10;
+    if (y0 < 10) y0 = 10;
+
+    SDL_Rect bg{10, y0, winW - 20, barH};
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 220);
+    SDL_RenderFillRect(renderer, &bg);
+
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    SDL_RenderDrawRect(renderer, &bg);
+
+    const int pad = 10;
+    const int x = bg.x + pad;
+    int y = bg.y + 8;
+
+    // Fit the command string to the bar width.
+    const int maxChars = std::max(0, (bg.w - 2 * pad) / (6 * 2)); // 5x7 font: ~6px per char at scale1
+    auto fitTail = [&](const std::string& s) -> std::string {
+        if (static_cast<int>(s.size()) <= maxChars) return s;
+        if (maxChars <= 3) return s.substr(s.size() - maxChars);
+        return "..." + s.substr(s.size() - (maxChars - 3));
+    };
+
+    const std::string prompt = "EXT CMD: " + fitTail(game.commandBuffer());
+    drawText5x7(renderer, x, y, 2, white, prompt);
+
+    y += 24;
+    drawText5x7(renderer, x, y, 1, gray, "ENTER RUN  ESC CANCEL  UP/DOWN HISTORY  TAB COMPLETE");
+}
+
+void Renderer::drawHelpOverlay(const Game& game) {
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    Color white{255, 255, 255, 255};
+    Color gray{180, 180, 180, 255};
+
+    const int panelW = std::min(winW - 80, 820);
+    const int panelH = std::min(520, winH - 40);
+    const int x0 = (winW - panelW) / 2;
+    const int y0 = (winH - panelH) / 2;
+    const int pad = 14;
+
+    SDL_Rect bg{x0, y0, panelW, panelH};
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
+    SDL_RenderFillRect(renderer, &bg);
+
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 120);
+    SDL_RenderDrawRect(renderer, &bg);
+
+    int y = y0 + pad;
+    drawText5x7(renderer, x0 + pad, y, 2, white, "HELP");
+    y += 22;
+
+    auto lineWhite = [&](const std::string& s) {
+        drawText5x7(renderer, x0 + pad, y, 2, white, s);
+        y += 18;
+    };
+    auto lineGray = [&](const std::string& s) {
+        drawText5x7(renderer, x0 + pad, y, 2, gray, s);
+        y += 18;
+    };
+
+    lineWhite("CONTROLS:");
+    lineGray("MOVE: WASD / ARROWS / NUMPAD (DIAGONALS OK)");
+    lineGray("SPACE/. WAIT  R REST  < > STAIRS");
+    lineGray("F FIRE  G PICKUP  I/TAB INVENTORY");
+    lineGray("L/V LOOK  C SEARCH  O EXPLORE  P AUTOPICKUP");
+    lineGray("M MINIMAP  SHIFT+TAB STATS  F2 OPTIONS");
+    lineGray("# EXTENDED COMMANDS  (TYPE + ENTER)");
+    lineGray("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART");
+    lineGray("PGUP/PGDN LOG  ESC CANCEL/QUIT");
+
+    y += 6;
+    lineWhite("EXTENDED COMMAND EXAMPLES:");
+    lineGray("save | load | loadauto | quit | version | seed");
+    lineGray("autopickup off/gold/all");
+    lineGray("autosave <turns>  stepdelay <ms>  identify on/off");
+
+    y += 6;
+    lineWhite("KEYBINDINGS:");
+    auto baseName = [](const std::string& p) -> std::string {
+        if (p.empty()) return {};
+        size_t i = p.find_last_of("/\");
+        if (i == std::string::npos) return p;
+        return p.substr(i + 1);
+    };
+    const std::string settingsFile = baseName(game.settingsPath());
+    if (!settingsFile.empty()) lineGray("EDIT " + settingsFile + " (bind_*)");
+    else lineGray("EDIT procrogue_settings.ini (bind_*)");
+
+    y += 6;
+    lineWhite("TIPS:");
+    lineGray("AUTO-EXPLORE STOPS IF YOU SEE AN ENEMY.");
+    lineGray("INVENTORY: E EQUIP  U USE  X DROP  SHIFT+X DROP ALL");
+    lineGray("SCROLL THE MESSAGE LOG WITH PGUP/PGDN.");
+}
+
+
 
 
 void Renderer::drawMinimapOverlay(const Game& game) {

@@ -8,166 +8,10 @@
 #include <string>
 
 #include "game.hpp"
+#include "keybinds.hpp"
 #include "render.hpp"
 #include "settings.hpp"
 #include "version.hpp"
-
-static Action keyToAction(const Game& game, SDL_Keycode key, Uint16 mod) {
-    // Message log scrolling
-    switch (key) {
-        case SDLK_PAGEUP:   return Action::LogUp;
-        case SDLK_PAGEDOWN: return Action::LogDown;
-        default: break;
-    }
-
-    // F1 help
-    if (key == SDLK_F1) return Action::Help;
-
-    // Inventory-specific commands (avoid conflicts with movement keys like 'u').
-    if (game.isInventoryOpen()) {
-        switch (key) {
-            case SDLK_e: return Action::Equip;
-            case SDLK_u: return Action::Use;
-
-            // Inventory QoL:
-            // - X drops 1 item from a stack
-            // - Shift+X drops the entire stack
-            case SDLK_x:
-                if (mod & KMOD_SHIFT) return Action::DropAll;
-                return Action::Drop;
-
-            // Shift+S sorts the inventory (does not consume a turn).
-            case SDLK_s:
-                if (mod & KMOD_SHIFT) return Action::SortInventory;
-                break;
-
-            case SDLK_RETURN:
-            case SDLK_KP_ENTER:
-                return Action::Confirm; // context action on selected item
-            default:
-                break;
-        }
-    }
-
-    switch (key) {
-        // 8-way movement (WASD / arrows / numpad / YUBN)
-        case SDLK_w:
-        case SDLK_UP:
-        case SDLK_KP_8:
-            return Action::Up;
-
-        case SDLK_s:
-        case SDLK_DOWN:
-        case SDLK_KP_2:
-            return Action::Down;
-
-        case SDLK_a:
-        case SDLK_LEFT:
-        case SDLK_KP_4:
-            return Action::Left;
-
-        case SDLK_d:
-        case SDLK_RIGHT:
-        case SDLK_KP_6:
-            return Action::Right;
-
-        case SDLK_y:
-        case SDLK_KP_7:
-            return Action::UpLeft;
-
-        case SDLK_u:
-        case SDLK_KP_9:
-            return Action::UpRight;
-
-        case SDLK_b:
-        case SDLK_KP_1:
-            return Action::DownLeft;
-
-        case SDLK_n:
-        case SDLK_KP_3:
-            return Action::DownRight;
-
-        case SDLK_PERIOD:
-        case SDLK_SPACE:
-        case SDLK_KP_5:
-            return Action::Wait;
-
-        case SDLK_z:
-            return Action::Rest;
-
-        case SDLK_g:
-            return Action::Pickup;
-
-        case SDLK_i:
-            return Action::Inventory;
-
-        case SDLK_f:
-            return Action::Fire;
-
-        case SDLK_c:
-            return Action::Search;
-
-        case SDLK_l:
-        case SDLK_v:
-            return Action::Look;
-
-        case SDLK_COMMA:
-            // '<' on most keyboards (Shift + ',')
-            if (mod & KMOD_SHIFT) return Action::StairsUp;
-            return Action::None;
-
-        case SDLK_GREATER:
-            // '>'
-            return Action::StairsDown;
-
-        case SDLK_o:
-            return Action::AutoExplore;
-
-        case SDLK_p:
-            return Action::ToggleAutoPickup;
-
-        case SDLK_m:
-            return Action::ToggleMinimap;
-
-        case SDLK_TAB:
-            return Action::ToggleStats;
-
-        case SDLK_F5:
-            return Action::Save;
-
-        case SDLK_F9:
-            return Action::Load;
-
-        case SDLK_F10:
-            return Action::LoadAuto;
-
-        case SDLK_RETURN:
-        case SDLK_KP_ENTER:
-            return Action::Confirm;
-
-        case SDLK_BACKSPACE:
-            return Action::Cancel;
-
-        case SDLK_SLASH:
-            if (mod & KMOD_SHIFT) return Action::Help;
-            return Action::None;
-
-        case SDLK_QUESTION:
-            return Action::Help;
-
-        case SDLK_h:
-            return Action::Help;
-
-        case SDLK_r:
-            return Action::Restart;
-
-        case SDLK_ESCAPE:
-            return Action::Cancel;
-
-        default:
-            return Action::None;
-    }
-}
 
 static std::optional<uint32_t> parseSeedArg(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
@@ -273,6 +117,11 @@ int main(int argc, char** argv) {
     game.setAutosaveEveryTurns(settings.autosaveEveryTurns);
     game.setAutoPickupMode(settings.autoPickup);
     game.setIdentificationEnabled(settings.identifyItems);
+    game.setSettingsPath(settingsPath);
+
+    KeyBinds keyBinds = KeyBinds::defaults();
+    keyBinds.loadOverridesFromIni(settingsPath);
+
 
     const bool loadOnStart = hasFlag(argc, argv, "--load") || hasFlag(argc, argv, "--continue");
 
@@ -294,6 +143,7 @@ int main(int argc, char** argv) {
     bool running = true;
     uint32_t lastTicks = SDL_GetTicks();
     bool wantScreenshot = false;
+    bool textInputOn = false;
 
     while (running) {
         const uint32_t frameStart = SDL_GetTicks();
@@ -317,7 +167,9 @@ int main(int argc, char** argv) {
                 case SDL_CONTROLLERDEVICEREMOVED:
                     if (controller && controllerId == static_cast<SDL_JoystickID>(ev.cdevice.which)) {
                         std::cout << "Controller disconnected\n";
-                        closeController();
+                        if (textInputOn) SDL_StopTextInput();
+
+    closeController();
                     }
                     break;
 
@@ -346,6 +198,12 @@ int main(int argc, char** argv) {
                     }
                     break;
 
+                case SDL_TEXTINPUT:
+                    if (game.isCommandOpen()) {
+                        game.commandTextInput(ev.text.text);
+                    }
+                    break;
+
                 case SDL_KEYDOWN:
                     if (ev.key.repeat != 0) break;
                     {
@@ -362,10 +220,29 @@ int main(int argc, char** argv) {
                             break;
                         }
 
+                        // Extended command prompt: treat the keyboard as text input.
+                        if (game.isCommandOpen()) {
+                            if (key == SDLK_ESCAPE) {
+                                game.handleAction(Action::Cancel);
+                            } else if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
+                                game.handleAction(Action::Confirm);
+                            } else if (key == SDLK_BACKSPACE) {
+                                game.commandBackspace();
+                            } else if (key == SDLK_UP) {
+                                game.handleAction(Action::Up);
+                            } else if (key == SDLK_DOWN) {
+                                game.handleAction(Action::Down);
+                            } else if (key == SDLK_TAB) {
+                                game.commandAutocomplete();
+                            }
+                            break;
+                        }
+
                         if (key == SDLK_ESCAPE) {
                             // ESC cancels UI modes; cancels auto-move; otherwise quit.
                             if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen() || game.isLooking() ||
-                                game.isMinimapOpen() || game.isStatsOpen() || game.isAutoActive()) {
+                                game.isMinimapOpen() || game.isStatsOpen() || game.isOptionsOpen() || game.isCommandOpen() ||
+                                game.isAutoActive()) {
                                 game.handleAction(Action::Cancel);
                             } else {
                                 running = false;
@@ -373,7 +250,7 @@ int main(int argc, char** argv) {
                             break;
                         }
 
-                        const Action a = keyToAction(game, key, mod);
+                        const Action a = keyBinds.mapKey(game, key, mod);
                         if (a != Action::None) {
                             game.handleAction(a);
                         }
@@ -402,7 +279,9 @@ int main(int argc, char** argv) {
                 case SDL_MOUSEBUTTONDOWN:
                     {
                         // Ignore mouse when menus are open.
-                        if (game.isInventoryOpen() || game.isHelpOpen() || game.isMinimapOpen() || game.isStatsOpen()) break;
+                        if (game.isInventoryOpen() || game.isHelpOpen() || game.isMinimapOpen() || game.isStatsOpen() ||
+                            game.isOptionsOpen() || game.isCommandOpen())
+                            break;
 
                         int tx = 0, ty = 0;
                         if (!renderer.windowToMapTile(ev.button.x, ev.button.y, tx, ty)) break;
@@ -440,6 +319,45 @@ int main(int argc, char** argv) {
             if (!running) break;
         }
 
+        // Toggle SDL text input for the extended command prompt.
+        if (game.isCommandOpen() && !textInputOn) {
+            SDL_StartTextInput();
+            textInputOn = true;
+        } else if (!game.isCommandOpen() && textInputOn) {
+            SDL_StopTextInput();
+            textInputOn = false;
+        }
+
+        // Persist settings changes (options menu + some extended commands).
+        if (game.settingsDirty() && !game.isOptionsOpen()) {
+            auto autoPickupToString = [](AutoPickupMode m) -> std::string {
+                switch (m) {
+                    case AutoPickupMode::Off: return "off";
+                    case AutoPickupMode::Gold: return "gold";
+                    case AutoPickupMode::All: return "all";
+                }
+                return "gold";
+            };
+
+            bool ok = true;
+            ok &= updateIniKey(settingsPath, "auto_pickup", autoPickupToString(game.autoPickupMode()));
+            ok &= updateIniKey(settingsPath, "auto_step_delay_ms", std::to_string(game.autoStepDelayMs()));
+            ok &= updateIniKey(settingsPath, "identify_items", game.identificationEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "autosave_every_turns", std::to_string(game.autosaveEveryTurns()));
+
+            if (!ok) game.pushSystemMessage("FAILED TO SAVE SETTINGS.");
+
+            game.clearSettingsDirty();
+        }
+
+        // Quit requests (e.g. from extended command "quit").
+        if (game.quitRequested()) {
+            running = false;
+            game.clearQuitRequest();
+        }
+
+        if (!running) break;
+
         game.update(dt);
         renderer.render(game);
 
@@ -468,6 +386,8 @@ int main(int argc, char** argv) {
             }
         }
     }
+
+    if (textInputOn) SDL_StopTextInput();
 
     closeController();
     renderer.shutdown();

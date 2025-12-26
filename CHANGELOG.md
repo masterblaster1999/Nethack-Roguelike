@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0] - 2025-12-26
+
+### Added
+- **Configurable keybindings** via `bind_*` entries in `procrogue_settings.ini`
+- In-game **Options** menu (**F2**) for common toggles (auto-pickup, autosave, identify, auto-step delay)
+- NetHack-like **extended command prompt** (**#**, Shift+3) with history + tab completion (`save`, `load`, `quit`, etc.)
+
+### Changed
+- HUD + Help text updated to reflect the new menus / command system
+- Settings are auto-saved when changed via the Options menu / extended commands
+
 ## [0.5.0] - 2025-12-26
 
 ### Added

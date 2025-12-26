@@ -18,13 +18,17 @@ A tiny NetHack-inspired roguelike with:
 - **Game controller support** (SDL2 GameController): D-pad move, **A** confirm, **B** cancel, **X** inventory, **Y** pickup, shoulders for look/fire.
 - **VSync + FPS cap settings**: new `vsync` and `max_fps` keys in `procrogue_settings.ini`.
 
+- **Configurable keybindings**: add `bind_*` entries in `procrogue_settings.ini` (multiple keys per action).
+- **In-game options menu**: press **F2** to tweak common settings (auto-pickup, autosave, etc.).
+- **NetHack-like extended commands**: press **#** (Shift+3) to open a command prompt (`save`, `load`, `quit`, ...).
+
 - **Auto-travel**: enter look mode (`L` / `V` or **right-click**) and press **Enter** to auto-walk to the cursor tile.
 - **Auto-explore**: press **O** to walk to the nearest unexplored frontier until interrupted.
 - **Auto-pickup modes**: press **P** to cycle **OFF → GOLD → ALL → OFF**.
-- **8-way movement**: move diagonally with **Y/U/B/N** (or numpad 1/3/7/9).
+- **8-way movement**: move diagonally with **Q/E/Z/C** (or numpad 1/3/7/9). (Fully rebindable.)
 - **Minimap + stats overlays**:
   - **M** toggles the minimap
-  - **Tab** toggles the stats/high-scores panel
+  - **Shift+Tab** toggles the stats/high-scores panel
 - **Screenshots**: press **F12** to save a BMP screenshot (to the `screenshots/` folder next to your save).
 - **Run history / high scores** are stored in `procrogue_scores.csv`.
 - **Mouse support**:
@@ -32,7 +36,7 @@ A tiny NetHack-inspired roguelike with:
   - **Right click**: enter look mode at the clicked tile
   - **Mouse move**: moves the look cursor / aiming cursor
   - **Mouse wheel**: scroll message log
-- **Settings file** (auto-created on first run): lets you tweak tile size, HUD height, fullscreen, auto-move speed, auto-pickup mode, and autosave interval.
+- **Settings file** (auto-created on first run): tweak tile size, HUD height, fullscreen, auto-move speed, auto-pickup/autosave, and `bind_*` keybindings.
 - **NetHack-style item identification**: potions + scrolls start unknown each run (randomized appearances). Using them identifies the item type; you can also find/read a **Scroll of Identify**. (Toggle via `identify_items` in settings.)
 - **New combat spice**: spiders can web you (movement blocked for a few turns), and wizards can occasionally "blink" (teleport) to reposition.
 - **New content**: **Axe** + **Plate Armor**, and a new monster: the **Ogre**.
@@ -41,7 +45,7 @@ A tiny NetHack-inspired roguelike with:
 ## Controls
 
 ### Movement / exploration
-- **Move**: WASD / Arrow keys / Y-U-B-N diagonals (also numpad)
+- **Move**: WASD / Arrow keys / Q-E-Z-C diagonals (also numpad)
 - **Wait**: `.` or Space
 - **Look**: `L` or `V` (or right-click)
 - **Auto-travel**: Enter while looking (or left-click a tile)
@@ -49,13 +53,13 @@ A tiny NetHack-inspired roguelike with:
 - **Search (reveal traps)**: `C`
 - **Auto-pickup mode**: `P` (cycles OFF/GOLD/ALL)
 - **Minimap**: `M`
-- **Stats / high scores**: `Tab`
+- **Stats / high scores**: `Shift+Tab`
 
 ### Interaction
 - **Pick up**: `G`
 - **Inventory**: `I`
   - While inventory is open: **E** equip/unequip, **U** use, **X** drop one, **Shift+X** drop stack, **Shift+S** sort, **Enter** context action
-- **Fire ranged**: `F` (aim with mouse or WASD/arrows/YUBN, **Enter** or **left-click** to fire, **right-click** or **Esc** cancels)
+- **Fire ranged**: `F` (aim with mouse or WASD/arrows/QEZC, **Enter** or **left-click** to fire, **right-click** or **Esc** cancels)
 - **Use stairs**: `<` up, `>` down
 
 ### Controller (optional)
@@ -71,13 +75,15 @@ A tiny NetHack-inspired roguelike with:
 - **R-stick**: minimap
 
 ### Meta
-- **Help**: `?` or `H`
+- **Help**: `F1`, `?`, or `H`
+- **Options menu**: `F2`
+- **Extended commands**: `#` (Shift+3)
 - **Save / Load**: `F5` / `F9`
 - **Load autosave**: `F10`
 - **Screenshot**: `F12`
 - **Fullscreen**: `F11`
 - **Message log scroll**: PageUp / PageDown (or mouse wheel)
-- **Restart**: `R`
+- **Restart**: `F6`
 - **Quit**: Esc (when no UI mode is active)
 
 ![game nethack](https://github.com/user-attachments/assets/fc0e0902-b161-47e6-b2f3-cc6f88100548)

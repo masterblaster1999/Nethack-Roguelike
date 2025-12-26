@@ -4,6 +4,7 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 static std::string ltrim(std::string s) {
     s.erase(s.begin(),
@@ -147,5 +148,171 @@ bool writeDefaultSettings(const std::string& path) {
     f << "# autosave_every_turns: 0 disables; otherwise saves an autosave file every N turns.\n";
     f << "autosave_every_turns = 200\n";
 
+    f << "
+";
+    f << "# Keybindings
+";
+    f << "#
+";
+    f << "# Rebind keys by adding entries of the form:
+";
+    f << "#   bind_<action> = key[, key, ...]
+";
+    f << "#
+";
+    f << "# Modifiers: shift, ctrl, alt. Example: shift+comma
+";
+    f << "# Tip: for '<' and '>' on most layouts, use shift+comma / shift+period.
+";
+    f << "#
+";
+    f << "# Movement
+";
+    f << "bind_up = w, up, kp_8
+";
+    f << "bind_down = s, down, kp_2
+";
+    f << "bind_left = a, left, kp_4
+";
+    f << "bind_right = d, right, kp_6
+";
+    f << "bind_up_left = q, kp_7
+";
+    f << "bind_up_right = e, kp_9
+";
+    f << "bind_down_left = z, kp_1
+";
+    f << "bind_down_right = c, kp_3
+";
+    f << "
+";
+    f << "# Actions
+";
+    f << "bind_confirm = enter, kp_enter
+";
+    f << "bind_cancel = escape, backspace
+";
+    f << "bind_wait = space
+";
+    f << "bind_rest = r
+";
+    f << "bind_pickup = g, comma, kp_0
+";
+    f << "bind_inventory = i, tab
+";
+    f << "bind_fire = f
+";
+    f << "bind_search = c
+";
+    f << "bind_look = l, v
+";
+    f << "bind_stairs_up = shift+comma, less, kp_9
+";
+    f << "bind_stairs_down = shift+period, greater, kp_3
+";
+    f << "bind_auto_explore = o
+";
+    f << "bind_toggle_auto_pickup = p
+";
+    f << "
+";
+    f << "# Inventory-specific
+";
+    f << "bind_equip = e
+";
+    f << "bind_use = u
+";
+    f << "bind_drop = x
+";
+    f << "bind_drop_all = shift+x
+";
+    f << "bind_sort_inventory = shift+s
+";
+    f << "
+";
+    f << "# UI / meta
+";
+    f << "bind_help = f1, shift+slash, h
+";
+    f << "bind_options = f2
+";
+    f << "bind_command = shift+3
+";
+    f << "bind_toggle_minimap = m
+";
+    f << "bind_toggle_stats = shift+tab
+";
+    f << "bind_save = f5
+";
+    f << "bind_restart = f6
+";
+    f << "bind_load = f9
+";
+    f << "bind_load_auto = f10
+";
+    f << "bind_log_up = pageup
+";
+    f << "bind_log_down = pagedown
+";
+    f << "
+";
+    return true;
+}
+
+
+bool updateIniKey(const std::string& path, const std::string& key, const std::string& value) {
+    std::ifstream in(path);
+    if (!in) return false;
+
+    std::vector<std::string> lines;
+    std::string line;
+
+    const auto keyLower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    };
+
+    const auto trim = [](std::string s) {
+        auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+        s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+        return s;
+    };
+
+    bool found = false;
+    while (std::getline(in, line)) {
+        std::string raw = line;
+
+        // Strip comments for matching, but preserve the original line for output when not matching.
+        auto commentPos = raw.find_first_of("#;");
+        if (commentPos != std::string::npos) raw = raw.substr(0, commentPos);
+
+        auto eq = raw.find('=');
+        if (eq != std::string::npos) {
+            std::string k = trim(raw.substr(0, eq));
+            if (!k.empty() && keyLower(k) == keyLower(key)) {
+                lines.push_back(key + " = " + value);
+                found = true;
+                continue;
+            }
+        }
+
+        lines.push_back(line);
+    }
+    in.close();
+
+    if (!found) {
+        // Append at end.
+        lines.push_back(key + " = " + value);
+    }
+
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return false;
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        out << lines[i];
+        if (i + 1 < lines.size()) out << "\n";
+    }
     return true;
 }

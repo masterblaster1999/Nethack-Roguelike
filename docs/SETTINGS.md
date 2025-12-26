@@ -65,3 +65,69 @@ Comments start with `#` or `;`.
 - `identify_items` (`true/false`, default `true`)
   - `true`: potions/scrolls start unidentified each run (NetHack-style)
   - `false`: items always show their true names (more "arcade" / beginner-friendly)
+
+
+### Keybindings
+
+You can rebind most keyboard controls by adding `bind_<action>` entries to `procrogue_settings.ini`.
+
+Format:
+
+```
+bind_<action> = key[, key, ...]
+```
+
+- Multiple keys can be bound to the same action by separating them with commas.
+- Modifiers are written as `shift+`, `ctrl+`, or `alt+` prefixes (example: `shift+comma`).
+- Key names are case-insensitive.
+
+Examples:
+
+```
+# NetHack-ish extended command key:
+bind_command = shift+3
+
+# Classic roguelike diagonals:
+bind_up_left = y
+bind_up_right = u
+bind_down_left = b
+bind_down_right = n
+
+# Alternative stairs keys:
+bind_stairs_up = shift+comma, less
+bind_stairs_down = shift+period, greater
+```
+
+Common key names:
+
+- Letters and digits: `w`, `a`, `1`, `9`
+- Directions: `up`, `down`, `left`, `right`
+- Punctuation: `comma`, `period`, `slash`
+- Other keys: `tab`, `space`, `enter`, `escape`, `pageup`, `pagedown`
+- Numpad: `kp_0` .. `kp_9`, `kp_enter`
+- Function keys: `f1` .. `f24`
+
+Available actions:
+
+**Movement**
+- `up`, `down`, `left`, `right`
+- `up_left`, `up_right`, `down_left`, `down_right`
+
+**Gameplay**
+- `confirm`, `cancel`
+- `wait`, `rest`
+- `pickup`, `inventory`
+- `fire`, `search`, `look`
+- `stairs_up`, `stairs_down`
+- `auto_explore`, `toggle_auto_pickup`
+
+**Inventory**
+- `equip`, `use`, `drop`, `drop_all`, `sort_inventory`
+
+**UI / Meta**
+- `help`, `options`, `command`
+- `toggle_minimap`, `toggle_stats`
+- `save`, `load`, `load_auto`, `restart`
+- `log_up`, `log_down`
+
+Tip: For `<` and `>` on most keyboard layouts, prefer `shift+comma` and `shift+period`.

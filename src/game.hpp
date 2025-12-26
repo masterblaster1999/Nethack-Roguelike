@@ -80,6 +80,10 @@ enum class Action : uint8_t {
 
     ToggleMinimap,
     ToggleStats,
+
+    // Menus / extended commands
+    Options,
+    Command,
 };
 
 enum class AutoPickupMode : uint8_t {
@@ -267,6 +271,32 @@ public:
     bool isMinimapOpen() const { return minimapOpen; }
     bool isStatsOpen() const { return statsOpen; }
 
+    // Options overlay
+    bool isOptionsOpen() const { return optionsOpen; }
+    int optionsSelection() const { return optionsSel; }
+
+    // NetHack-like extended command prompt
+    bool isCommandOpen() const { return commandOpen; }
+    const std::string& commandBuffer() const { return commandBuf; }
+    void commandTextInput(const char* utf8);
+    void commandBackspace();
+    void commandAutocomplete();
+
+    // Settings path (for UI hints) + persistence flag for options
+    void setSettingsPath(const std::string& path);
+    const std::string& settingsPath() const { return settingsPath_; }
+    bool settingsDirty() const { return settingsDirtyFlag; }
+    void markSettingsDirty() { settingsDirtyFlag = true; }
+    void clearSettingsDirty() { settingsDirtyFlag = false; }
+
+    // Auto-step delay getter (milliseconds)
+    int autoStepDelayMs() const;
+
+    // Quit requests (from extended commands)
+    bool quitRequested() const { return quitReq; }
+    void requestQuit() { quitReq = true; }
+    void clearQuitRequest() { quitReq = false; }
+
     // Turn counter (increments once per player action that consumes time)
     uint32_t turns() const { return turnCount; }
 
@@ -355,6 +385,23 @@ private:
     // Minimap / stats overlays
     bool minimapOpen = false;
     bool statsOpen = false;
+
+    // Options / command overlays
+    bool optionsOpen = false;
+    int optionsSel = 0;
+
+    bool commandOpen = false;
+    std::string commandBuf;
+    std::string commandDraft;
+    std::vector<std::string> commandHistory;
+    int commandHistoryPos = -1;
+
+    // Settings persistence + UI helpers
+    std::string settingsPath_;
+    bool settingsDirtyFlag = false;
+
+    // Application-level quit request (e.g., from extended command "quit")
+    bool quitReq = false;
 
     // Messages
     std::vector<Message> msgs;

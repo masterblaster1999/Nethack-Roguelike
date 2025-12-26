@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(ProcRogue
-    VERSION 0.4.0
+    VERSION 0.6.0
     DESCRIPTION "A tiny NetHack-inspired roguelike with procedurally generated pixel sprites (SDL2)"
     LANGUAGES C CXX
 )
@@ -31,6 +31,7 @@ set(PROCROGUE_TARGET proc_rogue)
 
 set(PROCROGUE_SOURCES
     src/main.cpp
+    src/keybinds.cpp
     src/game.cpp
     src/dungeon.cpp
     src/render.cpp

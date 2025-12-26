@@ -1,5 +1,7 @@
 #include "game.hpp"
+#include "version.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <deque>
 #include <sstream>
@@ -10,6 +12,271 @@
 #include <ctime>
 
 namespace {
+
+static std::string ltrim(std::string s) {
+    s.erase(s.begin(),
+        std::find_if(s.begin(), s.end(), [](unsigned char ch) { return !std::isspace(ch); }));
+    return s;
+}
+
+static std::string rtrim(std::string s) {
+    s.erase(
+        std::find_if(s.rbegin(), s.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(),
+        s.end());
+    return s;
+}
+
+static std::string trim(std::string s) {
+    return rtrim(ltrim(std::move(s)));
+}
+
+static std::string toLower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+static std::vector<std::string> splitWS(const std::string& s) {
+    std::istringstream iss(s);
+    std::vector<std::string> out;
+    std::string tok;
+    while (iss >> tok) out.push_back(tok);
+    return out;
+}
+
+static std::vector<std::string> extendedCommandList() {
+    // Keep these short and stable: they're user-facing and used for completion/prefix matching.
+    return {
+        "help",
+        "options",
+        "save",
+        "load",
+        "loadauto",
+        "quit",
+        "restart",
+        "autopickup",
+        "autosave",
+        "stepdelay",
+        "identify",
+        "seed",
+        "version",
+        "explore",
+        "search",
+        "rest",
+    };
+}
+
+
+static void runExtendedCommand(Game& game, const std::string& rawLine) {
+    std::string line = trim(rawLine);
+    if (line.empty()) return;
+
+    // Allow users to paste NetHack-style inputs like "#quit" even though we open the prompt separately.
+    if (!line.empty() && line[0] == '#') {
+        line = trim(line.substr(1));
+    }
+
+    auto toks = splitWS(line);
+    if (toks.empty()) return;
+
+    std::string cmdIn = toLower(toks[0]);
+
+    if (cmdIn == \"?\" || cmdIn == \"commands\") cmdIn = \"help\";
+    std::vector<std::string> cmds = extendedCommandList();
+
+    // Exact match first, else unique prefix match.
+    std::vector<std::string> matches;
+    for (const auto& c : cmds) {
+        if (c == cmdIn) {
+            matches = {c};
+            break;
+        }
+    }
+    if (matches.empty()) {
+        for (const auto& c : cmds) {
+            if (c.rfind(cmdIn, 0) == 0) matches.push_back(c);
+        }
+    }
+
+    if (matches.empty()) {
+        game.pushSystemMessage("UNKNOWN COMMAND: " + cmdIn);
+        return;
+    }
+
+    if (matches.size() > 1) {
+        std::string msg = "AMBIGUOUS: " + cmdIn + " (";
+        for (size_t i = 0; i < matches.size(); ++i) {
+            msg += matches[i];
+            if (i + 1 < matches.size()) msg += ", ";
+        }
+        msg += ")";
+        game.pushSystemMessage(msg);
+        return;
+    }
+
+    const std::string& cmd = matches[0];
+
+    auto arg = [&](size_t i) -> std::string {
+        return (i < toks.size()) ? toLower(toks[i]) : std::string();
+    };
+
+    if (cmd == "help" || cmd == "?" || cmd == "commands") {
+        game.pushSystemMessage("EXTENDED COMMANDS:");
+        auto list = extendedCommandList();
+        std::string line = "  ";
+        for (const auto& c : list) {
+            if (line.size() + c.size() + 1 > 46) {
+                game.pushSystemMessage(line);
+                line = "  ";
+            }
+            line += c + " ";
+        }
+        if (line != "  ") game.pushSystemMessage(line);
+        game.pushSystemMessage("TIP: type a prefix (e.g., 'autop') and press ENTER.");
+        return;
+    }
+
+    if (cmd == "options") {
+        game.handleAction(Action::Options);
+        return;
+    }
+
+    if (cmd == "save") {
+        (void)game.saveToFile(game.defaultSavePath());
+        return;
+    }
+    if (cmd == "load") {
+        (void)game.loadFromFile(game.defaultSavePath());
+        return;
+    }
+    if (cmd == "loadauto") {
+        (void)game.loadFromFile(game.defaultAutosavePath());
+        return;
+    }
+
+    if (cmd == "quit") {
+        game.requestQuit();
+        game.pushSystemMessage("QUIT REQUESTED. (If nothing happens, press ESC.)");
+        return;
+    }
+
+    if (cmd == "restart") {
+        game.handleAction(Action::Restart);
+        return;
+    }
+
+    if (cmd == "explore") {
+        game.requestAutoExplore();
+        return;
+    }
+
+    if (cmd == "search") {
+        game.handleAction(Action::Search);
+        return;
+    }
+
+    if (cmd == "rest") {
+        game.handleAction(Action::Rest);
+        return;
+    }
+
+    if (cmd == "seed") {
+        game.pushSystemMessage("SEED: " + std::to_string(game.seed()));
+        return;
+    }
+
+    if (cmd == "version") {
+        game.pushSystemMessage(std::string("VERSION: ") + PROCROGUE_VERSION);
+        return;
+    }
+
+    if (cmd == "autopickup") {
+        const std::string v = arg(1);
+        if (v.empty()) {
+            game.handleAction(Action::ToggleAutoPickup);
+            return;
+        }
+
+        AutoPickupMode m = game.autoPickupMode();
+        if (v == "off" || v == "0" || v == "false") m = AutoPickupMode::Off;
+        else if (v == "gold") m = AutoPickupMode::Gold;
+        else if (v == "all") m = AutoPickupMode::All;
+        else {
+            game.pushSystemMessage("USAGE: autopickup [off|gold|all]");
+            return;
+        }
+
+        game.setAutoPickupMode(m);
+        game.markSettingsDirty();
+
+        const char* label = (m == AutoPickupMode::Off)  ? "OFF"
+                            : (m == AutoPickupMode::Gold) ? "GOLD"
+                                                          : "ALL";
+        game.pushSystemMessage(std::string("AUTO-PICKUP: ") + label);
+        return;
+    }
+
+    if (cmd == "autosave") {
+        const std::string v = arg(1);
+        if (v.empty()) {
+            game.pushSystemMessage("AUTOSAVE EVERY: " + std::to_string(game.autosaveEveryTurns()) + " TURNS");
+            return;
+        }
+        try {
+            int n = std::stoi(v);
+            n = clampi(n, 0, 5000);
+            game.setAutosaveEveryTurns(n);
+            game.markSettingsDirty();
+            game.pushSystemMessage("AUTOSAVE EVERY: " + std::to_string(n) + " TURNS");
+        } catch (...) {
+            game.pushSystemMessage("USAGE: autosave <turns>");
+        }
+        return;
+    }
+
+    if (cmd == "stepdelay") {
+        const std::string v = arg(1);
+        if (v.empty()) {
+            game.pushSystemMessage("AUTO-STEP DELAY: " + std::to_string(game.autoStepDelayMs()) + " MS");
+            return;
+        }
+        try {
+            int ms = std::stoi(v);
+            ms = clampi(ms, 10, 500);
+            game.setAutoStepDelayMs(ms);
+            game.markSettingsDirty();
+            game.pushSystemMessage("AUTO-STEP DELAY: " + std::to_string(ms) + " MS");
+        } catch (...) {
+            game.pushSystemMessage("USAGE: stepdelay <ms>");
+        }
+        return;
+    }
+
+    if (cmd == "identify") {
+        const std::string v = arg(1);
+        if (v.empty()) {
+            game.pushSystemMessage(std::string("IDENTIFY: ") + (game.identificationEnabled() ? "ON" : "OFF"));
+            return;
+        }
+
+        bool on = game.identificationEnabled();
+        if (v == "on" || v == "true" || v == "1") on = true;
+        else if (v == "off" || v == "false" || v == "0") on = false;
+        else {
+            game.pushSystemMessage("USAGE: identify [on|off]");
+            return;
+        }
+
+        game.setIdentificationEnabled(on);
+        game.markSettingsDirty();
+        game.pushSystemMessage(std::string("IDENTIFY: ") + (on ? "ON" : "OFF"));
+        return;
+    }
+
+    // Should be unreachable because we validated against the command list, but keep a fallback.
+    game.pushSystemMessage("UNHANDLED COMMAND: " + cmd);
+}
+
 
 const char* kindName(EntityKind k) {
     switch (k) {
@@ -718,6 +985,68 @@ void Game::setScoresPath(const std::string& path) {
     scoresPathOverride = path;
     // Non-fatal if missing; it will be created on first recorded run.
     (void)scores.load(defaultScoresPath());
+}
+
+void Game::setSettingsPath(const std::string& path) {
+    settingsPath_ = path;
+}
+
+int Game::autoStepDelayMs() const {
+    // Stored internally in seconds.
+    return static_cast<int>(autoStepDelay * 1000.0f + 0.5f);
+}
+
+void Game::commandTextInput(const char* utf8) {
+    if (!commandOpen) return;
+    if (!utf8) return;
+    // Basic length cap so the overlay stays sane.
+    if (commandBuf.size() > 120) return;
+    commandBuf += utf8;
+}
+
+static void utf8PopBack(std::string& s) {
+    if (s.empty()) return;
+    size_t i = s.size() - 1;
+    // Walk back over UTF-8 continuation bytes (10xxxxxx).
+    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0u) == 0x80u) {
+        --i;
+    }
+    s.erase(i);
+}
+
+void Game::commandBackspace() {
+    if (!commandOpen) return;
+    utf8PopBack(commandBuf);
+}
+
+void Game::commandAutocomplete() {
+    if (!commandOpen) return;
+
+    std::string s = trim(commandBuf);
+    if (s.empty()) return;
+
+    // Only complete the first token; once you add arguments we assume you know what you're doing.
+    if (s.find_first_of(" 	") != std::string::npos) return;
+
+    std::string prefix = toLower(s);
+    std::vector<std::string> cmds = extendedCommandList();
+
+    std::vector<std::string> matches;
+    for (const auto& c : cmds) {
+        if (c.rfind(prefix, 0) == 0) matches.push_back(c);
+    }
+
+    if (matches.size() == 1) {
+        commandBuf = matches[0] + " ";
+        return;
+    }
+
+    if (matches.size() > 1) {
+        std::string line = "MATCHES:";
+        for (const auto& m : matches) line += " " + m;
+        pushSystemMessage(line);
+        return;
+    }
 }
 
 void Game::setAutoPickupMode(AutoPickupMode m) {
@@ -1518,7 +1847,7 @@ void Game::update(float dt) {
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
-        if (invOpen || targeting || helpOpen || looking || minimapOpen || statsOpen || isFinished()) {
+        if (invOpen || targeting || helpOpen || looking || minimapOpen || statsOpen || optionsOpen || commandOpen || isFinished()) {
             stopAutoMove(true);
             return;
         }
@@ -1560,6 +1889,15 @@ void Game::handleAction(Action a) {
         looking = false;
         minimapOpen = false;
         statsOpen = false;
+        optionsOpen = false;
+
+        if (commandOpen) {
+            commandOpen = false;
+            commandBuf.clear();
+            commandDraft.clear();
+            commandHistoryPos = -1;
+        }
+
         msgScroll = 0;
     };
 
@@ -1598,6 +1936,29 @@ void Game::handleAction(Action a) {
                 statsOpen = true;
             }
             return;
+        case Action::Options:
+            if (optionsOpen) {
+                optionsOpen = false;
+            } else {
+                closeOverlays();
+                optionsOpen = true;
+                optionsSel = 0;
+            }
+            return;
+        case Action::Command:
+            if (commandOpen) {
+                commandOpen = false;
+                commandBuf.clear();
+                commandDraft.clear();
+                commandHistoryPos = -1;
+            } else {
+                closeOverlays();
+                commandOpen = true;
+                commandBuf.clear();
+                commandDraft.clear();
+                commandHistoryPos = -1;
+            }
+            return;
         default:
             break;
     }
@@ -1611,6 +1972,8 @@ void Game::handleAction(Action a) {
             default:                   autoPickup = AutoPickupMode::Gold; break;
         }
 
+        settingsDirtyFlag = true;
+
         const char* mode =
             (autoPickup == AutoPickupMode::Off)  ? "OFF" :
             (autoPickup == AutoPickupMode::Gold) ? "GOLD" : "ALL";
@@ -1623,6 +1986,143 @@ void Game::handleAction(Action a) {
     // Auto-explore request.
     if (a == Action::AutoExplore) {
         requestAutoExplore();
+        return;
+    }
+
+    // Overlay: extended command prompt (does not consume turns)
+    if (commandOpen) {
+        if (a == Action::Cancel || a == Action::Command) {
+            commandOpen = false;
+            commandBuf.clear();
+            commandDraft.clear();
+            commandHistoryPos = -1;
+            return;
+        }
+
+        if (a == Action::Confirm) {
+            std::string line = trim(commandBuf);
+            commandOpen = false;
+            commandBuf.clear();
+            commandDraft.clear();
+            commandHistoryPos = -1;
+
+            if (!line.empty()) {
+                // Store history (keep it small).
+                if (commandHistory.empty() || commandHistory.back() != line) {
+                    commandHistory.push_back(line);
+                    if (commandHistory.size() > 50) {
+                        commandHistory.erase(commandHistory.begin());
+                    }
+                }
+                runExtendedCommand(*this, line);
+            }
+            return;
+        }
+
+        if (a == Action::Up) {
+            if (!commandHistory.empty()) {
+                if (commandHistoryPos < 0) {
+                    commandDraft = commandBuf;
+                    commandHistoryPos = static_cast<int>(commandHistory.size()) - 1;
+                } else {
+                    commandHistoryPos = std::max(0, commandHistoryPos - 1);
+                }
+                commandBuf = commandHistory[commandHistoryPos];
+            }
+            return;
+        }
+
+        if (a == Action::Down) {
+            if (commandHistoryPos >= 0) {
+                if (commandHistoryPos + 1 < static_cast<int>(commandHistory.size())) {
+                    ++commandHistoryPos;
+                    commandBuf = commandHistory[commandHistoryPos];
+                } else {
+                    commandHistoryPos = -1;
+                    commandBuf = commandDraft;
+                    commandDraft.clear();
+                }
+            }
+            return;
+        }
+
+        // Ignore any other actions while the prompt is open.
+        return;
+    }
+
+    // Overlay: options menu (does not consume turns)
+    if (optionsOpen) {
+        constexpr int kOptionCount = 5;
+
+        if (a == Action::Cancel || a == Action::Options) {
+            optionsOpen = false;
+            return;
+        }
+
+        if (a == Action::Up) {
+            optionsSel = clampi(optionsSel - 1, 0, kOptionCount - 1);
+            return;
+        }
+        if (a == Action::Down) {
+            optionsSel = clampi(optionsSel + 1, 0, kOptionCount - 1);
+            return;
+        }
+
+        const bool left = (a == Action::Left);
+        const bool right = (a == Action::Right);
+        const bool confirm = (a == Action::Confirm);
+
+        auto cycleAutoPickup = [&](int dir) {
+            int m = static_cast<int>(autoPickup);
+            m += dir;
+            if (m < 0) m = 2;
+            if (m > 2) m = 0;
+            autoPickup = static_cast<AutoPickupMode>(m);
+            settingsDirtyFlag = true;
+        };
+
+        if (optionsSel == 0) {
+            if (left) cycleAutoPickup(-1);
+            else if (right || confirm) cycleAutoPickup(+1);
+            return;
+        }
+
+        if (optionsSel == 1) {
+            if (left || right) {
+                int ms = autoStepDelayMs();
+                ms += left ? -5 : +5;
+                ms = clampi(ms, 10, 500);
+                setAutoStepDelayMs(ms);
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        if (optionsSel == 2) {
+            if (left || right) {
+                int t = autosaveInterval;
+                t += left ? -50 : +50;
+                t = clampi(t, 0, 5000);
+                setAutosaveEveryTurns(t);
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        if (optionsSel == 3) {
+            if (left || right || confirm) {
+                setIdentificationEnabled(!identifyItemsEnabled);
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // Close
+        if (optionsSel == 4) {
+            if (confirm) optionsOpen = false;
+            return;
+        }
+
         return;
     }
 

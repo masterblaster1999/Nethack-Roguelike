@@ -35,5 +35,9 @@ struct Settings {
 // Loads settings from disk. If the file is missing or invalid, defaults are used.
 Settings loadSettings(const std::string& path);
 
+// Update (or append) a single key=value entry in the settings file.
+// Returns false if the file could not be read/written.
+bool updateIniKey(const std::string& path, const std::string& key, const std::string& value);
+
 // Writes a commented default settings file. Returns true on success.
 bool writeDefaultSettings(const std::string& path);

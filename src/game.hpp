@@ -26,6 +26,7 @@ enum class EntityKind : uint8_t {
     // --- New monsters (appended to keep save compatibility) ---
     Snake,
     Spider,
+    Ogre,
 };
 
 enum class Action : uint8_t {
@@ -57,6 +58,8 @@ enum class Action : uint8_t {
     Equip,
     Use,
     Drop,
+    DropAll,     // Drop entire stack (inventory)
+    SortInventory, // Sort inventory (inventory)
 
     Save,
     Load,
@@ -433,8 +436,10 @@ private:
     void openInventory();
     void closeInventory();
     void moveInventorySelection(int dy);
+    void sortInventory();
     bool pickupAtPlayer();
     bool dropSelected();
+    bool dropSelectedAll();
     bool equipSelected();
     bool useSelected();
 

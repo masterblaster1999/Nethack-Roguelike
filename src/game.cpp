@@ -25,6 +25,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";
         case EntityKind::Spider: return "SPIDER";
+        case EntityKind::Ogre: return "OGRE";
         default: return "THING";
     }
 }
@@ -264,6 +265,7 @@ int Game::xpFor(EntityKind k) const {
         case EntityKind::Wolf: return 10;
         case EntityKind::Orc: return 14;
         case EntityKind::Troll: return 28;
+        case EntityKind::Ogre: return 30;
         case EntityKind::Wizard: return 32;
         default: return 10;
     }
@@ -1736,6 +1738,12 @@ void Game::handleAction(Action a) {
             case Action::Drop:
                 acted = dropSelected();
                 break;
+            case Action::DropAll:
+                acted = dropSelectedAll();
+                break;
+            case Action::SortInventory:
+                sortInventory();
+                break;
             default:
                 break;
         }
@@ -1974,7 +1982,7 @@ void Game::maybeRecordRun() {
     e.turns = turnCount;
     e.kills = killCount;
     e.level = charLevel;
-    e.gold = goldCount;
+    e.gold = goldCount();
     e.seed = seed_;
     e.score = computeScore(e);
 
@@ -2884,6 +2892,64 @@ void Game::moveInventorySelection(int dy) {
     invSel = clampi(invSel + dy, 0, static_cast<int>(inv.size()) - 1);
 }
 
+
+void Game::sortInventory() {
+    if (inv.empty()) {
+        pushMsg("NOTHING TO SORT.", MessageKind::Info, true);
+        return;
+    }
+
+    // Remember the currently selected item (by id) so we can restore selection after sort.
+    int selectedId = 0;
+    if (invSel >= 0 && invSel < static_cast<int>(inv.size())) {
+        selectedId = inv[static_cast<size_t>(invSel)].id;
+    }
+
+    auto category = [&](const Item& it) -> int {
+        // 0 = quest/special
+        if (it.kind == ItemKind::AmuletYendor) return 0;
+
+        // 1 = equipped gear
+        if (it.id == equipMeleeId || it.id == equipRangedId || it.id == equipArmorId) return 1;
+
+        // 2 = other equipment
+        const ItemDef& d = itemDef(it.kind);
+        if (d.slot != EquipSlot::None) return 2;
+
+        // 3 = consumables (potions/scrolls)
+        if (d.consumable) return 3;
+
+        // 4 = ammo
+        if (it.kind == ItemKind::Arrow || it.kind == ItemKind::Rock) return 4;
+
+        // 5 = gold
+        if (it.kind == ItemKind::Gold) return 5;
+
+        return 6;
+    };
+
+    std::stable_sort(inv.begin(), inv.end(), [&](const Item& a, const Item& b) {
+        const int ca = category(a);
+        const int cb = category(b);
+        if (ca != cb) return ca < cb;
+
+        const std::string na = displayItemName(a);
+        const std::string nb = displayItemName(b);
+        if (na != nb) return na < nb;
+
+        // Tie-breaker for stability.
+        return a.id < b.id;
+    });
+
+    if (selectedId != 0) {
+        int idx = findItemIndexById(inv, selectedId);
+        if (idx >= 0) invSel = idx;
+    }
+    invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+
+    pushMsg("INVENTORY SORTED.", MessageKind::System, true);
+}
+
 bool Game::autoPickupAtPlayer() {
     const Vec2i pos = player().pos;
     const int maxInv = 26;
@@ -3015,6 +3081,35 @@ bool Game::dropSelected() {
         inv.erase(inv.begin() + invSel);
         invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
     }
+
+    GroundItem gi;
+    gi.item = drop;
+    gi.pos = player().pos;
+    ground.push_back(gi);
+
+    pushMsg("YOU DROP " + displayItemName(drop) + ".");
+    return true;
+}
+
+bool Game::dropSelectedAll() {
+    if (inv.empty()) {
+        pushMsg("NOTHING TO DROP.");
+        return false;
+    }
+
+    invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
+    Item& it = inv[static_cast<size_t>(invSel)];
+
+    // Unequip if needed
+    if (it.id == equipMeleeId) equipMeleeId = 0;
+    if (it.id == equipRangedId) equipRangedId = 0;
+    if (it.id == equipArmorId) equipArmorId = 0;
+
+    Item drop = it;
+
+    // Remove whole item/stack.
+    inv.erase(inv.begin() + invSel);
+    invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 
     GroundItem gi;
     gi.item = drop;
@@ -3448,6 +3543,10 @@ void Game::spawnMonsters() {
             e.hpMax = 8; e.baseAtk = 2; e.baseDef = 1;
             e.willFlee = false;
             break;
+        case EntityKind::Ogre:
+            e.hpMax = 20; e.baseAtk = 5; e.baseDef = 2;
+            e.willFlee = false;
+            break;
         default:
             e.hpMax = 6; e.baseAtk = 2; e.baseDef = 0;
             break;
@@ -3518,6 +3617,7 @@ void Game::spawnMonsters() {
                     else if (roll < 88) k = EntityKind::Bat;
                     else if (roll < 94) k = EntityKind::Snake;
                     else if (roll < 97) k = EntityKind::Troll;
+                    else if (roll < 99) k = EntityKind::Ogre;
                     else k = EntityKind::Wizard;
                 } else {
                     // depth_ == 3
@@ -3539,7 +3639,18 @@ void Game::spawnMonsters() {
         // Treasure rooms get a guardian sometimes.
         if (r.type == RoomType::Treasure && !isStart && rng.chance(0.6f)) {
             Vec2i p = randomFreeTileInRoom(r);
-            addMonster(depth_ >= 4 ? (rng.chance(0.35f) ? EntityKind::Wizard : EntityKind::Troll) : (depth_ >= 3 ? EntityKind::Orc : EntityKind::Goblin), p, 0);
+            EntityKind g = EntityKind::Goblin;
+            if (depth_ >= 4) {
+                int gr = rng.range(0, 99);
+                if (gr < 25) g = EntityKind::Wizard;
+                else if (gr < 55) g = EntityKind::Ogre;
+                else g = EntityKind::Troll;
+            } else if (depth_ >= 3) {
+                g = EntityKind::Orc;
+            } else {
+                g = EntityKind::Goblin;
+            }
+            addMonster(g, p, 0);
         }
     }
 }
@@ -3563,22 +3674,26 @@ void Game::spawnItems() {
     };
 
     auto dropGoodItem = [&](const Room& r) {
-        int roll = rng.range(0, 119);
+        // Treasure rooms are where you find the "spicy" gear.
+        int roll = rng.range(0, 135);
+
         if (roll < 18) dropItemAt(ItemKind::Sword, randomFreeTileInRoom(r));
-        else if (roll < 32) dropItemAt(ItemKind::ChainArmor, randomFreeTileInRoom(r));
-        else if (roll < 44) dropItemAt(ItemKind::WandSparks, randomFreeTileInRoom(r));
-        else if (roll < 54) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r));
-        else if (roll < 66) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), rng.range(1, 2));
-        else if (roll < 78) dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), rng.range(1, 2));
-        else if (roll < 88) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), rng.range(1, 2));
-        else if (roll < 96) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
-        else if (roll < 102) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
-        else if (roll < 106) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
-        else if (roll < 110) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
-        else if (roll < 113) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
-        else if (roll < 115) dropItemAt(ItemKind::ScrollIdentify, randomFreeTileInRoom(r), 1);
-        else if (roll < 117) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
-        else if (roll < 119) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
+        else if (roll < 30) dropItemAt(ItemKind::Axe, randomFreeTileInRoom(r));
+        else if (roll < 44) dropItemAt(ItemKind::ChainArmor, randomFreeTileInRoom(r));
+        else if (roll < 50) dropItemAt(ItemKind::PlateArmor, randomFreeTileInRoom(r));
+        else if (roll < 62) dropItemAt(ItemKind::WandSparks, randomFreeTileInRoom(r));
+        else if (roll < 72) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r));
+        else if (roll < 84) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), rng.range(1, 2));
+        else if (roll < 96) dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), rng.range(1, 2));
+        else if (roll < 106) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), rng.range(1, 2));
+        else if (roll < 114) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
+        else if (roll < 118) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
+        else if (roll < 122) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
+        else if (roll < 126) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
+        else if (roll < 129) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
+        else if (roll < 131) dropItemAt(ItemKind::ScrollIdentify, randomFreeTileInRoom(r), 1);
+        else if (roll < 133) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
+        else if (roll < 135) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
         else dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
     };
 

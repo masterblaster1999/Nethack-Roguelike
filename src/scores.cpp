@@ -151,7 +151,7 @@ bool ScoreBoard::load(const std::string& path) {
     std::vector<std::string> cols;
 
     while (std::getline(in, line)) {
-        line = trim(line);
+        line = ::trim(std::move(line));
         if (line.empty()) continue;
         if (line[0] == '#') continue;
 

@@ -11,7 +11,9 @@ A tiny NetHack-inspired roguelike with:
 - **Inventory hotkeys**: while inventory is open:
   - **E** equip/unequip
   - **U** use (consumables)
-  - **X** drop
+  - **X** drop **one** (from a stack)
+  - **Shift+X** drop the **whole stack**
+  - **Shift+S** sort the inventory
   - **Enter** performs a **context action** (equip if gear, use if consumable)
 - **Game controller support** (SDL2 GameController): D-pad move, **A** confirm, **B** cancel, **X** inventory, **Y** pickup, shoulders for look/fire.
 - **VSync + FPS cap settings**: new `vsync` and `max_fps` keys in `procrogue_settings.ini`.
@@ -33,6 +35,7 @@ A tiny NetHack-inspired roguelike with:
 - **Settings file** (auto-created on first run): lets you tweak tile size, HUD height, fullscreen, auto-move speed, auto-pickup mode, and autosave interval.
 - **NetHack-style item identification**: potions + scrolls start unknown each run (randomized appearances). Using them identifies the item type; you can also find/read a **Scroll of Identify**. (Toggle via `identify_items` in settings.)
 - **New combat spice**: spiders can web you (movement blocked for a few turns), and wizards can occasionally "blink" (teleport) to reposition.
+- **New content**: **Axe** + **Plate Armor**, and a new monster: the **Ogre**.
 - **CI build workflow** for Linux/macOS/Windows.
 
 ## Controls
@@ -51,7 +54,7 @@ A tiny NetHack-inspired roguelike with:
 ### Interaction
 - **Pick up**: `G`
 - **Inventory**: `I`
-  - While inventory is open: **E** equip/unequip, **U** use, **X** drop, **Enter** context action
+  - While inventory is open: **E** equip/unequip, **U** use, **X** drop one, **Shift+X** drop stack, **Shift+S** sort, **Enter** context action
 - **Fire ranged**: `F` (aim with mouse or WASD/arrows/YUBN, **Enter** or **left-click** to fire, **right-click** or **Esc** cancels)
 - **Use stairs**: `<` up, `>` down
 

@@ -14,6 +14,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PROCROGUE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(PROCROGUE_BUILD_TESTS "Build unit tests (no SDL required)" OFF)
+option(PROCROGUE_BUILD_GAME "Build the SDL2 game executable" ON)
 
 # Fetching SDL2 is most useful on Windows/MSVC. On Linux/macOS, SDL2 is typically installed
 # via the system package manager and found via pkg-config. Default accordingly.
@@ -23,6 +24,8 @@ if (WIN32)
 endif()
 option(PROCROGUE_FETCH_SDL2 "Fetch SDL2 automatically when it is not found" ${_PROCROGUE_FETCH_SDL2_DEFAULT})
 unset(_PROCROGUE_FETCH_SDL2_DEFAULT)
+
+if (PROCROGUE_BUILD_GAME)
 
 set(PROCROGUE_TARGET proc_rogue)
 
@@ -189,6 +192,8 @@ target_link_libraries(${PROCROGUE_TARGET} PRIVATE ${_SDL2_LIB})
 
 unset(_SDL2_LIB)
 unset(_SDL2_MAIN)
+
+endif() # PROCROGUE_BUILD_GAME
 
 # ------------------------------------------------------------
 # Tests

@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <iostream>
 #include <sstream>
+#include <filesystem>
+#include <ctime>
+#include <iomanip>
 
 Renderer::Renderer(int windowW, int windowH, int tileSize, int hudHeight, bool vsync)
     : winW(windowW), winH(windowH), tile(tileSize), hudH(hudHeight), vsyncEnabled(vsync) {}
@@ -562,7 +565,10 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     int x = bg.x + 12;
     int y = bg.y + 12;
 
-    drawText5x7(renderer, x, y, scale, yellow, "INVENTORY  (UP/DOWN SELECT, ENTER ACT, E EQUIP, U USE, X DROP, ESC CLOSE)  [M]=MELEE [R]=RANGED [A]=ARMOR");
+    drawText5x7(renderer, x, y, scale, yellow,
+               "INVENTORY  (UP/DOWN SELECT, ENTER ACT, E EQUIP, U USE, X DROP, SHIFT+X DROP ALL, SHIFT+S SORT, ESC CLOSE)");
+    y += 7 * scale + 4;
+    drawText5x7(renderer, x, y, scale, yellow, "[M]=MELEE [R]=RANGED [A]=ARMOR");
     y += 7 * scale + 10;
 
     const auto& inv = game.inventory();
@@ -644,7 +650,8 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("STATS / SCORES: TAB");
     lineGray("SCREENSHOT: F12 (SAVES A .BMP)");
     lineGray("MOUSE: LMB AUTO-TRAVEL, RMB LOOK");
-    lineGray("INVENTORY: I   (ENTER ACT, E EQUIP, U USE, X DROP, ESC CLOSE)");
+    lineGray("INVENTORY: I   (ENTER ACT, E EQUIP, U USE, X DROP)");
+    lineGray("           (SHIFT+X DROP ALL, SHIFT+S SORT, ESC CLOSE)");
     lineGray("RANGED: F TARGET, ENTER FIRE, ESC CANCEL");
     lineGray("STAIRS: < UP, > DOWN   (ENTER ALSO WORKS WHILE STANDING ON STAIRS)");
     lineGray("LOG SCROLL: PAGEUP / PAGEDOWN");
@@ -670,9 +677,12 @@ void Renderer::drawHelpOverlay(const Game& game) {
 
 
 void Renderer::drawMinimapOverlay(const Game& game) {
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    const Color white{ 240, 240, 240, 255 };
     const Dungeon& d = game.dungeon();
-    const int W = d.width();
-    const int H = d.height();
+    const int W = d.width;
+    const int H = d.height;
 
     // Choose a small per-tile pixel size that fits comfortably on screen.
     int px = 4;

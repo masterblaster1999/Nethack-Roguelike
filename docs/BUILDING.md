@@ -118,3 +118,17 @@ cmake -S . -B build -DPROCROGUE_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+
+## Tests only (no SDL required)
+
+If you just want to build and run the unit tests (headless, no SDL2 dependency), configure with:
+
+```bash
+cmake -S . -B build_tests -DPROCROGUE_BUILD_GAME=OFF -DPROCROGUE_BUILD_TESTS=ON
+cmake --build build_tests
+ctest --test-dir build_tests --output-on-failure
+```
+
+This is also what the CI "tests-only" job uses.
+

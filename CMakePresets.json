@@ -1,64 +1,78 @@
 {
-  "version": 5,
-  "cmakeMinimumRequired": {
-    "major": 3,
-    "minor": 20,
-    "patch": 0
-  },
-  "configurePresets": [
-    {
-      "name": "ninja-debug",
-      "displayName": "Ninja Debug",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/ninja-debug",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
-      }
+    "version": 5,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 20,
+        "patch": 0
     },
-    {
-      "name": "ninja-release",
-      "displayName": "Ninja Release",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/ninja-release",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
-      }
-    },
-    {
-      "name": "msvc",
-      "displayName": "Visual Studio 2022 (x64)",
-      "generator": "Visual Studio 17 2022",
-      "binaryDir": "${sourceDir}/build/msvc",
-      "architecture": "x64",
-      "cacheVariables": {
-        "PROCROGUE_FETCH_SDL2": "ON"
-      }
-    },
-    {
-      "name": "ninja-release-tests",
-      "displayName": "Ninja Release + tests",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/ninja-release",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "PROCROGUE_BUILD_TESTS": true
-      },
-      "description": "(with tests)"
-    }
-  ],
-  "buildPresets": [
-    {
-      "name": "build-ninja-debug",
-      "configurePreset": "ninja-debug"
-    },
-    {
-      "name": "build-ninja-release",
-      "configurePreset": "ninja-release"
-    },
-    {
-      "name": "build-msvc-release",
-      "configurePreset": "msvc",
-      "configuration": "Release"
-    }
-  ]
+    "configurePresets": [
+        {
+            "name": "ninja-debug",
+            "displayName": "Ninja Debug",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/ninja-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "ninja-release",
+            "displayName": "Ninja Release",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/ninja-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "msvc",
+            "displayName": "Visual Studio 2022 (x64)",
+            "generator": "Visual Studio 17 2022",
+            "binaryDir": "${sourceDir}/build/msvc",
+            "architecture": "x64",
+            "cacheVariables": {
+                "PROCROGUE_FETCH_SDL2": "ON"
+            }
+        },
+        {
+            "name": "ninja-release-tests",
+            "displayName": "Ninja Release + tests",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/ninja-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "PROCROGUE_BUILD_TESTS": true
+            },
+            "description": "(with tests)"
+        },
+        {
+            "name": "tests",
+            "displayName": "Tests (no SDL)",
+            "inherits": "debug",
+            "cacheVariables": {
+                "PROCROGUE_BUILD_GAME": "OFF",
+                "PROCROGUE_BUILD_TESTS": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "build-ninja-debug",
+            "configurePreset": "ninja-debug"
+        },
+        {
+            "name": "build-ninja-release",
+            "configurePreset": "ninja-release"
+        },
+        {
+            "name": "build-msvc-release",
+            "configurePreset": "msvc",
+            "configuration": "Release"
+        },
+        {
+            "name": "tests",
+            "displayName": "Build tests (no SDL)",
+            "configurePreset": "tests"
+        }
+    ]
 }

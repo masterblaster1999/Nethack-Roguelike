@@ -62,10 +62,14 @@ enum class ItemKind : uint8_t {
 
     // --- Identification / utility (append-only) ---
     ScrollIdentify,
+
+    // --- New items (append-only to keep save compatibility) ---
+    Axe,
+    PlateArmor,
 };
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollIdentify) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::PlateArmor) + 1;
 
 inline bool isPotionKind(ItemKind k) {
     switch (k) {

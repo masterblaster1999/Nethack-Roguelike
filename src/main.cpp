@@ -28,7 +28,19 @@ static Action keyToAction(const Game& game, SDL_Keycode key, Uint16 mod) {
         switch (key) {
             case SDLK_e: return Action::Equip;
             case SDLK_u: return Action::Use;
-            case SDLK_x: return Action::Drop;
+
+            // Inventory QoL:
+            // - X drops 1 item from a stack
+            // - Shift+X drops the entire stack
+            case SDLK_x:
+                if (mod & KMOD_SHIFT) return Action::DropAll;
+                return Action::Drop;
+
+            // Shift+S sorts the inventory (does not consume a turn).
+            case SDLK_s:
+                if (mod & KMOD_SHIFT) return Action::SortInventory;
+                break;
+
             case SDLK_RETURN:
             case SDLK_KP_ENTER:
                 return Action::Confirm; // context action on selected item

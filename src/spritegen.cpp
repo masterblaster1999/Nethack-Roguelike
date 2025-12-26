@@ -104,6 +104,7 @@ float densityFor(EntityKind k) {
         case EntityKind::Wizard: return 0.50f;
         case EntityKind::Snake: return 0.48f;
         case EntityKind::Spider: return 0.46f;
+        case EntityKind::Ogre: return 0.72f;
         default: return 0.55f;
     }
 }
@@ -122,6 +123,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::Wizard: return add({ 140, 100, 200, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Snake: return add({ 80, 190, 100, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Spider: return add({ 80, 80, 95, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
+        case EntityKind::Ogre: return add({ 150, 120, 70, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         default: return add({ 180, 180, 180, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
     }
 }
@@ -228,7 +230,6 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
             setPx(s, x, 9, stripe);
         }
     }
-
     if (kind == EntityKind::Spider) {
         // Legs
         Color leg = {20,20,20,255};
@@ -239,6 +240,14 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
         // Extra eyes
         setPx(s, 6, 6, {255,255,255,255});
         setPx(s, 9, 6, {255,255,255,255});
+    }
+
+    if (kind == EntityKind::Ogre) {
+        // Horns + belt
+        Color horn = {240,240,240,255};
+        setPx(s, 6, 2, horn);
+        setPx(s, 9, 2, horn);
+        rect(s, 5, 11, 6, 1, {60,40,20,255});
     }
 
     // Soft outline (helps readability)
@@ -294,6 +303,20 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
             sparkle();
             break;
         }
+        case ItemKind::Axe: {
+            Color steel = add({210,210,220,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color wood  = add({130,90,45,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            // Handle
+            line(s, 8, 3, 8, 14, wood);
+            line(s, 7, 4, 7, 13, mul(wood, 0.85f));
+            // Head
+            rect(s, 6, 3, 4, 3, steel);
+            rect(s, 5, 4, 2, 2, mul(steel, 0.85f));
+            // Highlight
+            setPx(s, 9, 3, {255,255,255,200});
+            sparkle();
+            break;
+        }
         case ItemKind::Bow: {
             Color wood = add({150,100,50,255}, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
             // Simple arc
@@ -338,6 +361,21 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
                     setPx(s, x, y, mul(steel, 0.6f));
                 }
             }
+            sparkle();
+            break;
+        }
+        case ItemKind::PlateArmor: {
+            Color steel = add({175,175,190,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 4, 8, 10, mul(steel, 0.70f));
+            rect(s, 5, 5, 6, 8, steel);
+            // Shoulders
+            rect(s, 4, 5, 2, 3, mul(steel, 0.9f));
+            rect(s, 10, 5, 2, 3, mul(steel, 0.9f));
+            // Rivets / highlights
+            setPx(s, 6, 6, mul(steel, 0.6f));
+            setPx(s, 9, 6, mul(steel, 0.6f));
+            setPx(s, 7, 9, mul(steel, 0.55f));
+            setPx(s, 8, 9, mul(steel, 0.55f));
             sparkle();
             break;
         }

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0] - 2025-12-26
+
+### Added
+- Inventory quality-of-life:
+  - **Shift+S** sorts the inventory (no turn cost)
+  - **Shift+X** drops the entire selected stack
+- New content: **Axe**, **Plate Armor**, and a new monster: **Ogre**
+- Build system: `PROCROGUE_BUILD_GAME` (ON by default) to allow **tests-only builds without SDL**
+- GitHub Actions CI (Windows/macOS/Linux) + a dedicated **headless tests-only** job
+- Repository hygiene: `.clang-format`, `.editorconfig`, `.gitignore`
+
+### Changed
+- Updated the FetchContent SDL2 tarball to **SDL2 2.32.10** (official libsdl release tarball)
+
+### Fixed
+- Fixed multiple compile-time issues in the renderer minimap overlay
+- Fixed compile errors in run recording (`goldCount()` call) and score parsing (`trim()` name clash)
+
 ## 0.4.0
 
 ### Gameplay / controls

@@ -11,6 +11,15 @@ struct Settings {
     int hudHeight = 160;
     bool startFullscreen = false;
 
+    // Rendering / performance
+    // - vsync: enables SDL_Renderer vsync (lower CPU usage, smoother rendering).
+    // - maxFps: optional software cap when vsync is disabled (0 = uncapped).
+    bool vsync = true;
+    int maxFps = 0; // 0 or 30..240
+
+    // Input
+    bool controllerEnabled = true;
+
     // Gameplay QoL
     AutoPickupMode autoPickup = AutoPickupMode::Gold; // off|gold|all
     int autoStepDelayMs = 45; // auto-move speed (10..500)

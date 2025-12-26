@@ -76,6 +76,18 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "start_fullscreen") {
             bool b = false;
             if (parseBool(val, b)) s.startFullscreen = b;
+        } else if (key == "vsync") {
+            bool b = true;
+            if (parseBool(val, b)) s.vsync = b;
+        } else if (key == "max_fps") {
+            int v = 0;
+            if (parseInt(val, v)) {
+                if (v <= 0) s.maxFps = 0;
+                else s.maxFps = std::clamp(v, 30, 240);
+            }
+        } else if (key == "controller_enabled") {
+            bool b = true;
+            if (parseBool(val, b)) s.controllerEnabled = b;
         } else if (key == "auto_step_delay_ms") {
             int v = 0;
             if (parseInt(val, v)) s.autoStepDelayMs = std::clamp(v, 10, 500);
@@ -106,7 +118,20 @@ bool writeDefaultSettings(const std::string& path) {
     f << "# Rendering / UI\n";
     f << "tile_size = 32\n";
     f << "hud_height = 160\n";
-    f << "start_fullscreen = false\n\n";
+    f << "start_fullscreen = false\n";
+    f << "\n";
+
+    f << "# Rendering / performance\n";
+    f << "# vsync: true/false  (true = lower CPU usage, smoother rendering)\n";
+    f << "vsync = true\n";
+    f << "# max_fps: 0 disables; otherwise 30..240 (only used when vsync=false)\n";
+    f << "max_fps = 0\n";
+    f << "\n";
+
+    f << "# Input\n";
+    f << "# controller_enabled: true/false  (enables SDL2 game controller support)\n";
+    f << "controller_enabled = true\n";
+    f << "\n";
 
     f << "# Gameplay QoL\n";
     f << "# auto_pickup: off | gold | all\n";

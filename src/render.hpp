@@ -15,7 +15,7 @@
 
 class Renderer {
 public:
-    Renderer(int windowW, int windowH, int tileSize, int hudHeight);
+    Renderer(int windowW, int windowH, int tileSize, int hudHeight, bool vsync);
     ~Renderer();
 
     bool init();
@@ -42,6 +42,7 @@ private:
     int winH = 0;
     int tile = 32;
     int hudH = 160;
+    bool vsyncEnabled = false;
 
     bool initialized = false;
 

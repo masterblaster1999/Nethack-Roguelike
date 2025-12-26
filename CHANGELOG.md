@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0
+
+### Gameplay / controls
+- **Inventory is fully usable via keyboard now**:
+  - `E` equip, `U` use, `X` drop (while inventory is open).
+  - `Enter`/`A` (controller) performs a **context action** on the selected item (equip if gear, use if consumable).
+- **PageUp / PageDown** now scroll the message log (mouse wheel still works).
+- **Look mode** can be toggled with `L` or `V`.
+
+### Input
+- **Game controller support (SDL2 GameController API)**:
+  - D-pad movement, `A` confirm, `B` cancel, `X` inventory, `Y` pickup, shoulders for look/fire.
+  - Can be disabled via settings.
+
+### Rendering / performance
+- Updated **SDL2 FetchContent** (Windows option) to **SDL2 2.32.10**.
+- New settings:
+  - `vsync = true/false`
+  - `max_fps = 0|30..240` (only used when `vsync=false`)
+- HUD text rendering improved by expanding the built-in **5x7 font** to cover the punctuation used in UI (|, (), [], +, =, etc.).
+
+### Dev / project upgrades
+- Added a real **GitHub Actions CI** workflow (Windows/macOS/Linux) that builds and runs tests.
+- Added a small **unit test suite** (RNG determinism, dungeon connectivity, item definition sanity).
+- Added `.clang-format` and `.editorconfig` for consistent formatting.
+
 ## 0.3.0
 
 ### New gameplay

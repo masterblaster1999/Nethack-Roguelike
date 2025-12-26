@@ -33,6 +33,17 @@
       "cacheVariables": {
         "PROCROGUE_FETCH_SDL2": "ON"
       }
+    },
+    {
+      "name": "ninja-release-tests",
+      "displayName": "Ninja Release + tests",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ninja-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "PROCROGUE_BUILD_TESTS": true
+      },
+      "description": "(with tests)"
     }
   ],
   "buildPresets": [

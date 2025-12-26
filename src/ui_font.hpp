@@ -6,7 +6,7 @@
 #include <string>
 
 // Tiny built-in 5x7 bitmap font to avoid SDL_ttf dependency.
-// Only includes common ASCII used by the HUD/messages.
+// Includes common ASCII used by the HUD/messages.
 // Unknown characters are rendered as '?'.
 
 struct Glyph5x7 {
@@ -61,16 +61,28 @@ inline Glyph5x7 glyph5x7(char c) {
         case 'Y': return {{0b10001,0b10001,0b01010,0b00100,0b00100,0b00100,0b00100}};
         case 'Z': return {{0b11111,0b00001,0b00010,0b00100,0b01000,0b10000,0b11111}};
 
-        // Punctuation
+        // Punctuation (subset)
         case '.': return {{0,0,0,0,0,0b01100,0b01100}};
+        case ',': return {{0,0,0,0,0,0b01100,0b00100}};
         case '!': return {{0b00100,0b00100,0b00100,0b00100,0b00100,0,0b00100}};
         case '?': return {{0b01110,0b10001,0b00001,0b00010,0b00100,0,0b00100}};
         case ':': return {{0,0b01100,0b01100,0,0b01100,0b01100,0}};
+        case ';': return {{0,0b01100,0b01100,0,0b01100,0b00100,0}};
         case '-': return {{0,0,0,0b11111,0,0,0}};
+        case '_': return {{0,0,0,0,0,0,0b11111}};
         case '/': return {{0b00001,0b00010,0b00100,0b01000,0b10000,0,0}};
+        case '\\': return {{0b10000,0b01000,0b00100,0b00010,0b00001,0,0}};
         case '>': return {{0b10000,0b01000,0b00100,0b00010,0b00100,0b01000,0b10000}};
         case '<': return {{0b00001,0b00010,0b00100,0b01000,0b00100,0b00010,0b00001}};
+        case '|': return {{0b00100,0b00100,0b00100,0b00100,0b00100,0b00100,0b00100}};
+        case '+': return {{0,0b00100,0b00100,0b11111,0b00100,0b00100,0}};
+        case '=': return {{0,0,0b11111,0,0b11111,0,0}};
+        case '(': return {{0b00100,0b01000,0b10000,0b10000,0b10000,0b01000,0b00100}};
+        case ')': return {{0b00100,0b00010,0b00001,0b00001,0b00001,0b00010,0b00100}};
+        case '[': return {{0b11100,0b10000,0b10000,0b10000,0b10000,0b10000,0b11100}};
+        case ']': return {{0b00111,0b00001,0b00001,0b00001,0b00001,0b00001,0b00111}};
         case '\'': return {{0b00100,0b00100,0,0,0,0,0}};
+        case '"': return {{0b01010,0b01010,0,0,0,0,0}};
 
         default:
             return {{0b01110,0b10001,0b00010,0b00100,0b00100,0,0b00100}}; // '?'

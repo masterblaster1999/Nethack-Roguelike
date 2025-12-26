@@ -8,6 +8,14 @@ A tiny NetHack-inspired roguelike with:
 
 ## New in this build (QoL + big usability upgrades)
 
+- **Inventory hotkeys**: while inventory is open:
+  - **E** equip/unequip
+  - **U** use (consumables)
+  - **X** drop
+  - **Enter** performs a **context action** (equip if gear, use if consumable)
+- **Game controller support** (SDL2 GameController): D-pad move, **A** confirm, **B** cancel, **X** inventory, **Y** pickup, shoulders for look/fire.
+- **VSync + FPS cap settings**: new `vsync` and `max_fps` keys in `procrogue_settings.ini`.
+
 - **Auto-travel**: enter look mode (`L` / `V` or **right-click**) and press **Enter** to auto-walk to the cursor tile.
 - **Auto-explore**: press **O** to walk to the nearest unexplored frontier until interrupted.
 - **Auto-pickup modes**: press **P** to cycle **OFF → GOLD → ALL → OFF**.
@@ -43,8 +51,21 @@ A tiny NetHack-inspired roguelike with:
 ### Interaction
 - **Pick up**: `G`
 - **Inventory**: `I`
+  - While inventory is open: **E** equip/unequip, **U** use, **X** drop, **Enter** context action
 - **Fire ranged**: `F` (aim with mouse or WASD/arrows/YUBN, **Enter** or **left-click** to fire, **right-click** or **Esc** cancels)
 - **Use stairs**: `<` up, `>` down
+
+### Controller (optional)
+- **D-pad**: move
+- **A**: confirm / context action in inventory
+- **B**: cancel / close overlays
+- **X**: inventory
+- **Y**: pick up
+- **LB**: look
+- **RB**: fire
+- **Start**: stats
+- **Back**: help
+- **R-stick**: minimap
 
 ### Meta
 - **Help**: `?` or `H`
@@ -80,3 +101,10 @@ The settings file is created automatically on first run.
 ## Building
 
 See `docs/BUILDING.md`.
+
+To build the unit tests:
+```bash
+cmake -S . -B build -DPROCROGUE_BUILD_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```

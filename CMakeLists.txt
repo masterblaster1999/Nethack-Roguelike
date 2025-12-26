@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(ProcRogue
-    VERSION 0.3.0
+    VERSION 0.4.0
     DESCRIPTION "A tiny NetHack-inspired roguelike with procedurally generated pixel sprites (SDL2)"
     LANGUAGES C CXX
 )
@@ -13,6 +13,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PROCROGUE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+option(PROCROGUE_BUILD_TESTS "Build unit tests (no SDL required)" OFF)
 
 # Fetching SDL2 is most useful on Windows/MSVC. On Linux/macOS, SDL2 is typically installed
 # via the system package manager and found via pkg-config. Default accordingly.
@@ -48,6 +49,11 @@ set_target_properties(${PROCROGUE_TARGET} PROPERTIES OUTPUT_NAME ProcRogue)
 
 target_include_directories(${PROCROGUE_TARGET} PRIVATE src)
 target_compile_features(${PROCROGUE_TARGET} PRIVATE cxx_std_17)
+
+target_compile_definitions(${PROCROGUE_TARGET} PRIVATE
+    PROCROGUE_VERSION="${PROJECT_VERSION}"
+    PROCROGUE_APPNAME="ProcRogue"
+)
 
 if (WIN32)
     target_compile_definitions(${PROCROGUE_TARGET} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -183,3 +189,11 @@ target_link_libraries(${PROCROGUE_TARGET} PRIVATE ${_SDL2_LIB})
 
 unset(_SDL2_LIB)
 unset(_SDL2_MAIN)
+
+# ------------------------------------------------------------
+# Tests
+# ------------------------------------------------------------
+if (PROCROGUE_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

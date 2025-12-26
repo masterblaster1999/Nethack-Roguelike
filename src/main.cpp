@@ -10,8 +10,33 @@
 #include "game.hpp"
 #include "render.hpp"
 #include "settings.hpp"
+#include "version.hpp"
 
-static Action keyToAction(SDL_Keycode key, Uint16 mod) {
+static Action keyToAction(const Game& game, SDL_Keycode key, Uint16 mod) {
+    // Message log scrolling
+    switch (key) {
+        case SDLK_PAGEUP:   return Action::LogUp;
+        case SDLK_PAGEDOWN: return Action::LogDown;
+        default: break;
+    }
+
+    // F1 help
+    if (key == SDLK_F1) return Action::Help;
+
+    // Inventory-specific commands (avoid conflicts with movement keys like 'u').
+    if (game.isInventoryOpen()) {
+        switch (key) {
+            case SDLK_e: return Action::Equip;
+            case SDLK_u: return Action::Use;
+            case SDLK_x: return Action::Drop;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+                return Action::Confirm; // context action on selected item
+            default:
+                break;
+        }
+    }
+
     switch (key) {
         // 8-way movement (WASD / arrows / numpad / YUBN)
         case SDLK_w:
@@ -71,13 +96,16 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
             return Action::Search;
 
         case SDLK_l:
+        case SDLK_v:
             return Action::Look;
 
         case SDLK_COMMA:
-            // '<' on most keyboards, but SDL has SDLK_COMMA for the key.
-            return Action::StairsUp;
+            // '<' on most keyboards (Shift + ',')
+            if (mod & KMOD_SHIFT) return Action::StairsUp;
+            return Action::None;
 
         case SDLK_GREATER:
+            // '>'
             return Action::StairsDown;
 
         case SDLK_o:
@@ -102,6 +130,7 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
             return Action::LoadAuto;
 
         case SDLK_RETURN:
+        case SDLK_KP_ENTER:
             return Action::Confirm;
 
         case SDLK_BACKSPACE:
@@ -112,6 +141,9 @@ static Action keyToAction(SDL_Keycode key, Uint16 mod) {
             return Action::None;
 
         case SDLK_QUESTION:
+            return Action::Help;
+
+        case SDLK_h:
             return Action::Help;
 
         case SDLK_r:
@@ -148,14 +180,14 @@ static bool hasFlag(int argc, char** argv, const char* flag) {
 }
 
 int main(int argc, char** argv) {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
         return 1;
     }
 
     // Prefer a per-user writable directory for config/saves.
     std::string prefPath;
-    if (char* p = SDL_GetPrefPath("masterblaster1999", "ProcRogue")) {
+    if (char* p = SDL_GetPrefPath("masterblaster1999", PROCROGUE_APPNAME)) {
         prefPath = p;
         SDL_free(p);
     }
@@ -163,9 +195,9 @@ int main(int argc, char** argv) {
     const std::string basePath = prefPath.empty() ? std::string("./") : prefPath;
     const std::string settingsPath = basePath + "procrogue_settings.ini";
     const std::string savePath = basePath + "procrogue_save.dat";
-const std::string autosavePath = basePath + "procrogue_autosave.dat";
-const std::string scoresPath = basePath + "procrogue_scores.csv";
-const std::string screenshotDir = basePath + "screenshots";
+    const std::string autosavePath = basePath + "procrogue_autosave.dat";
+    const std::string scoresPath = basePath + "procrogue_scores.csv";
+    const std::string screenshotDir = basePath + "screenshots";
 
     // Load or create settings.
     if (!std::filesystem::exists(settingsPath)) {
@@ -178,7 +210,7 @@ const std::string screenshotDir = basePath + "screenshots";
     const int winW = Game::MAP_W * tileSize;
     const int winH = Game::MAP_H * tileSize + hudHeight;
 
-    Renderer renderer(winW, winH, tileSize, hudHeight);
+    Renderer renderer(winW, winH, tileSize, hudHeight, settings.vsync);
     if (!renderer.init()) {
         SDL_Quit();
         return 1;
@@ -188,14 +220,47 @@ const std::string screenshotDir = basePath + "screenshots";
         renderer.toggleFullscreen();
     }
 
+    // Optional controller support (SDL_GameController)
+    SDL_GameController* controller = nullptr;
+    SDL_JoystickID controllerId = -1;
+
+    auto closeController = [&]() {
+        if (controller) {
+            SDL_GameControllerClose(controller);
+            controller = nullptr;
+            controllerId = -1;
+        }
+    };
+
+    auto openFirstController = [&]() {
+        if (!settings.controllerEnabled) return;
+        if (controller) return;
+
+        const int n = SDL_NumJoysticks();
+        for (int i = 0; i < n; ++i) {
+            if (!SDL_IsGameController(i)) continue;
+
+            controller = SDL_GameControllerOpen(i);
+            if (controller) {
+                SDL_Joystick* joy = SDL_GameControllerGetJoystick(controller);
+                controllerId = joy ? SDL_JoystickInstanceID(joy) : -1;
+                const char* name = SDL_GameControllerName(controller);
+                std::cout << "Controller connected: " << (name ? name : "(unknown)") << "\n";
+            }
+            break;
+        }
+    };
+
+    openFirstController();
+
     Game game;
     game.setSavePath(savePath);
+    game.setAutosavePath(autosavePath);
+    game.setScoresPath(scoresPath);
     game.setAutoStepDelayMs(settings.autoStepDelayMs);
-game.setAutosavePath(autosavePath);
-game.setScoresPath(scoresPath);
-game.setAutosaveEveryTurns(settings.autosaveEveryTurns);
-game.setAutoPickupMode(settings.autoPickup);
-game.setIdentificationEnabled(settings.identifyItems);
+    game.setAutosaveEveryTurns(settings.autosaveEveryTurns);
+    game.setAutoPickupMode(settings.autoPickup);
+    game.setIdentificationEnabled(settings.identifyItems);
 
     const bool loadOnStart = hasFlag(argc, argv, "--load") || hasFlag(argc, argv, "--continue");
 
@@ -210,12 +275,18 @@ game.setIdentificationEnabled(settings.identifyItems);
         game.setAutoPickupMode(settings.autoPickup);
     }
 
+    const bool vsyncEnabled = settings.vsync;
+    const int maxFps = settings.maxFps;
+    const uint32_t targetFrameMs = (!vsyncEnabled && maxFps > 0) ? (1000u / static_cast<uint32_t>(maxFps)) : 0u;
+
     bool running = true;
     uint32_t lastTicks = SDL_GetTicks();
     bool wantScreenshot = false;
 
     while (running) {
-        uint32_t now = SDL_GetTicks();
+        const uint32_t frameStart = SDL_GetTicks();
+        const uint32_t now = frameStart;
+
         float dt = (now - lastTicks) / 1000.0f;
         if (dt > 0.1f) dt = 0.1f;
         lastTicks = now;
@@ -227,11 +298,47 @@ game.setIdentificationEnabled(settings.identifyItems);
                     running = false;
                     break;
 
+                case SDL_CONTROLLERDEVICEADDED:
+                    openFirstController();
+                    break;
+
+                case SDL_CONTROLLERDEVICEREMOVED:
+                    if (controller && controllerId == static_cast<SDL_JoystickID>(ev.cdevice.which)) {
+                        std::cout << "Controller disconnected\n";
+                        closeController();
+                    }
+                    break;
+
+                case SDL_CONTROLLERBUTTONDOWN:
+                    if (!settings.controllerEnabled) break;
+                    switch (ev.cbutton.button) {
+                        case SDL_CONTROLLER_BUTTON_DPAD_UP:    game.handleAction(Action::Up); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  game.handleAction(Action::Down); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  game.handleAction(Action::Left); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: game.handleAction(Action::Right); break;
+
+                        case SDL_CONTROLLER_BUTTON_A:          game.handleAction(Action::Confirm); break;
+                        case SDL_CONTROLLER_BUTTON_B:          game.handleAction(Action::Cancel); break;
+                        case SDL_CONTROLLER_BUTTON_X:          game.handleAction(Action::Inventory); break;
+                        case SDL_CONTROLLER_BUTTON_Y:          game.handleAction(Action::Pickup); break;
+
+                        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  game.handleAction(Action::Look); break;
+                        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: game.handleAction(Action::Fire); break;
+
+                        case SDL_CONTROLLER_BUTTON_BACK:  game.handleAction(Action::Help); break;
+                        case SDL_CONTROLLER_BUTTON_START: game.handleAction(Action::ToggleStats); break;
+
+                        case SDL_CONTROLLER_BUTTON_RIGHTSTICK: game.handleAction(Action::ToggleMinimap); break;
+                        default:
+                            break;
+                    }
+                    break;
+
                 case SDL_KEYDOWN:
                     if (ev.key.repeat != 0) break;
                     {
-                        SDL_Keycode key = ev.key.keysym.sym;
-                        Uint16 mod = ev.key.keysym.mod;
+                        const SDL_Keycode key = ev.key.keysym.sym;
+                        const Uint16 mod = ev.key.keysym.mod;
 
                         if (key == SDLK_F12) {
                             wantScreenshot = true;
@@ -254,7 +361,7 @@ game.setIdentificationEnabled(settings.identifyItems);
                             break;
                         }
 
-                        Action a = keyToAction(key, mod);
+                        const Action a = keyToAction(game, key, mod);
                         if (a != Action::None) {
                             game.handleAction(a);
                         }
@@ -270,7 +377,7 @@ game.setIdentificationEnabled(settings.identifyItems);
                     {
                         int tx = 0, ty = 0;
                         if (!renderer.windowToMapTile(ev.motion.x, ev.motion.y, tx, ty)) break;
-                        Vec2i p{tx, ty};
+                        const Vec2i p{tx, ty};
 
                         if (game.isTargeting()) {
                             game.setTargetCursor(p);
@@ -287,7 +394,7 @@ game.setIdentificationEnabled(settings.identifyItems);
 
                         int tx = 0, ty = 0;
                         if (!renderer.windowToMapTile(ev.button.x, ev.button.y, tx, ty)) break;
-                        Vec2i p{tx, ty};
+                        const Vec2i p{tx, ty};
 
                         if (game.isTargeting()) {
                             if (ev.button.button == SDL_BUTTON_LEFT) {
@@ -334,9 +441,23 @@ game.setIdentificationEnabled(settings.identifyItems);
             wantScreenshot = false;
         }
 
-        SDL_Delay(8);
+        // If vsync is enabled, SDL_RenderPresent will throttle naturally.
+        // Otherwise, optionally cap frame rate (and always yield a little to keep CPU usage sane).
+        if (!vsyncEnabled) {
+            if (targetFrameMs > 0) {
+                const uint32_t frameTime = SDL_GetTicks() - frameStart;
+                if (frameTime < targetFrameMs) {
+                    SDL_Delay(targetFrameMs - frameTime);
+                } else {
+                    SDL_Delay(1);
+                }
+            } else {
+                SDL_Delay(1);
+            }
+        }
     }
 
+    closeController();
     renderer.shutdown();
     SDL_Quit();
     return 0;

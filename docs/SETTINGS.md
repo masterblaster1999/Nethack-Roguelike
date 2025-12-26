@@ -34,6 +34,18 @@ Comments start with `#` or `;`.
 
 - `start_fullscreen` (`true/false`, default `false`)
 
+- `vsync` (`true/false`, default `true`)
+  - When `true`, the renderer uses vsync (smoother animation, lower CPU usage).
+
+- `max_fps` (int, default `0`)
+  - `0` disables the FPS cap (only a small yield delay is used).
+  - When `vsync = false`, values are clamped to `30..240`.
+
+### Input
+
+- `controller_enabled` (`true/false`, default `true`)
+  - Enables SDL2 GameController support (D-pad movement, A confirm, etc.).
+
 ### Gameplay QoL
 
 - `auto_pickup` (`off | gold | all`, default `gold`)

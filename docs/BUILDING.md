@@ -107,3 +107,14 @@ This repo’s CMake is set up to:
 - Prefer **SDL2 config packages** (vcpkg/MSYS/etc)
 - On Linux/macOS, fall back to **pkg-config**
 - On Windows, automatically **FetchContent** SDL2 when enabled/needed
+
+
+## Unit tests
+
+This project includes a small unit test executable (no SDL required).
+
+```bash
+cmake -S . -B build -DPROCROGUE_BUILD_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```

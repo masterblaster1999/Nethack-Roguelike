@@ -1714,6 +1714,19 @@ void Game::handleAction(Action a) {
             case Action::Cancel:
                 closeInventory();
                 break;
+
+            case Action::Confirm: {
+                // Context action: equip if equipable, otherwise use if consumable.
+                if (!inv.empty()) {
+                    invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
+                    const Item& it = inv[static_cast<size_t>(invSel)];
+                    const ItemDef& d = itemDef(it.kind);
+                    if (d.slot != EquipSlot::None) acted = equipSelected();
+                    else if (d.consumable) acted = useSelected();
+                }
+                break;
+            }
+
             case Action::Equip:
                 acted = equipSelected();
                 break;

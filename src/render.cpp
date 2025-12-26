@@ -1,13 +1,14 @@
 #include "render.hpp"
 #include "ui_font.hpp"
 #include "rng.hpp"
+#include "version.hpp"
 
 #include <algorithm>
 #include <iostream>
 #include <sstream>
 
-Renderer::Renderer(int windowW, int windowH, int tileSize, int hudHeight)
-    : winW(windowW), winH(windowH), tile(tileSize), hudH(hudHeight) {}
+Renderer::Renderer(int windowW, int windowH, int tileSize, int hudHeight, bool vsync)
+    : winW(windowW), winH(windowH), tile(tileSize), hudH(hudHeight), vsyncEnabled(vsync) {}
 
 Renderer::~Renderer() {
     shutdown();
@@ -18,7 +19,8 @@ bool Renderer::init() {
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0"); // nearest-neighbor
 
-    window = SDL_CreateWindow("ProcRogue",
+    const std::string title = std::string(PROCROGUE_APPNAME) + " v" + PROCROGUE_VERSION;
+    window = SDL_CreateWindow(title.c_str(),
                               SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                               winW, winH,
                               SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
@@ -27,7 +29,9 @@ bool Renderer::init() {
         return false;
     }
 
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    Uint32 rFlags = SDL_RENDERER_ACCELERATED;
+    if (vsyncEnabled) rFlags |= SDL_RENDERER_PRESENTVSYNC;
+    renderer = SDL_CreateRenderer(window, -1, rFlags);
     if (!renderer) {
         std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << "\n";
         SDL_DestroyWindow(window); window = nullptr;
@@ -463,7 +467,10 @@ void Renderer::drawHud(const Game& game) {
     const Color green{120,255,120,255};
 
     // Top row: Title and basic stats
-    drawText5x7(renderer, 8, winH - hudH + 8, 2, white, "PROCROGUE++");
+    {
+        const std::string hudTitle = std::string("PROCROGUE++ V") + PROCROGUE_VERSION;
+        drawText5x7(renderer, 8, winH - hudH + 8, 2, white, hudTitle);
+    }
 
     const Entity& p = game.player();
     std::stringstream ss;
@@ -496,9 +503,9 @@ void Renderer::drawHud(const Game& game) {
     drawText5x7(renderer, 8, controlY1, 2, gray,
         "MOVE: WASD/ARROWS/YUBN | . WAIT | Z REST | < > STAIRS");
     drawText5x7(renderer, 8, controlY2, 2, gray,
-        "G PICK | I INV | F FIRE | L LOOK | C SRCH | O AUTO | P PICK");
+        "G PICK | I INV (E EQUIP U USE X DROP) | F FIRE | L/V LOOK");
     drawText5x7(renderer, 8, controlY3, 2, gray,
-        "M MINI | TAB STATS | F5 SAVE | F9 LOAD | F12 SHOT | ? HELP");
+        "M MINI | TAB STATS | F5 SAVE | F9 LOAD | PGUP/PGDN LOG | F12 SHOT | ?/H HELP");
 
     // Message log
     const auto& msgs = game.messages();
@@ -555,7 +562,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     int x = bg.x + 12;
     int y = bg.y + 12;
 
-    drawText5x7(renderer, x, y, scale, yellow, "INVENTORY  (UP/DOWN SELECT, E EQUIP, U USE, X DROP, ESC CLOSE)  [M]=MELEE [R]=RANGED [A]=ARMOR");
+    drawText5x7(renderer, x, y, scale, yellow, "INVENTORY  (UP/DOWN SELECT, ENTER ACT, E EQUIP, U USE, X DROP, ESC CLOSE)  [M]=MELEE [R]=RANGED [A]=ARMOR");
     y += 7 * scale + 10;
 
     const auto& inv = game.inventory();
@@ -637,7 +644,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("STATS / SCORES: TAB");
     lineGray("SCREENSHOT: F12 (SAVES A .BMP)");
     lineGray("MOUSE: LMB AUTO-TRAVEL, RMB LOOK");
-    lineGray("INVENTORY: I   (E EQUIP, U USE, X DROP, ESC CLOSE)");
+    lineGray("INVENTORY: I   (ENTER ACT, E EQUIP, U USE, X DROP, ESC CLOSE)");
     lineGray("RANGED: F TARGET, ENTER FIRE, ESC CANCEL");
     lineGray("STAIRS: < UP, > DOWN   (ENTER ALSO WORKS WHILE STANDING ON STAIRS)");
     lineGray("LOG SCROLL: PAGEUP / PAGEDOWN");

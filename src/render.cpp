@@ -626,6 +626,10 @@ void Renderer::drawOptionsOverlay(const Game& game) {
     int x = x0 + pad;
     int y = y0 + pad;
 
+    // Local UI palette.
+    const Color white{255, 255, 255, 255};
+    const Color gray{180, 180, 180, 255};
+
     drawText5x7(renderer, x, y, 2, white, "OPTIONS");
     y += 24;
     drawText5x7(renderer, x, y, 1, gray, "UP/DOWN SELECT  LEFT/RIGHT CHANGE  ESC CLOSE");
@@ -643,7 +647,7 @@ void Renderer::drawOptionsOverlay(const Game& game) {
     const int sel = game.optionsSelection();
 
     auto drawOpt = [&](int idx, const std::string& label, const std::string& value) {
-        const SDL_Color c = (sel == idx) ? white : gray;
+        const Color c = (sel == idx) ? white : gray;
         const std::string line = (sel == idx ? "> " : "  ") + label + value;
         drawText5x7(renderer, x, y, 2, c, line);
         y += 22;
@@ -689,6 +693,14 @@ void Renderer::drawCommandOverlay(const Game& game) {
     const int pad = 10;
     const int x = bg.x + pad;
     int y = bg.y + 8;
+
+    // Local UI palette.
+    const Color white{255, 255, 255, 255};
+    const Color gray{180, 180, 180, 255};
+
+    // Local UI palette.
+    const Color white{255, 255, 255, 255};
+    const Color gray{180, 180, 180, 255};
 
     // Fit the command string to the bar width.
     const int maxChars = std::max(0, (bg.w - 2 * pad) / (6 * 2)); // 5x7 font: ~6px per char at scale1
@@ -757,7 +769,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineWhite("KEYBINDINGS:");
     auto baseName = [](const std::string& p) -> std::string {
         if (p.empty()) return {};
-        size_t i = p.find_last_of("/\");
+        size_t i = p.find_last_of("/\\");
         if (i == std::string::npos) return p;
         return p.substr(i + 1);
     };

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(ProcRogue
-    VERSION 0.6.0
+    VERSION 0.6.1
     DESCRIPTION "A tiny NetHack-inspired roguelike with procedurally generated pixel sprites (SDL2)"
     LANGUAGES C CXX
 )
@@ -150,7 +150,7 @@ if (NOT _SDL2_LIB)
         # can configure without needing Git installed.
         FetchContent_Declare(
             SDL2
-            URL https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.30.0.tar.gz
+            URL https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.32.10.tar.gz
         )
         FetchContent_MakeAvailable(SDL2)
 

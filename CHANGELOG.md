@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.1] - 2025-12-26
+
+### Added
+- Real **GitHub Actions CI** (build + unit tests) instead of the placeholder workflow.
+- Repo hygiene files: `.gitignore`, `.editorconfig`, `.clang-format`.
+
+### Changed
+- FetchContent SDL2 archive bumped to **SDL2 2.32.10** for consistency with docs.
+- Default stairs bindings no longer use `kp_9` / `kp_3` (avoids conflicts with diagonal movement).
+
+### Fixed
+- **CMakePresets**: fixed invalid parent preset reference (Visual Studio could fail to load presets).
+- **Build breakages** caused by accidental escaping / broken string literals in `game.cpp`, `render.cpp`, and `settings.cpp`.
+- Options/command overlays now use a consistent local UI palette (`white` / `gray`) and the correct `Color` type.
+
 ## [0.6.0] - 2025-12-26
 
 ### Added

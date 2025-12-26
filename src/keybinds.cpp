@@ -277,11 +277,9 @@ KeyBinds KeyBinds::defaults() {
 
     add(Action::StairsUp, SDLK_COMMA, KMOD_SHIFT);
     add(Action::StairsUp, SDLK_LESS);
-    add(Action::StairsUp, SDLK_KP_9);
 
     add(Action::StairsDown, SDLK_PERIOD, KMOD_SHIFT);
     add(Action::StairsDown, SDLK_GREATER);
-    add(Action::StairsDown, SDLK_KP_3);
 
     add(Action::AutoExplore, SDLK_o);
     add(Action::ToggleAutoPickup, SDLK_p);

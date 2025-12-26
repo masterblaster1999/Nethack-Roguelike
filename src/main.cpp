@@ -35,7 +35,27 @@ static bool hasFlag(int argc, char** argv, const char* flag) {
     return false;
 }
 
+static void printUsage(const char* exe) {
+    std::cout
+        << PROCROGUE_APPNAME << " " << PROCROGUE_VERSION << "\n"
+        << "Usage: " << (exe ? exe : "procrogue") << " [options]\n\n"
+        << "Options:\n"
+        << "  --seed <n>        Start a new run with a specific seed\n"
+        << "  --load            Auto-load the save on start (alias: --continue)\n"
+        << "  --version, -v     Print version and exit\n"
+        << "  --help, -h        Show this help and exit\n";
+}
+
 int main(int argc, char** argv) {
+    if (hasFlag(argc, argv, "--help") || hasFlag(argc, argv, "-h")) {
+        printUsage(argc > 0 ? argv[0] : "procrogue");
+        return 0;
+    }
+    if (hasFlag(argc, argv, "--version") || hasFlag(argc, argv, "-v")) {
+        std::cout << PROCROGUE_APPNAME << " " << PROCROGUE_VERSION << "\n";
+        return 0;
+    }
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
         return 1;

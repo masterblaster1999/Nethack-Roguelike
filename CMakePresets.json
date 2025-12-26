@@ -38,18 +38,20 @@
             "name": "ninja-release-tests",
             "displayName": "Ninja Release + tests",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/ninja-release",
+            "binaryDir": "${sourceDir}/build/ninja-release-tests",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "PROCROGUE_BUILD_TESTS": true
+                "PROCROGUE_BUILD_TESTS": "ON"
             },
             "description": "(with tests)"
         },
         {
             "name": "tests",
             "displayName": "Tests (no SDL)",
-            "inherits": "debug",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/tests",
             "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
                 "PROCROGUE_BUILD_GAME": "OFF",
                 "PROCROGUE_BUILD_TESTS": "ON"
             }
@@ -73,6 +75,16 @@
             "name": "tests",
             "displayName": "Build tests (no SDL)",
             "configurePreset": "tests"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "tests",
+            "displayName": "Run unit tests",
+            "configurePreset": "tests",
+            "output": {
+                "outputOnFailure": true
+            }
         }
     ]
 }

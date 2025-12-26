@@ -81,7 +81,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     std::string cmdIn = toLower(toks[0]);
 
-    if (cmdIn == \"?\" || cmdIn == \"commands\") cmdIn = \"help\";
+    if (cmdIn == "?" || cmdIn == "commands") cmdIn = "help";
     std::vector<std::string> cmds = extendedCommandList();
 
     // Exact match first, else unique prefix match.
@@ -123,15 +123,15 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     if (cmd == "help" || cmd == "?" || cmd == "commands") {
         game.pushSystemMessage("EXTENDED COMMANDS:");
         auto list = extendedCommandList();
-        std::string line = "  ";
+        std::string outLine = "  ";
         for (const auto& c : list) {
-            if (line.size() + c.size() + 1 > 46) {
-                game.pushSystemMessage(line);
-                line = "  ";
+            if (outLine.size() + c.size() + 1 > 46) {
+                game.pushSystemMessage(outLine);
+                outLine = "  ";
             }
-            line += c + " ";
+            outLine += c + " ";
         }
-        if (line != "  ") game.pushSystemMessage(line);
+        if (outLine != "  ") game.pushSystemMessage(outLine);
         game.pushSystemMessage("TIP: type a prefix (e.g., 'autop') and press ENTER.");
         return;
     }

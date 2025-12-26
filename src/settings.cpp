@@ -4,38 +4,47 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <string>
 #include <vector>
 
-static std::string ltrim(std::string s) {
+namespace {
+
+std::string ltrim(std::string s) {
     s.erase(s.begin(),
         std::find_if(s.begin(), s.end(), [](unsigned char ch) { return !std::isspace(ch); }));
     return s;
 }
 
-static std::string rtrim(std::string s) {
+std::string rtrim(std::string s) {
     s.erase(
         std::find_if(s.rbegin(), s.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(),
         s.end());
     return s;
 }
 
-static std::string trim(std::string s) {
+std::string trim(std::string s) {
     return rtrim(ltrim(std::move(s)));
 }
 
-static std::string toLower(std::string s) {
+std::string toLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s;
 }
 
-static bool parseBool(const std::string& v, bool& out) {
+bool parseBool(const std::string& v, bool& out) {
     const std::string s = toLower(trim(v));
-    if (s == "1" || s == "true" || s == "yes" || s == "on") { out = true; return true; }
-    if (s == "0" || s == "false" || s == "no"  || s == "off") { out = false; return true; }
+    if (s == "1" || s == "true" || s == "yes" || s == "on") {
+        out = true;
+        return true;
+    }
+    if (s == "0" || s == "false" || s == "no" || s == "off") {
+        out = false;
+        return true;
+    }
     return false;
 }
 
-static bool parseInt(const std::string& v, int& out) {
+bool parseInt(const std::string& v, int& out) {
     try {
         out = std::stoi(trim(v));
         return true;
@@ -43,6 +52,8 @@ static bool parseInt(const std::string& v, int& out) {
         return false;
     }
 }
+
+} // namespace
 
 Settings loadSettings(const std::string& path) {
     Settings s;
@@ -113,152 +124,103 @@ bool writeDefaultSettings(const std::string& path) {
     std::ofstream f(path);
     if (!f) return false;
 
-    f << "# ProcRogue settings\n";
-    f << "# Edit this file and restart the game.\n\n";
+    // Use a raw string literal to avoid fragile escaping / accidental newline-in-string bugs.
+    f << R"INI(# ProcRogue settings
+#
+# Lines are: key = value
+# Comments start with # or ;
+#
+# This file is auto-created on first run. Edit it and restart the game.
 
-    f << "# Rendering / UI\n";
-    f << "tile_size = 32\n";
-    f << "hud_height = 160\n";
-    f << "start_fullscreen = false\n";
-    f << "\n";
+# Rendering / UI
+tile_size = 32
+hud_height = 160
+start_fullscreen = false
 
-    f << "# Rendering / performance\n";
-    f << "# vsync: true/false  (true = lower CPU usage, smoother rendering)\n";
-    f << "vsync = true\n";
-    f << "# max_fps: 0 disables; otherwise 30..240 (only used when vsync=false)\n";
-    f << "max_fps = 0\n";
-    f << "\n";
+# Rendering / performance
+# vsync: true/false  (true = lower CPU usage, smoother rendering)
+vsync = true
+# max_fps: 0 disables; otherwise 30..240 (only used when vsync=false)
+max_fps = 0
 
-    f << "# Input\n";
-    f << "# controller_enabled: true/false  (enables SDL2 game controller support)\n";
-    f << "controller_enabled = true\n";
-    f << "\n";
+# Input
+# controller_enabled: true/false  (enables SDL2 game controller support)
+controller_enabled = true
 
-    f << "# Gameplay QoL\n";
-    f << "# auto_pickup: off | gold | all\n";
-    f << "auto_pickup = gold\n";
-    f << "# auto_step_delay_ms: 10..500 (lower = faster auto-move)\n";
-    f << "auto_step_delay_ms = 45\n\n";
+# Gameplay QoL
+# auto_pickup: off | gold | all
+auto_pickup = gold
+# auto_step_delay_ms: 10..500 (lower = faster auto-move)
+auto_step_delay_ms = 45
 
-    f << "# Item identification\n";
-    f << "# identify_items: true/false  (true = potions/scrolls start unidentified)\n";
-    f << "identify_items = true\n\n";
+# Item identification
+# identify_items: true/false  (true = potions/scrolls start unidentified)
+identify_items = true
 
-    f << "# Autosave\n";
-    f << "# autosave_every_turns: 0 disables; otherwise saves an autosave file every N turns.\n";
-    f << "autosave_every_turns = 200\n";
+# Autosave
+# autosave_every_turns: 0 disables; otherwise saves an autosave file every N turns.
+autosave_every_turns = 200
 
-    f << "
-";
-    f << "# Keybindings
-";
-    f << "#
-";
-    f << "# Rebind keys by adding entries of the form:
-";
-    f << "#   bind_<action> = key[, key, ...]
-";
-    f << "#
-";
-    f << "# Modifiers: shift, ctrl, alt. Example: shift+comma
-";
-    f << "# Tip: for '<' and '>' on most layouts, use shift+comma / shift+period.
-";
-    f << "#
-";
-    f << "# Movement
-";
-    f << "bind_up = w, up, kp_8
-";
-    f << "bind_down = s, down, kp_2
-";
-    f << "bind_left = a, left, kp_4
-";
-    f << "bind_right = d, right, kp_6
-";
-    f << "bind_up_left = q, kp_7
-";
-    f << "bind_up_right = e, kp_9
-";
-    f << "bind_down_left = z, kp_1
-";
-    f << "bind_down_right = c, kp_3
-";
-    f << "
-";
-    f << "# Actions
-";
-    f << "bind_confirm = enter, kp_enter
-";
-    f << "bind_cancel = escape, backspace
-";
-    f << "bind_wait = space
-";
-    f << "bind_rest = r
-";
-    f << "bind_pickup = g, comma, kp_0
-";
-    f << "bind_inventory = i, tab
-";
-    f << "bind_fire = f
-";
-    f << "bind_search = c
-";
-    f << "bind_look = l, v
-";
-    f << "bind_stairs_up = shift+comma, less, kp_9
-";
-    f << "bind_stairs_down = shift+period, greater, kp_3
-";
-    f << "bind_auto_explore = o
-";
-    f << "bind_toggle_auto_pickup = p
-";
-    f << "
-";
-    f << "# Inventory-specific
-";
-    f << "bind_equip = e
-";
-    f << "bind_use = u
-";
-    f << "bind_drop = x
-";
-    f << "bind_drop_all = shift+x
-";
-    f << "bind_sort_inventory = shift+s
-";
-    f << "
-";
-    f << "# UI / meta
-";
-    f << "bind_help = f1, shift+slash, h
-";
-    f << "bind_options = f2
-";
-    f << "bind_command = shift+3
-";
-    f << "bind_toggle_minimap = m
-";
-    f << "bind_toggle_stats = shift+tab
-";
-    f << "bind_save = f5
-";
-    f << "bind_restart = f6
-";
-    f << "bind_load = f9
-";
-    f << "bind_load_auto = f10
-";
-    f << "bind_log_up = pageup
-";
-    f << "bind_log_down = pagedown
-";
-    f << "
-";
+# -----------------------------------------------------------------------------
+# Keybindings
+#
+# Rebind keys by adding entries of the form:
+#   bind_<action> = key[, key, ...]
+#
+# Modifiers: shift, ctrl, alt. Example: shift+comma
+# Tip: for '<' and '>' on most layouts, use shift+comma / shift+period.
+#
+# Set a binding to "none" to disable it.
+# -----------------------------------------------------------------------------
+
+# Movement
+bind_up = w, up, kp_8
+bind_down = s, down, kp_2
+bind_left = a, left, kp_4
+bind_right = d, right, kp_6
+bind_up_left = q, kp_7
+bind_up_right = e, kp_9
+bind_down_left = z, kp_1
+bind_down_right = c, kp_3
+
+# Actions
+bind_confirm = enter, kp_enter
+bind_cancel = escape, backspace
+bind_wait = space, period
+bind_rest = r
+bind_pickup = g, comma, kp_0
+bind_inventory = i, tab
+bind_fire = f
+bind_search = c
+bind_look = l, v
+bind_stairs_up = shift+comma, less
+bind_stairs_down = shift+period, greater
+bind_auto_explore = o
+bind_toggle_auto_pickup = p
+
+# Inventory-specific
+bind_equip = e
+bind_use = u
+bind_drop = x
+bind_drop_all = shift+x
+bind_sort_inventory = shift+s
+
+# UI / meta
+bind_help = f1, shift+slash, h
+bind_options = f2
+bind_command = shift+3
+bind_toggle_minimap = m
+bind_toggle_stats = shift+tab
+bind_save = f5
+bind_restart = f6
+bind_load = f9
+bind_load_auto = f10
+bind_log_up = pageup
+bind_log_down = pagedown
+)INI";
+
     return true;
 }
-
 
 bool updateIniKey(const std::string& path, const std::string& key, const std::string& value) {
     std::ifstream in(path);
@@ -273,7 +235,7 @@ bool updateIniKey(const std::string& path, const std::string& key, const std::st
         return s;
     };
 
-    const auto trim = [](std::string s) {
+    const auto trimLocal = [](std::string s) {
         auto notSpace = [](unsigned char c) { return !std::isspace(c); };
         s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
         s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
@@ -290,7 +252,7 @@ bool updateIniKey(const std::string& path, const std::string& key, const std::st
 
         auto eq = raw.find('=');
         if (eq != std::string::npos) {
-            std::string k = trim(raw.substr(0, eq));
+            std::string k = trimLocal(raw.substr(0, eq));
             if (!k.empty() && keyLower(k) == keyLower(key)) {
                 lines.push_back(key + " = " + value);
                 found = true;

@@ -107,6 +107,12 @@ The settings file is created automatically on first run.
 - Auto-load the save on startup:
   - `procrogue --load`
 
+- Print the game version:
+  - `procrogue --version`
+
+- Show command-line help:
+  - `procrogue --help`
+
 ## Building
 
 See `docs/BUILDING.md`.

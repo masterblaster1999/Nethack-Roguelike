@@ -71,6 +71,9 @@ enum class Action : uint8_t {
 
     // New actions
     Search,             // Spend a turn searching for nearby traps
+    Disarm,             // Attempt to disarm a discovered adjacent trap
+    CloseDoor,          // Close an adjacent open door
+    LockDoor,           // Lock an adjacent closed/open door (consumes a Key)
     ToggleAutoPickup,   // Cycle auto-pickup mode (OFF/GOLD/ALL)
     AutoExplore,        // Auto-explore (walk to nearest unexplored frontier)
 
@@ -246,6 +249,8 @@ public:
     // Inventory/UI accessors for renderer
     const std::vector<Item>& inventory() const { return inv; }
     bool isInventoryOpen() const { return invOpen; }
+    // True when the inventory overlay is being used for a special prompt (e.g. choosing an item for Scroll of Identify).
+    bool isInventoryIdentifyMode() const { return invIdentifyMode; }
     int inventorySelection() const { return invSel; }
     bool isEquipped(int itemId) const;
     std::string equippedTag(int itemId) const; // e.g. "M", "R", "A", "MR"
@@ -440,6 +445,8 @@ private:
     int equipArmorId = 0;
     bool invOpen = false;
     int invSel = 0;
+    // Temporary inventory sub-mode (used for prompts like selecting an item to identify).
+    bool invIdentifyMode = false;
 
     // Targeting mode
     bool targeting = false;
@@ -658,8 +665,11 @@ private:
     std::vector<Vec2i> findPathBfs(Vec2i start, Vec2i goal, bool requireExplored) const;
     void stopAutoMove(bool silent);
     bool searchForTraps();
+    bool disarmTrap();
+    bool closeDoor();
+    bool lockDoor();
     Trap* trapAtMut(int x, int y);
-    void triggerTrapAt(Vec2i pos, Entity& victim);
+    void triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm = false);
     void applyEndOfTurnEffects();
     Vec2i randomFreeTileInRoom(const Room& r, int tries = 200);
 

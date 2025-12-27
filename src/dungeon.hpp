@@ -76,7 +76,10 @@ public:
     bool isOpaque(int x, int y) const;
     bool isDoorClosed(int x, int y) const;
     bool isDoorLocked(int x, int y) const;
+    bool isDoorOpen(int x, int y) const;
+    void closeDoor(int x, int y);
     void openDoor(int x, int y);
+    void lockDoor(int x, int y);
     void unlockDoor(int x, int y);
 
     void generate(RNG& rng);

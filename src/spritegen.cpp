@@ -40,7 +40,7 @@ void setPx(SpritePixels& s, int x, int y, Color c) {
     s.at(x, y) = c;
 }
 
-void blendPx(SpritePixels& s, int x, int y, Color c) {
+[[maybe_unused]] void blendPx(SpritePixels& s, int x, int y, Color c) {
     if (x < 0 || y < 0 || x >= s.w || y >= s.h) return;
     Color& dst = s.at(x, y);
     float a = c.a / 255.0f;

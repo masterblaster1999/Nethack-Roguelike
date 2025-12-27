@@ -184,6 +184,9 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     if (name == "inventory" || name == "inv") return Action::Inventory;
     if (name == "fire") return Action::Fire;
     if (name == "search") return Action::Search;
+    if (name == "disarm" || name == "untrap") return Action::Disarm;
+    if (name == "close_door" || name == "closedoor" || name == "close") return Action::CloseDoor;
+    if (name == "lock_door" || name == "lockdoor") return Action::LockDoor;
     if (name == "look") return Action::Look;
     if (name == "stairs_up" || name == "stairsup") return Action::StairsUp;
     if (name == "stairs_down" || name == "stairsdown") return Action::StairsDown;
@@ -274,6 +277,9 @@ KeyBinds KeyBinds::defaults() {
 
     add(Action::Fire, SDLK_f);
     add(Action::Search, SDLK_c);
+    add(Action::Disarm, SDLK_t);
+    add(Action::CloseDoor, SDLK_k);
+    add(Action::LockDoor, SDLK_k, KMOD_SHIFT);
     add(Action::Look, SDLK_l);
     add(Action::Look, SDLK_v);
 
@@ -401,6 +407,9 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::Fire,
         Action::Look,
         Action::Search,
+        Action::Disarm,
+        Action::CloseDoor,
+        Action::LockDoor,
         Action::AutoExplore,
         Action::ToggleAutoPickup,
         Action::Pickup,
@@ -445,6 +454,9 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
     {Action::Inventory, "inventory"},
     {Action::Fire, "fire"},
     {Action::Search, "search"},
+    {Action::Disarm, "disarm"},
+    {Action::CloseDoor, "close_door"},
+    {Action::LockDoor, "lock_door"},
     {Action::Look, "look"},
     {Action::StairsUp, "stairs_up"},
     {Action::StairsDown, "stairs_down"},

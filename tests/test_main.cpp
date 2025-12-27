@@ -5,6 +5,8 @@
 #include "settings.hpp"
 
 #include <cstdint>
+#include <cctype>
+#include <cstdio>
 #include <fstream>
 #if __has_include(<filesystem>)
 #include <filesystem>
@@ -139,6 +141,41 @@ void test_locked_door_tile_rules() {
     expect(d.at(5, 5).type == TileType::DoorOpen, "openDoor should open an unlocked door");
 }
 
+
+void test_close_door_tile_rules() {
+    Dungeon d(10, 10);
+    d.at(5, 5).type = TileType::DoorOpen;
+
+    expect(d.isDoorOpen(5, 5), "DoorOpen should be detected as open door");
+    expect(d.isPassable(5, 5), "Open door should be passable");
+    expect(d.isWalkable(5, 5), "Open door should be walkable");
+    expect(!d.isOpaque(5, 5), "Open door should not block FOV/LOS");
+
+    d.closeDoor(5, 5);
+
+    expect(d.isDoorClosed(5, 5), "closeDoor should convert an open door into a closed door");
+    expect(!d.isDoorOpen(5, 5), "Closed door should not still be reported as open");
+    // Closed doors are passable for pathing/AI, but not walkable for movement.
+    expect(d.isPassable(5, 5), "Closed door should be passable for pathing/AI");
+    expect(!d.isWalkable(5, 5), "Closed door should not be walkable while closed");
+    expect(d.isOpaque(5, 5), "Closed door should block FOV/LOS");
+}
+
+void test_lock_door_tile_rules() {
+    Dungeon d(10, 10);
+    d.at(5, 5).type = TileType::DoorClosed;
+
+    d.lockDoor(5, 5);
+
+    expect(d.isDoorLocked(5, 5), "lockDoor should convert a closed door into a locked door");
+    expect(!d.isPassable(5, 5), "Locked doors should not be passable after lockDoor");
+    expect(d.isOpaque(5, 5), "Locked doors should be opaque after lockDoor");
+    expect(!d.isWalkable(5, 5), "Locked doors should not be walkable after lockDoor");
+
+    d.unlockDoor(5, 5);
+    expect(d.isDoorClosed(5, 5), "unlockDoor should convert a locked door back into a closed door");
+}
+
 void test_fov_locked_door_blocks_visibility() {
     Dungeon d(10, 5);
 
@@ -268,6 +305,90 @@ void test_scores_new_format_load_and_escape() {
 #endif
 }
 
+
+
+
+void test_scores_load_utf8_bom_header() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "procrogue_scores_bom_test.csv";
+#else
+    const std::string path = "procrogue_scores_bom_test.csv";
+#endif
+
+    {
+        std::ofstream out(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        out << "\xEF\xBB\xBF" << "timestamp,name,slot,won,score,depth,turns,kills,level,gold,seed,cause,game_version\n";
+        out << "2025-01-01 00:00:00,Tester,default,0,1234,3,100,5,2,10,42,CAUSE,0.8.0\n";
+    }
+
+    ScoreBoard sb;
+#if __has_include(<filesystem>)
+    expect(sb.load(path.string()), "ScoreBoard BOM load failed");
+#else
+    expect(sb.load(path), "ScoreBoard BOM load failed");
+#endif
+    expect(sb.entries().size() == 1, "ScoreBoard BOM entry count");
+
+    const auto& e = sb.entries().front();
+    expect(e.name == "Tester", "ScoreBoard BOM name parsed");
+    expect(e.slot == "default", "ScoreBoard BOM slot parsed");
+    expect(e.cause == "CAUSE", "ScoreBoard BOM cause parsed");
+    expect(e.gameVersion == "0.8.0", "ScoreBoard BOM version parsed");
+    expect(e.score == 1234u, "ScoreBoard BOM score parsed");
+
+#if __has_include(<filesystem>)
+    std::error_code ec;
+    fs::remove(path, ec);
+#else
+    std::remove(path.c_str());
+#endif
+}
+
+
+void test_scores_quoted_whitespace_preserved() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "procrogue_scores_whitespace_test.csv";
+#else
+    const std::string path = "procrogue_scores_whitespace_test.csv";
+#endif
+
+    {
+#if __has_include(<filesystem>)
+        std::ofstream out(path);
+#else
+        std::ofstream out(path);
+#endif
+        out << "timestamp,name,won,score,depth,turns,kills,level,gold,seed,cause,game_version\n";
+        out << "2025-01-01T00:00:00Z,   \"  Spaced Name  \"   ,0,0,1,0,0,1,0,1,   \"  CAUSE WITH SPACES  \"   ,0.8.0\n";
+    }
+
+    ScoreBoard sb;
+#if __has_include(<filesystem>)
+    expect(sb.load(path.string()), "ScoreBoard whitespace load failed");
+#else
+    expect(sb.load(path), "ScoreBoard whitespace load failed");
+#endif
+    expect(sb.entries().size() == 1, "ScoreBoard whitespace entry count");
+
+    const auto& e = sb.entries().front();
+    expect(e.name == "  Spaced Name  ", "Quoted whitespace in name should be preserved");
+    expect(e.cause == "  CAUSE WITH SPACES  ", "Quoted whitespace in cause should be preserved");
+
+#if __has_include(<filesystem>)
+    std::error_code ec;
+    fs::remove(path, ec);
+#else
+    std::remove(path.c_str());
+#endif
+}
 void test_scores_append_roundtrip() {
 #if __has_include(<filesystem>)
     namespace fs = std::filesystem;
@@ -315,6 +436,283 @@ void test_scores_append_roundtrip() {
 #if __has_include(<filesystem>)
     std::error_code ec;
     fs::remove(path, ec);
+#endif
+}
+
+void test_scores_trim_keeps_recent_runs() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "procrogue_scores_trim_recent_test.csv";
+    std::error_code ec;
+    fs::remove(path, ec);
+#else
+    const std::string path = "procrogue_scores_trim_recent_test.csv";
+    std::remove(path.c_str());
+#endif
+
+    // Create a file with far more entries than we keep. Old behavior (trim by score only)
+    // would discard low-scoring recent runs. New behavior keeps a mix: top scores + recent history.
+    {
+#if __has_include(<filesystem>)
+        std::ofstream out(path);
+#else
+        std::ofstream out(path);
+#endif
+        out << "timestamp,name,slot,won,score,depth,turns,kills,level,gold,seed,cause,game_version\n";
+
+        // 150 high-scoring, older runs (day 1)
+        for (int i = 0; i < 150; ++i) {
+            const int mm = i / 60;
+            const int ss = i % 60;
+            char ts[64];
+            std::snprintf(ts, sizeof(ts), "2025-01-01 00:%02d:%02d", mm, ss);
+            out << ts << ",High,default,0," << (1000000 - i) << ",10,100,10,5,0," << i << ",,0.8.0\n";
+        }
+
+        // 60 low-scoring, newer runs (day 2)
+        for (int i = 0; i < 60; ++i) {
+            char ts[64];
+            std::snprintf(ts, sizeof(ts), "2025-01-02 00:00:%02d", i);
+            out << ts << ",Low,default,0,1,1,1,0,1,0," << (1000 + i) << ",,0.8.0\n";
+        }
+    }
+
+    ScoreBoard sb;
+#if __has_include(<filesystem>)
+    expect(sb.load(path.string()), "ScoreBoard trim/recent load failed");
+#else
+    expect(sb.load(path), "ScoreBoard trim/recent load failed");
+#endif
+
+    // We keep 60 top scores + 60 most recent runs.
+    expect(sb.entries().size() == 120, "ScoreBoard should keep 120 entries (top+recent mix)");
+
+    bool foundNewest = false;
+    for (const auto& e : sb.entries()) {
+        if (e.timestamp == "2025-01-02 00:00:59") {
+            foundNewest = true;
+            break;
+        }
+    }
+    expect(foundNewest, "ScoreBoard trimming should keep the newest low-score run");
+
+    // Also ensure the top score still survives.
+    if (!sb.entries().empty()) {
+        expect(sb.entries().front().score == 1000000u, "ScoreBoard should retain the top score");
+    }
+
+    // Trimming again to a smaller cap should still preserve some recent history.
+    sb.trim(10);
+    expect(sb.entries().size() == 10, "ScoreBoard should trim down to 10 entries");
+
+    bool foundNewestAfterSmallTrim = false;
+    for (const auto& e : sb.entries()) {
+        if (e.timestamp == "2025-01-02 00:00:59") {
+            foundNewestAfterSmallTrim = true;
+            break;
+        }
+    }
+    expect(foundNewestAfterSmallTrim, "ScoreBoard small trim should still keep the newest low-score run");
+
+#if __has_include(<filesystem>)
+    fs::remove(path, ec);
+#else
+    std::remove(path.c_str());
+#endif
+}
+
+void test_scores_u32_parsing_rejects_negative_and_overflow() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "procrogue_scores_u32_parse_test.csv";
+    std::error_code ec;
+    fs::remove(path, ec);
+#else
+    const std::string path = "procrogue_scores_u32_parse_test.csv";
+    std::remove(path.c_str());
+#endif
+
+    {
+        std::ofstream out(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        out << "timestamp,name,slot,won,score,depth,turns,kills,level,gold,seed,cause,game_version\n";
+        // Negative/overflow values should be rejected rather than wrapped into huge uint32_t values.
+        out << "2025-01-01 00:00:00,Tester,default,0,-1,3,-1,0,1,0,42949672960,CAUSE,0.8.0\n";
+    }
+
+    ScoreBoard sb;
+#if __has_include(<filesystem>)
+    expect(sb.load(path.string()), "ScoreBoard u32 parse load failed");
+#else
+    expect(sb.load(path), "ScoreBoard u32 parse load failed");
+#endif
+    expect(sb.entries().size() == 1, "ScoreBoard u32 parse entry count");
+
+    const auto& e = sb.entries().front();
+    expect(e.turns == 0u, "Negative turns should be rejected (remain default 0)");
+    expect(e.seed == 0u, "Overflow seed should be rejected (remain default 0)");
+    expect(e.score != 0u, "Invalid/negative score should trigger recompute");
+    expect(e.score < 1000000u, "Recomputed score should not be absurdly large");
+
+#if __has_include(<filesystem>)
+    fs::remove(path, ec);
+#else
+    std::remove(path.c_str());
+#endif
+}
+
+void test_scores_sort_ties_by_timestamp() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "procrogue_scores_tie_sort_test.csv";
+#else
+    const std::string path = "procrogue_scores_tie_sort_test.csv";
+#endif
+
+    {
+        std::ofstream out(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        out << "timestamp,name,slot,won,score,depth,turns,kills,level,gold,seed,cause,game_version\n";
+        out << "2025-01-01 00:00:00,Tester,default,0,500,3,100,0,1,0,1,,0.8.0\n";
+        out << "2025-01-02 00:00:00,Tester,default,0,500,3,100,0,1,0,1,,0.8.0\n";
+    }
+
+    ScoreBoard sb;
+#if __has_include(<filesystem>)
+    expect(sb.load(path.string()), "ScoreBoard tie sort load failed");
+#else
+    expect(sb.load(path), "ScoreBoard tie sort load failed");
+#endif
+    expect(sb.entries().size() == 2, "ScoreBoard tie sort entry count");
+
+    // With identical score/won/turns, newest timestamp should sort first.
+    expect(sb.entries()[0].timestamp == "2025-01-02 00:00:00", "ScoreBoard tie sort should prefer newest timestamp");
+
+#if __has_include(<filesystem>)
+    std::error_code ec;
+    fs::remove(path, ec);
+#endif
+}
+
+void test_scores_append_creates_parent_dirs() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "procrogue_scores_nested_dir_test";
+    const fs::path file = root / "nested" / "scores.csv";
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+
+    ScoreBoard sb;
+    ScoreEntry e;
+    e.timestamp = "2025-01-01 00:00:00";
+    e.won = false;
+    e.depth = 2;
+    e.turns = 10;
+    e.kills = 0;
+    e.level = 1;
+    e.gold = 0;
+    e.seed = 123;
+
+    expect(sb.append(file.string(), e), "ScoreBoard append should create missing parent directories");
+    expect(fs::exists(file), "ScoreBoard append should create the scores file");
+
+    fs::remove_all(root, ec);
+#else
+    // No filesystem support: skip.
+    expect(true, "Skipping directory-creation test (no <filesystem>)");
+#endif
+}
+
+void test_settings_updateIniKey_creates_parent_dirs() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "procrogue_settings_nested_dir_test";
+    const fs::path file = root / "nested" / "settings.ini";
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+
+    expect(updateIniKey(file.string(), "save_backups", "4"), "updateIniKey should create missing parent directories");
+    Settings s = loadSettings(file.string());
+    expect(s.saveBackups == 4, "updateIniKey should write settings in newly created dirs");
+
+    fs::remove_all(root, ec);
+#else
+    // No filesystem support: skip.
+    expect(true, "Skipping directory-creation test (no <filesystem>)");
+#endif
+}
+
+
+void test_settings_writeDefaultSettings_creates_parent_dirs() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "procrogue_settings_default_nested_dir_test";
+    const fs::path file = root / "nested" / "settings.ini";
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+
+    expect(writeDefaultSettings(file.string()), "writeDefaultSettings should create missing parent directories");
+    expect(fs::exists(file), "writeDefaultSettings should create the settings file");
+
+    Settings s = loadSettings(file.string());
+    expect(s.tileSize == 32, "writeDefaultSettings should write defaults (tile_size=32)");
+    expect(s.playerName == "PLAYER", "writeDefaultSettings should write defaults (player_name=PLAYER)");
+
+    fs::remove_all(root, ec);
+#else
+    // No filesystem support: skip.
+    expect(true, "Skipping writeDefaultSettings directory-creation test (no <filesystem>)");
+#endif
+}
+
+
+
+
+
+void test_settings_load_utf8_bom() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "procrogue_settings_bom_test.ini";
+#else
+    const std::string path = "procrogue_settings_bom_test.ini";
+#endif
+
+    {
+        std::ofstream f(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        f << "\xEF\xBB\xBF" << "save_backups = 4\n";
+    }
+
+#if __has_include(<filesystem>)
+    Settings s = loadSettings(path.string());
+#else
+    Settings s = loadSettings(path);
+#endif
+    expect(s.saveBackups == 4, "Settings BOM should parse save_backups");
+
+#if __has_include(<filesystem>)
+    std::error_code ec;
+    fs::remove(path, ec);
+#else
+    std::remove(path.c_str());
 #endif
 }
 
@@ -494,6 +892,124 @@ void test_settings_default_slot_parse() {
 }
 
 
+
+
+void test_settings_ini_helpers_create_update_remove() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "procrogue_settings_ini_helpers_test.ini";
+    std::error_code ec;
+    fs::remove(path, ec);
+#else
+    const std::string path = "procrogue_settings_ini_helpers_test.ini";
+    std::remove(path.c_str());
+#endif
+
+    // updateIniKey should create the file if it doesn't exist.
+#if __has_include(<filesystem>)
+    expect(updateIniKey(path.string(), "save_backups", "7"), "updateIniKey should create file when missing");
+    Settings s = loadSettings(path.string());
+#else
+    expect(updateIniKey(path, "save_backups", "7"), "updateIniKey should create file when missing");
+    Settings s = loadSettings(path);
+#endif
+    expect(s.saveBackups == 7, "updateIniKey created save_backups=7");
+
+    // updateIniKey should update an existing key.
+#if __has_include(<filesystem>)
+    expect(updateIniKey(path.string(), "save_backups", "2"), "updateIniKey should update an existing key");
+    s = loadSettings(path.string());
+#else
+    expect(updateIniKey(path, "save_backups", "2"), "updateIniKey should update an existing key");
+    s = loadSettings(path);
+#endif
+    expect(s.saveBackups == 2, "updateIniKey updated save_backups=2");
+
+    // updateIniKey should deduplicate multiple entries for the same key.
+    {
+        std::ofstream f(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+            , std::ios::app);
+        f << "\n# duplicate\n";
+        f << "save_backups = 9\n";
+    }
+
+#if __has_include(<filesystem>)
+    expect(updateIniKey(path.string(), "save_backups", "4"), "updateIniKey should handle duplicate keys");
+    s = loadSettings(path.string());
+#else
+    expect(updateIniKey(path, "save_backups", "4"), "updateIniKey should handle duplicate keys");
+    s = loadSettings(path);
+#endif
+    expect(s.saveBackups == 4, "updateIniKey should set save_backups=4 even with duplicates");
+
+    auto trimKey = [](std::string s) {
+        size_t a = 0;
+        while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+        size_t b = s.size();
+        while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+        return s.substr(a, b - a);
+    };
+    auto lowerKey = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+
+    int occurrences = 0;
+    {
+        std::ifstream in(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        std::string line;
+        while (std::getline(in, line)) {
+            std::string raw = line;
+            auto commentPos = raw.find_first_of("#;");
+            if (commentPos != std::string::npos) raw = raw.substr(0, commentPos);
+
+            auto eq = raw.find('=');
+            if (eq == std::string::npos) continue;
+
+            std::string k = lowerKey(trimKey(raw.substr(0, eq)));
+            if (k == "save_backups") ++occurrences;
+        }
+    }
+    expect(occurrences == 1, "updateIniKey should remove duplicate save_backups entries");
+
+    // removeIniKey should succeed if the file doesn't exist.
+#if __has_include(<filesystem>)
+    const fs::path missing = fs::temp_directory_path() / "procrogue_settings_ini_helpers_missing.ini";
+    fs::remove(missing, ec);
+    expect(removeIniKey(missing.string(), "save_backups"), "removeIniKey should succeed when file is missing");
+#else
+    const std::string missing = "procrogue_settings_ini_helpers_missing.ini";
+    std::remove(missing.c_str());
+    expect(removeIniKey(missing, "save_backups"), "removeIniKey should succeed when file is missing");
+#endif
+
+    // removeIniKey should remove an existing key (defaults should apply again).
+#if __has_include(<filesystem>)
+    expect(removeIniKey(path.string(), "save_backups"), "removeIniKey should remove an existing key");
+    s = loadSettings(path.string());
+#else
+    expect(removeIniKey(path, "save_backups"), "removeIniKey should remove an existing key");
+    s = loadSettings(path);
+#endif
+    expect(s.saveBackups == 3, "removeIniKey removed save_backups (defaults restored)");
+
+#if __has_include(<filesystem>)
+    fs::remove(path, ec);
+#else
+    std::remove(path.c_str());
+#endif
+}
 } // namespace
 
 int main() {
@@ -503,16 +1019,29 @@ int main() {
     test_dungeon_stairs_connected();
     test_secret_door_tile_rules();
     test_locked_door_tile_rules();
+    test_close_door_tile_rules();
+    test_lock_door_tile_rules();
     test_fov_locked_door_blocks_visibility();
     test_item_defs_sane();
 
     test_scores_legacy_load();
     test_scores_new_format_load_and_escape();
+    test_scores_load_utf8_bom_header();
+    test_scores_quoted_whitespace_preserved();
     test_scores_append_roundtrip();
+    test_scores_trim_keeps_recent_runs();
+    test_scores_u32_parsing_rejects_negative_and_overflow();
+    test_scores_sort_ties_by_timestamp();
+    test_scores_append_creates_parent_dirs();
+    test_settings_updateIniKey_creates_parent_dirs();
+    test_settings_writeDefaultSettings_creates_parent_dirs();
+
+    test_settings_load_utf8_bom();
 
     test_settings_save_backups_parse();
     test_settings_autopickup_smart_parse();
     test_settings_default_slot_parse();
+    test_settings_ini_helpers_create_update_remove();
 
     if (failures == 0) {
         std::cout << "All tests passed.\n";

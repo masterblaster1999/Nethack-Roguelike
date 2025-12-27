@@ -2,6 +2,103 @@
 
 
 
+
+
+
+
+
+
+## [0.20.0] - 2025-12-27
+
+### Added
+- **Lock door** action (`Shift+K` by default): lock an adjacent door by consuming a **Key**.
+  - Locks a **closed** door, or **closes + locks** an adjacent open door (if the doorway is not blocked).
+  - Locked doors are **impassable** until unlocked (use a key/lockpick or a Scroll of Knock).
+
+### Dev
+- Added `Dungeon::lockDoor()` and a unit test covering door locking/unlocking rules.
+
+## [0.19.0] - 2025-12-27
+
+### Changed
+- **Scroll of Identify** now lets you *choose* which unidentified potion/scroll to learn when multiple candidates exist.
+  - Press **Enter** on the highlighted inventory item to identify it.
+  - Press **Esc** to identify a random unknown item (preserves the previous random behavior).
+
+
+## [0.18.8] - 2025-12-27
+
+### Added
+- **Close door** action (`K` by default): close an adjacent open door.
+  - Only closes cardinally-adjacent doors; cannot close a blocked doorway.
+
+## [0.18.7] - 2025-12-27
+
+### Added
+- **Disarm trap** action (`T` by default): attempt to disarm a discovered adjacent trap.
+  - Chance scales with level; lockpicks improve success but can break on failure.
+  - On failure you may set the trap off.
+
+## [0.18.6] - 2025-12-27
+
+### Fixed
+- Default settings file creation (`writeDefaultSettings`) is now atomic and creates parent directories automatically (more robust for nested `--data-dir` paths and portable installs).
+
+### Dev
+- Added a unit test to ensure `writeDefaultSettings()` can create missing parent directories.
+## [0.18.5] - 2025-12-27
+
+### Fixed
+- Settings and scoreboard parsing now tolerate a UTF-8 BOM at the start of the file (common when editing on Windows).
+
+### Dev
+- Added unit tests covering BOM-prefixed `procrogue_scores.csv` and `procrogue_settings.ini` parsing.
+
+## [0.18.4] - 2025-12-27
+
+### Fixed
+- Scoreboard CSV numeric parsing now rejects negative/overflow values for unsigned fields (prevents wrapped huge numbers if the file is edited by hand).
+
+### Changed
+- Atomic text writes for the scoreboard and settings INI now create parent directories automatically (more robust for `--data-dir` / portable installs).
+- Scoreboard "top runs" ordering is now deterministic for tied scores (ties break by timestamp and metadata).
+
+### Dev
+- Added unit tests for hardened numeric parsing, tie-breaking sort order, and parent-directory creation for atomic writes.
+
+## [0.18.3] - 2025-12-27
+
+### Fixed
+- Scoreboard trimming now scales the **top+recent** mix correctly even when trimming to a small cap (e.g. a top-10 view), so recent history doesn't silently disappear.
+
+### Changed
+- INI helper writes (`updateIniKey()` / `removeIniKey()`) are now **atomic** and `updateIniKey()` deduplicates multiple existing entries for the same key.
+
+### Dev
+- Added unit tests for small-cap scoreboard trimming and INI key deduplication.
+
+## [0.18.2] - 2025-12-27
+
+### Fixed
+- Scoreboard trimming now keeps a mix of **top runs** and **recent runs**, so `#history` continues to show your latest games even if they are low-scoring.
+
+### Changed
+- `procrogue_scores.csv` retention increased to **120 entries** (top **60** by score + most recent **60** by timestamp).
+
+### Dev
+- Added a unit test covering scoreboard trimming behavior (top+recent mix).
+
+## [0.18.1] - 2025-12-27
+
+### Fixed
+- Scoreboard CSV parsing now preserves leading/trailing whitespace *inside quoted fields* (CSV semantics), while still trimming unquoted fields.
+- `removeIniKey()` now treats missing settings files as a no-op (instead of failing).
+
+### Changed
+- `updateIniKey()` now creates a minimal settings file if it doesn't exist (more robust for in-game `#bind` / options commands).
+
+### Dev
+- Added unit tests for quoted-whitespace CSV fields and INI helper behavior.
 ## [0.18.0] - 2025-12-27
 
 ### Added

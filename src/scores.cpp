@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <numeric>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -27,6 +29,17 @@ std::string toLower(std::string s) {
     return s;
 }
 
+void stripUtf8Bom(std::string& s) {
+    // Some editors (notably Windows tools) may write a UTF-8 BOM at the start of text files.
+    // If present, strip it so header/key parsing works as expected.
+    if (s.size() >= 3 &&
+        static_cast<unsigned char>(s[0]) == 0xEF &&
+        static_cast<unsigned char>(s[1]) == 0xBB &&
+        static_cast<unsigned char>(s[2]) == 0xBF) {
+        s.erase(0, 3);
+    }
+}
+
 // CSV parsing with support for quoted fields and escaped quotes ("").
 // We keep it intentionally simple; it's only used for ProcRogue's small scoreboard file.
 bool splitCsvLine(const std::string& line, std::vector<std::string>& out) {
@@ -35,6 +48,20 @@ bool splitCsvLine(const std::string& line, std::vector<std::string>& out) {
     cur.reserve(line.size());
 
     bool inQuotes = false;
+    bool fieldQuoted = false;
+    bool justClosedQuote = false;
+
+    auto pushField = [&]() {
+        if (fieldQuoted) {
+            out.push_back(cur);
+        } else {
+            out.push_back(trimStr(cur));
+        }
+        cur.clear();
+        inQuotes = false;
+        fieldQuoted = false;
+        justClosedQuote = false;
+    };
 
     for (size_t i = 0; i < line.size(); ++i) {
         char c = line[i];
@@ -47,6 +74,7 @@ bool splitCsvLine(const std::string& line, std::vector<std::string>& out) {
                     ++i;
                 } else {
                     inQuotes = false;
+                    justClosedQuote = true;
                 }
                 continue;
             }
@@ -55,19 +83,42 @@ bool splitCsvLine(const std::string& line, std::vector<std::string>& out) {
         }
 
         // Not in quotes.
-        if (c == '"') {
-            inQuotes = true;
-            continue;
-        }
         if (c == ',') {
-            out.push_back(trimStr(cur));
-            cur.clear();
+            pushField();
             continue;
         }
+
+        if (c == '"') {
+            // Start of a quoted field.
+            // Some CSV writers allow whitespace before the opening quote; treat it as quoted and
+            // discard that leading whitespace.
+            if (!fieldQuoted && trimStr(cur).empty()) {
+                cur.clear();
+                fieldQuoted = true;
+                inQuotes = true;
+                justClosedQuote = false;
+                continue;
+            }
+
+            // Otherwise treat it as a literal quote inside an unquoted field.
+            cur.push_back(c);
+            continue;
+        }
+
+        // Ignore whitespace after a closing quote before the comma/end (CSV semantics).
+        if (justClosedQuote) {
+            if (std::isspace(static_cast<unsigned char>(c))) {
+                continue;
+            }
+            justClosedQuote = false;
+        }
+
         cur.push_back(c);
     }
 
-    out.push_back(trimStr(cur));
+    // Final field.
+    if (fieldQuoted) out.push_back(cur);
+    else out.push_back(trimStr(cur));
     return true;
 }
 
@@ -103,14 +154,24 @@ std::string csvEscape(const std::string& field) {
 }
 
 bool parseU32(const std::string& s, uint32_t& out) {
+    // Harden parsing against negative numbers, overflow, and partial parses.
+    // Accepts decimal or 0x-prefixed hex (base=0).
+    const std::string t = trimStr(s);
+    if (t.empty()) return false;
+    if (!t.empty() && t[0] == '-') return false;
+
     try {
-        unsigned long v = std::stoul(trimStr(s));
+        size_t pos = 0;
+        unsigned long long v = std::stoull(t, &pos, 0);
+        if (pos != t.size()) return false;
+        if (v > static_cast<unsigned long long>(std::numeric_limits<uint32_t>::max())) return false;
         out = static_cast<uint32_t>(v);
         return true;
     } catch (...) {
         return false;
     }
 }
+
 
 bool parseI32(const std::string& s, int& out) {
     try {
@@ -133,6 +194,12 @@ bool atomicWriteTextFile(const std::string& path, const std::string& contents) {
     std::error_code ec;
     const fs::path p(path);
     const fs::path tmp = p.string() + ".tmp";
+
+    // Ensure the parent directory exists (helps for custom/portable data dirs).
+    if (!p.parent_path().empty()) {
+        std::error_code ecDirs;
+        fs::create_directories(p.parent_path(), ecDirs);
+    }
 
     {
         std::ofstream out(tmp, std::ios::binary);
@@ -166,6 +233,33 @@ bool atomicWriteTextFile(const std::string& path, const std::string& contents) {
 #endif
 }
 
+
+bool betterScoreEntry(const ScoreEntry& a, const ScoreEntry& b) {
+    // Strict ordering for the "top scores" view.
+    if (a.score != b.score) return a.score > b.score;
+    if (a.won != b.won) return a.won > b.won;
+    if (a.turns != b.turns) return a.turns < b.turns;
+    if (a.timestamp != b.timestamp) return a.timestamp > b.timestamp; // newest first
+    if (a.depth != b.depth) return a.depth > b.depth;
+    if (a.kills != b.kills) return a.kills > b.kills;
+    if (a.level != b.level) return a.level > b.level;
+    if (a.gold != b.gold) return a.gold > b.gold;
+    if (a.seed != b.seed) return a.seed > b.seed;
+    if (a.name != b.name) return a.name < b.name;
+    return a.cause < b.cause;
+}
+
+bool newerEntry(const ScoreEntry& a, const ScoreEntry& b) {
+    // Strict ordering for the "recent runs" view.
+    if (a.timestamp != b.timestamp) return a.timestamp > b.timestamp; // newest first
+    if (a.score != b.score) return a.score > b.score;
+    if (a.won != b.won) return a.won > b.won;
+    if (a.turns != b.turns) return a.turns < b.turns;
+    if (a.name != b.name) return a.name < b.name;
+    return a.cause < b.cause;
+}
+
+
 } // namespace
 
 uint32_t computeScore(const ScoreEntry& e) {
@@ -188,7 +282,89 @@ uint32_t computeScore(const ScoreEntry& e) {
 
 void ScoreBoard::trim(size_t maxEntries) {
     if (entries_.size() <= maxEntries) return;
-    entries_.resize(maxEntries);
+    if (maxEntries == 0) {
+        entries_.clear();
+        return;
+    }
+
+    // ProcRogue uses a single CSV file for both:
+    //  1) "Top runs" (score-sorted)
+    //  2) "Recent run history" (timestamp-sorted)
+    //
+    // Trimming purely by score can discard your newest runs (which might be low-scoring).
+    // To keep both views useful, keep a mix:
+    //   - Top runs by score
+    //   - Most recent runs by timestamp
+    //
+    // The game UI shows up to 60 entries for both #scores and #history, so we keep those.
+    constexpr size_t kDefaultKeepTop = 60;
+    constexpr size_t kDefaultKeepRecent = 60;
+
+    // Keep a balanced mix under *any* cap:
+    //   - top runs by score
+    //   - recent runs by timestamp
+    //
+    // When maxEntries is smaller than our default 60+60, scale the mix down so
+    // trimming still preserves recent history (useful for callers that want a
+    // smaller "top N" view).
+    size_t keepTop = std::min(kDefaultKeepTop, maxEntries);
+    size_t keepRecent = std::min(kDefaultKeepRecent, maxEntries);
+
+    if (keepTop + keepRecent > maxEntries) {
+        if (maxEntries <= 1) {
+            keepTop = maxEntries;
+            keepRecent = 0;
+        } else {
+            keepTop = (maxEntries + 1) / 2; // top gets the extra slot if odd
+            keepRecent = maxEntries - keepTop;
+        }
+    }
+
+    const size_t n = entries_.size();
+
+    std::vector<size_t> byScore(n);
+    std::iota(byScore.begin(), byScore.end(), size_t{0});
+    std::sort(byScore.begin(), byScore.end(), [&](size_t ia, size_t ib) {
+        return betterScoreEntry(entries_[ia], entries_[ib]);
+    });
+
+    std::vector<size_t> byTime(n);
+    std::iota(byTime.begin(), byTime.end(), size_t{0});
+    std::sort(byTime.begin(), byTime.end(), [&](size_t ia, size_t ib) {
+        return newerEntry(entries_[ia], entries_[ib]);
+    });
+
+    std::vector<uint8_t> keep(n, 0);
+    auto markFirst = [&](const std::vector<size_t>& order, size_t count) {
+        const size_t c = std::min(count, order.size());
+        for (size_t i = 0; i < c; ++i) {
+            keep[order[i]] = 1;
+        }
+    };
+
+    markFirst(byScore, keepTop);
+    markFirst(byTime, keepRecent);
+
+    // Fill any remaining capacity with the next-best scores.
+    size_t kept = 0;
+    for (uint8_t v : keep) kept += (v != 0);
+    for (size_t i : byScore) {
+        if (kept >= maxEntries) break;
+        if (keep[i]) continue;
+        keep[i] = 1;
+        ++kept;
+    }
+
+    // Rebuild in score order so ScoreBoard::entries() stays "top runs" sorted.
+    std::vector<ScoreEntry> out;
+    out.reserve(maxEntries);
+    for (size_t i : byScore) {
+        if (!keep[i]) continue;
+        out.push_back(entries_[i]);
+        if (out.size() >= maxEntries) break;
+    }
+
+    entries_.swap(out);
 }
 
 bool ScoreBoard::load(const std::string& path) {
@@ -229,6 +405,7 @@ bool ScoreBoard::load(const std::string& path) {
     };
 
     while (std::getline(in, line)) {
+        stripUtf8Bom(line);
         line = trimStr(std::move(line));
         if (line.empty()) continue;
         if (line[0] == '#') continue;
@@ -287,12 +464,11 @@ bool ScoreBoard::load(const std::string& path) {
 
     // Keep sorted by score desc.
     std::sort(entries_.begin(), entries_.end(), [](const ScoreEntry& a, const ScoreEntry& b) {
-        if (a.score != b.score) return a.score > b.score;
-        if (a.won != b.won) return a.won > b.won;
-        return a.turns < b.turns;
+        return betterScoreEntry(a, b);
     });
 
-    trim(60);
+    // Keep both top runs and recent run history.
+    trim(120);
     return true;
 }
 
@@ -303,12 +479,11 @@ bool ScoreBoard::append(const std::string& path, const ScoreEntry& eIn) {
     entries_.push_back(e);
 
     std::sort(entries_.begin(), entries_.end(), [](const ScoreEntry& a, const ScoreEntry& b) {
-        if (a.score != b.score) return a.score > b.score;
-        if (a.won != b.won) return a.won > b.won;
-        return a.turns < b.turns;
+        return betterScoreEntry(a, b);
     });
 
-    trim(60);
+    // Keep both top runs and recent run history.
+    trim(120);
 
     std::ostringstream out;
 

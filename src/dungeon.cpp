@@ -391,10 +391,29 @@ bool Dungeon::isDoorLocked(int x, int y) const {
     return at(x, y).type == TileType::DoorLocked;
 }
 
+bool Dungeon::isDoorOpen(int x, int y) const {
+    if (!inBounds(x, y)) return false;
+    return at(x, y).type == TileType::DoorOpen;
+}
+
+void Dungeon::closeDoor(int x, int y) {
+    if (!inBounds(x, y)) return;
+    if (at(x, y).type == TileType::DoorOpen) {
+        at(x, y).type = TileType::DoorClosed;
+    }
+}
+
 void Dungeon::openDoor(int x, int y) {
     if (!inBounds(x, y)) return;
     if (at(x, y).type == TileType::DoorClosed) {
         at(x, y).type = TileType::DoorOpen;
+    }
+}
+
+void Dungeon::lockDoor(int x, int y) {
+    if (!inBounds(x, y)) return;
+    if (at(x, y).type == TileType::DoorClosed) {
+        at(x, y).type = TileType::DoorLocked;
     }
 }
 

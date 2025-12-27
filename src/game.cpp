@@ -1813,6 +1813,7 @@ void Game::newGame(uint32_t seed) {
     equipArmorId = 0;
 
     invOpen = false;
+    invIdentifyMode = false;
     invSel = 0;
     targeting = false;
     targetLine.clear();
@@ -1917,7 +1918,7 @@ void Game::newGame(uint32_t seed) {
     pushMsg("WELCOME TO PROCROGUE++.", MessageKind::System);
     pushMsg("GOAL: FIND THE AMULET OF YENDOR (DEPTH 5), THEN RETURN TO THE EXIT (<) TO WIN.", MessageKind::System);
     pushMsg("PRESS ? FOR HELP. I INVENTORY. F TARGET/FIRE. M MINIMAP. TAB STATS. F12 SCREENSHOT.", MessageKind::System);
-    pushMsg("MOVE: WASD/ARROWS + Y/U/B/N DIAGONALS. TIP: C SEARCH. O AUTO-EXPLORE. P AUTO-PICKUP.", MessageKind::System);
+    pushMsg("MOVE: WASD/ARROWS + Y/U/B/N DIAGONALS. TIP: C SEARCH. T DISARM TRAPS. O AUTO-EXPLORE. P AUTO-PICKUP.", MessageKind::System);
     pushMsg("SAVE: F5   LOAD: F9   LOAD AUTO: F10", MessageKind::System);
 }
 
@@ -3089,6 +3090,7 @@ bool Game::loadFromFile(const std::string& path) {
 
     // Close transient UI and effects.
     invOpen = false;
+    invIdentifyMode = false;
     targeting = false;
     helpOpen = false;
     minimapOpen = false;
@@ -3171,6 +3173,7 @@ void Game::handleAction(Action a) {
 
     auto closeOverlays = [&]() {
         invOpen = false;
+        invIdentifyMode = false;
         targeting = false;
         helpOpen = false;
         looking = false;
@@ -3187,6 +3190,78 @@ void Game::handleAction(Action a) {
 
         msgScroll = 0;
     };
+
+    // ------------------------------------------------------------
+    // Modal inventory prompt: selecting an item for Scroll of Identify
+    // ------------------------------------------------------------
+    // This runs *before* global hotkeys so the prompt can't be dismissed by opening other overlays.
+    if (invOpen && invIdentifyMode) {
+        auto candidates = [&]() {
+            std::vector<ItemKind> out;
+            out.reserve(16);
+            auto seen = [&](ItemKind k) {
+                for (ItemKind x : out) if (x == k) return true;
+                return false;
+            };
+
+            for (const auto& invIt : inv) {
+                if (!isIdentifiableKind(invIt.kind)) continue;
+                if (invIt.kind == ItemKind::ScrollIdentify) continue;
+                if (isIdentified(invIt.kind)) continue;
+                if (!seen(invIt.kind)) out.push_back(invIt.kind);
+            }
+            return out;
+        };
+
+        auto identifyRandom = [&]() {
+            std::vector<ItemKind> c = candidates();
+            if (c.empty()) {
+                pushMsg("YOU LEARN NOTHING NEW.", MessageKind::Info, true);
+                return;
+            }
+            const int idx = rng.range(0, static_cast<int>(c.size()) - 1);
+            (void)markIdentified(c[static_cast<size_t>(idx)], false);
+        };
+
+        switch (a) {
+            case Action::Up:
+                moveInventorySelection(-1);
+                break;
+            case Action::Down:
+                moveInventorySelection(1);
+                break;
+            case Action::SortInventory:
+                sortInventory();
+                break;
+            case Action::Confirm: {
+                if (inv.empty()) {
+                    invIdentifyMode = false;
+                    break;
+                }
+                invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
+                const Item& selIt = inv[static_cast<size_t>(invSel)];
+
+                if (!isIdentifiableKind(selIt.kind) || selIt.kind == ItemKind::ScrollIdentify || isIdentified(selIt.kind)) {
+                    pushMsg("THAT DOESN'T TEACH YOU ANYTHING.", MessageKind::Info, true);
+                    break;
+                }
+
+                (void)markIdentified(selIt.kind, false);
+                invIdentifyMode = false;
+                break;
+            }
+            case Action::Cancel:
+            case Action::Inventory:
+                // Treat cancel as "pick randomly" to preserve the old (random) behavior.
+                identifyRandom();
+                closeInventory();
+                break;
+            default:
+                // Ignore other actions while the prompt is active.
+                break;
+        }
+        return;
+    }
 
     // Global hotkeys (available even while dead/won).
     switch (a) {
@@ -3643,6 +3718,15 @@ void Game::handleAction(Action a) {
             break;
         case Action::Search:
             acted = searchForTraps();
+            break;
+        case Action::Disarm:
+            acted = disarmTrap();
+            break;
+        case Action::CloseDoor:
+            acted = closeDoor();
+            break;
+        case Action::LockDoor:
+            acted = lockDoor();
             break;
         case Action::Pickup:
             acted = pickupAtPlayer();
@@ -4710,7 +4794,7 @@ Trap* Game::trapAtMut(int x, int y) {
     return nullptr;
 }
 
-void Game::triggerTrapAt(Vec2i pos, Entity& victim) {
+void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
     Trap* t = trapAtMut(pos.x, pos.y);
     if (!t) return;
 
@@ -4726,7 +4810,11 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim) {
             int dmg = rng.range(2, 5) + std::min(3, depth_ / 2);
             p.hp -= dmg;
             std::ostringstream ss;
-            ss << "YOU STEP ON A SPIKE TRAP! YOU TAKE " << dmg << ".";
+            if (fromDisarm) {
+                ss << "YOU SET OFF A SPIKE TRAP! YOU TAKE " << dmg << ".";
+            } else {
+                ss << "YOU STEP ON A SPIKE TRAP! YOU TAKE " << dmg << ".";
+            }
             pushMsg(ss.str(), MessageKind::Combat, false);
             if (p.hp <= 0) {
                 pushMsg("YOU DIE.", MessageKind::Combat, false);
@@ -4866,6 +4954,227 @@ bool Game::searchForTraps() {
     }
 
     return true; // Searching costs a turn.
+}
+
+
+bool Game::disarmTrap() {
+    if (gameOver || gameWon) return false;
+
+    Entity& p = playerMut();
+
+    // Choose the nearest discovered trap adjacent to the player (including underfoot).
+    int bestIndex = -1;
+    int bestDist = 999;
+    for (size_t i = 0; i < trapsCur.size(); ++i) {
+        const Trap& t = trapsCur[i];
+        if (!t.discovered) continue;
+        int dx = std::abs(t.pos.x - p.pos.x);
+        int dy = std::abs(t.pos.y - p.pos.y);
+        int cheb = std::max(dx, dy);
+        if (cheb > 1) continue;
+        if (cheb < bestDist) {
+            bestDist = cheb;
+            bestIndex = static_cast<int>(i);
+        }
+    }
+
+    if (bestIndex < 0) {
+        pushMsg("NO ADJACENT TRAP TO DISARM.", MessageKind::Info, true);
+        return false;
+    }
+
+    Trap& tr = trapsCur[static_cast<size_t>(bestIndex)];
+
+    auto trapName = [&](TrapKind k) -> const char* {
+        switch (k) {
+            case TrapKind::Spike: return "SPIKE";
+            case TrapKind::PoisonDart: return "POISON DART";
+            case TrapKind::Teleport: return "TELEPORT";
+            case TrapKind::Alarm: return "ALARM";
+            case TrapKind::Web: return "WEB";
+        }
+        return "TRAP";
+    };
+
+    const bool hasPicks = (lockpickCount() > 0);
+
+    // Base chance scales with level. Tools help a lot, but magical traps are still tricky.
+    float chance = 0.33f + 0.04f * static_cast<float>(charLevel);
+    chance = std::min(0.85f, chance);
+    if (hasPicks) chance = std::min(0.95f, chance + 0.15f);
+
+    if (tr.kind == TrapKind::Teleport) chance *= 0.85f;
+    if (tr.kind == TrapKind::Alarm) chance *= 0.90f;
+
+    chance = std::max(0.05f, chance);
+
+    if (rng.chance(chance)) {
+        std::ostringstream ss;
+        ss << "YOU DISARM THE " << trapName(tr.kind) << " TRAP.";
+        pushMsg(ss.str(), MessageKind::Success, true);
+        trapsCur.erase(trapsCur.begin() + bestIndex);
+        return true;
+    }
+
+    {
+        std::ostringstream ss;
+        ss << "YOU FAIL TO DISARM THE " << trapName(tr.kind) << " TRAP.";
+        pushMsg(ss.str(), MessageKind::Warning, true);
+    }
+
+    // Mishaps: lockpicks can break, and sometimes you set the trap off.
+    if (hasPicks && rng.chance(0.15f)) {
+        consumeLockpicks(1);
+        pushMsg("YOUR LOCKPICK BREAKS!", MessageKind::Warning, true);
+    }
+
+    float setOffChance = 0.15f;
+    if (tr.kind == TrapKind::Alarm) setOffChance = 0.25f;
+    if (tr.kind == TrapKind::Web) setOffChance = 0.20f;
+
+    if (rng.chance(setOffChance)) {
+        pushMsg("YOU SET OFF THE TRAP!", MessageKind::Warning, true);
+        triggerTrapAt(tr.pos, p, true);
+    }
+
+    return true; // Disarming costs a turn.
+}
+
+
+bool Game::closeDoor() {
+    if (gameOver || gameWon) return false;
+
+    Entity& p = playerMut();
+
+    struct Off { int dx, dy; };
+    // Prefer cardinal directions (closing diagonals feels odd and can be ambiguous).
+    const Off dirs[4] = { {0,-1}, {0,1}, {-1,0}, {1,0} };
+
+    int doorX = -1;
+    int doorY = -1;
+    bool sawBlockedDoor = false;
+
+    for (const auto& d : dirs) {
+        int x = p.pos.x + d.dx;
+        int y = p.pos.y + d.dy;
+        if (!dung.inBounds(x, y)) continue;
+        if (dung.at(x, y).type != TileType::DoorOpen) continue;
+
+        // Can't close a door if something is standing in the doorway.
+        if (entityAt(x, y) != nullptr) {
+            sawBlockedDoor = true;
+            continue;
+        }
+
+        doorX = x;
+        doorY = y;
+        break;
+    }
+
+    if (doorX < 0 || doorY < 0) {
+        if (sawBlockedDoor) {
+            pushMsg("THE DOORWAY IS BLOCKED.", MessageKind::Warning, true);
+        } else {
+            pushMsg("NO ADJACENT OPEN DOOR TO CLOSE.", MessageKind::Info, true);
+        }
+        return false;
+    }
+
+    dung.closeDoor(doorX, doorY);
+    pushMsg("YOU CLOSE THE DOOR.", MessageKind::System, true);
+    return true; // Closing a door costs a turn.
+}
+
+bool Game::lockDoor() {
+    if (gameOver || gameWon) return false;
+
+    Entity& p = playerMut();
+
+    struct Off { int dx, dy; };
+    // Prefer cardinal directions for door interactions.
+    const Off dirs[4] = { {0,-1}, {0,1}, {-1,0}, {1,0} };
+
+    int closedX = -1;
+    int closedY = -1;
+    int openX = -1;
+    int openY = -1;
+
+    bool sawBlockedDoor = false;
+    bool sawLockedDoor = false;
+
+    for (const auto& d : dirs) {
+        int x = p.pos.x + d.dx;
+        int y = p.pos.y + d.dy;
+        if (!dung.inBounds(x, y)) continue;
+
+        TileType tt = dung.at(x, y).type;
+
+        if (tt == TileType::DoorLocked) {
+            sawLockedDoor = true;
+            continue;
+        }
+
+        if (tt == TileType::DoorClosed) {
+            closedX = x;
+            closedY = y;
+            break; // prefer closed doors
+        }
+
+        if (tt == TileType::DoorOpen) {
+            // Can't lock a door if something is standing in the doorway.
+            if (entityAt(x, y) != nullptr) {
+                sawBlockedDoor = true;
+                continue;
+            }
+            // Save as fallback in case no closed door is adjacent.
+            if (openX < 0) {
+                openX = x;
+                openY = y;
+            }
+        }
+    }
+
+    int doorX = closedX;
+    int doorY = closedY;
+    bool wasOpen = false;
+
+    if (doorX < 0 || doorY < 0) {
+        if (openX >= 0 && openY >= 0) {
+            doorX = openX;
+            doorY = openY;
+            wasOpen = true;
+        }
+    }
+
+    if (doorX < 0 || doorY < 0) {
+        if (sawBlockedDoor) {
+            pushMsg("THE DOORWAY IS BLOCKED.", MessageKind::Warning, true);
+        } else if (sawLockedDoor) {
+            pushMsg("THE DOOR IS ALREADY LOCKED.", MessageKind::Info, true);
+        } else {
+            pushMsg("NO ADJACENT DOOR TO LOCK.", MessageKind::Info, true);
+        }
+        return false;
+    }
+
+    if (!consumeKeys(1)) {
+        pushMsg("YOU HAVE NO KEYS.", MessageKind::Warning, true);
+        return false;
+    }
+
+    if (wasOpen) {
+        dung.closeDoor(doorX, doorY);
+    }
+
+    dung.lockDoor(doorX, doorY);
+
+    if (wasOpen) {
+        pushMsg("YOU CLOSE AND LOCK THE DOOR.", MessageKind::System, true);
+    } else {
+        pushMsg("YOU LOCK THE DOOR.", MessageKind::System, true);
+    }
+
+    return true; // Locking costs a turn.
 }
 
 
@@ -5167,11 +5476,13 @@ void Game::openInventory() {
     msgScroll = 0;
 
     invOpen = true;
+    invIdentifyMode = false;
     invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 }
 
 void Game::closeInventory() {
     invOpen = false;
+    invIdentifyMode = false;
 }
 
 void Game::moveInventorySelection(int dy) {
@@ -5915,7 +6226,8 @@ bool Game::useSelected() {
     }
 
     if (it.kind == ItemKind::ScrollIdentify) {
-        // Using an identify scroll reveals the true name of one random unidentified potion/scroll.
+        // Using an identify scroll reveals the true name of one unidentified potion/scroll.
+        // If multiple candidates exist, the player can choose which one to learn.
         (void)markIdentified(it.kind, false);
 
         if (!identifyItemsEnabled) {
@@ -5940,12 +6252,33 @@ bool Game::useSelected() {
 
         if (candidates.empty()) {
             pushMsg("YOU STUDY THE SCROLL, BUT LEARN NOTHING NEW.", MessageKind::Info, true);
-        } else {
-            ItemKind k = candidates[static_cast<size_t>(rng.range(0, static_cast<int>(candidates.size()) - 1))];
-            (void)markIdentified(k, false);
+            consumeOneStackable();
+            return true;
         }
 
+        if (candidates.size() == 1) {
+            (void)markIdentified(candidates[0], false);
+            consumeOneStackable();
+            return true;
+        }
+
+        // Multiple unknown kinds: consume the scroll now (reading takes the turn regardless).
         consumeOneStackable();
+
+        // Enter a temporary inventory sub-mode so the player can choose.
+        invIdentifyMode = true;
+
+        // Move selection to the first eligible item to reduce friction.
+        for (size_t i = 0; i < inv.size(); ++i) {
+            const Item& cand = inv[i];
+            if (!isIdentifiableKind(cand.kind)) continue;
+            if (cand.kind == ItemKind::ScrollIdentify) continue;
+            if (isIdentified(cand.kind)) continue;
+            invSel = static_cast<int>(i);
+            break;
+        }
+
+        pushMsg("SELECT AN ITEM TO IDENTIFY (ENTER = CHOOSE, ESC = RANDOM).", MessageKind::System, true);
         return true;
     }
 

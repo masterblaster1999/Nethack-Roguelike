@@ -7,6 +7,11 @@
 #include <string>
 #include <vector>
 
+#if __has_include(<filesystem>)
+    #include <filesystem>
+    namespace fs = std::filesystem;
+#endif
+
 namespace {
 
 std::string ltrim(std::string s) {
@@ -29,6 +34,17 @@ std::string trim(std::string s) {
 std::string toLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s;
+}
+
+void stripUtf8Bom(std::string& s) {
+    // Some editors (notably Windows tools) may write a UTF-8 BOM at the start of text files.
+    // If present, strip it so header/key parsing works as expected.
+    if (s.size() >= 3 &&
+        static_cast<unsigned char>(s[0]) == 0xEF &&
+        static_cast<unsigned char>(s[1]) == 0xBB &&
+        static_cast<unsigned char>(s[2]) == 0xBF) {
+        s.erase(0, 3);
+    }
 }
 
 static bool isWindowsReservedBasename(const std::string& lower) {
@@ -95,6 +111,50 @@ bool parseInt(const std::string& v, int& out) {
     }
 }
 
+bool atomicWriteTextFile(const std::string& path, const std::string& contents) {
+#if __has_include(<filesystem>)
+    std::error_code ec;
+    const fs::path p(path);
+    const fs::path tmp = p.string() + ".tmp";
+
+    // Ensure the parent directory exists (helps for custom/portable data dirs).
+    if (!p.parent_path().empty()) {
+        std::error_code ecDirs;
+        fs::create_directories(p.parent_path(), ecDirs);
+    }
+
+    {
+        std::ofstream out(tmp, std::ios::binary);
+        if (!out) return false;
+        out.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+        out.flush();
+        if (!out.good()) return false;
+    }
+
+    // Try rename; on Windows this fails if destination exists.
+    fs::rename(tmp, p, ec);
+    if (ec) {
+        std::error_code ec2;
+        fs::remove(p, ec2);
+        ec.clear();
+        fs::rename(tmp, p, ec);
+    }
+    if (ec) {
+        // Fallback: copy then remove tmp
+        std::error_code ec2;
+        fs::copy_file(tmp, p, fs::copy_options::overwrite_existing, ec2);
+        fs::remove(tmp, ec2);
+        return !ec2;
+    }
+    return true;
+#else
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+    out.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+    return out.good();
+#endif
+}
+
 } // namespace
 
 Settings loadSettings(const std::string& path) {
@@ -105,6 +165,8 @@ Settings loadSettings(const std::string& path) {
 
     std::string line;
     while (std::getline(f, line)) {
+        stripUtf8Bom(line);
+
         // Strip comments (# or ;)
         auto hash = line.find('#');
         auto semi = line.find(';');
@@ -194,11 +256,8 @@ Settings loadSettings(const std::string& path) {
 }
 
 bool writeDefaultSettings(const std::string& path) {
-    std::ofstream f(path);
-    if (!f) return false;
-
     // Use a raw string literal to avoid fragile escaping / accidental newline-in-string bugs.
-    f << R"INI(# ProcRogue settings
+    const std::string contents = R"INI(# ProcRogue settings
 #
 # Lines are: key = value
 # Comments start with # or ;
@@ -291,6 +350,8 @@ bind_pickup = g, comma, kp_0
 bind_inventory = i, tab
 bind_fire = f
 bind_search = c
+bind_disarm = t
+bind_close_door = k
 bind_look = l, v
 bind_stairs_up = shift+comma, less
 bind_stairs_down = shift+period, greater
@@ -320,12 +381,18 @@ bind_log_up = pageup
 bind_log_down = pagedown
 )INI";
 
-    return true;
+    return atomicWriteTextFile(path, contents);
 }
+
 
 bool updateIniKey(const std::string& path, const std::string& key, const std::string& value) {
     std::ifstream in(path);
-    if (!in) return false;
+    if (!in) {
+        // File doesn't exist yet; create a minimal one so in-game bind/options commands
+        // can still persist changes even if the user deleted their settings.
+        const std::string contents = key + " = " + value + "\n";
+        return atomicWriteTextFile(path, contents);
+    }
 
     std::vector<std::string> lines;
     std::string line;
@@ -343,8 +410,11 @@ bool updateIniKey(const std::string& path, const std::string& key, const std::st
         return s;
     };
 
+    const std::string target = keyLower(trimLocal(key));
+
     bool found = false;
     while (std::getline(in, line)) {
+        stripUtf8Bom(line);
         std::string raw = line;
 
         // Strip comments for matching, but preserve the original line for output when not matching.
@@ -353,10 +423,14 @@ bool updateIniKey(const std::string& path, const std::string& key, const std::st
 
         auto eq = raw.find('=');
         if (eq != std::string::npos) {
-            std::string k = trimLocal(raw.substr(0, eq));
-            if (!k.empty() && keyLower(k) == keyLower(key)) {
-                lines.push_back(key + " = " + value);
-                found = true;
+            std::string k = keyLower(trimLocal(raw.substr(0, eq)));
+            if (!k.empty() && k == target) {
+                if (!found) {
+                    lines.push_back(key + " = " + value);
+                    found = true;
+                } else {
+                    // Drop duplicate keys to keep the file unambiguous.
+                }
                 continue;
             }
         }
@@ -370,19 +444,21 @@ bool updateIniKey(const std::string& path, const std::string& key, const std::st
         lines.push_back(key + " = " + value);
     }
 
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) return false;
-
+    std::ostringstream out;
     for (size_t i = 0; i < lines.size(); ++i) {
         out << lines[i];
         if (i + 1 < lines.size()) out << "\n";
     }
-    return true;
-}
+    out << "\n"; // keep a trailing newline for nicer diffs/editing
 
+    return atomicWriteTextFile(path, out.str());
+}
 bool removeIniKey(const std::string& path, const std::string& key) {
     std::ifstream in(path);
-    if (!in) return false;
+    if (!in) {
+        // Missing file is not an error (nothing to remove).
+        return true;
+    }
 
     std::vector<std::string> lines;
     std::string line;
@@ -400,8 +476,11 @@ bool removeIniKey(const std::string& path, const std::string& key) {
         return s;
     };
 
+    const std::string target = keyLower(trimLocal(key));
+
     bool removed = false;
     while (std::getline(in, line)) {
+        stripUtf8Bom(line);
         std::string raw = line;
 
         // Strip comments for matching, but preserve the original line for output when not matching.
@@ -410,8 +489,8 @@ bool removeIniKey(const std::string& path, const std::string& key) {
 
         auto eq = raw.find('=');
         if (eq != std::string::npos) {
-            std::string k = trimLocal(raw.substr(0, eq));
-            if (!k.empty() && keyLower(k) == keyLower(key)) {
+            std::string k = keyLower(trimLocal(raw.substr(0, eq)));
+            if (!k.empty() && k == target) {
                 removed = true;
                 continue; // drop the line
             }
@@ -424,12 +503,12 @@ bool removeIniKey(const std::string& path, const std::string& key) {
     // Nothing to remove is not an error.
     if (!removed) return true;
 
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) return false;
-
+    std::ostringstream out;
     for (size_t i = 0; i < lines.size(); ++i) {
         out << lines[i];
         if (i + 1 < lines.size()) out << "\n";
     }
-    return true;
+    if (!lines.empty()) out << "\n";
+
+    return atomicWriteTextFile(path, out.str());
 }

@@ -599,8 +599,13 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     int x = bg.x + 12;
     int y = bg.y + 12;
 
-    drawText5x7(renderer, x, y, scale, yellow,
-               "INVENTORY  (UP/DOWN SELECT, ENTER ACT, E EQUIP, U USE, X DROP, SHIFT+X DROP ALL, SHIFT+S SORT, ESC CLOSE)");
+    if (game.isInventoryIdentifyMode()) {
+        drawText5x7(renderer, x, y, scale, yellow,
+                   "IDENTIFY  (UP/DOWN SELECT, ENTER IDENTIFY, ESC RANDOM/CLOSE, SHIFT+S SORT)");
+    } else {
+        drawText5x7(renderer, x, y, scale, yellow,
+                   "INVENTORY  (UP/DOWN SELECT, ENTER ACT, E EQUIP, U USE, X DROP, SHIFT+X DROP ALL, SHIFT+S SORT, ESC CLOSE)");
+    }
     y += 7 * scale + 4;
     drawText5x7(renderer, x, y, scale, yellow, "[M]=MELEE [R]=RANGED [A]=ARMOR");
     y += 7 * scale + 10;
@@ -629,7 +634,12 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 
     // Footer hints about current selection
     const Item& cur = inv[static_cast<size_t>(clampi(sel, 0, static_cast<int>(inv.size()) - 1))];
-    std::string hint = "SELECTED: " + game.displayItemName(cur);
+    std::string hint;
+    if (game.isInventoryIdentifyMode()) {
+        hint = "IDENTIFY: " + game.displayItemName(cur);
+    } else {
+        hint = "SELECTED: " + game.displayItemName(cur);
+    }
     drawText5x7(renderer, x, bg.y + bg.h - 40, scale, yellow, toUpper(hint));
 }
 
@@ -781,9 +791,9 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("MOVE: WASD / ARROWS / NUMPAD (DIAGONALS OK)");
     lineGray("SPACE/. WAIT  R REST  < > STAIRS");
     lineGray("F FIRE  G PICKUP  I/TAB INVENTORY");
-    lineGray("L/V LOOK  C SEARCH (TRAPS/SECRETS)  O EXPLORE  P AUTOPICKUP");
-    lineGray("M MINIMAP  SHIFT+TAB STATS  F2 OPTIONS");
-    lineGray("# EXTENDED COMMANDS  (TYPE + ENTER)");
+    lineGray("L/V LOOK  C SEARCH  T DISARM  K CLOSE DOOR  SHIFT+K LOCK DOOR");
+    lineGray("O EXPLORE  P AUTOPICKUP  M MINIMAP  SHIFT+TAB STATS");
+    lineGray("F2 OPTIONS  # EXTENDED COMMANDS  (TYPE + ENTER)");
     lineGray("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART");
     lineGray("F11 FULLSCREEN  F12 SCREENSHOT (BINDABLE)");
     lineGray("PGUP/PGDN LOG  ESC CANCEL/QUIT");

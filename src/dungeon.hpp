@@ -11,6 +11,10 @@ enum class TileType : uint8_t {
     DoorOpen,
     StairsUp,
     StairsDown,
+    // Append-only: hidden until discovered by searching.
+    DoorSecret,
+    // Append-only: visible but requires a Key to open.
+    DoorLocked,
 };
 
 struct Tile {
@@ -24,6 +28,10 @@ enum class RoomType : uint8_t {
     Treasure,
     Lair,
     Shrine,
+    // Append-only: hidden treasure room accessed via a secret door.
+    Secret,
+    // Append-only: visible treasure room behind a locked door.
+    Vault,
 };
 
 struct Room {
@@ -67,7 +75,9 @@ public:
     bool isPassable(int x, int y) const; // includes closed doors (AI/path)
     bool isOpaque(int x, int y) const;
     bool isDoorClosed(int x, int y) const;
+    bool isDoorLocked(int x, int y) const;
     void openDoor(int x, int y);
+    void unlockDoor(int x, int y);
 
     void generate(RNG& rng);
 

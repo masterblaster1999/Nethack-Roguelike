@@ -67,6 +67,7 @@ bool Renderer::init() {
         stairsUpTex[static_cast<size_t>(f)]   = textureFromSprite(generateStairsTile(0x515A1u, true, f));
         stairsDownTex[static_cast<size_t>(f)] = textureFromSprite(generateStairsTile(0x515A2u, false, f));
         doorClosedTex[static_cast<size_t>(f)] = textureFromSprite(generateDoorTile(0xD00Du, false, f));
+        doorLockedTex[static_cast<size_t>(f)] = textureFromSprite(generateLockedDoorTile(0xD00Du, f));
         doorOpenTex[static_cast<size_t>(f)]   = textureFromSprite(generateDoorTile(0xD00Du, true, f));
     }
 
@@ -88,11 +89,13 @@ void Renderer::shutdown() {
     for (auto& t : stairsUpTex) if (t) SDL_DestroyTexture(t);
     for (auto& t : stairsDownTex) if (t) SDL_DestroyTexture(t);
     for (auto& t : doorClosedTex) if (t) SDL_DestroyTexture(t);
+    for (auto& t : doorLockedTex) if (t) SDL_DestroyTexture(t);
     for (auto& t : doorOpenTex) if (t) SDL_DestroyTexture(t);
 
     stairsUpTex.fill(nullptr);
     stairsDownTex.fill(nullptr);
     doorClosedTex.fill(nullptr);
+    doorLockedTex.fill(nullptr);
     doorOpenTex.fill(nullptr);
 
     for (auto& kv : entityTex) {
@@ -178,12 +181,20 @@ SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int fram
             size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(wallVar.size()));
             return wallVar[idx];
         }
+        case TileType::DoorSecret: {
+            // Draw secret doors as walls until discovered (tile is converted to DoorClosed).
+            if (wallVar.empty()) return nullptr;
+            size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(wallVar.size()));
+            return wallVar[idx];
+        }
         case TileType::StairsUp:
             return stairsUpTex[static_cast<size_t>(frame % FRAMES)];
         case TileType::StairsDown:
             return stairsDownTex[static_cast<size_t>(frame % FRAMES)];
         case TileType::DoorClosed:
             return doorClosedTex[static_cast<size_t>(frame % FRAMES)];
+        case TileType::DoorLocked:
+            return doorLockedTex[static_cast<size_t>(frame % FRAMES)];
         case TileType::DoorOpen:
             return doorOpenTex[static_cast<size_t>(frame % FRAMES)];
         default:
@@ -490,6 +501,7 @@ void Renderer::drawHud(const Game& game) {
     ss << " | LV: " << game.playerCharLevel();
     ss << " | XP: " << game.playerXp() << "/" << game.playerXpToNext();
     ss << " | GOLD: " << game.goldCount();
+    ss << " | KEYS: " << game.keyCount() << " | PICKS: " << game.lockpickCount();
     ss << " | DEPTH: " << game.depth();
     ss << " | MAX: " << game.maxDepthReached();
     ss << " | TURNS: " << game.turns();
@@ -528,7 +540,7 @@ void Renderer::drawHud(const Game& game) {
     drawText5x7(renderer, 8, controlY1, 2, gray,
         "MOVE: WASD/ARROWS/NUMPAD | SPACE/. WAIT | R REST | < > STAIRS");
     drawText5x7(renderer, 8, controlY2, 2, gray,
-        "F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH");
+        "F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH (TRAPS/SECRETS)");
     drawText5x7(renderer, 8, controlY3, 2, gray,
         "F2 OPT | # CMD | M MAP | SHIFT+TAB STATS | F5 SAVE | F9 LOAD | PGUP/PGDN LOG | ? HELP");
 
@@ -766,7 +778,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("MOVE: WASD / ARROWS / NUMPAD (DIAGONALS OK)");
     lineGray("SPACE/. WAIT  R REST  < > STAIRS");
     lineGray("F FIRE  G PICKUP  I/TAB INVENTORY");
-    lineGray("L/V LOOK  C SEARCH  O EXPLORE  P AUTOPICKUP");
+    lineGray("L/V LOOK  C SEARCH (TRAPS/SECRETS)  O EXPLORE  P AUTOPICKUP");
     lineGray("M MINIMAP  SHIFT+TAB STATS  F2 OPTIONS");
     lineGray("# EXTENDED COMMANDS  (TYPE + ENTER)");
     lineGray("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART");
@@ -795,6 +807,9 @@ void Renderer::drawHelpOverlay(const Game& game) {
 
     y += 6;
     lineWhite("TIPS:");
+    lineGray("SEARCH CAN REVEAL TRAPS AND SECRET DOORS.");
+    lineGray("LOCKED DOORS: USE KEYS, LOCKPICKS, OR A SCROLL OF KNOCK.");
+    lineGray("SOME VAULT DOORS MAY BE TRAPPED.");
     lineGray("AUTO-EXPLORE STOPS IF YOU SEE AN ENEMY OR GET HURT/DEBUFFED.");
     lineGray("INVENTORY: E EQUIP  U USE  X DROP  SHIFT+X DROP ALL");
     lineGray("SCROLL THE MESSAGE LOG WITH PGUP/PGDN.");
@@ -864,6 +879,10 @@ void Renderer::drawMinimapOverlay(const Game& game) {
             } else if (t.type == TileType::DoorClosed) {
                 if (vis) drawCell(x, y, 160, 110, 60);
                 else     drawCell(x, y, 90, 70, 40);
+            } else if (t.type == TileType::DoorLocked) {
+                // Slightly more "warning" tint than a normal closed door.
+                if (vis) drawCell(x, y, 180, 90, 70);
+                else     drawCell(x, y, 100, 60, 50);
             } else if (t.type == TileType::DoorOpen) {
                 if (vis) drawCell(x, y, 140, 120, 90);
                 else     drawCell(x, y, 80, 70, 55);
@@ -937,7 +956,7 @@ void Renderer::drawStatsOverlay(const Game& game) {
     }
     {
         std::stringstream ss;
-        ss << "TURNS: " << game.turns() << "  KILLS: " << game.kills() << "  GOLD: " << game.goldCount();
+        ss << "TURNS: " << game.turns() << "  KILLS: " << game.kills() << "  GOLD: " << game.goldCount() << "  KEYS: " << game.keyCount() << "  PICKS: " << game.lockpickCount();
         drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
         y += 18;
     }

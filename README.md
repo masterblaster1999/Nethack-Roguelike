@@ -5,6 +5,8 @@ A tiny NetHack-inspired roguelike with:
 - Procedurally generated pixel sprites (player, monsters, items)
 - Field-of-view + explored/seen tiles
 - Traps, potions/scrolls, ranged attacks, stairs, saving/loading
+- **Secret rooms + secret doors** (search to discover)
+- **Locked doors, keys + lockpicks**: unlock optional **vault rooms** for bonus loot (or read a **Scroll of Knock**)
 
 ## New in this build (QoL + big usability upgrades)
 
@@ -35,6 +37,19 @@ A tiny NetHack-inspired roguelike with:
 - **Richer high-scores**: run history now records your **name**, **cause of death/win**, and **game version** in `procrogue_scores.csv`.
 - **HUD effect timers**: optional turn counters on status tags (example: `POISON(6)`). Toggle via the options menu or `show_effect_timers` in settings.
 - **Auto-explore safety**: auto-move now stops when you get poisoned or webbed (not just when you take damage).
+- **Secret rooms**: levels can now spawn optional **secret treasure rooms** behind hidden doors.
+  - Use **C** to search and reveal secret doors.
+  - New **Scroll of Detect Secrets** reveals secret doors on the current floor.
+- **Vault rooms**: levels can now spawn optional **locked vault rooms** behind visible locked doors.
+  - Find **Keys** as loot (or from enemies) to unlock vault doors.
+  - If you’re out of keys, **Lockpicks** can pick locked doors (chance to fail/break).
+  - New **Scroll of Knock** unlocks + opens nearby locked doors.
+  - Some vault doors may be **trapped** (alarm/poison dart) — searching / Detect Traps can save you.
+  - Your current counts are shown in the HUD ("KEYS" / "PICKS").
+- **Treasure chests**: Treasure / Secret / Vault rooms can spawn chests.
+  - Stand on a chest and press **Enter** to open it.
+  - Chests may be **locked** (keys or lockpicks) and/or **trapped** (Search / Detect Traps can reveal).
+  - **Scroll of Knock** can also unlock chests.
 - **Run history / high scores** are stored in `procrogue_scores.csv`.
 - **Mouse support**:
   - **Left click**: auto-travel to the clicked tile

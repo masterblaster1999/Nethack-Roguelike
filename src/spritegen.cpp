@@ -501,6 +501,30 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
             if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
             break;
         }
+        case ItemKind::ScrollDetectSecrets: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+            // Secret-door-ish glyph
+            outlineRect(s, 7, 7, 3, 4, {80,50,30,255});
+            setPx(s, 9, 9, {80,50,30,255}); // knob
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+        case ItemKind::ScrollKnock: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+
+            // Lock glyph (shackle + body)
+            outlineRect(s, 7, 7, 3, 3, {80,50,30,255});
+            rect(s, 7, 9, 3, 2, {80,50,30,255});
+            // Keyhole
+            setPx(s, 8, 10, paper);
+
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
 case ItemKind::Arrow: {
             Color wood = add({160,110,60,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
             line(s, 4, 12, 12, 4, wood);
@@ -582,6 +606,94 @@ case ItemKind::Arrow: {
             circle(s, 8, 10, 3, gold);
             circle(s, 8, 9, 1, mul(gold, 1.05f));
             if (frame % 2 == 1) setPx(s, 10, 8, {255,255,255,180});
+            break;
+        }
+        case ItemKind::Key: {
+            Color metal = add({210,190,80,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color dark = mul(metal, 0.75f);
+            // Bow (ring)
+            circle(s, 6, 7, 3, metal);
+            circle(s, 6, 7, 1, {0,0,0,0});
+            // Shaft
+            line(s, 7, 7, 13, 7, metal);
+            line(s, 7, 8, 13, 8, dark);
+            // Teeth
+            rect(s, 10, 9, 2, 2, metal);
+            rect(s, 13, 9, 2, 2, dark);
+            if (frame % 2 == 1) setPx(s, 12, 6, {255,255,255,160});
+            break;
+        }
+        case ItemKind::Lockpick: {
+            Color metal = add({185,185,205,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color dark = mul(metal, 0.65f);
+
+            // Handle
+            rect(s, 3, 10, 4, 2, dark);
+            rect(s, 4, 9, 2, 1, dark);
+
+            // Shaft
+            line(s, 7, 10, 14, 10, metal);
+            line(s, 7, 11, 14, 11, dark);
+
+            // Hook tip
+            setPx(s, 14, 9, metal);
+            setPx(s, 14, 10, metal);
+            setPx(s, 13, 9, metal);
+
+            if (frame % 2 == 1) setPx(s, 10, 9, {255,255,255,140});
+            break;
+        }
+        case ItemKind::Chest: {
+            // A small wooden chest with a metal latch.
+            Color wood = add({150, 105, 60, 255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
+            Color woodDark = mul(wood, 0.70f);
+            Color band = add({180, 180, 200, 255}, rng.range(-8,8), rng.range(-8,8), rng.range(-8,8));
+            Color bandDark = mul(band, 0.75f);
+
+            // Body
+            outlineRect(s, 3, 7, 10, 7, woodDark);
+            rect(s, 4, 8, 8, 5, wood);
+
+            // Lid
+            outlineRect(s, 3, 5, 10, 3, woodDark);
+            rect(s, 4, 6, 8, 1, mul(wood, 0.90f));
+
+            // Metal band
+            line(s, 3, 10, 12, 10, bandDark);
+            line(s, 3, 9, 12, 9, band);
+
+            // Latch
+            rect(s, 7, 9, 2, 3, bandDark);
+            setPx(s, 8, 10, band);
+
+            // A subtle glint.
+            if (frame % 2 == 1) setPx(s, 10, 6, {255,255,255,120});
+            break;
+        }
+        case ItemKind::ChestOpen: {
+            // Open chest: lid up + visible gold.
+            Color wood = add({150, 105, 60, 255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
+            Color woodDark = mul(wood, 0.70f);
+            Color gold = add({235, 200, 70, 255}, rng.range(-8,8), rng.range(-8,8), rng.range(-8,8));
+            Color gold2 = mul(gold, 0.85f);
+
+            // Body
+            outlineRect(s, 3, 8, 10, 6, woodDark);
+            rect(s, 4, 9, 8, 4, wood);
+
+            // Open lid (angled)
+            line(s, 4, 7, 10, 4, woodDark);
+            line(s, 4, 6, 10, 3, mul(woodDark, 0.9f));
+
+            // Gold inside
+            rect(s, 5, 9, 6, 2, gold2);
+            rect(s, 6, 10, 4, 2, gold);
+
+            // Sparkle
+            if (frame % 2 == 1) {
+                setPx(s, 9, 8, {255,255,255,180});
+                setPx(s, 7, 9, {255,255,255,120});
+            }
             break;
         }
         default:
@@ -756,5 +868,41 @@ SpritePixels generateDoorTile(uint32_t seed, bool open, int frame) {
         if (frame % 2 == 1) setPx(s, 11, 7, {255,255,255,120});
     }
 
+
+
     return s;
 }
+
+SpritePixels generateLockedDoorTile(uint32_t seed, int frame) {
+    // Base: closed door sprite, with a small lock overlay for readability.
+    SpritePixels s = generateDoorTile(seed, /*open=*/false, frame);
+
+    // Lock colors: warm metal with dark outline.
+    const Color lockBody { 210, 185, 70, 255 };
+    const Color lockOutline { 120, 90, 25, 255 };
+    const Color keyhole { 30, 22, 10, 255 };
+
+    // Center-ish placement (slight per-seed variation).
+    int x0 = 6 + static_cast<int>((seed >> 12) & 1u);
+    int y0 = 6;
+
+    // Shackle
+    outlineRect(s, x0, y0, 4, 4, lockOutline);
+
+    // Body
+    rect(s, x0, y0 + 4, 4, 3, lockBody);
+    outlineRect(s, x0, y0 + 4, 4, 3, lockOutline);
+
+    // Keyhole
+    setPx(s, x0 + 1, y0 + 5, keyhole);
+    setPx(s, x0 + 2, y0 + 5, keyhole);
+    setPx(s, x0 + 2, y0 + 6, keyhole);
+
+    // Tiny shimmer highlight every so often.
+    if ((frame % 16) < 2) {
+        setPx(s, x0 + 2, y0 + 4, Color{ 245, 235, 130, 255 });
+    }
+
+    return s;
+}
+

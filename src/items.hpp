@@ -68,10 +68,28 @@ enum class ItemKind : uint8_t {
     PlateArmor,
     FoodRation,
     ScrollDetectTraps,
+    ScrollDetectSecrets,
+
+    // --- Misc (append-only) ---
+    Key,
+
+    // --- Locks / doors (append-only) ---
+    Lockpick,
+    ScrollKnock,
+
+    // --- Dungeon features (append-only) ---
+    // A ground-interactable chest. It cannot be picked up.
+    Chest,
+    // Decorative open chest left behind after looting.
+    ChestOpen,
 };
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollDetectTraps) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ChestOpen) + 1;
+
+inline bool isChestKind(ItemKind k) {
+    return k == ItemKind::Chest || k == ItemKind::ChestOpen;
+}
 
 inline bool isPotionKind(ItemKind k) {
     switch (k) {
@@ -96,6 +114,9 @@ inline bool isScrollKind(ItemKind k) {
         case ItemKind::ScrollEnchantArmor:
         case ItemKind::ScrollIdentify:
         case ItemKind::ScrollDetectTraps:
+        case ItemKind::ScrollDetectSecrets:
+            return true;
+        case ItemKind::ScrollKnock:
             return true;
         default:
             return false;

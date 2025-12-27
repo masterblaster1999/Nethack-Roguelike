@@ -90,6 +90,16 @@ void test_dungeon_stairs_connected() {
             int nx = p.x + dxy[0];
             int ny = p.y + dxy[1];
             if (!d.inBounds(nx, ny)) continue;
+            // Match in-game diagonal movement rules: no cutting corners.
+            if (dxy[0] != 0 && dxy[1] != 0) {
+                int ox = p.x + dxy[0];
+                int oy = p.y;
+                int px = p.x;
+                int py = p.y + dxy[1];
+                if (!d.inBounds(ox, oy) || !d.inBounds(px, py)) continue;
+                if (!d.isWalkable(ox, oy)) continue;
+                if (!d.isWalkable(px, py)) continue;
+            }
             if (!d.isPassable(nx, ny)) continue;
             size_t id = idx(nx, ny);
             if (visited[id]) continue;
@@ -102,6 +112,59 @@ void test_dungeon_stairs_connected() {
         expect(visited[idx(d.stairsDown.x, d.stairsDown.y)] != 0,
                "stairsDown not reachable from stairsUp");
     }
+}
+
+void test_secret_door_tile_rules() {
+    Dungeon d(10, 10);
+    d.at(5, 5).type = TileType::DoorSecret;
+
+    expect(!d.isPassable(5, 5), "Secret doors should not be passable until discovered");
+    expect(d.isOpaque(5, 5), "Secret doors should be opaque (block FOV/LOS) until discovered");
+    expect(!d.isWalkable(5, 5), "Secret doors should not be walkable until discovered");
+}
+
+void test_locked_door_tile_rules() {
+    Dungeon d(10, 10);
+    d.at(5, 5).type = TileType::DoorLocked;
+
+    expect(d.isDoorLocked(5, 5), "DoorLocked should be detected as locked door");
+    expect(!d.isPassable(5, 5), "Locked doors should not be passable until unlocked");
+    expect(d.isOpaque(5, 5), "Locked doors should be opaque (block FOV/LOS) while closed");
+    expect(!d.isWalkable(5, 5), "Locked doors should not be walkable while closed");
+
+    d.unlockDoor(5, 5);
+    expect(d.isDoorClosed(5, 5), "unlockDoor should convert a locked door into a closed door");
+    d.openDoor(5, 5);
+    expect(d.at(5, 5).type == TileType::DoorOpen, "openDoor should open an unlocked door");
+}
+
+void test_fov_locked_door_blocks_visibility() {
+    Dungeon d(10, 5);
+
+    // Start with solid walls.
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Wall;
+            d.at(x, y).visible = false;
+            d.at(x, y).explored = false;
+        }
+    }
+
+    // Carve a straight hallway with a locked door.
+    for (int x = 1; x <= 4; ++x) {
+        d.at(x, 2).type = TileType::Floor;
+    }
+    d.at(3, 2).type = TileType::DoorLocked;
+
+    // Locked door should block visibility.
+    d.computeFov(1, 2, 10);
+    expect(d.at(3, 2).visible, "Locked door tile should be visible");
+    expect(!d.at(4, 2).visible, "Tile behind locked door should not be visible");
+
+    // Open door should allow visibility through.
+    d.at(3, 2).type = TileType::DoorOpen;
+    d.computeFov(1, 2, 10);
+    expect(d.at(4, 2).visible, "Tile behind open door should be visible");
 }
 
 void test_item_defs_sane() {
@@ -259,6 +322,9 @@ int main() {
 
     test_rng_reproducible();
     test_dungeon_stairs_connected();
+    test_secret_door_tile_rules();
+    test_locked_door_tile_rules();
+    test_fov_locked_door_blocks_visibility();
     test_item_defs_sane();
 
     test_scores_legacy_load();

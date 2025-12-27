@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.12.0] - 2025-12-27
+
+### Added
+- **Treasure chests**: locked/trapped chests can spawn in **Treasure / Secret / Vault** rooms.
+  Stand on a chest and press **Enter** to open it.
+- Chest loot spills onto the floor (gold + items) and the chest becomes an **open chest** on the map.
+
+### Changed
+- **Scroll of Knock** now unlocks nearby **chests** as well as locked doors.
+- **Search** and **Scroll of Detect Traps** now reveal **trapped chests**.
+- Pickup/auto-pickup ignores chests (they are world interactables, not inventory items).
+
+### Fixed
+- Auto-travel / auto-explore pathfinding now properly routes through **locked doors** when you have **Keys** or **Lockpicks**.
+
+## [0.11.0] - 2025-12-27
+
+### Added
+- **Lockpicks**: a new item that can pick locked doors when you don’t have keys (chance to fail/break).
+- **Scroll of Knock**: unlocks and opens nearby locked doors.
+- **Trapped vault doors**: some locked doors now hide **alarm/poison dart traps** on the doorway tile.
+- HUD/Stats overlay now shows your current **PICKS** count.
+
+### Changed
+- Locked doors now render with a distinct **lock overlay** sprite.
+
+### Fixed
+- FOV now correctly treats **locked doors as opaque**, matching line-of-sight rules.
+
+## [0.10.0] - 2025-12-27
+
+### Added
+- **Locked doors + keys**: vault doors are visible but locked; find **Keys** to unlock them.
+- **Vault rooms**: optional locked side-rooms with higher-risk/higher-reward loot.
+- HUD/Stats overlay now shows your current **KEYS** count.
+- New Key item sprite.
+- Unit tests: locked door tile rules + unlock/open transitions.
+
+### Changed
+- Minimap now renders locked doors with a distinct tint.
+
+## [0.9.0] - 2025-12-27
+
+### Added
+- **Secret rooms + secret doors**: each floor may now generate 1–2 optional secret treasure rooms hidden behind secret doors.
+- Searching (**C**) can now reveal **secret doors** in addition to traps.
+- New **Scroll of Detect Secrets** (identifiable scroll) that reveals secret doors on the current floor.
+- Unit tests: improved dungeon connectivity BFS to match in-game diagonal movement rules.
+- CI: replaced the placeholder GitHub Actions workflow with a real build+test matrix (Ubuntu/macOS/Windows) and a Linux game build.
+- Repo hygiene: restored `.gitignore`, `.editorconfig`, and `.clang-format` files in the root.
+
 ## [0.8.0] - 2025-12-26
 
 ### Added

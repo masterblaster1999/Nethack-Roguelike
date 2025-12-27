@@ -53,6 +53,60 @@ static int hungerStateFor(int hunger, int hungerMax) {
     return 0;
 }
 
+// Chest flags are stored in Item::charges (low bits) to avoid changing save format.
+// - bit 0: locked
+// - bit 1: trapped
+// - bit 2: opened
+// - bit 3: trap discovered (for "search" / detect traps UI)
+// Trap kind is stored in charges bits 8..15.
+static constexpr int CHEST_FLAG_LOCKED = 1 << 0;
+static constexpr int CHEST_FLAG_TRAPPED = 1 << 1;
+static constexpr int CHEST_FLAG_OPENED = 1 << 2;
+static constexpr int CHEST_FLAG_TRAP_KNOWN = 1 << 3;
+static constexpr int CHEST_TRAP_SHIFT = 8;
+
+static bool chestLocked(const Item& it) {
+    return (it.charges & CHEST_FLAG_LOCKED) != 0;
+}
+
+static bool chestTrapped(const Item& it) {
+    return (it.charges & CHEST_FLAG_TRAPPED) != 0;
+}
+
+static bool chestTrapKnown(const Item& it) {
+    return (it.charges & CHEST_FLAG_TRAP_KNOWN) != 0;
+}
+
+static TrapKind chestTrapKind(const Item& it) {
+    const int v = (it.charges >> CHEST_TRAP_SHIFT) & 0xFF;
+    return static_cast<TrapKind>(v);
+}
+
+static int chestTier(const Item& it) {
+    // Stored in enchant (0..2). Not shown to the player.
+    return clampi(it.enchant, 0, 2);
+}
+
+static void setChestLocked(Item& it, bool v) {
+    if (v) it.charges |= CHEST_FLAG_LOCKED;
+    else it.charges &= ~CHEST_FLAG_LOCKED;
+}
+
+static void setChestTrapped(Item& it, bool v) {
+    if (v) it.charges |= CHEST_FLAG_TRAPPED;
+    else it.charges &= ~CHEST_FLAG_TRAPPED;
+}
+
+static void setChestTrapKnown(Item& it, bool v) {
+    if (v) it.charges |= CHEST_FLAG_TRAP_KNOWN;
+    else it.charges &= ~CHEST_FLAG_TRAP_KNOWN;
+}
+
+static void setChestTrapKind(Item& it, TrapKind k) {
+    it.charges &= ~(0xFF << CHEST_TRAP_SHIFT);
+    it.charges |= (static_cast<int>(k) & 0xFF) << CHEST_TRAP_SHIFT;
+}
+
 static std::vector<std::string> extendedCommandList() {
     // Keep these short and stable: they're user-facing and used for completion/prefix matching.
     return {
@@ -443,6 +497,8 @@ constexpr ItemKind SCROLL_KINDS[] = {
     ItemKind::ScrollEnchantArmor,
     ItemKind::ScrollIdentify,
     ItemKind::ScrollDetectTraps,
+    ItemKind::ScrollDetectSecrets,
+    ItemKind::ScrollKnock,
 };
 
 } // namespace
@@ -1157,6 +1213,63 @@ void Game::commandAutocomplete() {
 void Game::setAutoPickupMode(AutoPickupMode m) {
     autoPickup = m;
 }
+
+int Game::keyCount() const {
+    int n = 0;
+    for (const auto& it : inv) {
+        if (it.kind == ItemKind::Key) n += std::max(0, it.count);
+    }
+    return n;
+}
+
+int Game::lockpickCount() const {
+    int n = 0;
+    for (const auto& it : inv) {
+        if (it.kind == ItemKind::Lockpick) n += std::max(0, it.count);
+    }
+    return n;
+}
+
+bool Game::consumeKeys(int n) {
+    if (n <= 0) return true;
+
+    int need = n;
+    for (auto& it : inv) {
+        if (it.kind != ItemKind::Key) continue;
+        int take = std::min(it.count, need);
+        it.count -= take;
+        need -= take;
+        if (need <= 0) break;
+    }
+
+    // Remove emptied stackables.
+    inv.erase(std::remove_if(inv.begin(), inv.end(), [](const Item& it) {
+        return isStackable(it.kind) && it.count <= 0;
+    }), inv.end());
+
+    return need <= 0;
+}
+
+bool Game::consumeLockpicks(int n) {
+    if (n <= 0) return true;
+
+    int need = n;
+    for (auto& it : inv) {
+        if (it.kind != ItemKind::Lockpick) continue;
+        int take = std::min(it.count, need);
+        it.count -= take;
+        need -= take;
+        if (need <= 0) break;
+    }
+
+    // Remove emptied stackables.
+    inv.erase(std::remove_if(inv.begin(), inv.end(), [](const Item& it) {
+        return isStackable(it.kind) && it.count <= 0;
+    }), inv.end());
+
+    return need <= 0;
+}
+
 
 void Game::setPlayerName(std::string name) {
     std::string n = trim(std::move(name));
@@ -2583,13 +2696,24 @@ void Game::handleAction(Action a) {
                 }
                 acted = false;
             } else {
-                // QoL: if you're standing on items, Enter will pick them up.
-                bool hasItem = false;
+                // QoL: context action on the current tile.
+                // 1) Chests (world-interactable) have priority.
+                bool hasChest = false;
+                bool hasPickableItem = false;
                 for (const auto& gi : ground) {
-                    if (gi.pos == p.pos) { hasItem = true; break; }
+                    if (gi.pos != p.pos) continue;
+                    if (gi.item.kind == ItemKind::Chest) hasChest = true;
+                    if (!isChestKind(gi.item.kind)) hasPickableItem = true;
                 }
 
-                if (hasItem) {
+                if (hasChest) {
+                    acted = openChestAtPlayer();
+                    // If we didn't open the chest (e.g., locked and no keys/picks), still allow picking
+                    // up any other items on the tile.
+                    if (!acted && hasPickableItem) {
+                        acted = pickupAtPlayer();
+                    }
+                } else if (hasPickableItem) {
                     acted = pickupAtPlayer();
                 } else {
                     pushMsg("THERE IS NOTHING HERE.");
@@ -3034,7 +3158,11 @@ Vec2i Game::findNearestExploreFrontier() const {
         if (!dung.inBounds(x, y)) return false;
         const Tile& t = dung.at(x, y);
         if (!t.explored) return false;
-        if (!dung.isPassable(x, y)) return false;
+        // Treat locked doors as passable frontiers if we can unlock them.
+        if (!dung.isPassable(x, y)) {
+            const TileType tt = dung.at(x, y).type;
+            if (!(canUnlockDoors && tt == TileType::DoorLocked)) return false;
+        }
         if (isKnownTrap(x, y)) return false;
 
         // Any adjacent unexplored tile means stepping here can reveal something.
@@ -3048,6 +3176,8 @@ Vec2i Game::findNearestExploreFrontier() const {
     };
 
     const int dirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
+
+    const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
 
     while (!q.empty()) {
         Vec2i cur = q.front();
@@ -3066,7 +3196,10 @@ Vec2i Game::findNearestExploreFrontier() const {
 
             const Tile& t = dung.at(nx, ny);
             if (!t.explored) continue; // don't route through unknown
-            if (!dung.isPassable(nx, ny)) continue;
+            if (!dung.isPassable(nx, ny)) {
+                const TileType tt = dung.at(nx, ny).type;
+                if (!(canUnlockDoors && tt == TileType::DoorLocked)) continue;
+            }
             if (isKnownTrap(nx, ny)) continue;
 
             if (const Entity* occ = entityAt(nx, ny)) {
@@ -3108,6 +3241,8 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
 
     const int dirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
 
+    const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
+
     while (!q.empty()) {
         Vec2i cur = q.front();
         q.pop_front();
@@ -3127,7 +3262,14 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
                 continue;
             }
 
-            if (!dung.isPassable(nx, ny)) continue;
+            // Allow auto-pathing through locked doors if the player has keys or lockpicks.
+            // The actual door opening/unlocking happens during movement (tryMove).
+            if (!dung.isPassable(nx, ny)) {
+                const TileType tt = dung.at(nx, ny).type;
+                if (!(canUnlockDoors && tt == TileType::DoorLocked)) {
+                    continue;
+                }
+            }
 
             // Avoid known traps if possible.
             if (isKnownTrap(nx, ny) && !(nx == goal.x && ny == goal.y)) continue;
@@ -3221,10 +3363,12 @@ std::string Game::describeAt(Vec2i p) const {
     // Base tile description
     switch (t.type) {
         case TileType::Wall: ss << "WALL"; break;
+        case TileType::DoorSecret: ss << "WALL"; break; // don't spoil undiscovered secrets
         case TileType::Floor: ss << "FLOOR"; break;
         case TileType::StairsUp: ss << "STAIRS UP"; break;
         case TileType::StairsDown: ss << "STAIRS DOWN"; break;
         case TileType::DoorClosed: ss << "DOOR (CLOSED)"; break;
+        case TileType::DoorLocked: ss << "DOOR (LOCKED)"; break;
         case TileType::DoorOpen: ss << "DOOR (OPEN)"; break;
         default: ss << "TILE"; break;
     }
@@ -3264,7 +3408,12 @@ std::string Game::describeAt(Vec2i p) const {
             }
         }
         if (itemCount > 0 && first) {
-            ss << " | ITEM: " << displayItemName(first->item);
+            std::string itemLabel = displayItemName(first->item);
+            if (first->item.kind == ItemKind::Chest) {
+                if (chestLocked(first->item)) itemLabel += " (LOCKED)";
+                if (chestTrapped(first->item) && chestTrapKnown(first->item)) itemLabel += " (TRAPPED)";
+            }
+            ss << " | ITEM: " << itemLabel;
             if (itemCount > 1) ss << " (+" << (itemCount - 1) << ")";
         }
     }
@@ -3344,6 +3493,48 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         dung.openDoor(nx, ny);
         if (e.kind == EntityKind::Player) pushMsg("YOU OPEN THE DOOR.");
         return true;
+    }
+
+    // Locked door: keys open it instantly; lockpicks can work as a fallback.
+    if (dung.isDoorLocked(nx, ny)) {
+        if (e.kind != EntityKind::Player) {
+            // Monsters can't open locked doors (for now).
+            return false;
+        }
+
+        // Prefer keys (guaranteed).
+        if (consumeKeys(1)) {
+            dung.unlockDoor(nx, ny);
+            dung.openDoor(nx, ny);
+            pushMsg("YOU UNLOCK THE DOOR.", MessageKind::System, true);
+            return true;
+        }
+
+        // No keys: attempt to pick the lock if you have lockpicks.
+        if (lockpickCount() > 0) {
+            // Success chance scales a bit with character level.
+            float p = 0.55f + 0.03f * static_cast<float>(charLevel);
+            p = std::min(0.85f, p);
+
+            if (rng.chance(p)) {
+                dung.unlockDoor(nx, ny);
+                dung.openDoor(nx, ny);
+                pushMsg("YOU PICK THE LOCK.", MessageKind::Success, true);
+            } else {
+                pushMsg("YOU FAIL TO PICK THE LOCK.", MessageKind::Warning, true);
+
+                // Chance the pick breaks on a failed attempt.
+                const float breakChance = 0.25f;
+                if (rng.chance(breakChance)) {
+                    consumeLockpicks(1);
+                    pushMsg("YOUR LOCKPICK BREAKS!", MessageKind::Warning, true);
+                }
+            }
+            return true; // picking takes a turn either way
+        }
+
+        pushMsg("THE DOOR IS LOCKED.", MessageKind::Warning, true);
+        return false;
     }
 
     if (!dung.isWalkable(nx, ny)) {
@@ -3452,7 +3643,8 @@ bool Game::searchForTraps() {
     Entity& p = playerMut();
     const int radius = 2;
 
-    int found = 0;
+    int foundTraps = 0;
+    int foundSecrets = 0;
     float baseChance = 0.35f + 0.05f * static_cast<float>(charLevel);
     baseChance = std::min(0.85f, baseChance);
 
@@ -3467,13 +3659,66 @@ bool Game::searchForTraps() {
         if (cheb <= 1) chance = std::min(0.95f, chance + 0.20f);
         if (rng.chance(chance)) {
             t.discovered = true;
-            found += 1;
+            foundTraps += 1;
         }
     }
 
-    if (found > 0) {
+    // Trapped chests behave like traps for detection purposes.
+    for (auto& gi : ground) {
+        if (gi.item.kind != ItemKind::Chest) continue;
+        if (!chestTrapped(gi.item)) continue;
+        if (chestTrapKnown(gi.item)) continue;
+
+        int dx = std::abs(gi.pos.x - p.pos.x);
+        int dy = std::abs(gi.pos.y - p.pos.y);
+        int cheb = std::max(dx, dy);
+        if (cheb > radius) continue;
+
+        float chance = baseChance;
+        if (cheb <= 1) chance = std::min(0.95f, chance + 0.20f);
+        if (rng.chance(chance)) {
+            setChestTrapKnown(gi.item, true);
+            foundTraps += 1;
+        }
+    }
+
+    // Also search for secret doors in nearby walls.
+    // Secret doors are encoded as TileType::DoorSecret and behave like walls until discovered.
+    for (int y = p.pos.y - radius; y <= p.pos.y + radius; ++y) {
+        for (int x = p.pos.x - radius; x <= p.pos.x + radius; ++x) {
+            if (!dung.inBounds(x, y)) continue;
+            Tile& t = dung.at(x, y);
+            if (t.type != TileType::DoorSecret) continue;
+
+            int dx = std::abs(x - p.pos.x);
+            int dy = std::abs(y - p.pos.y);
+            int cheb = std::max(dx, dy);
+            if (cheb > radius) continue;
+
+            float chance = std::max(0.10f, baseChance - 0.10f); // slightly harder than traps
+            if (cheb <= 1) chance = std::min(0.95f, chance + 0.20f);
+
+            if (rng.chance(chance)) {
+                t.type = TileType::DoorClosed;
+                t.explored = true;
+                foundSecrets += 1;
+            }
+        }
+    }
+
+    if (foundTraps > 0 || foundSecrets > 0) {
         std::ostringstream ss;
-        ss << "YOU DISCOVER " << found << " TRAP" << (found == 1 ? "" : "S") << "!";
+        ss << "YOU DISCOVER ";
+        bool first = true;
+        if (foundTraps > 0) {
+            ss << foundTraps << " TRAP" << (foundTraps == 1 ? "" : "S");
+            first = false;
+        }
+        if (foundSecrets > 0) {
+            if (!first) ss << " AND ";
+            ss << foundSecrets << " SECRET DOOR" << (foundSecrets == 1 ? "" : "S");
+        }
+        ss << "!";
         pushMsg(ss.str(), MessageKind::Info, true);
     } else {
         pushMsg("YOU SEARCH, BUT FIND NOTHING.", MessageKind::Info, true);
@@ -3858,6 +4103,8 @@ bool Game::autoPickupAtPlayer() {
     if (autoPickup == AutoPickupMode::Off) return false;
 
     auto shouldPick = [&](const Item& it) -> bool {
+        // Chests are world-interactables; never auto-pickup.
+        if (isChestKind(it.kind)) return false;
         if (autoPickup == AutoPickupMode::Gold) return it.kind == ItemKind::Gold;
         // AutoPickupMode::All
         return true;
@@ -3909,6 +4156,204 @@ bool Game::autoPickupAtPlayer() {
     return true;
 }
 
+bool Game::openChestAtPlayer() {
+    const Vec2i pos = player().pos;
+
+    // Find a closed chest at the player's position.
+    GroundItem* chestGi = nullptr;
+    for (auto& gi : ground) {
+        if (gi.pos == pos && gi.item.kind == ItemKind::Chest) {
+            chestGi = &gi;
+            break;
+        }
+    }
+    if (!chestGi) return false;
+
+    Item& chest = chestGi->item;
+
+    // Locked chest: consume a key or attempt lockpick.
+    if (chestLocked(chest)) {
+        if (keyCount() > 0) {
+            (void)consumeKeys(1);
+            setChestLocked(chest, false);
+            pushMsg("YOU UNLOCK THE CHEST.", MessageKind::Info, true);
+        } else if (lockpickCount() > 0) {
+            // Lockpicking chance scales with character level, but higher-tier chests are harder.
+            float chance = 0.35f + 0.05f * static_cast<float>(charLevel);
+            chance -= 0.05f * static_cast<float>(chestTier(chest));
+            chance = clampf(chance, 0.15f, 0.95f);
+
+            if (rng.chance(chance)) {
+                setChestLocked(chest, false);
+                pushMsg("YOU PICK THE CHEST'S LOCK.", MessageKind::Info, true);
+            } else {
+                // Failed pick still costs a turn.
+                pushMsg("YOU FAIL TO PICK THE CHEST'S LOCK.", MessageKind::Info, true);
+                // Chance to break a lockpick.
+                float breakChance = 0.10f + 0.05f * static_cast<float>(chestTier(chest));
+                if (rng.chance(breakChance)) {
+                    (void)consumeLockpicks(1);
+                    pushMsg("YOUR LOCKPICK BREAKS!", MessageKind::Warning, true);
+                }
+                return true;
+            }
+        } else {
+            pushMsg("THE CHEST IS LOCKED.", MessageKind::Info, true);
+            return false;
+        }
+    }
+
+    // Opening the chest consumes a turn.
+    pushMsg("YOU OPEN THE CHEST.", MessageKind::Loot, true);
+
+    // Trigger trap if present.
+    if (chestTrapped(chest)) {
+        const TrapKind tk = chestTrapKind(chest);
+        setChestTrapped(chest, false);
+        setChestTrapKnown(chest, true);
+
+        Entity& p = playerMut();
+        switch (tk) {
+            case TrapKind::Spike: {
+                int dmg = rng.range(2, 5) + std::min(3, depth_ / 2);
+                p.hp -= dmg;
+                std::ostringstream ss;
+                ss << "A NEEDLE TRAP JABS YOU! YOU TAKE " << dmg << ".";
+                pushMsg(ss.str(), MessageKind::Combat, false);
+                if (p.hp <= 0) {
+                    pushMsg("YOU DIE.", MessageKind::Combat, false);
+                    if (endCause_.empty()) endCause_ = "KILLED BY CHEST TRAP";
+                    gameOver = true;
+                }
+                break;
+            }
+            case TrapKind::PoisonDart: {
+                int dmg = rng.range(1, 2);
+                p.hp -= dmg;
+                p.poisonTurns = std::max(p.poisonTurns, rng.range(6, 12));
+                std::ostringstream ss;
+                ss << "POISON NEEDLES HIT YOU! YOU TAKE " << dmg << ".";
+                pushMsg(ss.str(), MessageKind::Combat, false);
+                pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
+                if (p.hp <= 0) {
+                    pushMsg("YOU DIE.", MessageKind::Combat, false);
+                    if (endCause_.empty()) endCause_ = "KILLED BY POISON CHEST TRAP";
+                    gameOver = true;
+                }
+                break;
+            }
+            case TrapKind::Teleport: {
+                pushMsg("A TELEPORT GLYPH FLARES FROM THE CHEST!", MessageKind::Warning, false);
+                Vec2i dst = dung.randomFloor(rng, true);
+                for (int tries = 0; tries < 200; ++tries) {
+                    dst = dung.randomFloor(rng, true);
+                    if (!entityAt(dst.x, dst.y) && dst != dung.stairsUp && dst != dung.stairsDown) break;
+                }
+                p.pos = dst;
+                recomputeFov();
+                break;
+            }
+            case TrapKind::Alarm: {
+                pushMsg("AN ALARM BLARES FROM THE CHEST!", MessageKind::Warning, false);
+                for (auto& m : ents) {
+                    if (m.id != playerId_) m.alerted = true;
+                }
+                break;
+            }
+            case TrapKind::Web: {
+                const int turns = rng.range(4, 7) + std::min(6, depth_ / 2);
+                p.webTurns = std::max(p.webTurns, turns);
+                pushMsg("STICKY WEBBING EXPLODES OUT OF THE CHEST!", MessageKind::Warning, true);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    if (gameOver) {
+        // Don't generate loot if the trap killed the player.
+        return true;
+    }
+
+    // Loot: gold + a few items based on tier and depth.
+    auto dropItemHere = [&](ItemKind k, int count = 1, int enchant = 0) {
+        Item it;
+        it.id = nextItemId++;
+        it.kind = k;
+        it.count = std::max(1, count);
+        it.spriteSeed = rng.nextU32();
+        it.enchant = enchant;
+        if (k == ItemKind::WandSparks) it.charges = itemDef(k).maxCharges;
+        ground.push_back({it, pos});
+    };
+
+    const int tier = chestTier(chest);
+    int goldBase = rng.range(8, 16) + depth_ * 4;
+    if (tier == 1) goldBase = static_cast<int>(goldBase * 1.5f);
+    if (tier >= 2) goldBase = goldBase * 2;
+    dropItemHere(ItemKind::Gold, goldBase);
+
+    int rolls = 1 + tier;
+    if (depth_ >= 4 && rng.chance(0.50f)) rolls += 1;
+
+    for (int r = 0; r < rolls; ++r) {
+        int roll = rng.range(0, 139);
+
+        if (roll < 16) {
+            // Weapons
+            ItemKind wk = (roll < 8) ? ItemKind::Sword : ItemKind::Axe;
+            int ench = (rng.chance(0.25f + 0.10f * tier)) ? rng.range(1, 1 + tier) : 0;
+            dropItemHere(wk, 1, ench);
+        } else if (roll < 34) {
+            // Armor
+            ItemKind ak = (roll < 26) ? ItemKind::ChainArmor : ItemKind::PlateArmor;
+            int ench = (rng.chance(0.25f + 0.10f * tier)) ? rng.range(1, 1 + tier) : 0;
+            dropItemHere(ak, 1, ench);
+        } else if (roll < 48) {
+            dropItemHere(ItemKind::WandSparks, 1);
+        } else if (roll < 60) {
+            dropItemHere(ItemKind::PotionStrength, rng.range(1, 2));
+        } else if (roll < 78) {
+            dropItemHere(ItemKind::PotionHealing, rng.range(1, 2));
+        } else if (roll < 90) {
+            dropItemHere(ItemKind::PotionAntidote, rng.range(1, 2));
+        } else if (roll < 100) {
+            dropItemHere(ItemKind::PotionRegeneration, 1);
+        } else if (roll < 108) {
+            dropItemHere(ItemKind::PotionShielding, 1);
+        } else if (roll < 116) {
+            dropItemHere(ItemKind::PotionHaste, 1);
+        } else if (roll < 124) {
+            dropItemHere(ItemKind::PotionVision, 1);
+        } else if (roll < 130) {
+            dropItemHere(ItemKind::ScrollMapping, 1);
+        } else if (roll < 134) {
+            dropItemHere(ItemKind::ScrollTeleport, 1);
+        } else if (roll < 136) {
+            dropItemHere(ItemKind::ScrollEnchantWeapon, 1);
+        } else if (roll < 138) {
+            dropItemHere(ItemKind::ScrollEnchantArmor, 1);
+        } else {
+            int pick = rng.range(0, 3);
+            ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
+                                      : (pick == 1) ? ItemKind::ScrollDetectTraps
+                                      : (pick == 2) ? ItemKind::ScrollDetectSecrets
+                                                    : ItemKind::ScrollKnock;
+            dropItemHere(sk, 1);
+        }
+    }
+
+    // Turn the chest into a decorative open chest.
+    chest.kind = ItemKind::ChestOpen;
+    chest.charges = CHEST_FLAG_OPENED;
+
+    // Respect auto-pickup preference after loot spills out (mostly useful for gold).
+    (void)autoPickupAtPlayer();
+
+    return true;
+}
+
 bool Game::pickupAtPlayer() {
     Vec2i ppos = player().pos;
 
@@ -3921,6 +4366,19 @@ bool Game::pickupAtPlayer() {
         return false;
     }
 
+    // Chests are not pick-up items.
+    bool hasPickable = false;
+    for (size_t gi : idxs) {
+        if (gi < ground.size() && !isChestKind(ground[gi].item.kind)) {
+            hasPickable = true;
+            break;
+        }
+    }
+    if (!hasPickable) {
+        pushMsg("NOTHING TO PICK UP.", MessageKind::Info, true);
+        return false;
+    }
+
     const int maxInv = 26;
     bool pickedAny = false;
 
@@ -3930,6 +4388,11 @@ bool Game::pickupAtPlayer() {
         if (gi >= ground.size()) continue;
 
         Item it = ground[gi].item;
+
+        if (isChestKind(it.kind)) {
+            // Skip non-pickable world items.
+            continue;
+        }
 
         if (tryStackItem(inv, it)) {
             // stacked
@@ -4136,12 +4599,24 @@ bool Game::useSelected() {
         (void)markIdentified(it.kind, false);
 
         int newly = 0;
+        int total = 0;
+
         for (auto& tr : trapsCur) {
-            if (!tr.discovered) newly++;
+            total += 1;
+            if (!tr.discovered) newly += 1;
             tr.discovered = true;
         }
 
-        if (trapsCur.empty()) {
+        // Chests can also be trapped; reveal those too.
+        for (auto& gi : ground) {
+            if (gi.item.kind != ItemKind::Chest) continue;
+            if (!chestTrapped(gi.item)) continue;
+            total += 1;
+            if (!chestTrapKnown(gi.item)) newly += 1;
+            setChestTrapKnown(gi.item, true);
+        }
+
+        if (total == 0) {
             pushMsg("YOU SENSE NO TRAPS.", MessageKind::Info, true);
         } else if (newly == 0) {
             pushMsg("YOU SENSE NO NEW TRAPS.", MessageKind::Info, true);
@@ -4149,6 +4624,78 @@ bool Game::useSelected() {
             std::ostringstream ss;
             ss << "YOU SENSE " << newly << " TRAP" << (newly == 1 ? "" : "S") << "!";
             pushMsg(ss.str(), MessageKind::System, true);
+        }
+
+        consumeOneStackable();
+        return true;
+    }
+
+    if (it.kind == ItemKind::ScrollDetectSecrets) {
+        (void)markIdentified(it.kind, false);
+
+        int newly = 0;
+        for (auto& t : dung.tiles) {
+            if (t.type == TileType::DoorSecret) {
+                t.type = TileType::DoorClosed;
+                t.explored = true; // show on the map once discovered
+                newly++;
+            }
+        }
+
+        if (newly == 0) {
+            pushMsg("YOU SENSE NO SECRET DOORS.", MessageKind::Info, true);
+        } else {
+            std::ostringstream ss;
+            ss << "YOU SENSE " << newly << " SECRET DOOR" << (newly == 1 ? "" : "S") << "!";
+            pushMsg(ss.str(), MessageKind::System, true);
+        }
+
+        consumeOneStackable();
+        return true;
+    }
+
+
+    if (it.kind == ItemKind::ScrollKnock) {
+        (void)markIdentified(it.kind, false);
+
+        Entity& p = playerMut();
+        const int radius = 6;
+        int opened = 0;
+
+        for (int y = p.pos.y - radius; y <= p.pos.y + radius; ++y) {
+            for (int x = p.pos.x - radius; x <= p.pos.x + radius; ++x) {
+                if (!dung.inBounds(x, y)) continue;
+                int dx = std::abs(x - p.pos.x);
+                int dy = std::abs(y - p.pos.y);
+                int cheb = std::max(dx, dy);
+                if (cheb > radius) continue;
+
+                if (dung.isDoorLocked(x, y)) {
+                    dung.unlockDoor(x, y);
+                    dung.openDoor(x, y);
+                    opened++;
+                }
+            }
+        }
+
+        // Also unlock nearby chests.
+        for (auto& gi : ground) {
+            if (gi.item.kind != ItemKind::Chest) continue;
+            if (!chestLocked(gi.item)) continue;
+            int dx = std::abs(gi.pos.x - p.pos.x);
+            int dy = std::abs(gi.pos.y - p.pos.y);
+            int cheb = std::max(dx, dy);
+            if (cheb > radius) continue;
+            setChestLocked(gi.item, false);
+            opened += 1;
+        }
+
+        if (opened == 0) {
+            pushMsg("NOTHING SEEMS TO HAPPEN.", MessageKind::Info, true);
+        } else if (opened == 1) {
+            pushMsg("YOU HEAR A LOCK CLICK OPEN.", MessageKind::System, true);
+        } else {
+            pushMsg("YOU HEAR A CHORUS OF LOCKS CLICK OPEN.", MessageKind::System, true);
         }
 
         consumeOneStackable();
@@ -4529,7 +5076,12 @@ void Game::spawnMonsters() {
         bool isStart = (r.contains(dung.stairsUp.x, dung.stairsUp.y));
 
         int base = isStart ? 0 : 1;
+        if (r.type == RoomType::Secret || r.type == RoomType::Vault) base = 0;
         int n = rng.range(0, base + (depth_ >= 3 ? 2 : 1));
+        if (r.type == RoomType::Vault) {
+            // Vaults are locked side rooms; keep them dangerous but not overcrowded.
+            n = rng.range(0, 1);
+        }
 
         if (r.type == RoomType::Lair && !isStart) {
             // Pack spawns
@@ -4593,8 +5145,12 @@ void Game::spawnMonsters() {
             addMonster(k, p, 0);
         }
 
-        // Treasure rooms get a guardian sometimes.
-        if (r.type == RoomType::Treasure && !isStart && rng.chance(0.6f)) {
+        // Treasure/bonus rooms get a guardian sometimes.
+        if ((r.type == RoomType::Treasure || r.type == RoomType::Secret || r.type == RoomType::Vault) && !isStart) {
+            float chance = 0.60f;
+            if (r.type == RoomType::Secret) chance = 0.75f;
+            if (r.type == RoomType::Vault)  chance = 0.85f;
+            if (!rng.chance(chance)) continue;
             Vec2i p = randomFreeTileInRoom(r);
             EntityKind g = EntityKind::Goblin;
             if (depth_ >= 4) {
@@ -4606,6 +5162,9 @@ void Game::spawnMonsters() {
                 g = EntityKind::Orc;
             } else {
                 g = EntityKind::Goblin;
+            }
+            if (r.type == RoomType::Vault && depth_ >= 2 && depth_ < 3) {
+                g = EntityKind::Orc;
             }
             addMonster(g, p, 0);
         }
@@ -4648,23 +5207,131 @@ void Game::spawnItems() {
         else if (roll < 122) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
         else if (roll < 126) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
         else if (roll < 129) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
-        else if (roll < 131) dropItemAt(rng.chance(0.5f) ? ItemKind::ScrollIdentify : ItemKind::ScrollDetectTraps, randomFreeTileInRoom(r), 1);
+        else if (roll < 131) {
+            int pick = rng.range(0, 3);
+            ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
+                                      : (pick == 1) ? ItemKind::ScrollDetectTraps
+                                      : (pick == 2) ? ItemKind::ScrollDetectSecrets
+                                                    : ItemKind::ScrollKnock;
+            dropItemAt(sk, randomFreeTileInRoom(r), 1);
+        }
         else if (roll < 133) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
         else if (roll < 135) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
         else dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
     };
 
+    int keysPlacedThisFloor = 0;
+    int lockpicksPlacedThisFloor = 0;
+    auto dropKeyAt = [&](Vec2i pos, int count = 1) {
+        dropItemAt(ItemKind::Key, pos, count);
+        keysPlacedThisFloor += std::max(1, count);
+    };
+    auto dropLockpickAt = [&](Vec2i pos, int count = 1) {
+        dropItemAt(ItemKind::Lockpick, pos, count);
+        lockpicksPlacedThisFloor += std::max(1, count);
+    };
+
+    auto rollChestTrap = [&]() -> TrapKind {
+        // Weighted: mostly poison/alarm/web; teleport is rarer.
+        int r = rng.range(0, 99);
+        if (r < 32) return TrapKind::PoisonDart;
+        if (r < 58) return TrapKind::Alarm;
+        if (r < 82) return TrapKind::Web;
+        return TrapKind::Teleport;
+    };
+
+    auto hasGroundAt = [&](Vec2i pos) -> bool {
+        for (const auto& gi : ground) {
+            if (gi.pos == pos) return true;
+        }
+        return false;
+    };
+
+    auto randomEmptyTileInRoom = [&](const Room& r) -> Vec2i {
+        for (int tries = 0; tries < 200; ++tries) {
+            Vec2i pos = randomFreeTileInRoom(r);
+            if (!hasGroundAt(pos) && !entityAt(pos.x, pos.y)) return pos;
+        }
+        return randomFreeTileInRoom(r);
+    };
+
+    auto dropChestInRoom = [&](const Room& r, int tier, float lockedChance, float trappedChance) {
+        Item chest;
+        chest.id = nextItemId++;
+        chest.kind = ItemKind::Chest;
+        chest.count = 1;
+        chest.spriteSeed = rng.nextU32();
+        chest.enchant = clampi(tier, 0, 2);
+        chest.charges = 0;
+
+        if (rng.chance(lockedChance)) {
+            setChestLocked(chest, true);
+        }
+        if (rng.chance(trappedChance)) {
+            setChestTrapped(chest, true);
+            setChestTrapKnown(chest, false);
+            setChestTrapKind(chest, rollChestTrap());
+        }
+
+        Vec2i pos = randomEmptyTileInRoom(r);
+        ground.push_back({chest, pos});
+    };
+
+    bool hasLockedDoor = false;
+    for (const auto& t : dung.tiles) {
+        if (t.type == TileType::DoorLocked) {
+            hasLockedDoor = true;
+            break;
+        }
+    }
+
     for (const Room& r : rooms) {
         Vec2i p = randomFreeTileInRoom(r);
+
+        if (r.type == RoomType::Vault) {
+            // Vaults are locked bonus rooms: high reward, higher risk.
+            dropItemAt(ItemKind::Gold, p, rng.range(25, 55) + depth_ * 4);
+            dropChestInRoom(r, 2, 0.75f, 0.55f);
+            if (depth_ >= 4 && rng.chance(0.25f)) {
+                dropChestInRoom(r, 2, 0.85f, 0.65f);
+            }
+            dropGoodItem(r);
+            if (rng.chance(0.65f)) dropGoodItem(r);
+            if (rng.chance(0.35f)) dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), 1);
+            // No keys inside vaults; keys should be found outside.
+            continue;
+        }
+
+        if (r.type == RoomType::Secret) {
+            // Secret rooms are optional bonus finds; keep them rewarding but not as
+            // rich as full treasure rooms.
+            dropItemAt(ItemKind::Gold, p, rng.range(8, 22) + depth_);
+            if (rng.chance(0.55f)) {
+                dropChestInRoom(r, 1, 0.45f, 0.35f);
+            }
+            if (rng.chance(0.70f)) {
+                dropGoodItem(r);
+            } else if (rng.chance(0.50f)) {
+                dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), 1);
+            }
+            continue;
+        }
 
         if (r.type == RoomType::Treasure) {
             dropItemAt(ItemKind::Gold, p, rng.range(15, 40) + depth_ * 3);
             dropGoodItem(r);
+            if (rng.chance(0.40f)) {
+                dropChestInRoom(r, 1, 0.50f, 0.25f);
+            }
+            if (rng.chance(0.35f)) dropKeyAt(randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.25f)) dropLockpickAt(randomFreeTileInRoom(r), rng.range(1, 2));
             continue;
         }
 
         if (r.type == RoomType::Shrine) {
             dropItemAt(ItemKind::PotionHealing, p, rng.range(1, 2));
+            if (rng.chance(0.25f)) dropKeyAt(randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.20f)) dropLockpickAt(randomFreeTileInRoom(r), 1);
             if (rng.chance(hungerEnabled_ ? 0.75f : 0.35f)) dropItemAt(ItemKind::FoodRation, randomFreeTileInRoom(r), rng.range(1, 2));
             if (rng.chance(0.45f)) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.35f)) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), 1);
@@ -4674,7 +5341,14 @@ void Game::spawnItems() {
             if (rng.chance(0.15f)) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.18f)) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.12f)) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
-            if (rng.chance(0.20f)) dropItemAt(rng.chance(0.5f) ? ItemKind::ScrollIdentify : ItemKind::ScrollDetectTraps, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.20f)) {
+                int pick = rng.range(0, 3);
+                ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
+                                          : (pick == 1) ? ItemKind::ScrollDetectTraps
+                                          : (pick == 2) ? ItemKind::ScrollDetectSecrets
+                                                        : ItemKind::ScrollKnock;
+                dropItemAt(sk, randomFreeTileInRoom(r), 1);
+            }
             if (rng.chance(0.45f)) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.35f)) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.50f)) dropItemAt(ItemKind::Gold, randomFreeTileInRoom(r), rng.range(6, 18));
@@ -4683,12 +5357,21 @@ void Game::spawnItems() {
 
         if (r.type == RoomType::Lair) {
             if (rng.chance(0.50f)) dropItemAt(ItemKind::Rock, p, rng.range(3, 9));
+            if (rng.chance(0.10f)) dropKeyAt(randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.12f)) dropLockpickAt(randomFreeTileInRoom(r), 1);
             if (rng.chance(hungerEnabled_ ? 0.25f : 0.10f)) dropItemAt(ItemKind::FoodRation, randomFreeTileInRoom(r), 1);
             if (depth_ >= 2 && rng.chance(0.20f)) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r), 1);
             continue;
         }
 
         // Normal rooms: small chance for loot
+        if (rng.chance(0.06f)) {
+            dropKeyAt(p, 1);
+        }
+        if (rng.chance(0.05f)) {
+            dropLockpickAt(p, 1);
+        }
+
         if (rng.chance(0.35f)) {
             // Expanded table (added food rations).
             int roll = rng.range(0, 107);
@@ -4701,7 +5384,14 @@ void Game::spawnItems() {
             else if (roll < 68) dropItemAt(ItemKind::PotionRegeneration, p, 1);
             else if (roll < 74) dropItemAt(ItemKind::ScrollTeleport, p, 1);
             else if (roll < 80) dropItemAt(ItemKind::ScrollMapping, p, 1);
-            else if (roll < 82) dropItemAt(rng.chance(0.5f) ? ItemKind::ScrollIdentify : ItemKind::ScrollDetectTraps, p, 1);
+            else if (roll < 82) {
+                int pick = rng.range(0, 3);
+                ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
+                                          : (pick == 1) ? ItemKind::ScrollDetectTraps
+                                          : (pick == 2) ? ItemKind::ScrollDetectSecrets
+                                                        : ItemKind::ScrollKnock;
+                dropItemAt(sk, p, 1);
+            }
             else if (roll < 86) dropItemAt(ItemKind::ScrollEnchantWeapon, p, 1);
             else if (roll < 90) dropItemAt(ItemKind::ScrollEnchantArmor, p, 1);
             else if (roll < 95) dropItemAt(ItemKind::Arrow, p, rng.range(4, 10));
@@ -4713,6 +5403,49 @@ void Game::spawnItems() {
             else dropItemAt(ItemKind::PotionVision, p, 1);
         }
     }
+
+    // Guarantee at least one key on any floor that contains locked doors.
+    if (hasLockedDoor && keysPlacedThisFloor <= 0) {
+        std::vector<const Room*> candidates;
+        candidates.reserve(rooms.size());
+        for (const Room& r : rooms) {
+            if (r.type == RoomType::Vault) continue; // don't hide keys behind locked doors
+            if (r.type == RoomType::Secret) continue; // keep the guarantee discoverable without searching
+            candidates.push_back(&r);
+        }
+
+        if (!candidates.empty()) {
+            for (int tries = 0; tries < 50; ++tries) {
+                const Room& rr = *candidates[static_cast<size_t>(rng.range(0, static_cast<int>(candidates.size()) - 1))];
+                Vec2i pos = randomFreeTileInRoom(rr);
+                if (entityAt(pos.x, pos.y)) continue;
+                dropKeyAt(pos, 1);
+                break;
+            }
+        }
+    }
+    // Guarantee at least one lockpick on any floor that contains locked doors.
+    // (Lockpicks are a fallback if you can't find enough keys.)
+    if (hasLockedDoor && lockpicksPlacedThisFloor <= 0) {
+        std::vector<const Room*> candidates;
+        candidates.reserve(rooms.size());
+        for (const Room& r : rooms) {
+            if (r.type == RoomType::Vault) continue;   // don't hide picks behind locked doors
+            if (r.type == RoomType::Secret) continue;  // keep the guarantee discoverable without searching
+            candidates.push_back(&r);
+        }
+
+        if (!candidates.empty()) {
+            for (int tries = 0; tries < 50; ++tries) {
+                const Room& rr = *candidates[static_cast<size_t>(rng.range(0, static_cast<int>(candidates.size()) - 1))];
+                Vec2i pos = randomFreeTileInRoom(rr);
+                if (entityAt(pos.x, pos.y)) continue;
+                dropLockpickAt(pos, 1);
+                break;
+            }
+        }
+    }
+
 
     // Quest objective: place the Amulet of Yendor on depth 5.
     if (depth_ == 5 && !playerHasAmulet()) {
@@ -4799,6 +5532,32 @@ void Game::spawnTraps() {
         t.discovered = false;
         trapsCur.push_back(t);
     }
+
+    // Vault security: some locked doors are trapped.
+    // Traps are attached to the door tile and will trigger when you step through.
+    const float doorTrapBase = 0.18f;
+    const float doorTrapDepth = 0.02f * static_cast<float>(std::min(8, depth_));
+    const float doorTrapChance = std::min(0.40f, doorTrapBase + doorTrapDepth);
+
+    for (int y = 0; y < dung.height; ++y) {
+        for (int x = 0; x < dung.width; ++x) {
+            if (dung.at(x, y).type != TileType::DoorLocked) continue;
+            Vec2i p{ x, y };
+            if (alreadyHasTrap(p)) continue;
+            // Avoid trapping doors right next to the start.
+            if (manhattan(p, player().pos) <= 6) continue;
+
+            if (!rng.chance(doorTrapChance)) continue;
+
+            Trap t;
+            t.pos = p;
+            t.discovered = false;
+            // Bias toward alarm/poison on doors (fits the theme).
+            t.kind = rng.chance(0.55f) ? TrapKind::Alarm : TrapKind::PoisonDart;
+            trapsCur.push_back(t);
+        }
+    }
+
 }
 
 void Game::monsterTurn() {
@@ -5138,7 +5897,14 @@ void Game::cleanupDead() {
             else if (roll < 88) { gi.item.kind = ItemKind::PotionAntidote; gi.item.count = 1; }
             else if (roll < 92) { gi.item.kind = ItemKind::PotionRegeneration; gi.item.count = 1; }
             else if (roll < 96) { gi.item.kind = ItemKind::ScrollTeleport; gi.item.count = 1; }
-            else if (roll < 98) { gi.item.kind = (rng.chance(0.5f) ? ItemKind::ScrollIdentify : ItemKind::ScrollDetectTraps); gi.item.count = 1; }
+            else if (roll < 98) {
+                int pick = rng.range(0, 3);
+                gi.item.kind = (pick == 0) ? ItemKind::ScrollIdentify
+                                           : (pick == 1) ? ItemKind::ScrollDetectTraps
+                                           : (pick == 2) ? ItemKind::ScrollDetectSecrets
+                                                         : ItemKind::ScrollKnock;
+                gi.item.count = 1;
+            }
             else if (roll < 101) { gi.item.kind = ItemKind::ScrollEnchantWeapon; gi.item.count = 1; }
             else if (roll < 104) { gi.item.kind = ItemKind::ScrollEnchantArmor; gi.item.count = 1; }
             else if (roll < 105) { gi.item.kind = ItemKind::Dagger; gi.item.count = 1; }
@@ -5157,6 +5923,20 @@ void Game::cleanupDead() {
             }
 
             ground.push_back(gi);
+
+            // Rare extra drop: keys (humanoid-ish enemies are more likely to carry them).
+            const bool keyCarrier = (e.kind == EntityKind::Goblin || e.kind == EntityKind::Orc || e.kind == EntityKind::KoboldSlinger ||
+                                     e.kind == EntityKind::SkeletonArcher || e.kind == EntityKind::Wizard || e.kind == EntityKind::Ogre ||
+                                     e.kind == EntityKind::Troll);
+            if (keyCarrier && rng.chance(0.07f)) {
+                GroundItem kg;
+                kg.pos = e.pos;
+                kg.item.id = nextItemId++;
+                kg.item.spriteSeed = rng.nextU32();
+                kg.item.kind = ItemKind::Key;
+                kg.item.count = 1;
+                ground.push_back(kg);
+            }
         }
     }
 

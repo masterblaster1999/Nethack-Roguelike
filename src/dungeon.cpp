@@ -42,9 +42,171 @@ void carveFloor(Dungeon& d, int x, int y) {
     if (!d.inBounds(x, y)) return;
     Tile& t = d.at(x, y);
     // Don't overwrite doors or stairs.
-    if (t.type == TileType::DoorClosed || t.type == TileType::DoorOpen || t.type == TileType::StairsDown || t.type == TileType::StairsUp)
+    if (t.type == TileType::DoorClosed || t.type == TileType::DoorOpen || t.type == TileType::DoorSecret || t.type == TileType::DoorLocked ||
+        t.type == TileType::StairsDown || t.type == TileType::StairsUp)
         return;
     t.type = TileType::Floor;
+}
+
+// ------------------------------------------------------------
+// Secret rooms: optional side-rooms hidden behind secret doors.
+// These do NOT affect critical connectivity (stairs remain reachable).
+// ------------------------------------------------------------
+
+bool tryCarveSecretRoom(Dungeon& d, RNG& rng) {
+    // Pick a wall tile adjacent to floor, then carve a small room behind it.
+    // Door stays hidden (TileType::DoorSecret) until discovered via searching.
+    const int maxTries = 350;
+
+    const Vec2i dirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+    for (int tries = 0; tries < maxTries; ++tries) {
+        const int x = rng.range(2, d.width - 3);
+        const int y = rng.range(2, d.height - 3);
+
+        if (!d.inBounds(x, y)) continue;
+        if (d.at(x, y).type != TileType::Wall) continue;
+
+        // Randomize direction check order for variety.
+        int start = rng.range(0, 3);
+        for (int i = 0; i < 4; ++i) {
+            const Vec2i dir = dirs[(start + i) % 4];
+
+            const int fx = x + dir.x;
+            const int fy = y + dir.y;
+            if (!d.inBounds(fx, fy)) continue;
+            if (d.at(fx, fy).type != TileType::Floor) continue; // must attach to existing floor
+
+            // Room extends opposite the floor neighbor.
+            const int dx = -dir.x;
+            const int dy = -dir.y;
+
+            const int rw = rng.range(3, 6);
+            const int rh = rng.range(3, 6);
+
+            int rx = x;
+            int ry = y;
+
+            if (dx != 0) {
+                // Door is on the left/right wall.
+                rx = (dx > 0) ? x : (x - rw + 1);
+                ry = y - rh / 2;
+            } else {
+                // Door is on the top/bottom wall.
+                ry = (dy > 0) ? y : (y - rh + 1);
+                rx = x - rw / 2;
+            }
+
+            // Keep a 1-tile margin for borders.
+            if (rx < 1 || ry < 1 || (rx + rw) >= d.width - 1 || (ry + rh) >= d.height - 1) continue;
+
+            // Validate that the room footprint is entirely solid wall (we don't want overlaps).
+            bool ok = true;
+            for (int yy = ry; yy < ry + rh && ok; ++yy) {
+                for (int xx = rx; xx < rx + rw; ++xx) {
+                    if (!d.inBounds(xx, yy)) { ok = false; break; }
+                    if (d.at(xx, yy).type != TileType::Wall) { ok = false; break; }
+                }
+            }
+            if (!ok) continue;
+
+            // Carve room + place secret door.
+            carveRect(d, rx, ry, rw, rh, TileType::Floor);
+            d.at(x, y).type = TileType::DoorSecret;
+
+            Room r;
+            r.x = rx;
+            r.y = ry;
+            r.w = rw;
+            r.h = rh;
+            r.type = RoomType::Secret;
+            d.rooms.push_back(r);
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// ------------------------------------------------------------
+// Vault rooms: optional side-rooms behind *locked* doors.
+// Doors are visible (TileType::DoorLocked) but require a Key to open.
+// ------------------------------------------------------------
+
+bool tryCarveVaultRoom(Dungeon& d, RNG& rng) {
+    const int maxTries = 350;
+
+    const Vec2i dirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+    for (int tries = 0; tries < maxTries; ++tries) {
+        const int x = rng.range(2, d.width - 3);
+        const int y = rng.range(2, d.height - 3);
+
+        if (!d.inBounds(x, y)) continue;
+        if (d.at(x, y).type != TileType::Wall) continue;
+
+        // Randomize direction check order for variety.
+        int start = rng.range(0, 3);
+        for (int i = 0; i < 4; ++i) {
+            const Vec2i dir = dirs[(start + i) % 4];
+
+            const int fx = x + dir.x;
+            const int fy = y + dir.y;
+            if (!d.inBounds(fx, fy)) continue;
+            if (d.at(fx, fy).type != TileType::Floor) continue; // must attach to existing floor
+
+            // Room extends opposite the floor neighbor.
+            const int dx = -dir.x;
+            const int dy = -dir.y;
+
+            // Vaults are a bit larger than secrets; they should feel like a "real" reward.
+            const int rw = rng.range(4, 7);
+            const int rh = rng.range(4, 7);
+
+            int rx = x;
+            int ry = y;
+
+            if (dx != 0) {
+                // Door is on the left/right wall.
+                rx = (dx > 0) ? x : (x - rw + 1);
+                ry = y - rh / 2;
+            } else {
+                // Door is on the top/bottom wall.
+                ry = (dy > 0) ? y : (y - rh + 1);
+                rx = x - rw / 2;
+            }
+
+            // Keep a 1-tile margin for borders.
+            if (rx < 1 || ry < 1 || (rx + rw) >= d.width - 1 || (ry + rh) >= d.height - 1) continue;
+
+            // Validate that the room footprint is entirely solid wall (no overlaps).
+            bool ok = true;
+            for (int yy = ry; yy < ry + rh && ok; ++yy) {
+                for (int xx = rx; xx < rx + rw; ++xx) {
+                    if (!d.inBounds(xx, yy)) { ok = false; break; }
+                    if (d.at(xx, yy).type != TileType::Wall) { ok = false; break; }
+                }
+            }
+            if (!ok) continue;
+
+            // Carve room + place locked door.
+            carveRect(d, rx, ry, rw, rh, TileType::Floor);
+            d.at(x, y).type = TileType::DoorLocked;
+
+            Room r;
+            r.x = rx;
+            r.y = ry;
+            r.w = rw;
+            r.h = rh;
+            r.type = RoomType::Vault;
+            d.rooms.push_back(r);
+
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void carveH(Dungeon& d, int x1, int x2, int y) {
@@ -209,13 +371,14 @@ bool Dungeon::isWalkable(int x, int y) const {
 bool Dungeon::isPassable(int x, int y) const {
     if (!inBounds(x, y)) return false;
     TileType t = at(x, y).type;
+    // Note: locked doors are NOT passable for pathing/AI until unlocked.
     return (t == TileType::Floor || t == TileType::DoorOpen || t == TileType::DoorClosed || t == TileType::StairsDown || t == TileType::StairsUp);
 }
 
 bool Dungeon::isOpaque(int x, int y) const {
     if (!inBounds(x, y)) return true;
     TileType t = at(x, y).type;
-    return (t == TileType::Wall || t == TileType::DoorClosed);
+    return (t == TileType::Wall || t == TileType::DoorClosed || t == TileType::DoorLocked || t == TileType::DoorSecret);
 }
 
 bool Dungeon::isDoorClosed(int x, int y) const {
@@ -223,10 +386,23 @@ bool Dungeon::isDoorClosed(int x, int y) const {
     return at(x, y).type == TileType::DoorClosed;
 }
 
+bool Dungeon::isDoorLocked(int x, int y) const {
+    if (!inBounds(x, y)) return false;
+    return at(x, y).type == TileType::DoorLocked;
+}
+
 void Dungeon::openDoor(int x, int y) {
     if (!inBounds(x, y)) return;
     if (at(x, y).type == TileType::DoorClosed) {
         at(x, y).type = TileType::DoorOpen;
+    }
+}
+
+void Dungeon::unlockDoor(int x, int y) {
+    if (!inBounds(x, y)) return;
+    if (at(x, y).type == TileType::DoorLocked) {
+        // Unlocking converts the door to a normal closed door.
+        at(x, y).type = TileType::DoorClosed;
     }
 }
 
@@ -427,6 +603,37 @@ void Dungeon::generate(RNG& rng) {
         at(stairsDown.x, stairsDown.y).type = TileType::StairsDown;
     }
 
+    // ------------------------------------------------------------
+    // Optional secret rooms (post-stairs so we don't accidentally make stairs
+    // spawn behind a secret door).
+    // ------------------------------------------------------------
+    {
+        int want = 1;
+        if (rng.chance(0.50f)) want++;
+        // Keep tries bounded; not all maps have enough wall space.
+        int carved = 0;
+        for (int i = 0; i < want; ++i) {
+            if (tryCarveSecretRoom(*this, rng)) carved++;
+        }
+        (void)carved;
+    }
+
+    // ------------------------------------------------------------
+    // Optional vault rooms: visible but locked side rooms.
+    // These never affect critical connectivity (stairs already placed).
+    // ------------------------------------------------------------
+    {
+        int want = 0;
+        if (rng.chance(0.55f)) want = 1;
+        if (rng.chance(0.18f)) want++;
+
+        int carved = 0;
+        for (int i = 0; i < want; ++i) {
+            if (tryCarveVaultRoom(*this, rng)) carved++;
+        }
+        (void)carved;
+    }
+
     ensureBorders(*this);
 }
 
@@ -467,10 +674,10 @@ void Dungeon::computeFov(int px, int py, int radius) {
     for (auto& t : tiles) t.visible = false;
     if (!inBounds(px, py)) return;
 
-    auto isOpaque = [&](int x, int y) {
+    auto isOpaqueTile = [&](int x, int y) {
         if (!inBounds(x, y)) return true;
         TileType tt = at(x, y).type;
-        return (tt == TileType::Wall || tt == TileType::DoorClosed);
+        return (tt == TileType::Wall || tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorSecret);
     };
 
     auto markVis = [&](int x, int y) {
@@ -512,7 +719,7 @@ void Dungeon::computeFov(int px, int py, int radius) {
                 }
 
                 if (blocked) {
-                    if (isOpaque(ax, ay)) {
+                    if (isOpaqueTile(ax, ay)) {
                         newStart = rSlope;
                         continue;
                     } else {
@@ -520,7 +727,7 @@ void Dungeon::computeFov(int px, int py, int radius) {
                         start = newStart;
                     }
                 } else {
-                    if (isOpaque(ax, ay) && dist < radius) {
+                    if (isOpaqueTile(ax, ay) && dist < radius) {
                         blocked = true;
                         castLight(dist + 1, start, lSlope, xx, xy, yx, yy);
                         newStart = rSlope;

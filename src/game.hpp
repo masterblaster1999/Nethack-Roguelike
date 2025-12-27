@@ -257,6 +257,8 @@ public:
 
     // Convenience getters (kept for renderer/legacy naming)
     int goldCount() const { return countGold(inv); }
+    int keyCount() const;
+    int lockpickCount() const;
     int characterLevel() const { return charLevel; }
     int experience() const { return xp; }
     int experienceToNext() const { return xpNext; }
@@ -586,6 +588,9 @@ private:
 
     // QoL / traps / status
     bool autoPickupAtPlayer();
+    bool openChestAtPlayer();
+    bool consumeKeys(int n);
+    bool consumeLockpicks(int n);
 
     // Auto-move helpers
     bool stepAutoMove();

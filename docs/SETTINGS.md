@@ -54,9 +54,10 @@ Comments start with `#` or `;`.
 
 ### Gameplay QoL
 
-- `auto_pickup` (`off | gold | all`, default `gold`)
+- `auto_pickup` (`off | gold | smart | all`, default `gold`)
   - `off`: never auto-pickup
   - `gold`: auto-pickup gold only
+  - `smart`: auto-pickup “core” items (gold, keys/lockpicks, consumables, and equipment; ammo only if you have the matching ranged weapon)
   - `all`: auto-pickup any item you step on
 
 - `auto_step_delay_ms` (int, default `45`)
@@ -64,6 +65,11 @@ Comments start with `#` or `;`.
   - Lower = faster auto-travel / auto-explore
 - `confirm_quit` (`true/false`, default `true`)
   - When `true`, quitting via **ESC** requires pressing ESC twice (prevents accidental quits).
+
+- `auto_mortem` (`true/false`, default `true`)
+  - When `true`, ProcRogue writes a `procrogue_mortem_*.txt` full-state dump automatically when you **win** or **die**.
+  - You can toggle this in-game with `#mortem on|off`.
+
 
 - `hunger_enabled` (`true/false`, default `false`)
   - Enables an optional hunger system.
@@ -76,6 +82,22 @@ Comments start with `#` or `;`.
   - `0` disables autosave
   - Autosave writes to `procrogue_autosave.dat`
 
+- `default_slot` (string, default empty)
+  - Empty (or `default`) uses the standard filenames:
+    - `procrogue_save.dat`
+    - `procrogue_autosave.dat`
+  - Non-empty uses slot filenames:
+    - `procrogue_save_<slot>.dat`
+    - `procrogue_autosave_<slot>.dat`
+  - You can set this in-game with `#slot <name>`.
+
+- `save_backups` (int, default `3`)
+  - Clamped to `0..10`
+  - `0` disables backups
+  - Keeps rotated backups for both manual saves and autosaves:
+    - `procrogue_save.dat.bak1..bakN`
+    - `procrogue_autosave.dat.bak1..bakN`
+
 - `identify_items` (`true/false`, default `true`)
   - `true`: potions/scrolls start unidentified each run (NetHack-style)
   - `false`: items always show their true names (more "arcade" / beginner-friendly)
@@ -84,6 +106,8 @@ Comments start with `#` or `;`.
 ### Keybindings
 
 You can rebind most keyboard controls by adding `bind_<action>` entries to `procrogue_settings.ini`.
+
+Tip: you can also manage these in-game using `#binds`, `#bind <action> <keys>`, `#unbind <action>`, and `#reload`.
 
 Format:
 

@@ -1,11 +1,14 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <system_error>
 
 #include "game.hpp"
 #include "keybinds.hpp"
@@ -18,7 +21,7 @@ static std::optional<uint32_t> parseSeedArg(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--seed" && i + 1 < argc) {
             try {
-                unsigned long v = std::stoul(argv[i + 1]);
+                unsigned long v = std::stoul(argv[i + 1], nullptr, 0);
                 return static_cast<uint32_t>(v);
             } catch (...) {
                 return std::nullopt;
@@ -35,15 +38,84 @@ static bool hasFlag(int argc, char** argv, const char* flag) {
     return false;
 }
 
+
+static std::optional<std::string> parseStringArg(int argc, char** argv, const char* opt) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == opt && i + 1 < argc) {
+            return std::string(argv[i + 1]);
+        }
+    }
+    return std::nullopt;
+}
+
+static bool isWindowsReservedBasename(const std::string& lower) {
+    static const char* reserved[] = {
+        "con", "prn", "aux", "nul",
+        "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+        "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"
+    };
+    for (const char* r : reserved) {
+        if (lower == r) return true;
+    }
+    return false;
+}
+
+static std::string sanitizeSlotName(std::string raw) {
+    // Keep only filename-safe characters for a slot name (portable + predictable).
+    auto toLower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
+        return s;
+    };
+
+    // trim
+    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front()))) raw.erase(raw.begin());
+    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back()))) raw.pop_back();
+
+    raw = toLower(std::move(raw));
+
+    std::string out;
+    out.reserve(raw.size());
+
+    for (unsigned char c : raw) {
+        if (std::isalnum(c)) out.push_back(static_cast<char>(c));
+        else if (c == '_' || c == '-') out.push_back(static_cast<char>(c));
+        else if (std::isspace(c)) out.push_back('_');
+        else out.push_back('_');
+    }
+
+    // Collapse repeated underscores
+    out.erase(std::unique(out.begin(), out.end(), [](char a, char b) { return a == '_' && b == '_'; }), out.end());
+
+    // Trim underscores/hyphens from ends
+    while (!out.empty() && (out.front() == '_' || out.front() == '-')) out.erase(out.begin());
+    while (!out.empty() && (out.back() == '_' || out.back() == '-')) out.pop_back();
+
+    if (out.empty()) out = "slot";
+    if (out.size() > 32) out.resize(32);
+
+    if (isWindowsReservedBasename(out)) out = "_" + out;
+
+    return out;
+}
+
+
 static void printUsage(const char* exe) {
     std::cout
         << PROCROGUE_APPNAME << " " << PROCROGUE_VERSION << "\n"
         << "Usage: " << (exe ? exe : "procrogue") << " [options]\n\n"
         << "Options:\n"
-        << "  --seed <n>        Start a new run with a specific seed\n"
-        << "  --load            Auto-load the save on start (alias: --continue)\n"
-        << "  --version, -v     Print version and exit\n"
-        << "  --help, -h        Show this help and exit\n";
+        << "  --seed <n>           Start a new run with a specific seed\n"
+        << "  --daily              Start a daily run (deterministic UTC-date seed)\n"
+        << "  --load               Auto-load the manual save on start (alias: --continue)\n"
+        << "  --load-auto          Auto-load the autosave on start\n"
+        << "  --data-dir <path>    Override the save/config directory\n"
+        << "  --slot <name>        Use a named save slot (affects save + autosave files)\n"
+        << "  --portable           Store saves/config next to the executable\n"
+        << "  --reset-settings     Overwrite settings with fresh defaults\n"
+        << "\n"
+        << "  --version, -v        Print version and exit\n"
+        << "  --help, -h           Show this help and exit\n";
 }
 
 int main(int argc, char** argv) {
@@ -61,25 +133,78 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Prefer a per-user writable directory for config/saves.
-    std::string prefPath;
-    if (char* p = SDL_GetPrefPath("masterblaster1999", PROCROGUE_APPNAME)) {
-        prefPath = p;
-        SDL_free(p);
+    // Determine where to store settings/saves.
+    // By default we use a per-user writable directory (SDL_GetPrefPath), but this can be overridden.
+    const std::optional<std::string> dataDirArg = parseStringArg(argc, argv, "--data-dir");
+    const std::optional<std::string> slotArg = parseStringArg(argc, argv, "--slot");
+    const bool portable = hasFlag(argc, argv, "--portable");
+    const bool resetSettings = hasFlag(argc, argv, "--reset-settings");
+
+    std::filesystem::path baseDir;
+
+    if (dataDirArg && !dataDirArg->empty()) {
+        baseDir = std::filesystem::path(*dataDirArg);
+    } else if (portable) {
+        // Portable mode: store saves/config next to the executable (if possible).
+        if (char* p = SDL_GetBasePath()) {
+            baseDir = std::filesystem::path(p);
+            SDL_free(p);
+        } else {
+            baseDir = std::filesystem::current_path();
+        }
+    } else {
+        // Prefer a per-user writable directory for config/saves.
+        if (char* p = SDL_GetPrefPath("masterblaster1999", PROCROGUE_APPNAME)) {
+            baseDir = std::filesystem::path(p);
+            SDL_free(p);
+        } else {
+            baseDir = std::filesystem::current_path();
+        }
     }
 
-    const std::string basePath = prefPath.empty() ? std::string("./") : prefPath;
-    const std::string settingsPath = basePath + "procrogue_settings.ini";
-    const std::string savePath = basePath + "procrogue_save.dat";
-    const std::string autosavePath = basePath + "procrogue_autosave.dat";
-    const std::string scoresPath = basePath + "procrogue_scores.csv";
-    const std::string screenshotDir = basePath + "screenshots";
+    // Ensure the directory exists (best-effort).
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(baseDir, ec);
+    }
+
+    const std::filesystem::path settingsPathFs = baseDir / "procrogue_settings.ini";
+    const std::filesystem::path saveBasePathFs = baseDir / "procrogue_save.dat";
+    const std::filesystem::path autosaveBasePathFs = baseDir / "procrogue_autosave.dat";
+    const std::filesystem::path scoresPathFs = baseDir / "procrogue_scores.csv";
+    const std::filesystem::path screenshotDirFs = baseDir / "screenshots";
+
+    const std::string settingsPath = settingsPathFs.string();
+    const std::string scoresPath = scoresPathFs.string();
+    const std::string screenshotDir = screenshotDirFs.string();
 
     // Load or create settings.
-    if (!std::filesystem::exists(settingsPath)) {
+    if (resetSettings) {
+        // Best-effort backup to <file>.bak (overwrite any existing .bak).
+        std::error_code ec;
+        const std::filesystem::path bak = settingsPathFs.string() + ".bak";
+        std::filesystem::remove(bak, ec);
+        if (std::filesystem::exists(settingsPathFs)) {
+            std::filesystem::rename(settingsPathFs, bak, ec);
+        }
+        writeDefaultSettings(settingsPath);
+    } else if (!std::filesystem::exists(settingsPathFs)) {
         writeDefaultSettings(settingsPath);
     }
+
     Settings settings = loadSettings(settingsPath);
+
+    // Resolve the initial save slot.
+    // Priority: CLI --slot > settings default_slot > (empty = default).
+    std::string initialSlot;
+    if (slotArg && !slotArg->empty()) {
+        initialSlot = sanitizeSlotName(*slotArg);
+    } else if (!settings.defaultSlot.empty()) {
+        initialSlot = sanitizeSlotName(settings.defaultSlot);
+    }
+    if (initialSlot == "default" || initialSlot == "none" || initialSlot == "off") {
+        initialSlot.clear();
+    }
 
     const int tileSize = settings.tileSize;
     const int hudHeight = settings.hudHeight;
@@ -130,8 +255,13 @@ int main(int argc, char** argv) {
     openFirstController();
 
     Game game;
-    game.setSavePath(savePath);
-    game.setAutosavePath(autosavePath);
+    // Configure base save/autosave paths first, then apply the active slot.
+    game.setSavePath(saveBasePathFs.string());
+    game.setAutosavePath(autosaveBasePathFs.string());
+    game.setActiveSlot(initialSlot);
+
+    const std::string savePath = game.defaultSavePath();
+    const std::string autosavePath = game.defaultAutosavePath();
     game.setScoresPath(scoresPath);
     game.setAutoStepDelayMs(settings.autoStepDelayMs);
     game.setAutosaveEveryTurns(settings.autosaveEveryTurns);
@@ -139,6 +269,8 @@ int main(int argc, char** argv) {
     game.setIdentificationEnabled(settings.identifyItems);
     game.setHungerEnabled(settings.hungerEnabled);
     game.setConfirmQuitEnabled(settings.confirmQuit);
+    game.setAutoMortemEnabled(settings.autoMortem);
+    game.setSaveBackups(settings.saveBackups);
 
     game.setPlayerName(settings.playerName);
     game.setShowEffectTimers(settings.showEffectTimers);
@@ -147,18 +279,108 @@ int main(int argc, char** argv) {
     KeyBinds keyBinds = KeyBinds::defaults();
     keyBinds.loadOverridesFromIni(settingsPath);
 
+    auto reloadKeyBindsFromDisk = [&]() {
+        keyBinds = KeyBinds::defaults();
+        keyBinds.loadOverridesFromIni(settingsPath);
+    };
 
-    const bool loadOnStart = hasFlag(argc, argv, "--load") || hasFlag(argc, argv, "--continue");
+    const bool wantLoadSave = hasFlag(argc, argv, "--load") || hasFlag(argc, argv, "--continue");
+    const bool wantLoadAuto = hasFlag(argc, argv, "--load-auto");
+    const bool wantDaily = hasFlag(argc, argv, "--daily");
 
-    bool loaded = false;
-    if (loadOnStart && std::filesystem::exists(savePath)) {
-        loaded = game.loadFromFile(savePath);
+    enum class LoadedFrom {
+        None,
+        Save,
+        Autosave,
+    };
+
+    LoadedFrom loadedFrom = LoadedFrom::None;
+
+    const bool saveExists = std::filesystem::exists(savePath);
+    const bool autoExists = std::filesystem::exists(autosavePath);
+
+    bool saveTried = false;
+    bool autoTried = false;
+    bool saveOk = false;
+    bool autoOk = false;
+
+    auto attemptLoad = [&](const std::string& p, bool exists, bool& tried, bool& ok) {
+        tried = true;
+        if (!exists) {
+            ok = false;
+            return;
+        }
+        ok = game.loadFromFile(p);
+    };
+
+    if (wantLoadAuto) {
+        attemptLoad(autosavePath, autoExists, autoTried, autoOk);
+        if (autoOk) {
+            loadedFrom = LoadedFrom::Autosave;
+        } else if (wantLoadSave) {
+            attemptLoad(savePath, saveExists, saveTried, saveOk);
+            if (saveOk) loadedFrom = LoadedFrom::Save;
+        }
+    } else if (wantLoadSave) {
+        attemptLoad(savePath, saveExists, saveTried, saveOk);
+        if (saveOk) {
+            loadedFrom = LoadedFrom::Save;
+        } else {
+            attemptLoad(autosavePath, autoExists, autoTried, autoOk);
+            if (autoOk) loadedFrom = LoadedFrom::Autosave;
+        }
+    }
+
+    const bool loaded = (loadedFrom != LoadedFrom::None);
+    std::string startMsg;
+
+    if (loaded) {
+        if (loadedFrom == LoadedFrom::Autosave && wantLoadSave && !wantLoadAuto) {
+            startMsg = "LOADED AUTOSAVE (SAVE UNAVAILABLE).";
+        } else if (loadedFrom == LoadedFrom::Save && wantLoadAuto) {
+            // This can happen if autosave was missing/corrupt and the user also passed --load.
+            startMsg = "LOADED MANUAL SAVE (AUTOSAVE UNAVAILABLE).";
+        } else if (loadedFrom == LoadedFrom::Autosave && wantLoadAuto) {
+            startMsg = "LOADED AUTOSAVE.";
+        }
+    } else if (wantLoadSave || wantLoadAuto) {
+        // We were asked to load a save on startup, but couldn't. We'll start a new run and tell the player why.
+        if (wantLoadAuto && !wantLoadSave) {
+            startMsg = autoExists ? "FAILED TO LOAD AUTOSAVE (CORRUPT?); STARTED NEW RUN."
+                                  : "NO AUTOSAVE FILE FOUND; STARTED NEW RUN.";
+        } else if (wantLoadSave && !wantLoadAuto) {
+            if (!saveExists && !autoExists) startMsg = "NO SAVE/AUTOSAVE FOUND; STARTED NEW RUN.";
+            else if (saveExists && !saveOk && !autoExists) startMsg = "FAILED TO LOAD SAVE (CORRUPT?); STARTED NEW RUN.";
+            else if (!saveExists && autoExists && autoTried && !autoOk) startMsg = "NO SAVE FOUND; AUTOSAVE FAILED TO LOAD; STARTED NEW RUN.";
+            else startMsg = "FAILED TO LOAD SAVE AND AUTOSAVE; STARTED NEW RUN.";
+        } else { // wantLoadAuto && wantLoadSave
+            if (!saveExists && !autoExists) startMsg = "NO AUTOSAVE OR SAVE FOUND; STARTED NEW RUN.";
+            else startMsg = "FAILED TO LOAD AUTOSAVE AND SAVE; STARTED NEW RUN.";
+        }
     }
 
     if (!loaded) {
-        const uint32_t seed = parseSeedArg(argc, argv).value_or(static_cast<uint32_t>(SDL_GetTicks()));
+        std::string dailyMsg;
+
+        const std::optional<uint32_t> seedArg = parseSeedArg(argc, argv);
+        uint32_t seed = 0u;
+        if (seedArg.has_value()) {
+            seed = *seedArg;
+        } else if (wantDaily) {
+            std::string dateIso;
+            seed = dailySeedUtc(&dateIso);
+            dailyMsg = "DAILY RUN (UTC " + dateIso + ") SEED: " + std::to_string(seed);
+        } else {
+            seed = static_cast<uint32_t>(SDL_GetTicks());
+        }
+
         game.newGame(seed);
         game.setAutoPickupMode(settings.autoPickup);
+
+        if (!startMsg.empty()) game.pushSystemMessage(startMsg);
+        if (!dailyMsg.empty()) game.pushSystemMessage(dailyMsg);
+    } else if (!startMsg.empty()) {
+        game.pushSystemMessage(startMsg);
     }
 
     const bool vsyncEnabled = settings.vsync;
@@ -195,7 +417,7 @@ int main(int argc, char** argv) {
                         std::cout << "Controller disconnected\n";
                         if (textInputOn) SDL_StopTextInput();
 
-    closeController();
+                        closeController();
                     }
                     break;
 
@@ -235,16 +457,6 @@ int main(int argc, char** argv) {
                     {
                         const SDL_Keycode key = ev.key.keysym.sym;
                         const Uint16 mod = ev.key.keysym.mod;
-
-                        if (key == SDLK_F12) {
-                            wantScreenshot = true;
-                            break;
-                        }
-
-                        if (key == SDLK_F11) {
-                            renderer.toggleFullscreen();
-                            break;
-                        }
 
                         // Extended command prompt: treat the keyboard as text input.
                         if (game.isCommandOpen()) {
@@ -383,6 +595,7 @@ int main(int argc, char** argv) {
                 switch (m) {
                     case AutoPickupMode::Off: return "off";
                     case AutoPickupMode::Gold: return "gold";
+                    case AutoPickupMode::Smart: return "smart";
                     case AutoPickupMode::All: return "all";
                 }
                 return "gold";
@@ -394,14 +607,80 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "identify_items", game.identificationEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "hunger_enabled", game.hungerEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "confirm_quit", game.confirmQuitEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "auto_mortem", game.autoMortemEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "autosave_every_turns", std::to_string(game.autosaveEveryTurns()));
+            ok &= updateIniKey(settingsPath, "save_backups", std::to_string(game.saveBackups()));
+
+            // Only persist the default slot if the user changed it in-game (e.g., via #slot).
+            if (game.slotDirty()) {
+                ok &= updateIniKey(settingsPath, "default_slot", game.activeSlot());
+            }
 
             ok &= updateIniKey(settingsPath, "player_name", game.playerName());
             ok &= updateIniKey(settingsPath, "show_effect_timers", game.showEffectTimers() ? "true" : "false");
 
             if (!ok) game.pushSystemMessage("FAILED TO SAVE SETTINGS.");
 
+            game.clearSlotDirty();
+
             game.clearSettingsDirty();
+        }
+
+        // App-level requests (extended commands)
+        if (game.configReloadRequested()) {
+            const bool prevControllerEnabled = settings.controllerEnabled;
+
+            Settings newSettings = loadSettings(settingsPath);
+
+            // Apply a safe subset immediately. Renderer/window related settings still require restart.
+            game.setAutoPickupMode(newSettings.autoPickup);
+            game.setAutoStepDelayMs(newSettings.autoStepDelayMs);
+            game.setAutosaveEveryTurns(newSettings.autosaveEveryTurns);
+            game.setSaveBackups(newSettings.saveBackups);
+            game.setIdentificationEnabled(newSettings.identifyItems);
+            game.setHungerEnabled(newSettings.hungerEnabled);
+            game.setConfirmQuitEnabled(newSettings.confirmQuit);
+            game.setAutoMortemEnabled(newSettings.autoMortem);
+            game.setPlayerName(newSettings.playerName);
+            game.setShowEffectTimers(newSettings.showEffectTimers);
+
+            // Keep the local copy up-to-date for any later use.
+            settings = newSettings;
+
+            // Controller can be toggled at runtime (best-effort).
+            if (!settings.controllerEnabled && prevControllerEnabled) {
+                closeController();
+            } else if (settings.controllerEnabled && !prevControllerEnabled) {
+                openFirstController();
+            }
+
+            reloadKeyBindsFromDisk();
+
+            game.pushSystemMessage("RELOADED SETTINGS + KEYBINDS. (TILE SIZE/VSYNC/FULLSCREEN REQUIRE RESTART)");
+            game.clearConfigReloadRequest();
+        }
+
+        if (game.keyBindsReloadRequested()) {
+            reloadKeyBindsFromDisk();
+            game.pushSystemMessage("RELOADED KEYBINDS.");
+            game.clearKeyBindsReloadRequest();
+        }
+
+        if (game.keyBindsDumpRequested()) {
+            game.pushSystemMessage("KEYBINDS:");
+            const auto desc = keyBinds.describeAll();
+
+            int shown = 0;
+            for (const auto& kv : desc) {
+                game.pushSystemMessage("  " + kv.first + " = " + kv.second);
+                if (++shown >= 60) {
+                    game.pushSystemMessage("  ...");
+                    break;
+                }
+            }
+
+            game.pushSystemMessage("TIP: #bind <action> <keys> | #unbind <action> | #reload");
+            game.clearKeyBindsDumpRequest();
         }
 
         // Quit requests (e.g. from extended command "quit").

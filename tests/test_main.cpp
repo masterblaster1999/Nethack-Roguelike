@@ -2,6 +2,7 @@
 #include "items.hpp"
 #include "rng.hpp"
 #include "scores.hpp"
+#include "settings.hpp"
 
 #include <cstdint>
 #include <fstream>
@@ -279,6 +280,7 @@ void test_scores_append_roundtrip() {
     ScoreEntry e;
     e.timestamp = "2025-01-01T00:00:00Z";
     e.name = "Tester";
+    e.slot = "run1";
     e.won = false;
     e.depth = 4;
     e.turns = 50;
@@ -307,6 +309,7 @@ void test_scores_append_roundtrip() {
     expect(r.name == "Tester", "Roundtrip name preserved");
     expect(r.cause == "KILLED BY GOBLIN", "Roundtrip cause preserved");
     expect(r.gameVersion == "0.8.0", "Roundtrip version preserved");
+    expect(r.slot == "run1", "Roundtrip slot preserved");
     expect(r.seed == 77u, "Roundtrip seed preserved");
 
 #if __has_include(<filesystem>)
@@ -314,6 +317,182 @@ void test_scores_append_roundtrip() {
     fs::remove(path, ec);
 #endif
 }
+
+
+void test_settings_save_backups_parse() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "procrogue_settings_save_backups_test.ini";
+#else
+    const std::string path = "procrogue_settings_save_backups_test.ini";
+#endif
+
+    // Basic parse
+    {
+        std::ofstream f(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        f << "# Test settings\n";
+        f << "save_backups = 5\n";
+    }
+
+#if __has_include(<filesystem>)
+    Settings s = loadSettings(path.string());
+#else
+    Settings s = loadSettings(path);
+#endif
+    expect(s.saveBackups == 5, "save_backups should parse to 5");
+
+    // Clamp low
+    {
+        std::ofstream f(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        f << "save_backups = -1\n";
+    }
+#if __has_include(<filesystem>)
+    s = loadSettings(path.string());
+#else
+    s = loadSettings(path);
+#endif
+    expect(s.saveBackups == 0, "save_backups should clamp to 0");
+
+    // Clamp high
+    {
+        std::ofstream f(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        f << "save_backups = 999\n";
+    }
+#if __has_include(<filesystem>)
+    s = loadSettings(path.string());
+#else
+    s = loadSettings(path);
+#endif
+    expect(s.saveBackups == 10, "save_backups should clamp to 10");
+
+#if __has_include(<filesystem>)
+    std::error_code ec;
+    fs::remove(path, ec);
+#endif
+}
+
+void test_settings_autopickup_smart_parse() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "procrogue_settings_autopickup_smart_test.ini";
+#else
+    const std::string path = "procrogue_settings_autopickup_smart_test.ini";
+#endif
+
+    {
+        std::ofstream f(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        f << "auto_pickup = smart\n";
+    }
+
+#if __has_include(<filesystem>)
+    Settings s = loadSettings(path.string());
+#else
+    Settings s = loadSettings(path);
+#endif
+    expect(s.autoPickup == AutoPickupMode::Smart, "auto_pickup=smart should parse to Smart");
+
+#if __has_include(<filesystem>)
+    std::error_code ec;
+    fs::remove(path, ec);
+#endif
+}
+
+
+void test_settings_default_slot_parse() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "procrogue_settings_default_slot_test.ini";
+#else
+    const std::string path = "procrogue_settings_default_slot_test.ini";
+#endif
+
+    // Basic parse + sanitize
+    {
+        std::ofstream f(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        f << "default_slot =  My Run 01  \n";
+    }
+
+#if __has_include(<filesystem>)
+    Settings s = loadSettings(path.string());
+#else
+    Settings s = loadSettings(path);
+#endif
+    expect(s.defaultSlot == "my_run_01", "default_slot should sanitize spaces and case");
+
+    // "default" should clear it
+    {
+        std::ofstream f(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        f << "default_slot = default\n";
+    }
+
+#if __has_include(<filesystem>)
+    s = loadSettings(path.string());
+#else
+    s = loadSettings(path);
+#endif
+    expect(s.defaultSlot.empty(), "default_slot=default should clear to empty");
+
+    // Windows reserved base names should be prefixed
+    {
+        std::ofstream f(
+#if __has_include(<filesystem>)
+            path
+#else
+            path
+#endif
+        );
+        f << "default_slot = con\n";
+    }
+
+#if __has_include(<filesystem>)
+    s = loadSettings(path.string());
+#else
+    s = loadSettings(path);
+#endif
+    expect(s.defaultSlot == "_con", "default_slot should avoid Windows reserved basenames");
+
+#if __has_include(<filesystem>)
+    std::error_code ec;
+    fs::remove(path, ec);
+#endif
+}
+
 
 } // namespace
 
@@ -330,6 +509,10 @@ int main() {
     test_scores_legacy_load();
     test_scores_new_format_load_and_escape();
     test_scores_append_roundtrip();
+
+    test_settings_save_backups_parse();
+    test_settings_autopickup_smart_parse();
+    test_settings_default_slot_parse();
 
     if (failures == 0) {
         std::cout << "All tests passed.\n";

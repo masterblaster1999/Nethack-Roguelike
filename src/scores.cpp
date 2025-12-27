@@ -256,6 +256,7 @@ bool ScoreBoard::load(const std::string& path) {
 
         e.timestamp = getCol(cols, "timestamp");
         e.name = getCol(cols, "name");
+        e.slot = getCol(cols, "slot");
         e.cause = getCol(cols, "cause");
 
         // Support either "game_version" or "version" as a column name.
@@ -312,10 +313,11 @@ bool ScoreBoard::append(const std::string& path, const ScoreEntry& eIn) {
     std::ostringstream out;
 
     // Newer, richer schema. Older files are still readable via header mapping.
-    out << "timestamp,name,won,score,depth,turns,kills,level,gold,seed,cause,game_version\n";
+    out << "timestamp,name,slot,won,score,depth,turns,kills,level,gold,seed,cause,game_version\n";
     for (const auto& s : entries_) {
         out << csvEscape(s.timestamp) << ','
             << csvEscape(s.name) << ','
+            << csvEscape(s.slot) << ','
             << (s.won ? 1 : 0) << ','
             << s.score << ','
             << s.depth << ','

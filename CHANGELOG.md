@@ -1,5 +1,118 @@
 # Changelog
 
+
+
+## [0.18.0] - 2025-12-27
+
+### Added
+- **Smart auto-pickup mode**: new `smart` mode sits between `gold` and `all`.
+  - Picks up “core” items (gold, keys/lockpicks, consumables, and equipment; ammo only if you have the matching ranged weapon).
+- **Recent run history**: new extended command `#history [n]` shows your most recent runs (newest first).
+
+### Changed
+- Auto-explore now **auto-walks to visible loot/chests** (that won't be auto-picked) and **stops on arrival**, instead of stopping immediately on sight.
+- Auto-explore no longer treats **open chests** as an interruption target.
+
+### Fixed
+- Save loading now preserves `AutoPickupMode::Smart` (no longer clamped back to `gold`).
+
+### Dev
+- Added a unit test for parsing `auto_pickup = smart` from settings.
+
+
+## [0.17.0] - 2025-12-27
+
+### Added
+- **In-game keybind management**:
+  - `#binds` prints the current active keybinds (defaults + overrides).
+  - `#bind <action> <keys>` updates `bind_<action>` in `procrogue_settings.ini` and reloads keybinds immediately.
+  - `#unbind <action>` removes the override for an action (resets it back to defaults) and reloads keybinds.
+- **Hot config reload**: `#reload` reloads settings + keybinds from disk while the game is running (safe subset applies immediately; renderer/window-related settings still require restart).
+- **Scoreboard slot tracking**: `procrogue_scores.csv` now records the active save slot for each run (new `slot` column; older files remain readable).
+
+### Changed
+- `#scores` output now includes the run slot when it is not `default`.
+
+### Dev
+- Added `removeIniKey()` helper for settings file maintenance.
+
+
+## [0.16.0] - 2025-12-27
+
+### Added
+- **Persistent default save slot**: new `default_slot` setting (and new extended command `#slot <name>`) lets you set the active slot used by **F5/F9/F10** and `#save/#load`.
+- **Daily runs from CLI**: `--daily` starts a deterministic UTC-date seeded run (matches `#daily`).
+
+### Changed
+- Options menu now includes `AUTO MORTEM` and `SAVE BACKUPS`.
+- Exported logs/dumps now include the current **slot name**.
+
+### Fixed
+- `--seed` now accepts hex input (e.g., `--seed 0xBADC0DE`).
+- Minor formatting cleanup in `main.cpp`.
+
+## [0.15.0] - 2025-12-27
+
+### Added
+- **Save slots**:
+  - `#save <slot>` / `#load <slot>` / `#loadauto <slot>` to save/load named slots (files are stored next to your normal save).
+  - `#saves` to list detected save slots (manual + autosave).
+  - `--slot <name>` command-line flag to run the game using a specific slot by default.
+- **Automatic mortem dumps**: new `auto_mortem` setting writes a `procrogue_mortem_*.txt` full-state dump automatically when you **win** or **die**.
+  - `#mortem` exports a mortem dump immediately.
+  - `#mortem on|off` toggles the feature.
+- **New extended commands**:
+  - `#paths` shows the active save/autosave/scores/settings file paths.
+  - `#exportall` exports **log + map + dump** in one command.
+
+### Changed
+- Autosave now also triggers on **floor changes** (stairs) when autosave is enabled (`autosave_every_turns > 0`), improving crash-safety between levels.
+
+### Dev
+- Unit tests now also compile `spritegen.cpp` (still no SDL required).
+
+## [0.14.0] - 2025-12-27
+
+### Added
+- **Daily challenge run**: `#daily` restarts a new game using a deterministic **UTC-date** seed.
+- **Full state dump export**: `#dump` writes a single timestamped text file with your **run state**, **equipment/inventory**, **recent messages**, and an **ASCII map snapshot**.
+- **Seeded restarts**: `#restart <seed>` now accepts an optional seed argument.
+
+### Changed
+- Auto-explore no longer stops for normal loot when **auto-pickup is ALL** (it will still stop for **chests**, since they can't be auto-picked).
+- Restart no longer resets your auto-pickup preference.
+- Auto-move now stops automatically if you are **starving** (when hunger is enabled).
+
+### Fixed
+- `#exportlog` / `#exportmap` / `#export` now compile again and correctly export using the current `MessageKind` / `EntityKind` types.
+- Fixed a compile error in auto-explore frontier selection (`canUnlockDoors` capture order).
+- Fixed a compile error in chest-lockpick chance clamping (uses `std::clamp`).
+
+### Dev
+- Unit tests now compile the full core game logic (`game.cpp`) even when building tests without SDL.
+
+## [0.13.0] - 2025-12-27
+
+### Added
+- **Save backups**: new `save_backups` setting to keep rotated backups of manual saves and autosaves (`.bak1..bakN`).
+- **Startup flags**:
+  - `--load-auto` to auto-load the autosave on launch.
+  - `--data-dir <path>` to override the save/config directory.
+  - `--portable` to store saves/config next to the executable.
+  - `--reset-settings` to overwrite settings with fresh defaults.
+- **Exports**: new extended commands:
+  - `#exportlog` writes a timestamped run log (`procrogue_log_YYYYMMDD_HHMMSS.txt`).
+  - `#exportmap` writes a timestamped ASCII map snapshot (`procrogue_map_YYYYMMDD_HHMMSS.txt`).
+  - `#export` writes both.
+
+### Changed
+- Fullscreen and screenshot are now **fully rebindable/disableable** (no hard-coded F11/F12 override).
+- Startup load flow now tries **save ↔ autosave fallbacks** and shows clear status messages.
+
+### Fixed
+- Locked-door sprite compile issue: `Renderer` now declares `doorLockedTex` (matched to `render.cpp`).
+- Save loading now reports **corrupt/truncated** saves instead of failing silently.
+
 ## [0.12.0] - 2025-12-27
 
 ### Added

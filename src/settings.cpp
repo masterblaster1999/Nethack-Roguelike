@@ -31,6 +31,48 @@ std::string toLower(std::string s) {
     return s;
 }
 
+static bool isWindowsReservedBasename(const std::string& lower) {
+    static const char* reserved[] = {
+        "con", "prn", "aux", "nul",
+        "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+        "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"
+    };
+    for (const char* r : reserved) {
+        if (lower == r) return true;
+    }
+    return false;
+}
+
+static std::string sanitizeSlotName(std::string raw) {
+    // Keep only filename-safe characters for a slot name (portable + predictable).
+    raw = toLower(trim(std::move(raw)));
+
+    std::string out;
+    out.reserve(raw.size());
+
+    for (unsigned char c : raw) {
+        if (std::isalnum(c)) out.push_back(static_cast<char>(c));
+        else if (c == '_' || c == '-') out.push_back(static_cast<char>(c));
+        else if (std::isspace(c)) out.push_back('_');
+        else out.push_back('_');
+    }
+
+    // Collapse repeated underscores.
+    out.erase(std::unique(out.begin(), out.end(), [](char a, char b) { return a == '_' && b == '_'; }), out.end());
+
+    // Trim underscores/hyphens from ends.
+    while (!out.empty() && (out.front() == '_' || out.front() == '-')) out.erase(out.begin());
+    while (!out.empty() && (out.back() == '_' || out.back() == '-')) out.pop_back();
+
+    if (out.empty()) out = "slot";
+    if (out.size() > 32) out.resize(32);
+
+    if (isWindowsReservedBasename(out)) {
+        out = "_" + out;
+    }
+    return out;
+}
+
 bool parseBool(const std::string& v, bool& out) {
     const std::string s = toLower(trim(v));
     if (s == "1" || s == "true" || s == "yes" || s == "on") {
@@ -117,10 +159,22 @@ Settings loadSettings(const std::string& path) {
             std::string v = toLower(val);
             if (v == "off") s.autoPickup = AutoPickupMode::Off;
             else if (v == "gold") s.autoPickup = AutoPickupMode::Gold;
+            else if (v == "smart") s.autoPickup = AutoPickupMode::Smart;
             else if (v == "all") s.autoPickup = AutoPickupMode::All;
         } else if (key == "autosave_every_turns") {
             int v = 0;
             if (parseInt(val, v)) s.autosaveEveryTurns = std::clamp(v, 0, 5000);
+        } else if (key == "save_backups") {
+            int v = 0;
+            if (parseInt(val, v)) s.saveBackups = std::clamp(v, 0, 10);
+        } else if (key == "default_slot") {
+            std::string v = trim(val);
+            const std::string low = toLower(v);
+            if (v.empty() || low == "default" || low == "none" || low == "off") {
+                s.defaultSlot.clear();
+            } else {
+                s.defaultSlot = sanitizeSlotName(v);
+            }
         } else if (key == "identify_items") {
             bool b = true;
             if (parseBool(val, b)) s.identifyItems = b;
@@ -130,6 +184,9 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "confirm_quit") {
             bool b = true;
             if (parseBool(val, b)) s.confirmQuit = b;
+        } else if (key == "auto_mortem") {
+            bool b = true;
+            if (parseBool(val, b)) s.autoMortem = b;
         }
     }
 
@@ -171,7 +228,7 @@ max_fps = 0
 controller_enabled = true
 
 # Gameplay QoL
-# auto_pickup: off | gold | all
+# auto_pickup: off | gold | smart | all
 auto_pickup = gold
 # auto_step_delay_ms: 10..500 (lower = faster auto-move)
 auto_step_delay_ms = 45
@@ -179,6 +236,9 @@ auto_step_delay_ms = 45
 # Safety
 # confirm_quit: true/false (true = ESC twice to quit)
 confirm_quit = true
+# auto_mortem: true/false (true = write a mortem dump on win/death)
+auto_mortem = true
+
 
 # Optional survival mechanic
 # hunger_enabled: true/false (adds food and starvation over time)
@@ -191,6 +251,14 @@ identify_items = true
 # Autosave
 # autosave_every_turns: 0 disables; otherwise saves an autosave file every N turns.
 autosave_every_turns = 200
+
+# Save slot
+# default_slot: empty (or "default") uses procrogue_save.dat; otherwise procrogue_save_<slot>.dat
+default_slot =
+
+# Save backups
+# save_backups: 0 disables; otherwise keeps N rotated backups (<file>.bak1..bakN).
+save_backups = 3
 
 # -----------------------------------------------------------------------------
 # Keybindings
@@ -301,6 +369,60 @@ bool updateIniKey(const std::string& path, const std::string& key, const std::st
         // Append at end.
         lines.push_back(key + " = " + value);
     }
+
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return false;
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        out << lines[i];
+        if (i + 1 < lines.size()) out << "\n";
+    }
+    return true;
+}
+
+bool removeIniKey(const std::string& path, const std::string& key) {
+    std::ifstream in(path);
+    if (!in) return false;
+
+    std::vector<std::string> lines;
+    std::string line;
+
+    const auto keyLower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    };
+
+    const auto trimLocal = [](std::string s) {
+        auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+        s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+        return s;
+    };
+
+    bool removed = false;
+    while (std::getline(in, line)) {
+        std::string raw = line;
+
+        // Strip comments for matching, but preserve the original line for output when not matching.
+        auto commentPos = raw.find_first_of("#;");
+        if (commentPos != std::string::npos) raw = raw.substr(0, commentPos);
+
+        auto eq = raw.find('=');
+        if (eq != std::string::npos) {
+            std::string k = trimLocal(raw.substr(0, eq));
+            if (!k.empty() && keyLower(k) == keyLower(key)) {
+                removed = true;
+                continue; // drop the line
+            }
+        }
+
+        lines.push_back(line);
+    }
+    in.close();
+
+    // Nothing to remove is not an error.
+    if (!removed) return true;
 
     std::ofstream out(path, std::ios::trunc);
     if (!out) return false;

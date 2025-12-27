@@ -91,9 +91,10 @@ enum class Action : uint8_t {
 };
 
 enum class AutoPickupMode : uint8_t {
-    Off = 0,
-    Gold,
-    All,
+    Off  = 0,
+    Gold = 1,
+    All  = 2,
+    Smart = 3,
 };
 
 enum class AutoMoveMode : uint8_t {
@@ -110,6 +111,10 @@ enum class MessageKind : uint8_t {
     Warning,
     Success,
 };
+
+// Deterministic "daily" seed derived from the current UTC date.
+// If outDateIso is non-null, it receives an ISO date like "2025-12-27".
+uint32_t dailySeedUtc(std::string* outDateIso = nullptr);
 
 struct Message {
     std::string text;
@@ -287,6 +292,11 @@ public:
     void setConfirmQuitEnabled(bool enabled) { confirmQuitEnabled_ = enabled; }
     bool confirmQuitEnabled() const { return confirmQuitEnabled_; }
 
+    // Automatic mortem dump (full-state dump written on win/death).
+    void setAutoMortemEnabled(bool enabled) { autoMortemEnabled_ = enabled; }
+    bool autoMortemEnabled() const { return autoMortemEnabled_; }
+
+
     // Targeting
     bool isTargeting() const { return targeting; }
     Vec2i targetingCursor() const { return targetPos; }
@@ -323,6 +333,11 @@ public:
     void markSettingsDirty() { settingsDirtyFlag = true; }
     void clearSettingsDirty() { settingsDirtyFlag = false; }
 
+    // Separate flag so we don't accidentally persist --slot when the user only changed other options.
+    bool slotDirty() const { return slotDirtyFlag; }
+    void markSlotDirty() { slotDirtyFlag = true; settingsDirtyFlag = true; }
+    void clearSlotDirty() { slotDirtyFlag = false; }
+
     // Auto-step delay getter (milliseconds)
     int autoStepDelayMs() const;
 
@@ -330,6 +345,19 @@ public:
     bool quitRequested() const { return quitReq; }
     void requestQuit() { quitReq = true; }
     void clearQuitRequest() { quitReq = false; }
+
+    // Requests to the platform layer (handled in main.cpp)
+    bool keyBindsReloadRequested() const { return keyBindsReloadReq; }
+    void requestKeyBindsReload() { keyBindsReloadReq = true; }
+    void clearKeyBindsReloadRequest() { keyBindsReloadReq = false; }
+
+    bool keyBindsDumpRequested() const { return keyBindsDumpReq; }
+    void requestKeyBindsDump() { keyBindsDumpReq = true; }
+    void clearKeyBindsDumpRequest() { keyBindsDumpReq = false; }
+
+    bool configReloadRequested() const { return configReloadReq; }
+    void requestConfigReload() { configReloadReq = true; }
+    void clearConfigReloadRequest() { configReloadReq = false; }
 
     // Turn counter (increments once per player action that consumes time)
     uint32_t turns() const { return turnCount; }
@@ -345,6 +373,16 @@ public:
     // Save/load helpers
     std::string defaultSavePath() const;
     void setSavePath(const std::string& path);
+
+    // Active save slot name (empty = "default").
+    // This changes what defaultSavePath/defaultAutosavePath point to.
+    const std::string& activeSlot() const { return activeSlot_; }
+    void setActiveSlot(std::string slot);
+
+    // Save backup rotation (applies to manual saves and autosaves)
+    // 0 disables backups; N keeps <file>.bak1..bakN.
+    void setSaveBackups(int count);
+    int saveBackups() const { return saveBackups_; }
 
     // Autosave
     void setAutosavePath(const std::string& path);
@@ -433,9 +471,15 @@ private:
     // Settings persistence + UI helpers
     std::string settingsPath_;
     bool settingsDirtyFlag = false;
+    bool slotDirtyFlag = false;
 
     // Application-level quit request (e.g., from extended command "quit")
     bool quitReq = false;
+
+    // Application-level requests (extended commands may set these; main.cpp handles them).
+    bool keyBindsReloadReq = false;
+    bool keyBindsDumpReq = false;
+    bool configReloadReq = false;
 
     // Messages
     std::vector<Message> msgs;
@@ -445,6 +489,8 @@ private:
     AutoPickupMode autoPickup = AutoPickupMode::Gold;
 
     bool confirmQuitEnabled_ = true;
+    bool autoMortemEnabled_ = true;
+    bool mortemWritten_ = false;
 
     // Hunger system (optional; when disabled, hunger does not tick).
     bool hungerEnabled_ = false;
@@ -465,8 +511,15 @@ private:
     float autoStepTimer = 0.0f;
     float autoStepDelay = 0.045f; // seconds between auto steps (configurable)
 
+    // Auto-explore goal tracking (used to stop on arrival when targeting visible loot).
+    bool autoExploreGoalIsLoot = false;
+    Vec2i autoExploreGoalPos{-1, -1};
+
     // Save path overrides (set by main using SDL_GetPrefPath)
     std::string savePathOverride;
+    std::string activeSlot_;
+    // How many rotated backups to keep for save/autosave files.
+    int saveBackups_ = 3;
     std::string autosavePathOverride;
     std::string scoresPathOverride;
 
@@ -593,6 +646,11 @@ private:
     bool consumeLockpicks(int n);
 
     // Auto-move helpers
+    bool hasRangedWeaponForAmmo(AmmoKind ammo) const;
+    bool autoPickupWouldPick(ItemKind k) const;
+    bool autoExploreWantsLoot(ItemKind k) const;
+    bool tileHasAutoExploreLoot(Vec2i p) const;
+
     bool stepAutoMove();
     bool buildAutoTravelPath(Vec2i goal, bool requireExplored);
     bool buildAutoExplorePath();

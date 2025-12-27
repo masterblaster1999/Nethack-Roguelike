@@ -23,6 +23,7 @@ struct ScoreEntry {
 
     // Optional metadata (newer versions may record these).
     std::string name;        // player name
+    std::string slot;        // save slot name ("default" or custom); optional
     std::string cause;       // end-of-run cause ("KILLED BY ...", "ESCAPED ...")
     std::string gameVersion; // e.g. "0.8.0"
 };

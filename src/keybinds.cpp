@@ -425,3 +425,170 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
 
     return a;
 }
+
+
+static const std::pair<Action, const char*> kActionNameTable[] = {
+    {Action::Up, "up"},
+    {Action::Down, "down"},
+    {Action::Left, "left"},
+    {Action::Right, "right"},
+    {Action::UpLeft, "up_left"},
+    {Action::UpRight, "up_right"},
+    {Action::DownLeft, "down_left"},
+    {Action::DownRight, "down_right"},
+
+    {Action::Confirm, "confirm"},
+    {Action::Cancel, "cancel"},
+    {Action::Wait, "wait"},
+    {Action::Rest, "rest"},
+    {Action::Pickup, "pickup"},
+    {Action::Inventory, "inventory"},
+    {Action::Fire, "fire"},
+    {Action::Search, "search"},
+    {Action::Look, "look"},
+    {Action::StairsUp, "stairs_up"},
+    {Action::StairsDown, "stairs_down"},
+    {Action::AutoExplore, "auto_explore"},
+    {Action::ToggleAutoPickup, "toggle_auto_pickup"},
+
+    {Action::Equip, "equip"},
+    {Action::Use, "use"},
+    {Action::Drop, "drop"},
+    {Action::DropAll, "drop_all"},
+    {Action::SortInventory, "sort_inventory"},
+
+    {Action::Help, "help"},
+    {Action::Options, "options"},
+    {Action::Command, "command"},
+    {Action::ToggleMinimap, "toggle_minimap"},
+    {Action::ToggleStats, "toggle_stats"},
+    {Action::ToggleFullscreen, "fullscreen"},
+    {Action::Screenshot, "screenshot"},
+
+    {Action::Save, "save"},
+    {Action::Load, "load"},
+    {Action::LoadAuto, "load_auto"},
+    {Action::Restart, "restart"},
+
+    {Action::LogUp, "log_up"},
+    {Action::LogDown, "log_down"},
+};
+
+static const char* actionName(Action a) {
+    for (const auto& kv : kActionNameTable) {
+        if (kv.first == a) return kv.second;
+    }
+    return "unknown";
+}
+
+static std::string keycodeToToken(SDL_Keycode key) {
+    // Printable ASCII range: keep letters/digits as-is for copy/paste convenience.
+    if (key >= 32 && key <= 126) {
+        const char c = static_cast<char>(key);
+        // Prefer named tokens for common punctuation to match docs and reduce ambiguity.
+        switch (c) {
+            case ',': return "comma";
+            case '.': return "period";
+            case '/': return "slash";
+            case '\\': return "backslash";
+            case '-': return "minus";
+            case '=': return "equals";
+            case ';': return "semicolon";
+            case '\'': return "apostrophe";
+            case '`': return "grave";
+            case '<': return "less";
+            case '>': return "greater";
+            case ' ': return "space";
+            default:
+                return std::string(1, c);
+        }
+    }
+
+    switch (key) {
+        // Arrows / navigation
+        case SDLK_UP: return "up";
+        case SDLK_DOWN: return "down";
+        case SDLK_LEFT: return "left";
+        case SDLK_RIGHT: return "right";
+        case SDLK_PAGEUP: return "pageup";
+        case SDLK_PAGEDOWN: return "pagedown";
+        case SDLK_HOME: return "home";
+        case SDLK_END: return "end";
+        case SDLK_INSERT: return "insert";
+        case SDLK_DELETE: return "delete";
+
+        // Control keys
+        case SDLK_RETURN: return "enter";
+        case SDLK_ESCAPE: return "escape";
+        case SDLK_TAB: return "tab";
+        case SDLK_BACKSPACE: return "backspace";
+        case SDLK_SPACE: return "space";
+
+        // Function keys
+        case SDLK_F1:  return "f1";
+        case SDLK_F2:  return "f2";
+        case SDLK_F3:  return "f3";
+        case SDLK_F4:  return "f4";
+        case SDLK_F5:  return "f5";
+        case SDLK_F6:  return "f6";
+        case SDLK_F7:  return "f7";
+        case SDLK_F8:  return "f8";
+        case SDLK_F9:  return "f9";
+        case SDLK_F10: return "f10";
+        case SDLK_F11: return "f11";
+        case SDLK_F12: return "f12";
+
+        // Keypad
+        case SDLK_KP_ENTER: return "kp_enter";
+        case SDLK_KP_0: return "kp_0";
+        case SDLK_KP_1: return "kp_1";
+        case SDLK_KP_2: return "kp_2";
+        case SDLK_KP_3: return "kp_3";
+        case SDLK_KP_4: return "kp_4";
+        case SDLK_KP_5: return "kp_5";
+        case SDLK_KP_6: return "kp_6";
+        case SDLK_KP_7: return "kp_7";
+        case SDLK_KP_8: return "kp_8";
+        case SDLK_KP_9: return "kp_9";
+
+        default: break;
+    }
+
+    // Fallback: SDL's canonical key name (parseable by SDL_GetKeyFromName()).
+    const char* name = SDL_GetKeyName(key);
+    if (name && name[0] != '\0') {
+        return std::string(name);
+    }
+    return "unknown";
+}
+
+static std::string chordToString(const KeyChord& c) {
+    std::string out;
+    if (c.mods & KMOD_CTRL) out += "ctrl+";
+    if (c.mods & KMOD_ALT) out += "alt+";
+    if (c.mods & KMOD_SHIFT) out += "shift+";
+    out += keycodeToToken(c.key);
+    return out;
+}
+
+std::string KeyBinds::describeAction(Action a) const {
+    auto it = binds.find(a);
+    if (it == binds.end() || it->second.empty()) return "none";
+
+    std::string out;
+    const auto& chords = it->second;
+    for (size_t i = 0; i < chords.size(); ++i) {
+        out += chordToString(chords[i]);
+        if (i + 1 < chords.size()) out += ", ";
+    }
+    return out.empty() ? "none" : out;
+}
+
+std::vector<std::pair<std::string, std::string>> KeyBinds::describeAll() const {
+    std::vector<std::pair<std::string, std::string>> out;
+    out.reserve(sizeof(kActionNameTable) / sizeof(kActionNameTable[0]));
+    for (const auto& kv : kActionNameTable) {
+        out.emplace_back(std::string(actionName(kv.first)), describeAction(kv.first));
+    }
+    return out;
+}

@@ -3,6 +3,9 @@ add_executable(procrogue_tests
     ../src/dungeon.cpp
     ../src/items.cpp
     ../src/scores.cpp
+    ../src/settings.cpp
+    ../src/game.cpp
+    ../src/spritegen.cpp
 )
 
 target_include_directories(procrogue_tests PRIVATE ../src)

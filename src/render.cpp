@@ -637,7 +637,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 
 void Renderer::drawOptionsOverlay(const Game& game) {
     const int panelW = std::min(winW - 80, 760);
-    const int panelH = 288;
+    const int panelH = 340;
     const int x0 = (winW - panelW) / 2;
     const int y0 = (winH - panelH) / 2;
 
@@ -665,6 +665,7 @@ void Renderer::drawOptionsOverlay(const Game& game) {
         switch (game.autoPickupMode()) {
             case AutoPickupMode::Off: return "OFF";
             case AutoPickupMode::Gold: return "GOLD";
+            case AutoPickupMode::Smart: return "SMART";
             case AutoPickupMode::All: return "ALL";
         }
         return "GOLD";
@@ -686,7 +687,9 @@ void Renderer::drawOptionsOverlay(const Game& game) {
     drawOpt(4, "HUNGER SYSTEM: ", game.hungerEnabled() ? "ON" : "OFF");
     drawOpt(5, "EFFECT TIMERS: ", game.showEffectTimers() ? "ON" : "OFF");
     drawOpt(6, "CONFIRM QUIT: ", game.confirmQuitEnabled() ? "ON" : "OFF");
-    drawOpt(7, "", "CLOSE");
+    drawOpt(7, "AUTO MORTEM: ", game.autoMortemEnabled() ? "ON" : "OFF");
+    drawOpt(8, "SAVE BACKUPS: ", std::to_string(game.saveBackups()));
+    drawOpt(9, "", "CLOSE");
 
     y = y0 + panelH - 42;
 

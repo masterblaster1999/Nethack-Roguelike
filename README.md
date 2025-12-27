@@ -26,7 +26,8 @@ A tiny NetHack-inspired roguelike with:
 
 - **Auto-travel**: enter look mode (`L` / `V` or **right-click**) and press **Enter** to auto-walk to the cursor tile.
 - **Auto-explore**: press **O** to walk to the nearest unexplored frontier until interrupted.
-- **Auto-pickup modes**: press **P** to cycle **OFF → GOLD → ALL → OFF**.
+  - If auto-explore spots a chest or loot you won’t auto-pick, it will **auto-walk to it and stop on arrival**.
+- **Auto-pickup modes**: press **P** to cycle **OFF → GOLD → SMART → ALL → OFF**.
 - **8-way movement**: move diagonally with **Q/E/Z/C** (or numpad 1/3/7/9). (Fully rebindable.)
 - **Minimap + stats overlays**:
   - **M** toggles the minimap
@@ -78,7 +79,7 @@ A tiny NetHack-inspired roguelike with:
 - **Auto-travel**: Enter while looking (or left-click a tile)
 - **Auto-explore**: `O`
 - **Search (reveal traps)**: `C`
-- **Auto-pickup mode**: `P` (cycles OFF/GOLD/ALL)
+- **Auto-pickup mode**: `P` (cycles OFF/GOLD/SMART/ALL)
 - **Minimap**: `M`
 - **Stats / high scores**: `Shift+Tab`
 
@@ -117,7 +118,13 @@ A tiny NetHack-inspired roguelike with:
 
 ## Save files + settings location
 
-This build uses **SDL_GetPrefPath** so saves and settings live in a per-user writable folder:
+By default, ProcRogue uses **SDL_GetPrefPath** so saves and settings live in a per-user writable folder.
+
+You can override this with:
+- `--data-dir <path>` (explicit directory)
+- `--portable` (store next to the executable)
+- `--slot <name>` (use a named save slot; affects save + autosave filenames)
+
 
 - `procrogue_save.dat`
 - `procrogue_autosave.dat`
@@ -125,20 +132,82 @@ This build uses **SDL_GetPrefPath** so saves and settings live in a per-user wri
 - `procrogue_scores.csv`
 - `screenshots/`
 
+Slot files (when using `--slot <name>` or `#save <slot>`):
+
+- `procrogue_save_<slot>.dat`
+- `procrogue_autosave_<slot>.dat`
+
 The settings file is created automatically on first run.
 
 ## Command-line
 
 - Start with a specific seed:
   - `procrogue --seed 12345`
-- Auto-load the save on startup:
-  - `procrogue --load`
+
+- Start a daily run (deterministic UTC-date seed):
+  - `procrogue --daily`
+
+- Auto-load the manual save on startup:
+  - `procrogue --load` (alias: `--continue`)
+
+- Auto-load the autosave on startup:
+  - `procrogue --load-auto`
+
+- Override the save/config directory:
+  - `procrogue --data-dir ./my_saves`
+
+- Use a named save slot (changes save + autosave filenames):
+  - `procrogue --slot run1`
+
+- Portable mode (store saves/config next to the executable):
+  - `procrogue --portable`
+
+- Reset settings to defaults (backs up the previous file to `procrogue_settings.ini.bak`):
+  - `procrogue --reset-settings`
 
 - Print the game version:
   - `procrogue --version`
 
 - Show command-line help:
   - `procrogue --help`
+
+
+## Extended commands
+
+Press **`#`** (Shift+3) to open the in-game command prompt.
+
+Useful commands:
+- `#help` – list commands
+- `#options` – open the options menu
+- `#binds` – list active keybinds (defaults + overrides)
+- `#bind <action> <keys>` – set a keybind (writes to settings + reloads)
+- `#unbind <action>` – reset an action back to default bindings
+- `#reload` – reload settings + keybinds from disk
+- `#save <slot>` – save to a named slot (e.g. `#save run1`)
+- `#load <slot>` – load a named slot
+- `#loadauto <slot>` – load a named autosave slot
+- `#saves` – list detected save slots
+- `#slot <name>` – set the *active* default slot (affects F5/F9/F10 and persists to settings)
+- `#paths` – show active save/autosave/scores/settings paths
+- `#mortem [now|on|off]` – export a mortem dump now, or toggle auto-mortem-on-death/win
+- `#restart` – restart with a random seed
+- `#restart <seed>` – restart with a specific seed (e.g. `#restart 12345` or `#restart 0xBADC0DE`)
+- `#daily` – restart using a deterministic **UTC-date** "daily" seed
+- `#autopickup off|gold|smart|all` – set auto-pickup mode
+- `#autosave <turns>` – set autosave interval (0 disables)
+- `#stepdelay <ms>` – set auto-step delay (10–500)
+- `#identify on|off` – toggle item identification system
+- `#timers on|off` – toggle status effect timers
+- `#seed` – show the current run seed
+- `#scores [n]` – show top scores (default 10)
+- `#history [n]` – show most recent runs (default 10)
+
+Exports (written to your save/config directory):
+- `#exportlog [filename]` – export a run log (`procrogue_log_*.txt`)
+- `#exportmap [filename]` – export an ASCII map snapshot (`procrogue_map_*.txt`)
+- `#export` – export both log + map
+- `#exportall [prefix]` – export log + map + dump in one command
+- `#dump [filename]` – export a single **full state dump** (stats + equipment/inventory + recent messages + map)
 
 ## Building
 

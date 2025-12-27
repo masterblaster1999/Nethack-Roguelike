@@ -57,6 +57,7 @@ private:
     std::array<SDL_Texture*, FRAMES> stairsUpTex{};
     std::array<SDL_Texture*, FRAMES> stairsDownTex{};
     std::array<SDL_Texture*, FRAMES> doorClosedTex{};
+    std::array<SDL_Texture*, FRAMES> doorLockedTex{};
     std::array<SDL_Texture*, FRAMES> doorOpenTex{};
 
     // Entity / item / projectile textures (keyed by kind+seed)

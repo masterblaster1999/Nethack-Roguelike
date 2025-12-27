@@ -1,6 +1,8 @@
 #include "game.hpp"
+#include "settings.hpp"
 #include "version.hpp"
 #include <algorithm>
+#include <numeric>
 #include <cctype>
 #include <cstdlib>
 #include <deque>
@@ -34,6 +36,432 @@ static std::string toLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s;
+}
+
+
+static void moveFileWithFallback(const std::filesystem::path& from, const std::filesystem::path& to) {
+    std::error_code ec;
+    std::filesystem::rename(from, to, ec);
+    if (!ec) return;
+
+    // Fallback (e.g., Windows rename over existing / cross-device): copy then remove.
+    std::error_code ec2;
+    std::filesystem::copy_file(from, to, std::filesystem::copy_options::overwrite_existing, ec2);
+    if (ec2) return;
+    std::filesystem::remove(from, ec2);
+}
+
+static void rotateFileBackups(const std::filesystem::path& path, int keepBackups) {
+    if (keepBackups <= 0) return;
+
+    // Example: procrogue_save.dat -> procrogue_save.dat.bak1, bak2, ...
+    // We keep this intentionally simple and best-effort; failures should not prevent saving.
+    std::error_code ec;
+
+    // Remove the oldest
+    const std::filesystem::path oldest = path.string() + ".bak" + std::to_string(keepBackups);
+    std::filesystem::remove(oldest, ec);
+
+    // Shift N-1 -> N
+    for (int i = keepBackups - 1; i >= 1; --i) {
+        const std::filesystem::path src = path.string() + ".bak" + std::to_string(i);
+        const std::filesystem::path dst = path.string() + ".bak" + std::to_string(i + 1);
+        if (!std::filesystem::exists(src)) continue;
+        moveFileWithFallback(src, dst);
+    }
+
+    // Current -> bak1
+    if (std::filesystem::exists(path)) {
+        const std::filesystem::path dst = path.string() + ".bak1";
+        moveFileWithFallback(path, dst);
+    }
+}
+
+
+static std::string timestampForFilename() {
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    std::ostringstream ss;
+    ss << std::put_time(&tm, "%Y%m%d_%H%M%S");
+    return ss.str();
+}
+
+
+static bool isWindowsReservedBasename(const std::string& lower) {
+    // Windows device names are invalid as file basenames (even with extensions).
+    // We only guard against the common ones to avoid surprising save-slot failures.
+    static const char* reserved[] = {
+        "con", "prn", "aux", "nul",
+        "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+        "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"
+    };
+    for (const char* r : reserved) {
+        if (lower == r) return true;
+    }
+    return false;
+}
+
+static std::string sanitizeSlotName(std::string raw) {
+    raw = trim(std::move(raw));
+    raw = toLower(std::move(raw));
+
+    std::string out;
+    out.reserve(raw.size());
+
+    for (unsigned char c : raw) {
+        if (std::isalnum(c)) {
+            out.push_back(static_cast<char>(c));
+        } else if (c == '_' || c == '-') {
+            out.push_back(static_cast<char>(c));
+        } else if (std::isspace(c)) {
+            out.push_back('_');
+        } else {
+            // Avoid path separators / dots / other punctuation.
+            out.push_back('_');
+        }
+    }
+
+    // Collapse repeated underscores.
+    out.erase(std::unique(out.begin(), out.end(), [](char a, char b) { return a == '_' && b == '_'; }), out.end());
+
+    // Trim underscores/hyphens from ends.
+    while (!out.empty() && (out.front() == '_' || out.front() == '-')) out.erase(out.begin());
+    while (!out.empty() && (out.back() == '_' || out.back() == '-')) out.pop_back();
+
+    if (out.empty()) out = "slot";
+    if (out.size() > 32) out.resize(32);
+
+    if (isWindowsReservedBasename(out)) {
+        out = "_" + out;
+    }
+
+    return out;
+}
+
+static std::filesystem::path makeSlotPath(const std::string& basePathStr, const std::string& slot) {
+    std::filesystem::path p(basePathStr);
+    std::filesystem::path dir = p.parent_path();
+    if (dir.empty()) dir = std::filesystem::path(".");
+    const std::string stem = p.stem().string();
+    const std::string ext = p.extension().string();
+    return dir / (stem + "_" + slot + ext);
+}
+
+static std::filesystem::path baseSavePathForSlots(const Game& game) {
+    std::filesystem::path p(game.defaultSavePath());
+    std::filesystem::path dir = p.parent_path();
+    if (dir.empty()) dir = std::filesystem::path(".");
+    return dir / "procrogue_save.dat";
+}
+
+static std::filesystem::path baseAutosavePathForSlots(const Game& game) {
+    std::filesystem::path p(game.defaultAutosavePath());
+    std::filesystem::path dir = p.parent_path();
+    if (dir.empty()) dir = std::filesystem::path(".");
+    return dir / "procrogue_autosave.dat";
+}
+
+static std::filesystem::path exportBaseDir(const Game& game) {
+    namespace fs = std::filesystem;
+    fs::path dir = fs::path(game.defaultSavePath()).parent_path();
+    if (dir.empty()) dir = fs::path(".");
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    return dir;
+}
+
+static bool exportRunLogToFile(const Game& game, const std::filesystem::path& outPath) {
+    std::ofstream f(outPath);
+    if (!f) return false;
+
+    f << PROCROGUE_APPNAME << " " << PROCROGUE_VERSION << "\n";
+    f << "Name: " << game.playerName() << "\n";
+    f << "Slot: " << (game.activeSlot().empty() ? std::string("default") : game.activeSlot()) << "\n";
+    f << "Seed: " << game.seed() << "\n";
+    f << "Depth: " << game.depth() << " (max " << game.maxDepthReached() << ")\n";
+    f << "Turns: " << game.turns() << "\n";
+    f << "Kills: " << game.kills() << "\n";
+    f << "Gold: " << game.goldCount() << "\n";
+    f << "Level: " << game.playerCharLevel() << "\n";
+    if (game.hungerEnabled()) {
+        f << "Hunger: " << game.hungerCurrent() << "/" << game.hungerMaximum();
+        const std::string tag = game.hungerTag();
+        if (!tag.empty()) f << " (" << tag << ")";
+        f << "\n";
+    }
+
+    if (game.isFinished()) {
+        f << "Result: " << (game.isGameWon() ? "WIN" : "DEAD") << "\n";
+        if (!game.endCause().empty()) f << "Cause: " << game.endCause() << "\n";
+    }
+
+    f << "\nMessages:\n";
+    for (const auto& m : game.messages()) {
+        const char* k = (m.kind == MessageKind::Info)    ? "INFO"
+                      : (m.kind == MessageKind::Combat)  ? "COMBAT"
+                      : (m.kind == MessageKind::Loot)    ? "LOOT"
+                      : (m.kind == MessageKind::System)  ? "SYSTEM"
+                      : (m.kind == MessageKind::Warning) ? "WARN"
+                      : (m.kind == MessageKind::Success) ? "SUCCESS"
+                                                         : "INFO";
+        f << "[" << k << "] " << m.text << "\n";
+    }
+    return true;
+}
+
+static bool exportRunMapToFile(const Game& game, const std::filesystem::path& outPath) {
+    std::ofstream f(outPath);
+    if (!f) return false;
+
+    const Dungeon& d = game.dungeon();
+
+    f << PROCROGUE_APPNAME << " map export (" << PROCROGUE_VERSION << ")\n";
+    f << "Seed: " << game.seed() << "  Depth: " << game.depth() << "  Turns: " << game.turns() << "\n";
+    f << "Legend: # wall, . floor, + door, / open door, * locked door, < up, > down, ^ trap, @ you\n";
+    f << "        $ gold, ! potion, ? scroll, : food, K key, l lockpick, C chest\n";
+    f << "        g goblin, o orc, b bat, j slime, S skeleton, k kobold, w wolf, T troll, W wizard, n snake, s spider, O ogre\n\n";
+
+    std::vector<std::string> grid(static_cast<size_t>(d.height), std::string(static_cast<size_t>(d.width), ' '));
+
+    // Base tiles (explored only).
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const Tile& t = d.at(x, y);
+            if (!t.explored) {
+                grid[static_cast<size_t>(y)][static_cast<size_t>(x)] = ' ';
+                continue;
+            }
+
+            char c = ' ';
+            switch (t.type) {
+                case TileType::Wall:       c = '#'; break;
+                case TileType::Floor:      c = '.'; break;
+                case TileType::DoorClosed: c = '+'; break;
+                case TileType::DoorOpen:   c = '/'; break;
+                case TileType::StairsUp:   c = '<'; break;
+                case TileType::StairsDown: c = '>'; break;
+                case TileType::DoorSecret: c = '#'; break;
+                case TileType::DoorLocked: c = '*'; break;
+                default:                   c = '?'; break;
+            }
+
+            grid[static_cast<size_t>(y)][static_cast<size_t>(x)] = c;
+        }
+    }
+
+    // Traps (discovered, on explored tiles).
+    for (const auto& tr : game.traps()) {
+        if (!tr.discovered) continue;
+        if (!d.inBounds(tr.pos.x, tr.pos.y)) continue;
+        const Tile& t = d.at(tr.pos.x, tr.pos.y);
+        if (!t.explored) continue;
+        grid[static_cast<size_t>(tr.pos.y)][static_cast<size_t>(tr.pos.x)] = '^';
+    }
+
+    // Items (visible only).
+    for (const auto& gi : game.groundItems()) {
+        if (!d.inBounds(gi.pos.x, gi.pos.y)) continue;
+        const Tile& t = d.at(gi.pos.x, gi.pos.y);
+        if (!t.visible) continue;
+
+        char c = '*';
+        if (gi.item.kind == ItemKind::Gold) c = '$';
+        else if (isPotionKind(gi.item.kind)) c = '!';
+        else if (isScrollKind(gi.item.kind)) c = '?';
+        else if (gi.item.kind == ItemKind::FoodRation) c = ':';
+        else if (gi.item.kind == ItemKind::Key) c = 'K';
+        else if (gi.item.kind == ItemKind::Lockpick) c = 'l';
+        else if (isChestKind(gi.item.kind)) c = 'C';
+
+        grid[static_cast<size_t>(gi.pos.y)][static_cast<size_t>(gi.pos.x)] = c;
+    }
+
+    // Monsters (visible only).
+    auto monsterGlyph = [](EntityKind k) -> char {
+        switch (k) {
+            case EntityKind::Goblin: return 'g';
+            case EntityKind::Orc:    return 'o';
+            case EntityKind::Bat:    return 'b';
+            case EntityKind::Slime:  return 'j';
+            case EntityKind::SkeletonArcher: return 'S';
+            case EntityKind::KoboldSlinger:  return 'k';
+            case EntityKind::Wolf:   return 'w';
+            case EntityKind::Troll:  return 'T';
+            case EntityKind::Wizard: return 'W';
+            case EntityKind::Snake:  return 'n';
+            case EntityKind::Spider: return 's';
+            case EntityKind::Ogre:   return 'O';
+            default:                 return 'M';
+        }
+    };
+
+    for (const auto& e : game.entities()) {
+        if (e.kind == EntityKind::Player) continue;
+        if (e.hp <= 0) continue;
+        if (!d.inBounds(e.pos.x, e.pos.y)) continue;
+        const Tile& t = d.at(e.pos.x, e.pos.y);
+        if (!t.visible) continue;
+        grid[static_cast<size_t>(e.pos.y)][static_cast<size_t>(e.pos.x)] = monsterGlyph(e.kind);
+    }
+
+    // Player
+    const Entity& p = game.player();
+    if (d.inBounds(p.pos.x, p.pos.y)) {
+        grid[static_cast<size_t>(p.pos.y)][static_cast<size_t>(p.pos.x)] = '@';
+    }
+
+    for (int y = 0; y < d.height; ++y) {
+        f << grid[static_cast<size_t>(y)] << "\n";
+    }
+
+    return true;
+}
+
+
+// Returns {ok, mapIncluded}.
+static std::pair<bool, bool> exportRunDumpToFile(const Game& game, const std::filesystem::path& outPath) {
+    namespace fs = std::filesystem;
+
+    std::ofstream f(outPath);
+    if (!f) return {false, false};
+
+    const Entity& p = game.player();
+
+    f << PROCROGUE_APPNAME << " dump (" << PROCROGUE_VERSION << ")\n";
+    f << "Name: " << game.playerName() << "\n";
+    f << "Slot: " << (game.activeSlot().empty() ? std::string("default") : game.activeSlot()) << "\n";
+    f << "Seed: " << game.seed() << "\n";
+    f << "Depth: " << game.depth() << " (max " << game.maxDepthReached() << ")\n";
+    f << "Turns: " << game.turns() << "\n";
+    f << "Kills: " << game.kills() << "\n";
+    f << "Gold: " << game.goldCount() << "\n";
+    f << "Level: " << game.playerCharLevel() << "  XP: " << game.playerXp() << "/" << game.playerXpToNext() << "\n";
+
+    if (game.isFinished()) {
+        f << "Result: " << (game.isGameWon() ? "WIN" : "DEAD") << "\n";
+        if (!game.endCause().empty()) f << "Cause: " << game.endCause() << "\n";
+    }
+
+    f << "HP: " << p.hp << "/" << p.hpMax << "  ATK: " << game.playerAttack() << "  DEF: " << game.playerDefense() << "\n";
+
+    if (game.hungerEnabled()) {
+        f << "Hunger: " << game.hungerCurrent() << "/" << game.hungerMaximum();
+        const std::string tag = game.hungerTag();
+        if (!tag.empty()) f << " (" << tag << ")";
+        f << "\n";
+    }
+
+    // Status effects
+    f << "Status: ";
+    bool any = false;
+    auto add = [&](const char* name, int turns) {
+        if (turns <= 0) return;
+        if (any) f << ", ";
+        f << name << "(" << turns << ")";
+        any = true;
+    };
+    add("POISON", p.poisonTurns);
+    add("REGEN", p.regenTurns);
+    add("SHIELD", p.shieldTurns);
+    add("VISION", p.visionTurns);
+    add("WEB", p.webTurns);
+    add("HASTE", p.hasteTurns);
+    if (!any) f << "(none)";
+    f << "\n";
+
+    // Equipment
+    f << "\nEquipment:\n";
+    f << "  Melee:  " << game.equippedMeleeName() << "\n";
+    f << "  Ranged: " << game.equippedRangedName() << "\n";
+    f << "  Armor:  " << game.equippedArmorName() << "\n";
+
+    // Inventory
+    f << "\nInventory:\n";
+    if (game.inventory().empty()) {
+        f << "  (empty)\n";
+    } else {
+        for (const auto& it : game.inventory()) {
+            f << "  - " << game.displayItemName(it);
+            const std::string tag = game.equippedTag(it.id);
+            if (!tag.empty()) f << " {" << tag << "}";
+            f << "\n";
+        }
+    }
+
+    // Messages (tail)
+    f << "\nMessages (most recent last):\n";
+    const auto& ms = game.messages();
+    const size_t start = (ms.size() > 120) ? (ms.size() - 120) : 0;
+    for (size_t i = start; i < ms.size(); ++i) {
+        f << "  " << ms[i].text << "\n";
+    }
+
+    // Map at end (same format as exportmap)
+    f << "\n--- MAP ---\n\n";
+    f.flush();
+
+    bool mapOk = false;
+    try {
+        fs::path tmp = outPath;
+        tmp += ".map.tmp";
+
+        mapOk = exportRunMapToFile(game, tmp);
+        if (mapOk) {
+            std::ifstream in(tmp);
+            if (in) {
+                std::string line;
+                bool pastHeader = false;
+                while (std::getline(in, line)) {
+                    if (!pastHeader) {
+                        if (line.empty()) pastHeader = true;
+                        continue;
+                    }
+                    f << line << "\n";
+                }
+                mapOk = true;
+            } else {
+                mapOk = false;
+            }
+        }
+
+        std::error_code ec;
+        fs::remove(tmp, ec);
+    } catch (...) {
+        mapOk = false;
+    }
+
+    return {true, mapOk};
+}
+
+
+
+uint32_t dailySeedUtc(std::string* outDateIso) {
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &t);
+#else
+    gmtime_r(&t, &tm);
+#endif
+
+    const int year = tm.tm_year + 1900;
+    const int mon = tm.tm_mon + 1;
+    const int day = tm.tm_mday;
+
+    if (outDateIso) {
+        std::ostringstream ss;
+        ss << std::setfill('0') << std::setw(4) << year << "-" << std::setw(2) << mon << "-" << std::setw(2) << day;
+        *outDateIso = ss.str();
+    }
+
+    // YYYYMMDD -> stable hash (not crypto; just deterministic across platforms).
+    const uint32_t ymd = static_cast<uint32_t>(year * 10000 + mon * 100 + day);
+    return hash32(ymd ^ 0xDABA0B1Du);
 }
 
 static std::vector<std::string> splitWS(const std::string& s) {
@@ -112,11 +540,19 @@ static std::vector<std::string> extendedCommandList() {
     return {
         "help",
         "options",
+        "binds",
+        "bind",
+        "unbind",
+        "reload",
         "save",
         "load",
         "loadauto",
+        "saves",
+        "slot",
+        "paths",
         "quit",
         "restart",
+        "daily",
         "autopickup",
         "autosave",
         "stepdelay",
@@ -126,6 +562,13 @@ static std::vector<std::string> extendedCommandList() {
         "version",
         "name",
         "scores",
+        "history",
+        "exportlog",
+        "exportmap",
+        "export",
+        "exportall",
+        "dump",
+        "mortem",
         "explore",
         "search",
         "rest",
@@ -187,6 +630,67 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return (i < toks.size()) ? toLower(toks[i]) : std::string();
     };
 
+    // Map an action name to the canonical settings key (bind_<action>). Accepts a few aliases.
+    auto bindKeyForActionName = [&](const std::string& actionRaw, std::string& outKey) -> bool {
+        std::string a = toLower(trim(actionRaw));
+    
+        // Allow users to pass 'bind_<action>' too.
+        if (a.rfind("bind_", 0) == 0) a = a.substr(5);
+        // Normalize separators.
+        for (char& c : a) {
+            if (c == '-') c = '_';
+        }
+
+        // Movement
+        if (a == "up") { outKey = "bind_up"; return true; }
+        if (a == "down") { outKey = "bind_down"; return true; }
+        if (a == "left") { outKey = "bind_left"; return true; }
+        if (a == "right") { outKey = "bind_right"; return true; }
+        if (a == "up_left" || a == "upleft") { outKey = "bind_up_left"; return true; }
+        if (a == "up_right" || a == "upright") { outKey = "bind_up_right"; return true; }
+        if (a == "down_left" || a == "downleft") { outKey = "bind_down_left"; return true; }
+        if (a == "down_right" || a == "downright") { outKey = "bind_down_right"; return true; }
+
+        // Actions
+        if (a == "confirm" || a == "ok") { outKey = "bind_confirm"; return true; }
+        if (a == "cancel" || a == "escape" || a == "esc") { outKey = "bind_cancel"; return true; }
+        if (a == "wait") { outKey = "bind_wait"; return true; }
+        if (a == "rest") { outKey = "bind_rest"; return true; }
+        if (a == "pickup" || a == "pick_up" || a == "pick") { outKey = "bind_pickup"; return true; }
+        if (a == "inventory" || a == "inv") { outKey = "bind_inventory"; return true; }
+        if (a == "fire") { outKey = "bind_fire"; return true; }
+        if (a == "search") { outKey = "bind_search"; return true; }
+        if (a == "look") { outKey = "bind_look"; return true; }
+        if (a == "stairs_up" || a == "stairsup") { outKey = "bind_stairs_up"; return true; }
+        if (a == "stairs_down" || a == "stairsdown") { outKey = "bind_stairs_down"; return true; }
+        if (a == "auto_explore" || a == "autoexplore") { outKey = "bind_auto_explore"; return true; }
+        if (a == "toggle_auto_pickup" || a == "toggleautopickup" || a == "autopickup") { outKey = "bind_toggle_auto_pickup"; return true; }
+
+        // Inventory-specific
+        if (a == "equip") { outKey = "bind_equip"; return true; }
+        if (a == "use") { outKey = "bind_use"; return true; }
+        if (a == "drop") { outKey = "bind_drop"; return true; }
+        if (a == "drop_all" || a == "dropall") { outKey = "bind_drop_all"; return true; }
+        if (a == "sort_inventory" || a == "sortinventory") { outKey = "bind_sort_inventory"; return true; }
+
+        // UI / meta
+        if (a == "help") { outKey = "bind_help"; return true; }
+        if (a == "options") { outKey = "bind_options"; return true; }
+        if (a == "command" || a == "extcmd") { outKey = "bind_command"; return true; }
+        if (a == "toggle_minimap" || a == "minimap") { outKey = "bind_toggle_minimap"; return true; }
+        if (a == "toggle_stats" || a == "stats") { outKey = "bind_toggle_stats"; return true; }
+        if (a == "fullscreen" || a == "toggle_fullscreen" || a == "togglefullscreen") { outKey = "bind_fullscreen"; return true; }
+        if (a == "screenshot") { outKey = "bind_screenshot"; return true; }
+        if (a == "save") { outKey = "bind_save"; return true; }
+        if (a == "restart" || a == "newgame") { outKey = "bind_restart"; return true; }
+        if (a == "load") { outKey = "bind_load"; return true; }
+        if (a == "load_auto" || a == "loadauto") { outKey = "bind_load_auto"; return true; }
+        if (a == "log_up" || a == "logup") { outKey = "bind_log_up"; return true; }
+        if (a == "log_down" || a == "logdown") { outKey = "bind_log_down"; return true; }
+
+        return false;
+    };
+
     if (cmd == "help" || cmd == "?" || cmd == "commands") {
         game.pushSystemMessage("EXTENDED COMMANDS:");
         auto list = extendedCommandList();
@@ -200,6 +704,10 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         }
         if (outLine != "  ") game.pushSystemMessage(outLine);
         game.pushSystemMessage("TIP: type a prefix (e.g., 'autop') and press ENTER.");
+        game.pushSystemMessage("SLOTS: slot [name], save [slot], load [slot], loadauto [slot], saves");
+        game.pushSystemMessage("EXPORT: exportlog/exportmap/export/exportall/dump");
+        game.pushSystemMessage("MORTEM: mortem [on/off]");
+        game.pushSystemMessage("KEYBINDS: binds | bind <action> <keys> | unbind <action> | reload");
         return;
     }
 
@@ -208,18 +716,217 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "binds") {
+        // Main thread (SDL) formats the bindings for display.
+        game.requestKeyBindsDump();
+        return;
+    }
+
+    if (cmd == "reload") {
+        // Reload settings + keybinds from disk (safe subset applies immediately).
+        game.requestConfigReload();
+        game.pushSystemMessage("RELOAD REQUESTED.");
+        return;
+    }
+
+    if (cmd == "bind" || cmd == "unbind") {
+        if (toks.size() <= 1) {
+            game.pushSystemMessage("USAGE: #bind <action> <key[,key,...]>");
+            game.pushSystemMessage("       #unbind <action>   (resets to defaults)");
+            game.pushSystemMessage("TIP: use #binds to list actions + current bindings.");
+            return;
+        }
+
+        std::string bindKey;
+        if (!bindKeyForActionName(toks[1], bindKey)) {
+            game.pushSystemMessage("UNKNOWN ACTION: " + toks[1]);
+            game.pushSystemMessage("TIP: use #binds to list valid action names.");
+            return;
+        }
+
+        const std::string settingsPath = game.settingsPath();
+        if (settingsPath.empty()) {
+            game.pushSystemMessage("SETTINGS PATH UNKNOWN; CAN'T EDIT KEYBINDS.");
+            return;
+        }
+
+        if (cmd == "unbind") {
+            const bool ok = removeIniKey(settingsPath, bindKey);
+            if (ok) {
+                game.requestKeyBindsReload();
+                game.pushSystemMessage("BIND RESET: " + bindKey + " (defaults)");
+            } else {
+                game.pushSystemMessage("FAILED TO UPDATE SETTINGS FILE.");
+            }
+            return;
+        }
+
+        // bind: join the rest of the tokens to preserve commas/spaces.
+        if (toks.size() <= 2) {
+            game.pushSystemMessage("USAGE: #bind <action> <key[,key,...]>");
+            game.pushSystemMessage("EXAMPLE: #bind inventory i, tab");
+            return;
+        }
+
+        std::string value;
+        for (size_t i = 2; i < toks.size(); ++i) {
+            if (i > 2) value += " ";
+            value += toks[i];
+        }
+        value = trim(value);
+        if (value.empty()) {
+            game.pushSystemMessage("USAGE: #bind <action> <key[,key,...]>");
+            return;
+        }
+
+        const bool ok = updateIniKey(settingsPath, bindKey, value);
+        if (ok) {
+            game.requestKeyBindsReload();
+            game.pushSystemMessage("BIND SET: " + bindKey + " = " + value);
+        } else {
+            game.pushSystemMessage("FAILED TO UPDATE SETTINGS FILE.");
+        }
+        return;
+    }
+
     if (cmd == "save") {
-        (void)game.saveToFile(game.defaultSavePath());
+        // Optional save slot: #save <slot>
+        const std::string slot = (toks.size() > 1) ? sanitizeSlotName(toks[1]) : std::string();
+        const std::string path = slot.empty()
+            ? game.defaultSavePath()
+            : makeSlotPath(baseSavePathForSlots(game).string(), slot).string();
+        (void)game.saveToFile(path);
         return;
     }
     if (cmd == "load") {
-        (void)game.loadFromFile(game.defaultSavePath());
+        // Optional save slot: #load <slot>
+        const std::string slot = (toks.size() > 1) ? sanitizeSlotName(toks[1]) : std::string();
+        const std::string path = slot.empty()
+            ? game.defaultSavePath()
+            : makeSlotPath(baseSavePathForSlots(game).string(), slot).string();
+        (void)game.loadFromFile(path);
         return;
     }
     if (cmd == "loadauto") {
-        (void)game.loadFromFile(game.defaultAutosavePath());
+        // Optional save slot: #loadauto <slot>
+        const std::string slot = (toks.size() > 1) ? sanitizeSlotName(toks[1]) : std::string();
+        const std::string path = slot.empty()
+            ? game.defaultAutosavePath()
+            : makeSlotPath(baseAutosavePathForSlots(game).string(), slot).string();
+        (void)game.loadFromFile(path);
         return;
     }
+
+    if (cmd == "saves") {
+        namespace fs = std::filesystem;
+
+        const fs::path saveBase = baseSavePathForSlots(game);
+        const fs::path autoBase = baseAutosavePathForSlots(game);
+
+        struct SlotInfo { bool save = false; bool autosave = false; };
+        std::map<std::string, SlotInfo> slots;
+
+        auto scanDir = [&](const fs::path& dir, const std::string& stem, const std::string& ext, bool isAuto) {
+            std::error_code ec;
+            for (const auto& ent : fs::directory_iterator(dir, ec)) {
+                if (ec) break;
+                if (!ent.is_regular_file(ec)) continue;
+                const fs::path p = ent.path();
+                if (p.extension().string() != ext) continue;
+
+                const std::string baseName = p.stem().string(); // without extension
+                if (baseName == stem) {
+                    SlotInfo& si = slots["default"];
+                    if (isAuto) si.autosave = true;
+                    else si.save = true;
+                    continue;
+                }
+
+                const std::string prefix = stem + "_";
+                if (baseName.rfind(prefix, 0) != 0) continue;
+
+                const std::string slot = baseName.substr(prefix.size());
+                if (slot.empty()) continue;
+
+                SlotInfo& si = slots[slot];
+                if (isAuto) si.autosave = true;
+                else si.save = true;
+            }
+        };
+
+        fs::path saveDir = saveBase.parent_path();
+        if (saveDir.empty()) saveDir = fs::path(".");
+        fs::path autoDir = autoBase.parent_path();
+        if (autoDir.empty()) autoDir = fs::path(".");
+
+        scanDir(saveDir, saveBase.stem().string(), saveBase.extension().string(), false);
+        if (autoDir == saveDir) {
+            scanDir(saveDir, autoBase.stem().string(), autoBase.extension().string(), true);
+        } else {
+            scanDir(autoDir, autoBase.stem().string(), autoBase.extension().string(), true);
+        }
+
+        if (slots.empty()) {
+            game.pushSystemMessage("NO SAVE SLOTS FOUND.");
+            return;
+        }
+
+        game.pushSystemMessage("SAVE SLOTS:");
+        int shown = 0;
+        for (const auto& kv : slots) {
+            const std::string& name = kv.first;
+            const SlotInfo& si = kv.second;
+            std::string line = "  " + name + " [";
+            line += si.save ? "save" : "-";
+            line += ", ";
+            line += si.autosave ? "autosave" : "-";
+            line += "]";
+            game.pushSystemMessage(line);
+            if (++shown >= 30) {
+                game.pushSystemMessage("  ...");
+                break;
+            }
+        }
+        return;
+    }
+
+    if (cmd == "slot") {
+        if (toks.size() <= 1) {
+            const std::string cur = game.activeSlot().empty() ? std::string("default") : game.activeSlot();
+            game.pushSystemMessage("ACTIVE SLOT: " + cur);
+            game.pushSystemMessage("USAGE: #slot <name>  (or: #slot default)");
+            game.pushSystemMessage("SAVE: " + game.defaultSavePath());
+            game.pushSystemMessage("AUTO: " + game.defaultAutosavePath());
+            return;
+        }
+
+        const std::string raw = toks[1];
+        const std::string v = toLower(raw);
+        if (v == "default" || v == "none" || v == "off") {
+            game.setActiveSlot(std::string());
+            game.markSlotDirty();
+            game.pushSystemMessage("ACTIVE SLOT SET TO: default");
+            return;
+        }
+
+        const std::string slot = sanitizeSlotName(raw);
+        game.setActiveSlot(slot);
+        game.markSlotDirty();
+        game.pushSystemMessage("ACTIVE SLOT SET TO: " + slot);
+        return;
+    }
+
+    if (cmd == "paths") {
+        game.pushSystemMessage("PATHS:");
+        game.pushSystemMessage("  save: " + game.defaultSavePath());
+        game.pushSystemMessage("  autosave: " + game.defaultAutosavePath());
+        game.pushSystemMessage("  scores: " + game.defaultScoresPath());
+        const std::string sp = game.settingsPath();
+        if (!sp.empty()) game.pushSystemMessage("  settings: " + sp);
+        else game.pushSystemMessage("  settings: (unknown)");
+        return;
+    }
+
 
     if (cmd == "quit") {
         game.requestQuit();
@@ -228,7 +935,32 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     }
 
     if (cmd == "restart") {
+        // Optional: restart with a specific seed (useful for reproducing runs).
+        //   #restart 12345
+        const std::string v = arg(1);
+        if (!v.empty()) {
+            try {
+                unsigned long s = std::stoul(v, nullptr, 0);
+                const uint32_t seed = static_cast<uint32_t>(s);
+                game.newGame(seed);
+                game.pushSystemMessage("RESTARTED WITH SEED: " + std::to_string(seed));
+            } catch (...) {
+                game.pushSystemMessage("USAGE: restart [seed]");
+            }
+            return;
+        }
+
         game.handleAction(Action::Restart);
+        return;
+    }
+
+    if (cmd == "daily") {
+        // Deterministic daily seed (UTC date) for a lightweight "daily challenge".
+        //   #daily
+        std::string dateIso;
+        const uint32_t seed = dailySeedUtc(&dateIso);
+        game.newGame(seed);
+        game.pushSystemMessage("DAILY RUN (UTC " + dateIso + ") SEED: " + std::to_string(seed));
         return;
     }
 
@@ -331,10 +1063,185 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
             std::string line = "#" + std::to_string(i + 1) + " " + who + " " + res + " ";
             line += "S" + std::to_string(e.score) + " D" + std::to_string(e.depth);
+            if (!e.slot.empty() && e.slot != "default") line += " [" + e.slot + "]";
             line += " T" + std::to_string(e.turns) + " K" + std::to_string(e.kills);
             if (!e.cause.empty()) line += " " + e.cause;
 
             game.pushSystemMessage(line);
+        }
+        return;
+    }
+
+    if (cmd == "history") {
+        int n = 10;
+        if (toks.size() > 1) {
+            try {
+                n = std::stoi(toks[1]);
+            } catch (...) {
+                n = 10;
+            }
+        }
+        n = clampi(n, 1, 60);
+
+        const auto& es = game.scoreBoard().entries();
+        if (es.empty()) {
+            game.pushSystemMessage("NO RUNS RECORDED YET.");
+            return;
+        }
+
+        std::vector<size_t> idx(es.size());
+        std::iota(idx.begin(), idx.end(), size_t{0});
+
+        std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+            const auto& ea = es[a];
+            const auto& eb = es[b];
+            if (ea.timestamp != eb.timestamp) return ea.timestamp > eb.timestamp; // newest first
+            if (ea.score != eb.score) return ea.score > eb.score;
+            return ea.name < eb.name;
+        });
+
+        const int count = std::min<int>(n, static_cast<int>(idx.size()));
+        game.pushSystemMessage("RECENT RUNS (NEWEST FIRST):");
+        for (int i = 0; i < count; ++i) {
+            const auto& e = es[idx[static_cast<size_t>(i)]];
+
+            std::ostringstream line;
+            line << "#" << (i + 1) << " ";
+            line << (e.timestamp.empty() ? "(no timestamp)" : e.timestamp) << " ";
+            line << (e.name.empty() ? "PLAYER" : e.name) << " ";
+            line << (e.won ? "WIN" : "DEAD") << " ";
+            line << "S" << e.score << " D" << e.depth << " T" << e.turns << " K" << e.kills;
+
+            if (!e.slot.empty() && e.slot != "default") line << " [" << e.slot << "]";
+            if (!e.cause.empty()) line << " " << e.cause;
+            if (!e.gameVersion.empty()) line << " V" << e.gameVersion;
+
+            game.pushSystemMessage(line.str());
+        }
+        return;
+    }
+
+    if (cmd == "exportlog" || cmd == "exportmap" || cmd == "export" || cmd == "exportall" || cmd == "dump") {
+        namespace fs = std::filesystem;
+
+        const fs::path baseDir = exportBaseDir(game);
+        const std::string ts = timestampForFilename();
+        const std::string argName = (toks.size() > 1) ? toks[1] : std::string();
+
+        if (cmd == "exportlog") {
+            const fs::path outPath = argName.empty() ? (baseDir / ("procrogue_log_" + ts + ".txt")) : (baseDir / fs::path(argName));
+            if (!exportRunLogToFile(game, outPath)) {
+                game.pushSystemMessage("FAILED TO EXPORT LOG.");
+            } else {
+                game.pushSystemMessage("EXPORTED LOG: " + outPath.string());
+            }
+            return;
+        }
+
+        if (cmd == "exportmap") {
+            const fs::path outPath = argName.empty() ? (baseDir / ("procrogue_map_" + ts + ".txt")) : (baseDir / fs::path(argName));
+            if (!exportRunMapToFile(game, outPath)) {
+                game.pushSystemMessage("FAILED TO EXPORT MAP.");
+            } else {
+                game.pushSystemMessage("EXPORTED MAP: " + outPath.string());
+            }
+            return;
+        }
+
+        if (cmd == "dump") {
+            const fs::path outPath = argName.empty() ? (baseDir / ("procrogue_dump_" + ts + ".txt")) : (baseDir / fs::path(argName));
+            const auto res = exportRunDumpToFile(game, outPath);
+            if (!res.first) {
+                game.pushSystemMessage("FAILED TO EXPORT DUMP.");
+            } else if (!res.second) {
+                game.pushSystemMessage("EXPORTED DUMP (MAP MAY BE MISSING): " + outPath.string());
+            } else {
+                game.pushSystemMessage("EXPORTED DUMP: " + outPath.string());
+            }
+            return;
+        }
+
+        if (cmd == "exportall") {
+            // Optional: #exportall [prefix]
+            fs::path prefix = argName.empty() ? fs::path("procrogue_" + ts) : fs::path(argName);
+
+            fs::path dir = baseDir;
+            if (!prefix.parent_path().empty()) {
+                dir = baseDir / prefix.parent_path();
+                std::error_code ec;
+                fs::create_directories(dir, ec);
+            }
+
+            const std::string stem = prefix.stem().string().empty() ? prefix.filename().string() : prefix.stem().string();
+
+            const fs::path logPath  = dir / (stem + "_log.txt");
+            const fs::path mapPath  = dir / (stem + "_map.txt");
+            const fs::path dumpPath = dir / (stem + "_dump.txt");
+
+            const bool okLog = exportRunLogToFile(game, logPath);
+            const bool okMap = exportRunMapToFile(game, mapPath);
+            const auto dumpRes = exportRunDumpToFile(game, dumpPath);
+
+            if (okLog) game.pushSystemMessage("EXPORTED LOG: " + logPath.string());
+            if (okMap) game.pushSystemMessage("EXPORTED MAP: " + mapPath.string());
+            if (dumpRes.first) {
+                if (!dumpRes.second) game.pushSystemMessage("EXPORTED DUMP (MAP MAY BE MISSING): " + dumpPath.string());
+                else game.pushSystemMessage("EXPORTED DUMP: " + dumpPath.string());
+            }
+
+            if (!okLog || !okMap || !dumpRes.first) {
+                game.pushSystemMessage("EXPORTALL COMPLETED WITH ERRORS.");
+            }
+            return;
+        }
+
+        // export: do both
+        const fs::path logPath = baseDir / ("procrogue_log_" + ts + ".txt");
+        const fs::path mapPath = baseDir / ("procrogue_map_" + ts + ".txt");
+
+        const bool okLog = exportRunLogToFile(game, logPath);
+        const bool okMap = exportRunMapToFile(game, mapPath);
+
+        if (okLog) game.pushSystemMessage("EXPORTED LOG: " + logPath.string());
+        if (okMap) game.pushSystemMessage("EXPORTED MAP: " + mapPath.string());
+
+        if (!okLog || !okMap) {
+            game.pushSystemMessage("EXPORT COMPLETED WITH ERRORS.");
+        }
+        return;
+    }
+
+    if (cmd == "mortem") {
+        if (toks.size() > 1) {
+            const std::string v = toLower(toks[1]);
+            if (v == "on" || v == "true" || v == "1") {
+                game.setAutoMortemEnabled(true);
+                game.markSettingsDirty();
+                game.pushSystemMessage("AUTO MORTEM: ON");
+                return;
+            }
+            if (v == "off" || v == "false" || v == "0") {
+                game.setAutoMortemEnabled(false);
+                game.markSettingsDirty();
+                game.pushSystemMessage("AUTO MORTEM: OFF");
+                return;
+            }
+            if (v != "now") {
+                game.pushSystemMessage("USAGE: mortem [now|on|off]");
+                return;
+            }
+        }
+
+        namespace fs = std::filesystem;
+        const fs::path dir = exportBaseDir(game);
+        const std::string ts = timestampForFilename();
+        const fs::path outPath = dir / ("procrogue_mortem_" + ts + ".txt");
+
+        const auto res = exportRunDumpToFile(game, outPath);
+        if (!res.first) {
+            game.pushSystemMessage("FAILED TO EXPORT MORTEM.");
+        } else {
+            game.pushSystemMessage("EXPORTED MORTEM: " + outPath.string());
         }
         return;
     }
@@ -349,18 +1256,20 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         AutoPickupMode m = game.autoPickupMode();
         if (v == "off" || v == "0" || v == "false") m = AutoPickupMode::Off;
         else if (v == "gold") m = AutoPickupMode::Gold;
+        else if (v == "smart") m = AutoPickupMode::Smart;
         else if (v == "all") m = AutoPickupMode::All;
         else {
-            game.pushSystemMessage("USAGE: autopickup [off|gold|all]");
+            game.pushSystemMessage("USAGE: autopickup [off|gold|smart|all]");
             return;
         }
 
         game.setAutoPickupMode(m);
         game.markSettingsDirty();
 
-        const char* label = (m == AutoPickupMode::Off)  ? "OFF"
-                            : (m == AutoPickupMode::Gold) ? "GOLD"
-                                                          : "ALL";
+        const char* label = (m == AutoPickupMode::Off)   ? "OFF"
+                            : (m == AutoPickupMode::Gold)  ? "GOLD"
+                            : (m == AutoPickupMode::Smart) ? "SMART"
+                                                           : "ALL";
         game.pushSystemMessage(std::string("AUTO-PICKUP: ") + label);
         return;
     }
@@ -915,7 +1824,7 @@ void Game::newGame(uint32_t seed) {
     msgs.clear();
     msgScroll = 0;
 
-    autoPickup = AutoPickupMode::Gold;
+    // autoPickup is a user setting; do not reset it between runs.
 
     // Randomize potion/scroll appearances and reset identification knowledge.
     initIdentificationTables();
@@ -924,6 +1833,8 @@ void Game::newGame(uint32_t seed) {
     autoPathTiles.clear();
     autoPathIndex = 0;
     autoStepTimer = 0.0f;
+    autoExploreGoalIsLoot = false;
+    autoExploreGoalPos = Vec2i{-1, -1};
 
     turnCount = 0;
     naturalRegenCounter = 0;
@@ -932,6 +1843,7 @@ void Game::newGame(uint32_t seed) {
     killCount = 0;
     maxDepth = 1;
     runRecorded = false;
+    mortemWritten_ = false;
     hastePhase = false;
     looking = false;
     lookPos = {0,0};
@@ -1105,6 +2017,17 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     pushMsg(ss.str());
 
     recomputeFov();
+
+    // Safety: when autosave is enabled, also autosave on floor transitions.
+    // This avoids losing progress between levels even if the turn-based autosave interval hasn't triggered yet.
+    if (autosaveInterval > 0 && !isFinished()) {
+        const std::string ap = defaultAutosavePath();
+        if (!ap.empty()) {
+            if (saveToFile(ap, true)) {
+                lastAutosaveTurn = turnCount;
+            }
+        }
+    }
 }
 
 
@@ -1115,6 +2038,35 @@ std::string Game::defaultSavePath() const {
 
 void Game::setSavePath(const std::string& path) {
     savePathOverride = path;
+}
+
+void Game::setActiveSlot(std::string slot) {
+    // Normalize/sanitize to keep slot filenames portable.
+    slot = trim(slot);
+    std::string low = toLower(slot);
+    if (slot.empty() || low == "default" || low == "none" || low == "off") {
+        slot.clear();
+    } else {
+        slot = sanitizeSlotName(slot);
+    }
+
+    // Compute base paths from the current save directory.
+    const std::filesystem::path baseSave = baseSavePathForSlots(*this);
+    const std::filesystem::path baseAuto = baseAutosavePathForSlots(*this);
+
+    activeSlot_ = slot;
+
+    if (activeSlot_.empty()) {
+        savePathOverride = baseSave.string();
+        autosavePathOverride = baseAuto.string();
+    } else {
+        savePathOverride = makeSlotPath(baseSave.string(), activeSlot_).string();
+        autosavePathOverride = makeSlotPath(baseAuto.string(), activeSlot_).string();
+    }
+}
+
+void Game::setSaveBackups(int count) {
+    saveBackups_ = clampi(count, 0, 10);
 }
 
 std::string Game::defaultAutosavePath() const {
@@ -1753,6 +2705,9 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     }
     out.close();
 
+    // Rotate backups of the previous file (best-effort).
+    rotateFileBackups(p, saveBackups_);
+
     // Replace the target.
     std::error_code ec;
     std::filesystem::rename(tmp, p, ec);
@@ -1792,6 +2747,11 @@ bool Game::loadFromFile(const std::string& path) {
         return false;
     }
 
+    auto fail = [&]() -> bool {
+        pushMsg("SAVE FILE IS CORRUPTED OR TRUNCATED.");
+        return false;
+    };
+
     uint32_t rngState = 0;
     int32_t depth = 1;
     int32_t pId = 0;
@@ -1813,34 +2773,34 @@ bool Game::loadFromFile(const std::string& path) {
     uint32_t killsNow = 0;
     int32_t maxD = 1;
 
-    if (!readPod(in, rngState)) return false;
-    if (!readPod(in, depth)) return false;
-    if (!readPod(in, pId)) return false;
-    if (!readPod(in, nextE)) return false;
-    if (!readPod(in, nextI)) return false;
-    if (!readPod(in, eqM)) return false;
-    if (!readPod(in, eqR)) return false;
-    if (!readPod(in, eqA)) return false;
-    if (!readPod(in, clvl)) return false;
-    if (!readPod(in, xpNow)) return false;
-    if (!readPod(in, xpNeed)) return false;
-    if (!readPod(in, over)) return false;
-    if (!readPod(in, won)) return false;
+    if (!readPod(in, rngState)) return fail();
+    if (!readPod(in, depth)) return fail();
+    if (!readPod(in, pId)) return fail();
+    if (!readPod(in, nextE)) return fail();
+    if (!readPod(in, nextI)) return fail();
+    if (!readPod(in, eqM)) return fail();
+    if (!readPod(in, eqR)) return fail();
+    if (!readPod(in, eqA)) return fail();
+    if (!readPod(in, clvl)) return fail();
+    if (!readPod(in, xpNow)) return fail();
+    if (!readPod(in, xpNeed)) return fail();
+    if (!readPod(in, over)) return fail();
+    if (!readPod(in, won)) return fail();
 
     if (version >= 2u) {
-        if (!readPod(in, autoPick)) return false;
+        if (!readPod(in, autoPick)) return fail();
     }
 
     if (version >= 3u) {
-        if (!readPod(in, turnsNow)) return false;
-        if (!readPod(in, natRegen)) return false;
-        if (!readPod(in, hasteP)) return false;
+        if (!readPod(in, turnsNow)) return fail();
+        if (!readPod(in, natRegen)) return fail();
+        if (!readPod(in, hasteP)) return fail();
     }
 
     if (version >= 5u) {
-        if (!readPod(in, seedNow)) return false;
-        if (!readPod(in, killsNow)) return false;
-        if (!readPod(in, maxD)) return false;
+        if (!readPod(in, seedNow)) return fail();
+        if (!readPod(in, killsNow)) return fail();
+        if (!readPod(in, maxD)) return fail();
     }
 
     // v6+: item identification tables
@@ -1851,12 +2811,12 @@ bool Game::loadFromFile(const std::string& path) {
 
     if (version >= 6u) {
         uint32_t kindCount = 0;
-        if (!readPod(in, kindCount)) return false;
+        if (!readPod(in, kindCount)) return fail();
         for (uint32_t i = 0; i < kindCount; ++i) {
             uint8_t known = 1;
             uint8_t app = 0;
-            if (!readPod(in, known)) return false;
-            if (!readPod(in, app)) return false;
+            if (!readPod(in, known)) return fail();
+            if (!readPod(in, app)) return fail();
             if (i < static_cast<uint32_t>(ITEM_KIND_COUNT)) {
                 identKnownTmp[static_cast<size_t>(i)] = known;
                 identAppTmp[static_cast<size_t>(i)] = app;
@@ -1909,26 +2869,26 @@ bool Game::loadFromFile(const std::string& path) {
     int32_t hungerTmp = 800;
     int32_t hungerMaxTmp = 800;
     if (version >= 7u) {
-        if (!readPod(in, hungerEnabledTmp)) return false;
-        if (!readPod(in, hungerTmp)) return false;
-        if (!readPod(in, hungerMaxTmp)) return false;
+        if (!readPod(in, hungerEnabledTmp)) return fail();
+        if (!readPod(in, hungerTmp)) return fail();
+        if (!readPod(in, hungerMaxTmp)) return fail();
     }
 
     Entity p;
-    if (!readEntity(in, p, version)) return false;
+    if (!readEntity(in, p, version)) return fail();
 
     uint32_t invCount = 0;
-    if (!readPod(in, invCount)) return false;
+    if (!readPod(in, invCount)) return fail();
     std::vector<Item> invTmp;
     invTmp.reserve(invCount);
     for (uint32_t i = 0; i < invCount; ++i) {
         Item it;
-        if (!readItem(in, it, version)) return false;
+        if (!readItem(in, it, version)) return fail();
         invTmp.push_back(it);
     }
 
     uint32_t msgCount = 0;
-    if (!readPod(in, msgCount)) return false;
+    if (!readPod(in, msgCount)) return fail();
     std::vector<Message> msgsTmp;
     msgsTmp.reserve(msgCount);
     for (uint32_t i = 0; i < msgCount; ++i) {
@@ -1936,9 +2896,9 @@ bool Game::loadFromFile(const std::string& path) {
             uint8_t mk = 0;
             uint8_t fp = 1;
             std::string s;
-            if (!readPod(in, mk)) return false;
-            if (!readPod(in, fp)) return false;
-            if (!readString(in, s)) return false;
+            if (!readPod(in, mk)) return fail();
+            if (!readPod(in, fp)) return fail();
+            if (!readString(in, s)) return fail();
             Message m;
             m.text = std::move(s);
             m.kind = static_cast<MessageKind>(mk);
@@ -1946,27 +2906,27 @@ bool Game::loadFromFile(const std::string& path) {
             msgsTmp.push_back(std::move(m));
         } else {
             std::string s;
-            if (!readString(in, s)) return false;
+            if (!readString(in, s)) return fail();
             msgsTmp.push_back({std::move(s), MessageKind::Info, true});
         }
     }
 
     uint32_t lvlCount = 0;
-    if (!readPod(in, lvlCount)) return false;
+    if (!readPod(in, lvlCount)) return fail();
     std::map<int, LevelState> levelsTmp;
 
     for (uint32_t li = 0; li < lvlCount; ++li) {
         int32_t d32 = 0;
-        if (!readPod(in, d32)) return false;
+        if (!readPod(in, d32)) return fail();
 
         int32_t w = 0, h = 0;
         int32_t upx = 0, upy = 0, dnx = 0, dny = 0;
-        if (!readPod(in, w)) return false;
-        if (!readPod(in, h)) return false;
-        if (!readPod(in, upx)) return false;
-        if (!readPod(in, upy)) return false;
-        if (!readPod(in, dnx)) return false;
-        if (!readPod(in, dny)) return false;
+        if (!readPod(in, w)) return fail();
+        if (!readPod(in, h)) return fail();
+        if (!readPod(in, upx)) return fail();
+        if (!readPod(in, upy)) return fail();
+        if (!readPod(in, dnx)) return fail();
+        if (!readPod(in, dny)) return fail();
 
         LevelState st;
         st.depth = d32;
@@ -1975,17 +2935,17 @@ bool Game::loadFromFile(const std::string& path) {
         st.dung.stairsDown = { dnx, dny };
 
         uint32_t roomCount = 0;
-        if (!readPod(in, roomCount)) return false;
+        if (!readPod(in, roomCount)) return fail();
         st.dung.rooms.clear();
         st.dung.rooms.reserve(roomCount);
         for (uint32_t ri = 0; ri < roomCount; ++ri) {
             int32_t rx = 0, ry = 0, rw = 0, rh = 0;
             uint8_t rt = 0;
-            if (!readPod(in, rx)) return false;
-            if (!readPod(in, ry)) return false;
-            if (!readPod(in, rw)) return false;
-            if (!readPod(in, rh)) return false;
-            if (!readPod(in, rt)) return false;
+            if (!readPod(in, rx)) return fail();
+            if (!readPod(in, ry)) return fail();
+            if (!readPod(in, rw)) return fail();
+            if (!readPod(in, rh)) return fail();
+            if (!readPod(in, rt)) return fail();
             Room r;
             r.x = rx;
             r.y = ry;
@@ -1996,39 +2956,39 @@ bool Game::loadFromFile(const std::string& path) {
         }
 
         uint32_t tileCount = 0;
-        if (!readPod(in, tileCount)) return false;
+        if (!readPod(in, tileCount)) return fail();
         st.dung.tiles.assign(tileCount, Tile{});
         for (uint32_t ti = 0; ti < tileCount; ++ti) {
             uint8_t tt = 0;
             uint8_t explored = 0;
-            if (!readPod(in, tt)) return false;
-            if (!readPod(in, explored)) return false;
+            if (!readPod(in, tt)) return fail();
+            if (!readPod(in, explored)) return fail();
             st.dung.tiles[ti].type = static_cast<TileType>(tt);
             st.dung.tiles[ti].visible = false;
             st.dung.tiles[ti].explored = explored != 0;
         }
 
         uint32_t monCount = 0;
-        if (!readPod(in, monCount)) return false;
+        if (!readPod(in, monCount)) return fail();
         st.monsters.clear();
         st.monsters.reserve(monCount);
         for (uint32_t mi = 0; mi < monCount; ++mi) {
             Entity m;
-            if (!readEntity(in, m, version)) return false;
+            if (!readEntity(in, m, version)) return fail();
             st.monsters.push_back(m);
         }
 
         uint32_t gCount = 0;
-        if (!readPod(in, gCount)) return false;
+        if (!readPod(in, gCount)) return fail();
         st.ground.clear();
         st.ground.reserve(gCount);
         for (uint32_t gi = 0; gi < gCount; ++gi) {
             int32_t gx = 0, gy = 0;
-            if (!readPod(in, gx)) return false;
-            if (!readPod(in, gy)) return false;
+            if (!readPod(in, gx)) return fail();
+            if (!readPod(in, gy)) return fail();
             GroundItem gr;
             gr.pos = { gx, gy };
-            if (!readItem(in, gr.item, version)) return false;
+            if (!readItem(in, gr.item, version)) return fail();
             st.ground.push_back(gr);
         }
 
@@ -2036,16 +2996,16 @@ bool Game::loadFromFile(const std::string& path) {
         st.traps.clear();
         if (version >= 2u) {
             uint32_t tCount = 0;
-            if (!readPod(in, tCount)) return false;
+            if (!readPod(in, tCount)) return fail();
             st.traps.reserve(tCount);
             for (uint32_t ti = 0; ti < tCount; ++ti) {
                 uint8_t tk = 0;
                 int32_t tx = 0, ty = 0;
                 uint8_t disc = 0;
-                if (!readPod(in, tk)) return false;
-                if (!readPod(in, tx)) return false;
-                if (!readPod(in, ty)) return false;
-                if (!readPod(in, disc)) return false;
+                if (!readPod(in, tk)) return fail();
+                if (!readPod(in, tx)) return fail();
+                if (!readPod(in, ty)) return fail();
+                if (!readPod(in, disc)) return fail();
                 Trap tr;
                 tr.kind = static_cast<TrapKind>(tk);
                 tr.pos = { tx, ty };
@@ -2073,7 +3033,8 @@ bool Game::loadFromFile(const std::string& path) {
     gameWon = won != 0;
     if (version >= 4u) {
         autoPickup = static_cast<AutoPickupMode>(autoPick);
-        if (autoPickup > AutoPickupMode::All) autoPickup = AutoPickupMode::Gold;
+        // Accept known modes; clamp anything else to Gold.
+        if (autoPick > static_cast<uint8_t>(AutoPickupMode::Smart)) autoPickup = AutoPickupMode::Gold;
     } else {
         autoPickup = (autoPick != 0) ? AutoPickupMode::Gold : AutoPickupMode::Off;
     }
@@ -2292,17 +3253,19 @@ void Game::handleAction(Action a) {
     // Toggle auto-pickup (safe to do in any non-finished state).
     if (a == Action::ToggleAutoPickup) {
         switch (autoPickup) {
-            case AutoPickupMode::Off:  autoPickup = AutoPickupMode::Gold; break;
-            case AutoPickupMode::Gold: autoPickup = AutoPickupMode::All;  break;
-            case AutoPickupMode::All:  autoPickup = AutoPickupMode::Off;  break;
-            default:                   autoPickup = AutoPickupMode::Gold; break;
+            case AutoPickupMode::Off:   autoPickup = AutoPickupMode::Gold;  break;
+            case AutoPickupMode::Gold:  autoPickup = AutoPickupMode::Smart; break;
+            case AutoPickupMode::Smart: autoPickup = AutoPickupMode::All;   break;
+            case AutoPickupMode::All:   autoPickup = AutoPickupMode::Off;   break;
+            default:                    autoPickup = AutoPickupMode::Gold;  break;
         }
 
         settingsDirtyFlag = true;
 
         const char* mode =
-            (autoPickup == AutoPickupMode::Off)  ? "OFF" :
-            (autoPickup == AutoPickupMode::Gold) ? "GOLD" : "ALL";
+            (autoPickup == AutoPickupMode::Off)   ? "OFF" :
+            (autoPickup == AutoPickupMode::Gold)  ? "GOLD" :
+            (autoPickup == AutoPickupMode::Smart) ? "SMART" : "ALL";
 
         std::string msg = std::string("AUTO-PICKUP: ") + mode + ".";
         pushMsg(msg, MessageKind::System);
@@ -2378,7 +3341,7 @@ void Game::handleAction(Action a) {
 
     // Overlay: options menu (does not consume turns)
     if (optionsOpen) {
-        constexpr int kOptionCount = 8;
+        constexpr int kOptionCount = 10;
 
         if (a == Action::Cancel || a == Action::Options) {
             optionsOpen = false;
@@ -2399,11 +3362,14 @@ void Game::handleAction(Action a) {
         const bool confirm = (a == Action::Confirm);
 
         auto cycleAutoPickup = [&](int dir) {
-            int m = static_cast<int>(autoPickup);
-            m += dir;
-            if (m < 0) m = 2;
-            if (m > 2) m = 0;
-            autoPickup = static_cast<AutoPickupMode>(m);
+            const AutoPickupMode order[4] = { AutoPickupMode::Off, AutoPickupMode::Gold, AutoPickupMode::Smart, AutoPickupMode::All };
+            int idx = 0;
+            for (int i = 0; i < 4; ++i) {
+                if (order[i] == autoPickup) { idx = i; break; }
+            }
+            idx = (idx + dir) % 4;
+            if (idx < 0) idx += 4;
+            autoPickup = order[idx];
             settingsDirtyFlag = true;
         };
 
@@ -2474,8 +3440,28 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 7) Close
+        // 7) Auto mortem (write a dump file on win/death)
         if (optionsSel == 7) {
+            if (left || right || confirm) {
+                autoMortemEnabled_ = !autoMortemEnabled_;
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // 8) Save backups (0..10)
+        if (optionsSel == 8) {
+            if (left || right) {
+                int n = saveBackups_;
+                n += left ? -1 : +1;
+                setSaveBackups(n);
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // 9) Close
+        if (optionsSel == 9) {
             if (left || right || confirm) optionsOpen = false;
             return;
         }
@@ -2866,6 +3852,7 @@ void Game::maybeRecordRun() {
     e.seed = seed_;
 
     e.name = playerName_;
+    e.slot = activeSlot_.empty() ? std::string("default") : activeSlot_;
     e.cause = endCause_;
     e.gameVersion = PROCROGUE_VERSION;
 
@@ -2876,6 +3863,21 @@ void Game::maybeRecordRun() {
         const bool ok = scores.append(scorePath, e);
         if (ok) {
             pushMsg("RUN RECORDED.", MessageKind::System);
+        }
+    }
+
+    if (autoMortemEnabled_ && !mortemWritten_) {
+        namespace fs = std::filesystem;
+        const fs::path dir = exportBaseDir(*this);
+        const std::string ts = timestampForFilename();
+        const fs::path outPath = dir / ("procrogue_mortem_" + ts + ".txt");
+
+        const auto res = exportRunDumpToFile(*this, outPath);
+        if (res.first) {
+            mortemWritten_ = true;
+            pushMsg("MORTEM DUMP WRITTEN.", MessageKind::System);
+        } else {
+            pushMsg("FAILED TO WRITE MORTEM DUMP.", MessageKind::Warning);
         }
     }
 
@@ -2901,6 +3903,72 @@ void Game::stopAutoMove(bool silent) {
     if (!silent) {
         pushMsg("AUTO-MOVE: OFF.", MessageKind::System);
     }
+}
+
+
+bool Game::hasRangedWeaponForAmmo(AmmoKind ammo) const {
+    for (const auto& it : inv) {
+        const ItemDef& d = itemDef(it.kind);
+        if (d.slot == EquipSlot::RangedWeapon && d.ammo == ammo) return true;
+    }
+    return false;
+}
+
+bool Game::autoPickupWouldPick(ItemKind k) const {
+    // Chests are world-interactables; never auto-pickup.
+    if (isChestKind(k)) return false;
+
+    switch (autoPickup) {
+        case AutoPickupMode::Off:
+            return false;
+        case AutoPickupMode::Gold:
+            return k == ItemKind::Gold;
+        case AutoPickupMode::All:
+            return true;
+        case AutoPickupMode::Smart: {
+            if (k == ItemKind::Gold) return true;
+            if (k == ItemKind::Key || k == ItemKind::Lockpick) return true;
+            if (k == ItemKind::AmuletYendor) return true;
+
+            // Ammo only if we have a matching ranged weapon.
+            if (k == ItemKind::Arrow) return hasRangedWeaponForAmmo(AmmoKind::Arrow);
+            if (k == ItemKind::Rock)  return hasRangedWeaponForAmmo(AmmoKind::Rock);
+
+            const ItemDef& def = itemDef(k);
+            if (def.consumable) return true;
+            if (def.slot != EquipSlot::None) return true; // equipment
+            return false;
+        }
+    }
+
+    return false;
+}
+
+bool Game::autoExploreWantsLoot(ItemKind k) const {
+    // Gold never stops explore (it's either auto-picked or easy to pick later).
+    if (k == ItemKind::Gold) return false;
+
+    // Only unopened chests are "interesting".
+    if (k == ItemKind::Chest) return true;
+    if (k == ItemKind::ChestOpen) return false;
+
+    // If this would be picked up automatically, don't stop/retarget for it.
+    if (autoPickup != AutoPickupMode::Off && autoPickupWouldPick(k)) return false;
+
+    // Ammo can be noisy; only treat it as interesting if you have the matching weapon.
+    if (k == ItemKind::Arrow) return hasRangedWeaponForAmmo(AmmoKind::Arrow);
+    if (k == ItemKind::Rock)  return hasRangedWeaponForAmmo(AmmoKind::Rock);
+
+    return true;
+}
+
+bool Game::tileHasAutoExploreLoot(Vec2i p) const {
+    for (const auto& gi : ground) {
+        if (gi.pos == p && autoExploreWantsLoot(gi.item.kind)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Game::requestAutoTravel(Vec2i goal) {
@@ -2999,18 +4067,65 @@ bool Game::stepAutoMove() {
         stopAutoMove(true);
         return false;
     }
+    // Hunger safety: if starvation is enabled and you're starving, stop auto-move so you can eat.
+    if (hungerEnabled_ && hungerStateFor(hunger, hungerMax) >= 2) {
+        pushMsg("AUTO-MOVE STOPPED (YOU ARE STARVING).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
 
-    // In auto-explore mode, stop when you see non-gold loot so you can decide what to do.
+    // In auto-explore mode, if we see "interesting" loot that won't be auto-picked, retarget toward it and
+    // stop when we arrive. This is less jarring than stopping immediately on sight.
     if (autoMode == AutoMoveMode::Explore) {
+        const Vec2i here = player().pos;
+
+        Vec2i bestPos{-1, -1};
+        int bestPri = 999;
+        int bestDist = 999999;
+
         for (const auto& gi : ground) {
-            if (gi.item.kind == ItemKind::Gold) continue;
-            if (dung.inBounds(gi.pos.x, gi.pos.y) && dung.at(gi.pos.x, gi.pos.y).visible) {
-                pushMsg("AUTO-EXPLORE STOPPED (LOOT SPOTTED).", MessageKind::System);
+            if (!dung.inBounds(gi.pos.x, gi.pos.y)) continue;
+            if (!dung.at(gi.pos.x, gi.pos.y).visible) continue;
+
+            const ItemKind k = gi.item.kind;
+            if (!autoExploreWantsLoot(k)) continue;
+
+            const int pri = (k == ItemKind::Chest) ? 0 : 1;
+            const int dist = std::abs(gi.pos.x - here.x) + std::abs(gi.pos.y - here.y);
+
+            if (pri < bestPri || (pri == bestPri && dist < bestDist)) {
+                bestPri = pri;
+                bestDist = dist;
+                bestPos = gi.pos;
+            }
+        }
+
+        if (bestPos.x >= 0) {
+            // If we're already standing on it, stop immediately.
+            if (bestPos == here) {
+                pushMsg((bestPri == 0) ? "AUTO-EXPLORE STOPPED (CHEST HERE)." : "AUTO-EXPLORE STOPPED (LOOT HERE).",
+                        MessageKind::System);
                 stopAutoMove(true);
                 return false;
             }
+
+            // If we aren't already headed there, retarget.
+            if (!autoExploreGoalIsLoot || autoExploreGoalPos != bestPos) {
+                if (!buildAutoTravelPath(bestPos, /*requireExplored*/true)) {
+                    pushMsg("AUTO-EXPLORE STOPPED (NO PATH TO LOOT).", MessageKind::System);
+                    stopAutoMove(true);
+                    return false;
+                }
+
+                autoExploreGoalIsLoot = true;
+                autoExploreGoalPos = bestPos;
+
+                pushMsg((bestPri == 0) ? "AUTO-EXPLORE: TARGETING CHEST." : "AUTO-EXPLORE: TARGETING LOOT.",
+                        MessageKind::System);
+            }
         }
     }
+
 
     // If we're out of path, rebuild (explore) or finish (travel).
     if (autoPathIndex >= autoPathTiles.size()) {
@@ -3086,6 +4201,12 @@ bool Game::stepAutoMove() {
 
     advanceAfterPlayerAction();
 
+    if (hungerEnabled_ && hungerStateFor(hunger, hungerMax) >= 2) {
+        pushMsg("AUTO-MOVE STOPPED (YOU ARE STARVING).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
     if (p.hp < hpBefore) {
         pushMsg("AUTO-MOVE STOPPED (YOU TOOK DAMAGE).", MessageKind::Warning);
         stopAutoMove(true);
@@ -3102,6 +4223,21 @@ bool Game::stepAutoMove() {
         pushMsg("AUTO-MOVE STOPPED (YOU WERE WEBBED).", MessageKind::Warning);
         stopAutoMove(true);
         return false;
+    }
+
+    // If we were auto-exploring toward loot, stop once we arrive (so the player can decide what to do).
+    if (autoMode == AutoMoveMode::Explore && autoExploreGoalIsLoot && p.pos == autoExploreGoalPos) {
+        if (tileHasAutoExploreLoot(p.pos)) {
+            const bool chestHere = std::any_of(ground.begin(), ground.end(), [&](const GroundItem& gi) {
+                return gi.pos == p.pos && gi.item.kind == ItemKind::Chest;
+            });
+            pushMsg(chestHere ? "AUTO-EXPLORE STOPPED (CHEST REACHED)." : "AUTO-EXPLORE STOPPED (LOOT REACHED).",
+                    MessageKind::System);
+            stopAutoMove(true);
+            return false;
+        }
+        autoExploreGoalIsLoot = false;
+        autoExploreGoalPos = Vec2i{-1, -1};
     }
 
     // If travel completed after this step, finish.
@@ -3130,6 +4266,11 @@ bool Game::buildAutoTravelPath(Vec2i goal, bool requireExplored) {
 }
 
 bool Game::buildAutoExplorePath() {
+    // Auto-explore normally aims for the nearest frontier (unexplored adjacency).
+    // Loot handling is done opportunistically in stepAutoMove() when it becomes visible.
+    autoExploreGoalIsLoot = false;
+    autoExploreGoalPos = Vec2i{-1, -1};
+
     Vec2i goal = findNearestExploreFrontier();
     if (goal.x < 0 || goal.y < 0) return false;
     return buildAutoTravelPath(goal, /*requireExplored*/true);
@@ -3145,6 +4286,8 @@ Vec2i Game::findNearestExploreFrontier() const {
 
     visited[idxOf(start.x, start.y)] = 1;
     q.push_back(start);
+
+    const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
 
     auto isKnownTrap = [&](int x, int y) -> bool {
         for (const auto& t : trapsCur) {
@@ -3176,8 +4319,6 @@ Vec2i Game::findNearestExploreFrontier() const {
     };
 
     const int dirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
-
-    const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
 
     while (!q.empty()) {
         Vec2i cur = q.front();
@@ -4102,19 +5243,11 @@ bool Game::autoPickupAtPlayer() {
 
     if (autoPickup == AutoPickupMode::Off) return false;
 
-    auto shouldPick = [&](const Item& it) -> bool {
-        // Chests are world-interactables; never auto-pickup.
-        if (isChestKind(it.kind)) return false;
-        if (autoPickup == AutoPickupMode::Gold) return it.kind == ItemKind::Gold;
-        // AutoPickupMode::All
-        return true;
-    };
-
     int pickedCount = 0;
     std::vector<std::string> sampleNames;
 
     for (size_t i = 0; i < ground.size();) {
-        if (ground[i].pos == pos && shouldPick(ground[i].item)) {
+        if (ground[i].pos == pos && autoPickupWouldPick(ground[i].item.kind)) {
             Item it = ground[i].item;
 
             // Merge into existing stacks if possible.
@@ -4181,7 +5314,7 @@ bool Game::openChestAtPlayer() {
             // Lockpicking chance scales with character level, but higher-tier chests are harder.
             float chance = 0.35f + 0.05f * static_cast<float>(charLevel);
             chance -= 0.05f * static_cast<float>(chestTier(chest));
-            chance = clampf(chance, 0.15f, 0.95f);
+            chance = std::clamp(chance, 0.15f, 0.95f);
 
             if (rng.chance(chance)) {
                 setChestLocked(chest, false);

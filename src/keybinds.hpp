@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <utility>
 
 #include "game.hpp"
 
@@ -38,6 +39,10 @@ public:
     void loadOverridesFromIni(const std::string& settingsPath);
 
     Action mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const;
+
+    // Returns human-readable bindings for UI/logging (action name -> key list).
+    std::vector<std::pair<std::string, std::string>> describeAll() const;
+    std::string describeAction(Action a) const;
 
 private:
     std::unordered_map<Action, std::vector<KeyChord>, ActionHash> binds;

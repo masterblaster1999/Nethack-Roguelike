@@ -193,6 +193,8 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     // UI / meta
     if (name == "toggle_minimap" || name == "minimap") return Action::ToggleMinimap;
     if (name == "toggle_stats" || name == "stats") return Action::ToggleStats;
+    if (name == "toggle_fullscreen" || name == "fullscreen") return Action::ToggleFullscreen;
+    if (name == "screenshot" || name == "take_screenshot") return Action::Screenshot;
     if (name == "help") return Action::Help;
     if (name == "options") return Action::Options;
     if (name == "command" || name == "extcmd") return Action::Command;
@@ -295,6 +297,9 @@ KeyBinds KeyBinds::defaults() {
     add(Action::ToggleMinimap, SDLK_m);
     add(Action::ToggleStats, SDLK_TAB, KMOD_SHIFT);
 
+    add(Action::ToggleFullscreen, SDLK_F11);
+    add(Action::Screenshot, SDLK_F12);
+
     add(Action::Save, SDLK_F5);
     add(Action::Restart, SDLK_F6);
     add(Action::Load, SDLK_F9);
@@ -364,6 +369,8 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::Down,
             Action::Left,
             Action::Right,
+            Action::ToggleFullscreen,
+            Action::Screenshot,
             Action::LogUp,
             Action::LogDown,
             Action::Help,

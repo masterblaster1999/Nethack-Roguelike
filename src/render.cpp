@@ -324,6 +324,7 @@ void Renderer::render(const Game& game) {
             case TrapKind::PoisonDart:r = 80;  g = 220; b = 80;  break;
             case TrapKind::Teleport: r = 170; g = 110; b = 230; break;
             case TrapKind::Alarm:    r = 220; g = 220; b = 80;  break;
+            case TrapKind::Web:       r = 140; g = 180; b = 255; break;
         }
 
         const uint8_t a = t.visible ? 220 : 120;
@@ -494,13 +495,26 @@ void Renderer::drawHud(const Game& game) {
     ss << " | TURNS: " << game.turns();
     ss << " | KILLS: " << game.kills();
 
-    // Status effects (compact)
-    if (p.poisonTurns > 0) ss << " | POISON";
-    if (p.webTurns > 0) ss << " | WEB";
-    if (p.regenTurns > 0) ss << " | REGEN";
-    if (p.shieldTurns > 0) ss << " | SHIELD";
-    if (p.hasteTurns > 0) ss << " | HASTE";
-    if (p.visionTurns > 0) ss << " | VISION";
+    // Status effects
+    auto addStatus = [&](const char* label, int turns) {
+        if (turns <= 0) return;
+        if (game.showEffectTimers()) {
+            ss << " | " << label << "(" << turns << ")";
+        } else {
+            ss << " | " << label;
+        }
+    };
+
+    addStatus("POISON", p.poisonTurns);
+    addStatus("WEB", p.webTurns);
+    addStatus("REGEN", p.regenTurns);
+    addStatus("SHIELD", p.shieldTurns);
+    addStatus("HASTE", p.hasteTurns);
+    addStatus("VISION", p.visionTurns);
+    {
+        const std::string ht = game.hungerTag();
+        if (!ht.empty()) ss << " | " << ht;
+    }
     if (game.autosaveEveryTurns() > 0) {
         ss << " | AS: " << game.autosaveEveryTurns();
     }
@@ -611,7 +625,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 
 void Renderer::drawOptionsOverlay(const Game& game) {
     const int panelW = std::min(winW - 80, 760);
-    const int panelH = 230;
+    const int panelH = 288;
     const int x0 = (winW - panelW) / 2;
     const int y0 = (winH - panelH) / 2;
 
@@ -657,7 +671,10 @@ void Renderer::drawOptionsOverlay(const Game& game) {
     drawOpt(1, "AUTO-STEP DELAY: ", std::to_string(game.autoStepDelayMs()) + " MS");
     drawOpt(2, "AUTOSAVE EVERY: ", std::to_string(game.autosaveEveryTurns()) + " TURNS");
     drawOpt(3, "IDENTIFY ITEMS: ", game.identificationEnabled() ? "ON" : "OFF");
-    drawOpt(4, "", "CLOSE");
+    drawOpt(4, "HUNGER SYSTEM: ", game.hungerEnabled() ? "ON" : "OFF");
+    drawOpt(5, "EFFECT TIMERS: ", game.showEffectTimers() ? "ON" : "OFF");
+    drawOpt(6, "CONFIRM QUIT: ", game.confirmQuitEnabled() ? "ON" : "OFF");
+    drawOpt(7, "", "CLOSE");
 
     y = y0 + panelH - 42;
 
@@ -675,7 +692,7 @@ void Renderer::drawOptionsOverlay(const Game& game) {
         drawText5x7(renderer, x, y, 1, gray, "KEYBINDS: EDIT procrogue_settings.ini (bind_*)");
     }
     y += 14;
-    drawText5x7(renderer, x, y, 1, gray, "TIP: PRESS # FOR EXTENDED COMMANDS (save, load, quit...)");
+    drawText5x7(renderer, x, y, 1, gray, "TIP: PRESS # FOR EXTENDED COMMANDS (save, load, pray, quit...)");
 }
 
 void Renderer::drawCommandOverlay(const Game& game) {
@@ -693,10 +710,6 @@ void Renderer::drawCommandOverlay(const Game& game) {
     const int pad = 10;
     const int x = bg.x + pad;
     int y = bg.y + 8;
-
-    // Local UI palette.
-    const Color white{255, 255, 255, 255};
-    const Color gray{180, 180, 180, 255};
 
     // Local UI palette.
     const Color white{255, 255, 255, 255};
@@ -757,13 +770,16 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("M MINIMAP  SHIFT+TAB STATS  F2 OPTIONS");
     lineGray("# EXTENDED COMMANDS  (TYPE + ENTER)");
     lineGray("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART");
+    lineGray("F11 FULLSCREEN  F12 SCREENSHOT (BINDABLE)");
     lineGray("PGUP/PGDN LOG  ESC CANCEL/QUIT");
 
     y += 6;
     lineWhite("EXTENDED COMMAND EXAMPLES:");
-    lineGray("save | load | loadauto | quit | version | seed");
+    lineGray("save | load | loadauto | quit | version | seed | name | scores");
     lineGray("autopickup off/gold/all");
-    lineGray("autosave <turns>  stepdelay <ms>  identify on/off");
+    lineGray("name <text>  scores [N]");
+    lineGray("autosave <turns>  stepdelay <ms>  identify on/off  timers on/off");
+    lineGray("pray [heal|cure|identify|bless]");
 
     y += 6;
     lineWhite("KEYBINDINGS:");
@@ -779,7 +795,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
 
     y += 6;
     lineWhite("TIPS:");
-    lineGray("AUTO-EXPLORE STOPS IF YOU SEE AN ENEMY.");
+    lineGray("AUTO-EXPLORE STOPS IF YOU SEE AN ENEMY OR GET HURT/DEBUFFED.");
     lineGray("INVENTORY: E EQUIP  U USE  X DROP  SHIFT+X DROP ALL");
     lineGray("SCROLL THE MESSAGE LOG WITH PGUP/PGDN.");
 }
@@ -955,16 +971,33 @@ void Renderer::drawStatsOverlay(const Game& game) {
     } else {
         for (int i = 0; i < (int)entries.size() && i < maxShown; ++i) {
             const auto& e = entries[i];
+            auto trunc = [](const std::string& s, size_t n) {
+                if (s.size() <= n) return s;
+                if (n <= 1) return s.substr(0, n);
+                if (n <= 3) return s.substr(0, n);
+                return s.substr(0, n - 3) + "...";
+            };
+
+            const std::string who = e.name.empty() ? "PLAYER" : e.name;
+            const std::string whoCol = trunc(who, 10);
+            const std::string cause = e.cause.empty() ? "" : e.cause;
+            const std::string causeCol = trunc(cause, 28);
+
             std::stringstream ss;
-            ss << "#" << (i + 1)
-               << "  " << e.score
-               << "  " << (e.won ? "WIN" : "DEAD")
-               << "  D" << e.depth
-               << "  T" << e.turns
-               << "  K" << e.kills
-               << "  L" << e.level
-               << "  G" << e.gold
-               << "  SEED " << e.seed;
+            ss << "#" << (i + 1) << " "
+               << whoCol;
+            if (whoCol.size() < 10) ss << std::string(10 - whoCol.size(), ' ');
+
+            ss << " "
+               << (e.won ? "WIN " : "DEAD")
+               << " " << e.score
+               << " D" << e.depth
+               << " T" << e.turns
+               << " K" << e.kills
+               << " S" << e.seed;
+
+            if (!causeCol.empty()) ss << " " << causeCol;
+
             drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
             y += 16;
             if (y > y0 + panelH - 36) break;

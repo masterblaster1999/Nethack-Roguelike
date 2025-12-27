@@ -478,7 +478,30 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
             if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
             break;
         }
-        case ItemKind::Arrow: {
+        
+        case ItemKind::ScrollIdentify: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+            // "?" / identify-ish glyph
+            line(s, 8, 7, 8, 9, {80,50,30,255});
+            setPx(s, 8, 6, {80,50,30,255});
+            setPx(s, 8, 10, {80,50,30,255});
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+        case ItemKind::ScrollDetectTraps: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+            // Trap-ish glyph (X)
+            line(s, 7, 7, 9, 9, {80,50,30,255});
+            line(s, 9, 7, 7, 9, {80,50,30,255});
+            setPx(s, 8, 10, {80,50,30,255});
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+case ItemKind::Arrow: {
             Color wood = add({160,110,60,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
             line(s, 4, 12, 12, 4, wood);
             line(s, 11, 3, 13, 5, {220,220,220,255});
@@ -532,6 +555,22 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
             line(s, 6, 9, 10, 9, {80,50,30,255});
             line(s, 7, 7, 7, 10, {80,50,30,255});
             if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+        case ItemKind::FoodRation: {
+            // Simple "ration" icon: a wrapped package with crumbs.
+            Color wrap = add({210, 190, 140, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color edge = mul(wrap, 0.8f);
+            outlineRect(s, 4, 5, 8, 7, edge);
+            rect(s, 5, 6, 6, 5, wrap);
+            // A little tie
+            setPx(s, 8, 5, {120, 80, 40, 255});
+            setPx(s, 7, 5, {120, 80, 40, 255});
+            // Crumbs
+            if (frame % 2 == 1) {
+                setPx(s, 6, 12, {230, 220, 190, 200});
+                setPx(s, 11, 11, {230, 220, 190, 200});
+            }
             break;
         }
         case ItemKind::AmuletYendor: {

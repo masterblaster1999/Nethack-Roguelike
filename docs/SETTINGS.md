@@ -34,6 +34,12 @@ Comments start with `#` or `;`.
 
 - `start_fullscreen` (`true/false`, default `false`)
 
+- `player_name` (string, default `PLAYER`)
+  - Used in the HUD + scoreboard.
+
+- `show_effect_timers` (`true/false`, default `true`)
+  - When `true`, status tags show remaining turns (example: `POISON(6)`).
+
 - `vsync` (`true/false`, default `true`)
   - When `true`, the renderer uses vsync (smoother animation, lower CPU usage).
 
@@ -56,6 +62,14 @@ Comments start with `#` or `;`.
 - `auto_step_delay_ms` (int, default `45`)
   - Clamped to `10..500`
   - Lower = faster auto-travel / auto-explore
+- `confirm_quit` (`true/false`, default `true`)
+  - When `true`, quitting via **ESC** requires pressing ESC twice (prevents accidental quits).
+
+- `hunger_enabled` (`true/false`, default `false`)
+  - Enables an optional hunger system.
+  - Adds *Food Rations* to loot tables.
+  - When hunger reaches zero, you take starvation damage over time until you eat.
+
 
 - `autosave_every_turns` (int, default `200`)
   - Clamped to `0..5000`
@@ -127,6 +141,7 @@ Available actions:
 **UI / Meta**
 - `help`, `options`, `command`
 - `toggle_minimap`, `toggle_stats`
+- `fullscreen`, `screenshot`
 - `save`, `load`, `load_auto`, `restart`
 - `log_up`, `log_down`
 

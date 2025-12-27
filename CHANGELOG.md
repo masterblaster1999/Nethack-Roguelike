@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.8.0] - 2025-12-26
+
+### Added
+- Player name (`player_name` / `#name`) shown in HUD overlays and recorded in the scoreboard.
+- Richer scoreboard metadata: name, cause of death/win, and game version are stored in `procrogue_scores.csv`.
+- Rebindable fullscreen + screenshot actions (`bind_fullscreen`, `bind_screenshot`).
+- HUD effect timers option (`show_effect_timers`) + new in-game toggle in the Options menu.
+- `#scores [N]` extended command to print top runs in the message log.
+
+### Changed
+- Auto-explore now interrupts on newly applied debuffs (poison/web) in addition to enemies/damage.
+- Scoreboard loading/writing is more robust and backwards-compatible with older CSV layouts.
+
+### Fixed
+- Documentation now reflects the current `.bin` save file extensions.
+
+## [0.7.0] - 2025-12-26
+
+### Added
+- New **Web trap** that can immobilize you for several turns.
+- New **Scroll of Detect Traps** (identifiable scroll) that reveals all traps on the current floor.
+- New shrine interaction command: **#pray** (auto, or `pray heal|cure|identify|bless`). Costs gold and consumes a turn.
+- Proper scroll sprites for **Scroll of Identify** and **Scroll of Detect Traps** (no more fallback icon).
+
+### Changed
+- Trap generation now includes Web traps on deeper floors.
+- Help/overlay text updated to include the new shrine command.
+
 ## [0.6.1] - 2025-12-26
 
 ### Added

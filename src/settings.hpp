@@ -11,6 +11,12 @@ struct Settings {
     int hudHeight = 160;
     bool startFullscreen = false;
 
+    // Player identity (used for the scoreboard and HUD)
+    std::string playerName = "PLAYER";
+
+    // HUD status tags: show remaining turns for timed effects (POISON(6), REGEN(3), ...)
+    bool showEffectTimers = true;
+
     // Rendering / performance
     // - vsync: enables SDL_Renderer vsync (lower CPU usage, smoother rendering).
     // - maxFps: optional software cap when vsync is disabled (0 = uncapped).
@@ -30,6 +36,8 @@ struct Settings {
     // NetHack-style item identification (potions/scrolls start unknown each run).
     // If false, items always show their true names (more "arcade" / beginner-friendly).
     bool identifyItems = true;
+    bool hungerEnabled = false; // Optional hunger system (adds food).
+    bool confirmQuit = true;   // Require ESC twice to quit (prevents accidental quits).
 };
 
 // Loads settings from disk. If the file is missing or invalid, defaults are used.

@@ -20,6 +20,11 @@ struct ScoreEntry {
     int level = 1;
     int gold = 0;
     uint32_t seed = 0;
+
+    // Optional metadata (newer versions may record these).
+    std::string name;        // player name
+    std::string cause;       // end-of-run cause ("KILLED BY ...", "ESCAPED ...")
+    std::string gameVersion; // e.g. "0.8.0"
 };
 
 uint32_t computeScore(const ScoreEntry& e);

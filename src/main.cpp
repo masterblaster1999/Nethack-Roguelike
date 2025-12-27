@@ -137,6 +137,11 @@ int main(int argc, char** argv) {
     game.setAutosaveEveryTurns(settings.autosaveEveryTurns);
     game.setAutoPickupMode(settings.autoPickup);
     game.setIdentificationEnabled(settings.identifyItems);
+    game.setHungerEnabled(settings.hungerEnabled);
+    game.setConfirmQuitEnabled(settings.confirmQuit);
+
+    game.setPlayerName(settings.playerName);
+    game.setShowEffectTimers(settings.showEffectTimers);
     game.setSettingsPath(settingsPath);
 
     KeyBinds keyBinds = KeyBinds::defaults();
@@ -164,6 +169,7 @@ int main(int argc, char** argv) {
     uint32_t lastTicks = SDL_GetTicks();
     bool wantScreenshot = false;
     bool textInputOn = false;
+    uint32_t lastEscPressMs = 0;
 
     while (running) {
         const uint32_t frameStart = SDL_GetTicks();
@@ -244,6 +250,7 @@ int main(int argc, char** argv) {
                         if (game.isCommandOpen()) {
                             if (key == SDLK_ESCAPE) {
                                 game.handleAction(Action::Cancel);
+                                lastEscPressMs = 0;
                             } else if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
                                 game.handleAction(Action::Confirm);
                             } else if (key == SDLK_BACKSPACE) {
@@ -259,18 +266,40 @@ int main(int argc, char** argv) {
                         }
 
                         if (key == SDLK_ESCAPE) {
-                            // ESC cancels UI modes; cancels auto-move; otherwise quit.
+                            // ESC cancels UI modes; cancels auto-move; otherwise quit (optionally double-press).
                             if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen() || game.isLooking() ||
                                 game.isMinimapOpen() || game.isStatsOpen() || game.isOptionsOpen() || game.isCommandOpen() ||
                                 game.isAutoActive()) {
                                 game.handleAction(Action::Cancel);
+                                lastEscPressMs = 0;
                             } else {
-                                running = false;
+                                if (!game.confirmQuitEnabled()) {
+                                    running = false;
+                                } else {
+                                    const uint32_t now = SDL_GetTicks();
+                                    if (lastEscPressMs != 0 && (now - lastEscPressMs) < 1500u) {
+                                        running = false;
+                                    } else {
+                                        lastEscPressMs = now;
+                                        game.pushSystemMessage("PRESS ESC AGAIN TO QUIT.");
+                                    }
+                                }
                             }
                             break;
                         }
 
                         const Action a = keyBinds.mapKey(game, key, mod);
+
+                        // These are handled at the platform layer (so they work even during auto-move).
+                        if (a == Action::ToggleFullscreen) {
+                            renderer.toggleFullscreen();
+                            break;
+                        }
+                        if (a == Action::Screenshot) {
+                            wantScreenshot = true;
+                            break;
+                        }
+
                         if (a != Action::None) {
                             game.handleAction(a);
                         }
@@ -363,7 +392,12 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "auto_pickup", autoPickupToString(game.autoPickupMode()));
             ok &= updateIniKey(settingsPath, "auto_step_delay_ms", std::to_string(game.autoStepDelayMs()));
             ok &= updateIniKey(settingsPath, "identify_items", game.identificationEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "hunger_enabled", game.hungerEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "confirm_quit", game.confirmQuitEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "autosave_every_turns", std::to_string(game.autosaveEveryTurns()));
+
+            ok &= updateIniKey(settingsPath, "player_name", game.playerName());
+            ok &= updateIniKey(settingsPath, "show_effect_timers", game.showEffectTimers() ? "true" : "false");
 
             if (!ok) game.pushSystemMessage("FAILED TO SAVE SETTINGS.");
 

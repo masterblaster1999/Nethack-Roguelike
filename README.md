@@ -20,7 +20,7 @@ A tiny NetHack-inspired roguelike with:
 
 - **Configurable keybindings**: add `bind_*` entries in `procrogue_settings.ini` (multiple keys per action).
 - **In-game options menu**: press **F2** to tweak common settings (auto-pickup, autosave, etc.).
-- **NetHack-like extended commands**: press **#** (Shift+3) to open a command prompt (`save`, `load`, `quit`, ...).
+- **NetHack-like extended commands**: press **#** (Shift+3) to open a command prompt (`save`, `load`, `pray`, `quit`, ...).
 
 - **Auto-travel**: enter look mode (`L` / `V` or **right-click**) and press **Enter** to auto-walk to the cursor tile.
 - **Auto-explore**: press **O** to walk to the nearest unexplored frontier until interrupted.
@@ -29,7 +29,12 @@ A tiny NetHack-inspired roguelike with:
 - **Minimap + stats overlays**:
   - **M** toggles the minimap
   - **Shift+Tab** toggles the stats/high-scores panel
-- **Screenshots**: press **F12** to save a BMP screenshot (to the `screenshots/` folder next to your save).
+- **Screenshots**: press **F12** (bindable) to save a BMP screenshot (to the `screenshots/` folder next to your save).
+- **Fullscreen toggle**: press **F11** (bindable).
+- **Player name**: set `player_name` in `procrogue_settings.ini` or use `#name <text>` in-game (recorded in the scoreboard).
+- **Richer high-scores**: run history now records your **name**, **cause of death/win**, and **game version** in `procrogue_scores.csv`.
+- **HUD effect timers**: optional turn counters on status tags (example: `POISON(6)`). Toggle via the options menu or `show_effect_timers` in settings.
+- **Auto-explore safety**: auto-move now stops when you get poisoned or webbed (not just when you take damage).
 - **Run history / high scores** are stored in `procrogue_scores.csv`.
 - **Mouse support**:
   - **Left click**: auto-travel to the clicked tile
@@ -37,7 +42,14 @@ A tiny NetHack-inspired roguelike with:
   - **Mouse move**: moves the look cursor / aiming cursor
   - **Mouse wheel**: scroll message log
 - **Settings file** (auto-created on first run): tweak tile size, HUD height, fullscreen, auto-move speed, auto-pickup/autosave, and `bind_*` keybindings.
+- **Optional hunger system**: enable `hunger_enabled` to add food + starvation (and a new **Food Ration** item).
+- **Safer quitting**: `confirm_quit` (default ON) requires **ESC twice** to exit (prevents accidental quits).
+- **Context pickup**: when not on stairs, **Enter** will pick up items you’re standing on.
+
 - **NetHack-style item identification**: potions + scrolls start unknown each run (randomized appearances). Using them identifies the item type; you can also find/read a **Scroll of Identify**. (Toggle via `identify_items` in settings.)
+- **New scroll**: **Scroll of Detect Traps** reveals all traps on the current floor (and identifies itself when used).
+- **Shrines**: use **#pray** (`pray heal|cure|identify|bless`) to spend gold for a small blessing (consumes a turn).
+- **New trap**: **Web traps** can immobilize you for a few turns.
 - **New combat spice**: spiders can web you (movement blocked for a few turns), and wizards can occasionally "blink" (teleport) to reposition.
 - **New content**: **Axe** + **Plate Armor**, and a new monster: the **Ogre**.
 - **CI build workflow** for Linux/macOS/Windows.
@@ -80,11 +92,11 @@ A tiny NetHack-inspired roguelike with:
 - **Extended commands**: `#` (Shift+3)
 - **Save / Load**: `F5` / `F9`
 - **Load autosave**: `F10`
-- **Screenshot**: `F12`
-- **Fullscreen**: `F11`
+- **Screenshot**: `F12` (bindable via `bind_screenshot`)
+- **Fullscreen**: `F11` (bindable via `bind_fullscreen`)
 - **Message log scroll**: PageUp / PageDown (or mouse wheel)
 - **Restart**: `F6`
-- **Quit**: Esc (when no UI mode is active)
+- **Quit**: Esc (or Esc twice if `confirm_quit` is enabled)
 
 ![game nethack](https://github.com/user-attachments/assets/fc0e0902-b161-47e6-b2f3-cc6f88100548)
 

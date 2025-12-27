@@ -84,6 +84,10 @@ enum class Action : uint8_t {
     // Menus / extended commands
     Options,
     Command,
+
+    // Window / capture
+    ToggleFullscreen,
+    Screenshot,
 };
 
 enum class AutoPickupMode : uint8_t {
@@ -118,6 +122,7 @@ enum class TrapKind : uint8_t {
     PoisonDart,
     Teleport,
     Alarm,
+    Web,
 };
 
 struct Trap {
@@ -195,6 +200,10 @@ public:
     void newGame(uint32_t seed);
 
     void handleAction(Action a);
+
+    // Shrine interaction (use via #pray or future keybind).
+    // mode: \"heal\" | \"cure\" | \"identify\" | \"bless\" | \"\" (auto)
+    bool prayAtShrine(const std::string& mode = std::string());
     void update(float dt);
 
     const Dungeon& dungeon() const { return dung; }
@@ -217,6 +226,17 @@ public:
     uint32_t seed() const { return seed_; }
     uint32_t kills() const { return killCount; }
     int maxDepthReached() const { return maxDepth; }
+
+    // Player identity (used for HUD + scoreboard)
+    const std::string& playerName() const { return playerName_; }
+    void setPlayerName(std::string name);
+
+    // End-of-run cause (e.g., "KILLED BY GOBLIN", "ESCAPED WITH THE AMULET")
+    const std::string& endCause() const { return endCause_; }
+
+    // HUD preferences
+    bool showEffectTimers() const { return showEffectTimers_; }
+    void setShowEffectTimers(bool enabled) { showEffectTimers_ = enabled; }
 
     // Inventory/UI accessors for renderer
     const std::vector<Item>& inventory() const { return inv; }
@@ -252,6 +272,18 @@ public:
 
     void setIdentificationEnabled(bool enabled);
     bool identificationEnabled() const { return identifyItemsEnabled; }
+
+    // Optional hunger system (survival / NetHack-like pacing).
+    void setHungerEnabled(bool enabled);
+    bool hungerEnabled() const { return hungerEnabled_; }
+    int hungerCurrent() const { return hunger; }
+    int hungerMaximum() const { return hungerMax; }
+    // Returns an empty string when not hungry; otherwise "HUNGRY"/"STARVING".
+    std::string hungerTag() const;
+
+    // Quit confirmation (ESC requires a second press within a short window).
+    void setConfirmQuitEnabled(bool enabled) { confirmQuitEnabled_ = enabled; }
+    bool confirmQuitEnabled() const { return confirmQuitEnabled_; }
 
     // Targeting
     bool isTargeting() const { return targeting; }
@@ -410,6 +442,14 @@ private:
     // Options / quality-of-life
     AutoPickupMode autoPickup = AutoPickupMode::Gold;
 
+    bool confirmQuitEnabled_ = true;
+
+    // Hunger system (optional; when disabled, hunger does not tick).
+    bool hungerEnabled_ = false;
+    int hunger = 0;
+    int hungerMax = 0;
+    int hungerStatePrev = 0; // for message throttling
+
     // Item identification (NetHack-style). When enabled, potions/scrolls start unknown each run
     // and become identified through use/identify scrolls.
     bool identifyItemsEnabled = true;
@@ -452,6 +492,15 @@ private:
     uint32_t seed_ = 0;
     uint32_t killCount = 0;
     int maxDepth = 1;
+
+    // Player identity (persisted via settings)
+    std::string playerName_ = "PLAYER";
+
+    // End-of-run cause string for scoreboard / UI
+    std::string endCause_;
+
+    // UI preferences (persisted via settings)
+    bool showEffectTimers_ = true;
 
     // Autosave
     int autosaveInterval = 0; // 0 = off

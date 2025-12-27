@@ -88,6 +88,16 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "start_fullscreen") {
             bool b = false;
             if (parseBool(val, b)) s.startFullscreen = b;
+        } else if (key == "player_name") {
+            // Preserved as-is (except trimming). Used in the HUD + scoreboard.
+            std::string n = trim(val);
+            if (!n.empty()) {
+                if (n.size() > 24) n.resize(24);
+                s.playerName = n;
+            }
+        } else if (key == "show_effect_timers") {
+            bool b = true;
+            if (parseBool(val, b)) s.showEffectTimers = b;
         } else if (key == "vsync") {
             bool b = true;
             if (parseBool(val, b)) s.vsync = b;
@@ -114,6 +124,12 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "identify_items") {
             bool b = true;
             if (parseBool(val, b)) s.identifyItems = b;
+        } else if (key == "hunger_enabled") {
+            bool b = false;
+            if (parseBool(val, b)) s.hungerEnabled = b;
+        } else if (key == "confirm_quit") {
+            bool b = true;
+            if (parseBool(val, b)) s.confirmQuit = b;
         }
     }
 
@@ -137,6 +153,13 @@ tile_size = 32
 hud_height = 160
 start_fullscreen = false
 
+# Player identity (used in the HUD + scoreboard)
+player_name = PLAYER
+
+# HUD
+# show_effect_timers: true/false (shows remaining turns on POISON/REGEN/... in the HUD)
+show_effect_timers = true
+
 # Rendering / performance
 # vsync: true/false  (true = lower CPU usage, smoother rendering)
 vsync = true
@@ -152,6 +175,14 @@ controller_enabled = true
 auto_pickup = gold
 # auto_step_delay_ms: 10..500 (lower = faster auto-move)
 auto_step_delay_ms = 45
+
+# Safety
+# confirm_quit: true/false (true = ESC twice to quit)
+confirm_quit = true
+
+# Optional survival mechanic
+# hunger_enabled: true/false (adds food and starvation over time)
+hunger_enabled = false
 
 # Item identification
 # identify_items: true/false  (true = potions/scrolls start unidentified)
@@ -211,6 +242,8 @@ bind_options = f2
 bind_command = shift+3
 bind_toggle_minimap = m
 bind_toggle_stats = shift+tab
+bind_fullscreen = f11
+bind_screenshot = f12
 bind_save = f5
 bind_restart = f6
 bind_load = f9

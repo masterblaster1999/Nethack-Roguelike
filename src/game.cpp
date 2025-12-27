@@ -44,6 +44,15 @@ static std::vector<std::string> splitWS(const std::string& s) {
     return out;
 }
 
+// Hunger helper: 0 = OK, 1 = hungry, 2 = starving, 3 = starving (damage)
+static int hungerStateFor(int hunger, int hungerMax) {
+    if (hungerMax <= 0) return 0;
+    if (hunger <= 0) return 3;
+    if (hunger < (hungerMax / 10)) return 2;
+    if (hunger < (hungerMax / 4)) return 1;
+    return 0;
+}
+
 static std::vector<std::string> extendedCommandList() {
     // Keep these short and stable: they're user-facing and used for completion/prefix matching.
     return {
@@ -58,11 +67,15 @@ static std::vector<std::string> extendedCommandList() {
         "autosave",
         "stepdelay",
         "identify",
+        "timers",
         "seed",
         "version",
+        "name",
+        "scores",
         "explore",
         "search",
         "rest",
+        "pray",
     };
 }
 
@@ -180,6 +193,35 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "pray") {
+        game.prayAtShrine(arg(1));
+        return;
+    }
+
+    if (cmd == "timers") {
+        if (toks.size() <= 1) {
+            game.pushSystemMessage(std::string("EFFECT TIMERS: ") + (game.showEffectTimers() ? "ON" : "OFF"));
+            return;
+        }
+
+        std::string v = toLower(toks[1]);
+        if (v == "on" || v == "true" || v == "1") {
+            game.setShowEffectTimers(true);
+            game.markSettingsDirty();
+            game.pushSystemMessage("EFFECT TIMERS: ON");
+            return;
+        }
+        if (v == "off" || v == "false" || v == "0") {
+            game.setShowEffectTimers(false);
+            game.markSettingsDirty();
+            game.pushSystemMessage("EFFECT TIMERS: OFF");
+            return;
+        }
+
+        game.pushSystemMessage("USAGE: #timers on/off");
+        return;
+    }
+
     if (cmd == "seed") {
         game.pushSystemMessage("SEED: " + std::to_string(game.seed()));
         return;
@@ -187,6 +229,59 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     if (cmd == "version") {
         game.pushSystemMessage(std::string("VERSION: ") + PROCROGUE_VERSION);
+        return;
+    }
+
+    if (cmd == "name") {
+        if (toks.size() <= 1) {
+            game.pushSystemMessage("NAME: " + game.playerName());
+            return;
+        }
+
+        // Join the rest of the tokens to allow spaces.
+        std::string n;
+        for (size_t i = 1; i < toks.size(); ++i) {
+            if (i > 1) n += " ";
+            n += toks[i];
+        }
+
+        game.setPlayerName(n);
+        game.markSettingsDirty();
+        game.pushSystemMessage("NAME SET TO: " + game.playerName());
+        return;
+    }
+
+    if (cmd == "scores") {
+        int n = 10;
+        if (toks.size() > 1) {
+            try {
+                n = std::stoi(toks[1]);
+            } catch (...) {
+                n = 10;
+            }
+        }
+        n = clampi(n, 1, 60);
+
+        const auto& es = game.scoreBoard().entries();
+        if (es.empty()) {
+            game.pushSystemMessage("NO SCORES YET.");
+            return;
+        }
+
+        game.pushSystemMessage("TOP SCORES:");
+        const int count = std::min<int>(n, static_cast<int>(es.size()));
+        for (int i = 0; i < count; ++i) {
+            const auto& e = es[static_cast<size_t>(i)];
+            const std::string who = e.name.empty() ? std::string("PLAYER") : e.name;
+            const std::string res = e.won ? std::string("WIN") : std::string("DEAD");
+
+            std::string line = "#" + std::to_string(i + 1) + " " + who + " " + res + " ";
+            line += "S" + std::to_string(e.score) + " D" + std::to_string(e.depth);
+            line += " T" + std::to_string(e.turns) + " K" + std::to_string(e.kills);
+            if (!e.cause.empty()) line += " " + e.cause;
+
+            game.pushSystemMessage(line);
+        }
         return;
     }
 
@@ -347,6 +442,7 @@ constexpr ItemKind SCROLL_KINDS[] = {
     ItemKind::ScrollEnchantWeapon,
     ItemKind::ScrollEnchantArmor,
     ItemKind::ScrollIdentify,
+    ItemKind::ScrollDetectTraps,
 };
 
 } // namespace
@@ -788,9 +884,16 @@ void Game::newGame(uint32_t seed) {
     gameOver = false;
     gameWon = false;
 
+    endCause_.clear();
+
     charLevel = 1;
     xp = 0;
     xpNext = 20;
+
+    // Hunger pacing (optional setting; stored per-run in save files).
+    hungerMax = 800;
+    hunger = hungerMax;
+    hungerStatePrev = hungerStateFor(hunger, hungerMax);
 
     dung.generate(rng);
 
@@ -825,6 +928,8 @@ void Game::newGame(uint32_t seed) {
     int dagId = give(ItemKind::Dagger, 1);
     int armId = give(ItemKind::LeatherArmor, 1);
     give(ItemKind::PotionHealing, 2);
+    // New: basic food. Heals a little and (if hunger is enabled) restores hunger.
+    give(ItemKind::FoodRation, hungerEnabled_ ? 2 : 1);
     give(ItemKind::ScrollTeleport, 1);
     give(ItemKind::ScrollMapping, 1);
     give(ItemKind::Gold, 10);
@@ -1053,8 +1158,45 @@ void Game::setAutoPickupMode(AutoPickupMode m) {
     autoPickup = m;
 }
 
+void Game::setPlayerName(std::string name) {
+    std::string n = trim(std::move(name));
+    if (n.empty()) n = "PLAYER";
+
+    // Strip control chars (keeps the HUD / CSV clean).
+    std::string filtered;
+    filtered.reserve(n.size());
+    for (char c : n) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (uc < 32 || uc == 127) continue;
+        filtered.push_back(c);
+    }
+
+    filtered = trim(std::move(filtered));
+    if (filtered.empty()) filtered = "PLAYER";
+    if (filtered.size() > 24) filtered.resize(24);
+    playerName_ = std::move(filtered);
+}
+
 void Game::setIdentificationEnabled(bool enabled) {
     identifyItemsEnabled = enabled;
+}
+
+void Game::setHungerEnabled(bool enabled) {
+    hungerEnabled_ = enabled;
+
+    // Initialize reasonable defaults lazily so older paths don't need to know.
+    if (hungerMax <= 0) hungerMax = 800;
+    hunger = clampi(hunger, 0, hungerMax);
+
+    hungerStatePrev = hungerStateFor(hunger, hungerMax);
+}
+
+std::string Game::hungerTag() const {
+    if (!hungerEnabled_) return std::string();
+    const int st = hungerStateFor(hunger, hungerMax);
+    if (st == 1) return "HUNGRY";
+    if (st >= 2) return "STARVING";
+    return std::string();
 }
 
 void Game::setAutoStepDelayMs(int ms) {
@@ -1065,7 +1207,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 6u;
+constexpr uint32_t SAVE_VERSION = 7u;
 
 template <typename T>
 void writePod(std::ostream& out, const T& v) {
@@ -1381,6 +1523,14 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
         writePod(out, app);
     }
 
+    // v7+: hunger system state (per-run)
+    uint8_t hungerEnabledTmp = hungerEnabled_ ? 1u : 0u;
+    int32_t hungerTmp = static_cast<int32_t>(hunger);
+    int32_t hungerMaxTmp = static_cast<int32_t>(hungerMax);
+    writePod(out, hungerEnabledTmp);
+    writePod(out, hungerTmp);
+    writePod(out, hungerMaxTmp);
+
     // Player
     writeEntity(out, player());
 
@@ -1599,6 +1749,56 @@ bool Game::loadFromFile(const std::string& path) {
                 identAppTmp[static_cast<size_t>(i)] = app;
             }
         }
+
+        // If this save was made with an older build (fewer ItemKind values),
+        // initialize any newly-added identifiable kinds so item-ID stays consistent.
+        if (identifyItemsEnabled && kindCount < static_cast<uint32_t>(ITEM_KIND_COUNT)) {
+            constexpr size_t POTION_APP_COUNT = sizeof(POTION_APPEARANCES) / sizeof(POTION_APPEARANCES[0]);
+            constexpr size_t SCROLL_APP_COUNT = sizeof(SCROLL_APPEARANCES) / sizeof(SCROLL_APPEARANCES[0]);
+            std::vector<bool> usedPotionApps(POTION_APP_COUNT, false);
+            std::vector<bool> usedScrollApps(SCROLL_APP_COUNT, false);
+
+            auto markUsed = [&](ItemKind k, std::vector<bool>& used, size_t maxApps) {
+                const uint32_t idx = static_cast<uint32_t>(k);
+                if (idx >= kindCount || idx >= static_cast<uint32_t>(ITEM_KIND_COUNT)) return;
+                const uint8_t a = identAppTmp[static_cast<size_t>(idx)];
+                if (static_cast<size_t>(a) < maxApps) used[static_cast<size_t>(a)] = true;
+            };
+
+            for (ItemKind k : POTION_KINDS) markUsed(k, usedPotionApps, usedPotionApps.size());
+            for (ItemKind k : SCROLL_KINDS) markUsed(k, usedScrollApps, usedScrollApps.size());
+
+            auto takeUnused = [&](std::vector<bool>& used) -> uint8_t {
+                for (size_t j = 0; j < used.size(); ++j) {
+                    if (!used[j]) {
+                        used[j] = true;
+                        return static_cast<uint8_t>(j);
+                    }
+                }
+                return 0u;
+            };
+
+            for (uint32_t i = kindCount; i < static_cast<uint32_t>(ITEM_KIND_COUNT); ++i) {
+                ItemKind k = static_cast<ItemKind>(i);
+                if (!isIdentifiableKind(k)) continue;
+
+                // Unknown by default in this run (but keep the save file aligned).
+                identKnownTmp[static_cast<size_t>(i)] = 0u;
+
+                if (isPotionKind(k)) identAppTmp[static_cast<size_t>(i)] = takeUnused(usedPotionApps);
+                else if (isScrollKind(k)) identAppTmp[static_cast<size_t>(i)] = takeUnused(usedScrollApps);
+            }
+        }
+    }
+
+    // v7+: hunger system state (per-run)
+    uint8_t hungerEnabledTmp = hungerEnabled_ ? 1u : 0u;
+    int32_t hungerTmp = 800;
+    int32_t hungerMaxTmp = 800;
+    if (version >= 7u) {
+        if (!readPod(in, hungerEnabledTmp)) return false;
+        if (!readPod(in, hungerTmp)) return false;
+        if (!readPod(in, hungerMaxTmp)) return false;
     }
 
     Entity p;
@@ -1783,6 +1983,19 @@ bool Game::loadFromFile(const std::string& path) {
     // v6+: identification tables (or default "all known" for older saves)
     identKnown = identKnownTmp;
     identAppearance = identAppTmp;
+
+
+    // v7+: hunger state
+    if (version >= 7u) {
+        hungerEnabled_ = (hungerEnabledTmp != 0);
+        hungerMax = (hungerMaxTmp > 0) ? static_cast<int>(hungerMaxTmp) : 800;
+        hunger = clampi(static_cast<int>(hungerTmp), 0, hungerMax);
+    } else {
+        // Pre-hunger saves: keep the current setting, but start fully fed.
+        if (hungerMax <= 0) hungerMax = 800;
+        hunger = hungerMax;
+    }
+    hungerStatePrev = hungerStateFor(hunger, hungerMax);
 
     inv = std::move(invTmp);
     msgs = std::move(msgsTmp);
@@ -2052,7 +2265,7 @@ void Game::handleAction(Action a) {
 
     // Overlay: options menu (does not consume turns)
     if (optionsOpen) {
-        constexpr int kOptionCount = 5;
+        constexpr int kOptionCount = 8;
 
         if (a == Action::Cancel || a == Action::Options) {
             optionsOpen = false;
@@ -2081,12 +2294,14 @@ void Game::handleAction(Action a) {
             settingsDirtyFlag = true;
         };
 
+        // 0) Auto-pickup
         if (optionsSel == 0) {
             if (left) cycleAutoPickup(-1);
             else if (right || confirm) cycleAutoPickup(+1);
             return;
         }
 
+        // 1) Auto-step delay
         if (optionsSel == 1) {
             if (left || right) {
                 int ms = autoStepDelayMs();
@@ -2098,6 +2313,7 @@ void Game::handleAction(Action a) {
             return;
         }
 
+        // 2) Autosave interval
         if (optionsSel == 2) {
             if (left || right) {
                 int t = autosaveInterval;
@@ -2109,6 +2325,7 @@ void Game::handleAction(Action a) {
             return;
         }
 
+        // 3) Identification helper
         if (optionsSel == 3) {
             if (left || right || confirm) {
                 setIdentificationEnabled(!identifyItemsEnabled);
@@ -2117,9 +2334,36 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // Close
+        // 4) Hunger system
         if (optionsSel == 4) {
-            if (confirm) optionsOpen = false;
+            if (left || right || confirm) {
+                setHungerEnabled(!hungerEnabled_);
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // 5) Effect timers (HUD)
+        if (optionsSel == 5) {
+            if (left || right || confirm) {
+                showEffectTimers_ = !showEffectTimers_;
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // 6) Confirm quit (double-ESC)
+        if (optionsSel == 6) {
+            if (left || right || confirm) {
+                confirmQuitEnabled_ = !confirmQuitEnabled_;
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // 7) Close
+        if (optionsSel == 7) {
+            if (left || right || confirm) optionsOpen = false;
             return;
         }
 
@@ -2327,6 +2571,7 @@ void Game::handleAction(Action a) {
                 if (depth_ <= 1) {
                     if (playerHasAmulet()) {
                         gameWon = true;
+                        if (endCause_.empty()) endCause_ = "ESCAPED WITH THE AMULET";
                         pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!", MessageKind::Success);
                         pushMsg("VICTORY!", MessageKind::Success);
                         maybeRecordRun();
@@ -2338,7 +2583,17 @@ void Game::handleAction(Action a) {
                 }
                 acted = false;
             } else {
-                pushMsg("THERE ARE NO STAIRS HERE.");
+                // QoL: if you're standing on items, Enter will pick them up.
+                bool hasItem = false;
+                for (const auto& gi : ground) {
+                    if (gi.pos == p.pos) { hasItem = true; break; }
+                }
+
+                if (hasItem) {
+                    acted = pickupAtPlayer();
+                } else {
+                    pushMsg("THERE IS NOTHING HERE.");
+                }
             }
         } break;
         case Action::StairsDown:
@@ -2354,6 +2609,7 @@ void Game::handleAction(Action a) {
                 if (depth_ <= 1) {
                     if (playerHasAmulet()) {
                         gameWon = true;
+                        if (endCause_.empty()) endCause_ = "ESCAPED WITH THE AMULET";
                         pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!", MessageKind::Success);
                         pushMsg("VICTORY!", MessageKind::Success);
                         maybeRecordRun();
@@ -2484,6 +2740,11 @@ void Game::maybeRecordRun() {
     e.level = charLevel;
     e.gold = goldCount();
     e.seed = seed_;
+
+    e.name = playerName_;
+    e.cause = endCause_;
+    e.gameVersion = PROCROGUE_VERSION;
+
     e.score = computeScore(e);
 
     const std::string scorePath = defaultScoresPath();
@@ -2677,6 +2938,8 @@ bool Game::stepAutoMove() {
     const int dy = next.y - p.pos.y;
 
     const int hpBefore = p.hp;
+    const int poisonBefore = p.poisonTurns;
+    const int webBefore = p.webTurns;
     const Vec2i posBefore = p.pos;
 
     const bool acted = tryMove(p, dx, dy);
@@ -2701,6 +2964,18 @@ bool Game::stepAutoMove() {
 
     if (p.hp < hpBefore) {
         pushMsg("AUTO-MOVE STOPPED (YOU TOOK DAMAGE).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
+    if (p.poisonTurns > poisonBefore) {
+        pushMsg("AUTO-MOVE STOPPED (YOU WERE POISONED).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
+    if (p.webTurns > webBefore) {
+        pushMsg("AUTO-MOVE STOPPED (YOU WERE WEBBED).", MessageKind::Warning);
         stopAutoMove(true);
         return false;
     }
@@ -2964,6 +3239,7 @@ std::string Game::describeAt(Vec2i p) const {
             case TrapKind::PoisonDart: ss << "POISON DART"; break;
             case TrapKind::Teleport: ss << "TELEPORT"; break;
             case TrapKind::Alarm: ss << "ALARM"; break;
+            case TrapKind::Web: ss << "WEB"; break;
         }
         break;
     }
@@ -3122,6 +3398,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim) {
             pushMsg(ss.str(), MessageKind::Combat, false);
             if (p.hp <= 0) {
                 pushMsg("YOU DIE.", MessageKind::Combat, false);
+                if (endCause_.empty()) endCause_ = "KILLED BY SPIKE TRAP";
                 gameOver = true;
             }
             break;
@@ -3136,6 +3413,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim) {
             pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
             if (p.hp <= 0) {
                 pushMsg("YOU DIE.", MessageKind::Combat, false);
+                if (endCause_.empty()) endCause_ = "KILLED BY POISON DART TRAP";
                 gameOver = true;
             }
             break;
@@ -3157,6 +3435,12 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim) {
             for (auto& m : ents) {
                 if (m.id != playerId_) m.alerted = true;
             }
+            break;
+        }
+        case TrapKind::Web: {
+            const int turns = rng.range(4, 7) + std::min(6, depth_ / 2);
+            p.webTurns = std::max(p.webTurns, turns);
+            pushMsg("YOU ARE CAUGHT IN STICKY WEBBING!", MessageKind::Warning, true);
             break;
         }
         default:
@@ -3198,6 +3482,121 @@ bool Game::searchForTraps() {
     return true; // Searching costs a turn.
 }
 
+
+bool Game::prayAtShrine(const std::string& modeIn) {
+    if (gameOver || gameWon) return false;
+
+    Entity& p = playerMut();
+
+    // Must be standing inside a shrine room.
+    bool inShrine = false;
+    for (const Room& r : dung.rooms) {
+        if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) {
+            inShrine = true;
+            break;
+        }
+    }
+
+    if (!inShrine) {
+        pushMsg("YOU ARE NOT AT A SHRINE.", MessageKind::System, true);
+        return false;
+    }
+
+    std::string mode = toLower(trim(modeIn));
+    if (!mode.empty()) {
+        if (!(mode == "heal" || mode == "cure" || mode == "identify" || mode == "bless")) {
+            pushMsg("UNKNOWN PRAYER: " + mode + ". TRY: heal, cure, identify, bless.", MessageKind::System, true);
+            return false;
+        }
+    } else {
+        // Auto-pick the most useful effect right now.
+        if (p.poisonTurns > 0 || p.webTurns > 0) mode = "cure";
+        else if (p.hp < p.hpMax) mode = "heal";
+        else if (identifyItemsEnabled) {
+            bool hasUnknown = false;
+            for (const auto& it : inv) {
+                if (!isIdentifiableKind(it.kind)) continue;
+                if (isIdentified(it.kind)) continue;
+                hasUnknown = true;
+                break;
+            }
+            mode = hasUnknown ? "identify" : "bless";
+        } else {
+            mode = "bless";
+        }
+    }
+
+    // Pricing: scales gently with depth so it stays relevant.
+    const int base = 8 + depth_ * 2;
+    int cost = base;
+    if (mode == "cure") cost = std::max(4, base - 2);
+    else if (mode == "identify") cost = base + 6;
+    else if (mode == "bless") cost = base + 10;
+
+    if (goldCount() < cost) {
+        pushMsg("YOU NEED " + std::to_string(cost) + " GOLD TO PRAY HERE.", MessageKind::Warning, true);
+        return false;
+    }
+
+    // Spend gold from inventory stacks.
+    int remaining = cost;
+    for (auto& it : inv) {
+        if (remaining <= 0) break;
+        if (it.kind != ItemKind::Gold) continue;
+        const int take = std::min(it.count, remaining);
+        it.count -= take;
+        remaining -= take;
+    }
+    inv.erase(std::remove_if(inv.begin(), inv.end(),
+                             [](const Item& it) { return it.kind == ItemKind::Gold && it.count <= 0; }),
+              inv.end());
+
+    pushMsg("YOU OFFER " + std::to_string(cost) + " GOLD.", MessageKind::System);
+
+    if (mode == "heal") {
+        const int before = p.hp;
+        p.hp = p.hpMax;
+        if (p.hp > before) pushMsg("A WARM LIGHT MENDS YOUR WOUNDS.", MessageKind::Success, true);
+        else pushMsg("YOU FEEL REASSURED.", MessageKind::Info, true);
+    } else if (mode == "cure") {
+        const bool hadPoison = (p.poisonTurns > 0);
+        const bool hadWeb = (p.webTurns > 0);
+        p.poisonTurns = 0;
+        p.webTurns = 0;
+        if (hadPoison || hadWeb) pushMsg("YOU FEEL PURIFIED.", MessageKind::Success, true);
+        else pushMsg("NOTHING SEEMS AMISS.", MessageKind::Info, true);
+    } else if (mode == "identify") {
+        if (!identifyItemsEnabled) {
+            pushMsg("THE SHRINE IS SILENT. (IDENTIFY ITEMS IS OFF.)", MessageKind::Info, true);
+        } else {
+            std::vector<ItemKind> candidates;
+            candidates.reserve(inv.size());
+            for (const auto& it : inv) {
+                if (!isIdentifiableKind(it.kind)) continue;
+                if (isIdentified(it.kind)) continue;
+                candidates.push_back(it.kind);
+            }
+
+            if (candidates.empty()) {
+                pushMsg("NOTHING NEW IS REVEALED.", MessageKind::Info, true);
+            } else {
+                ItemKind k = candidates[static_cast<size_t>(rng.range(0, static_cast<int>(candidates.size()) - 1))];
+                (void)markIdentified(k, false);
+                pushMsg("DIVINE INSIGHT REVEALS THE TRUTH.", MessageKind::Info, true);
+            }
+        }
+    } else { // bless
+        p.shieldTurns = std::max(p.shieldTurns, 18 + depth_ * 2);
+        p.regenTurns = std::max(p.regenTurns, 10 + depth_);
+        pushMsg("A HOLY AURA SURROUNDS YOU.", MessageKind::Success, true);
+    }
+
+    // Praying consumes a turn.
+    advanceAfterPlayerAction();
+    return true;
+}
+
+
 void Game::attackMelee(Entity& attacker, Entity& defender) {
     int atk = attacker.baseAtk;
     int def = defender.baseDef;
@@ -3238,6 +3637,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
     if (defender.hp <= 0) {
         if (defender.kind == EntityKind::Player) {
             pushMsg("YOU DIE.", MessageKind::Combat, false);
+            if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindName(attacker.kind);
             gameOver = true;
         } else {
             std::ostringstream ds;
@@ -3330,6 +3730,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atk, Proj
         if (hit->hp <= 0) {
             if (hit->kind == EntityKind::Player) {
                 pushMsg("YOU DIE.", MessageKind::Combat, false);
+                if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindName(attacker.kind);
                 gameOver = true;
             } else {
                 std::ostringstream ds;
@@ -3731,6 +4132,29 @@ bool Game::useSelected() {
         return true;
     }
 
+    if (it.kind == ItemKind::ScrollDetectTraps) {
+        (void)markIdentified(it.kind, false);
+
+        int newly = 0;
+        for (auto& tr : trapsCur) {
+            if (!tr.discovered) newly++;
+            tr.discovered = true;
+        }
+
+        if (trapsCur.empty()) {
+            pushMsg("YOU SENSE NO TRAPS.", MessageKind::Info, true);
+        } else if (newly == 0) {
+            pushMsg("YOU SENSE NO NEW TRAPS.", MessageKind::Info, true);
+        } else {
+            std::ostringstream ss;
+            ss << "YOU SENSE " << newly << " TRAP" << (newly == 1 ? "" : "S") << "!";
+            pushMsg(ss.str(), MessageKind::System, true);
+        }
+
+        consumeOneStackable();
+        return true;
+    }
+
     if (it.kind == ItemKind::PotionAntidote) {
         Entity& p = playerMut();
         if (p.poisonTurns > 0) {
@@ -3841,6 +4265,39 @@ bool Game::useSelected() {
             (void)markIdentified(k, false);
         }
 
+        consumeOneStackable();
+        return true;
+    }
+
+    if (it.kind == ItemKind::FoodRation) {
+        Entity& p = playerMut();
+        const ItemDef& d = itemDef(it.kind);
+
+        const int beforeState = hungerStateFor(hunger, hungerMax);
+
+        // Small heal (always), plus hunger restoration if enabled.
+        if (d.healAmount > 0 && p.hp < p.hpMax) {
+            p.hp = std::min(p.hpMax, p.hp + d.healAmount);
+        }
+
+        if (hungerEnabled_) {
+            if (hungerMax <= 0) hungerMax = 800;
+            hunger = std::min(hungerMax, hunger + d.hungerRestore);
+        }
+
+        const int afterState = hungerStateFor(hunger, hungerMax);
+        if (hungerEnabled_) {
+            if (beforeState >= 2 && afterState < 2) {
+                pushMsg("YOU FEEL LESS STARVED.", MessageKind::System, true);
+            } else if (beforeState >= 1 && afterState == 0) {
+                pushMsg("YOU FEEL SATIATED.", MessageKind::System, true);
+            }
+        }
+
+        // Sync the throttling state so we don't immediately re-announce hunger next tick.
+        hungerStatePrev = hungerStateFor(hunger, hungerMax);
+
+        pushMsg("YOU EAT A FOOD RATION.", MessageKind::Loot, true);
         consumeOneStackable();
         return true;
     }
@@ -4191,7 +4648,7 @@ void Game::spawnItems() {
         else if (roll < 122) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
         else if (roll < 126) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
         else if (roll < 129) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
-        else if (roll < 131) dropItemAt(ItemKind::ScrollIdentify, randomFreeTileInRoom(r), 1);
+        else if (roll < 131) dropItemAt(rng.chance(0.5f) ? ItemKind::ScrollIdentify : ItemKind::ScrollDetectTraps, randomFreeTileInRoom(r), 1);
         else if (roll < 133) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
         else if (roll < 135) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
         else dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
@@ -4208,6 +4665,7 @@ void Game::spawnItems() {
 
         if (r.type == RoomType::Shrine) {
             dropItemAt(ItemKind::PotionHealing, p, rng.range(1, 2));
+            if (rng.chance(hungerEnabled_ ? 0.75f : 0.35f)) dropItemAt(ItemKind::FoodRation, randomFreeTileInRoom(r), rng.range(1, 2));
             if (rng.chance(0.45f)) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.35f)) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.30f)) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
@@ -4216,7 +4674,7 @@ void Game::spawnItems() {
             if (rng.chance(0.15f)) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.18f)) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.12f)) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
-            if (rng.chance(0.20f)) dropItemAt(ItemKind::ScrollIdentify, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.20f)) dropItemAt(rng.chance(0.5f) ? ItemKind::ScrollIdentify : ItemKind::ScrollDetectTraps, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.45f)) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.35f)) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.50f)) dropItemAt(ItemKind::Gold, randomFreeTileInRoom(r), rng.range(6, 18));
@@ -4225,29 +4683,33 @@ void Game::spawnItems() {
 
         if (r.type == RoomType::Lair) {
             if (rng.chance(0.50f)) dropItemAt(ItemKind::Rock, p, rng.range(3, 9));
+            if (rng.chance(hungerEnabled_ ? 0.25f : 0.10f)) dropItemAt(ItemKind::FoodRation, randomFreeTileInRoom(r), 1);
             if (depth_ >= 2 && rng.chance(0.20f)) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r), 1);
             continue;
         }
 
         // Normal rooms: small chance for loot
         if (rng.chance(0.35f)) {
-            int roll = rng.range(0, 99);
+            // Expanded table (added food rations).
+            int roll = rng.range(0, 107);
+
             if (roll < 22) dropItemAt(ItemKind::Gold, p, rng.range(3, 10));
-            else if (roll < 36) dropItemAt(ItemKind::PotionHealing, p, 1);
-            else if (roll < 46) dropItemAt(ItemKind::PotionStrength, p, 1);
-            else if (roll < 54) dropItemAt(ItemKind::PotionAntidote, p, 1);
-            else if (roll < 60) dropItemAt(ItemKind::PotionRegeneration, p, 1);
-            else if (roll < 66) dropItemAt(ItemKind::ScrollTeleport, p, 1);
-            else if (roll < 72) dropItemAt(ItemKind::ScrollMapping, p, 1);
-            else if (roll < 74) dropItemAt(ItemKind::ScrollIdentify, p, 1);
-            else if (roll < 78) dropItemAt(ItemKind::ScrollEnchantWeapon, p, 1);
-            else if (roll < 82) dropItemAt(ItemKind::ScrollEnchantArmor, p, 1);
-            else if (roll < 87) dropItemAt(ItemKind::Arrow, p, rng.range(4, 10));
-            else if (roll < 92) dropItemAt(ItemKind::Rock, p, rng.range(3, 8));
-            else if (roll < 95) dropItemAt(ItemKind::Dagger, p, 1);
-            else if (roll < 97) dropItemAt(ItemKind::LeatherArmor, p, 1);
-            else if (roll < 98) dropItemAt(ItemKind::PotionShielding, p, 1);
-            else if (roll < 99) dropItemAt(ItemKind::PotionHaste, p, 1);
+            else if (roll < 30) dropItemAt(ItemKind::FoodRation, p, 1);
+            else if (roll < 44) dropItemAt(ItemKind::PotionHealing, p, 1);
+            else if (roll < 54) dropItemAt(ItemKind::PotionStrength, p, 1);
+            else if (roll < 62) dropItemAt(ItemKind::PotionAntidote, p, 1);
+            else if (roll < 68) dropItemAt(ItemKind::PotionRegeneration, p, 1);
+            else if (roll < 74) dropItemAt(ItemKind::ScrollTeleport, p, 1);
+            else if (roll < 80) dropItemAt(ItemKind::ScrollMapping, p, 1);
+            else if (roll < 82) dropItemAt(rng.chance(0.5f) ? ItemKind::ScrollIdentify : ItemKind::ScrollDetectTraps, p, 1);
+            else if (roll < 86) dropItemAt(ItemKind::ScrollEnchantWeapon, p, 1);
+            else if (roll < 90) dropItemAt(ItemKind::ScrollEnchantArmor, p, 1);
+            else if (roll < 95) dropItemAt(ItemKind::Arrow, p, rng.range(4, 10));
+            else if (roll < 100) dropItemAt(ItemKind::Rock, p, rng.range(3, 8));
+            else if (roll < 103) dropItemAt(ItemKind::Dagger, p, 1);
+            else if (roll < 105) dropItemAt(ItemKind::LeatherArmor, p, 1);
+            else if (roll < 106) dropItemAt(ItemKind::PotionShielding, p, 1);
+            else if (roll < 107) dropItemAt(ItemKind::PotionHaste, p, 1);
             else dropItemAt(ItemKind::PotionVision, p, 1);
         }
     }
@@ -4320,12 +4782,14 @@ void Game::spawnTraps() {
         } else if (depth_ <= 3) {
             if (roll < 45) tk = TrapKind::Spike;
             else if (roll < 75) tk = TrapKind::PoisonDart;
-            else if (roll < 90) tk = TrapKind::Alarm;
+            else if (roll < 88) tk = TrapKind::Alarm;
+            else if (roll < 94) tk = TrapKind::Web;
             else tk = TrapKind::Teleport;
         } else {
             if (roll < 35) tk = TrapKind::Spike;
             else if (roll < 65) tk = TrapKind::PoisonDart;
-            else if (roll < 85) tk = TrapKind::Alarm;
+            else if (roll < 82) tk = TrapKind::Alarm;
+            else if (roll < 92) tk = TrapKind::Web;
             else tk = TrapKind::Teleport;
         }
 
@@ -4562,6 +5026,7 @@ void Game::applyEndOfTurnEffects() {
         p.hp -= 1;
         if (p.hp <= 0) {
             pushMsg("YOU SUCCUMB TO POISON.", MessageKind::Combat, false);
+            if (endCause_.empty()) endCause_ = "DIED OF POISON";
             gameOver = true;
             return;
         }
@@ -4619,6 +5084,36 @@ void Game::applyEndOfTurnEffects() {
             naturalRegenCounter = 0;
         }
     }
+    // Hunger ticking (optional).
+    if (hungerEnabled_) {
+        if (hungerMax <= 0) hungerMax = 800;
+
+        hunger = std::max(0, hunger - 1);
+
+        const int st = hungerStateFor(hunger, hungerMax);
+        if (st != hungerStatePrev) {
+            if (st == 1) {
+                pushMsg("YOU FEEL HUNGRY.", MessageKind::System, true);
+            } else if (st == 2) {
+                pushMsg("YOU ARE STARVING!", MessageKind::Warning, true);
+            } else if (st == 3) {
+                pushMsg("YOU ARE STARVING TO DEATH!", MessageKind::Warning, true);
+            }
+            hungerStatePrev = st;
+        }
+
+        // Starvation damage (every other turn so it isn't instant death).
+        if (st == 3 && (turnCount % 2u) == 0u) {
+            p.hp -= 1;
+            if (p.hp <= 0) {
+                pushMsg("YOU STARVE.", MessageKind::Combat, false);
+                if (endCause_.empty()) endCause_ = "STARVED TO DEATH";
+                gameOver = true;
+                return;
+            }
+        }
+    }
+
 }
 
 void Game::cleanupDead() {
@@ -4634,20 +5129,21 @@ void Game::cleanupDead() {
             gi.item.id = nextItemId++;
             gi.item.spriteSeed = rng.nextU32();
 
-            int roll = rng.range(0, 99);
+            int roll = rng.range(0, 107);
             if (roll < 40) { gi.item.kind = ItemKind::Gold; gi.item.count = rng.range(2, 8); }
             else if (roll < 55) { gi.item.kind = ItemKind::Arrow; gi.item.count = rng.range(3, 7); }
             else if (roll < 65) { gi.item.kind = ItemKind::Rock; gi.item.count = rng.range(2, 6); }
-            else if (roll < 74) { gi.item.kind = ItemKind::PotionHealing; gi.item.count = 1; }
-            else if (roll < 80) { gi.item.kind = ItemKind::PotionAntidote; gi.item.count = 1; }
-            else if (roll < 84) { gi.item.kind = ItemKind::PotionRegeneration; gi.item.count = 1; }
-            else if (roll < 88) { gi.item.kind = ItemKind::ScrollTeleport; gi.item.count = 1; }
-            else if (roll < 90) { gi.item.kind = ItemKind::ScrollIdentify; gi.item.count = 1; }
-            else if (roll < 93) { gi.item.kind = ItemKind::ScrollEnchantWeapon; gi.item.count = 1; }
-            else if (roll < 96) { gi.item.kind = ItemKind::ScrollEnchantArmor; gi.item.count = 1; }
-            else if (roll < 97) { gi.item.kind = ItemKind::Dagger; gi.item.count = 1; }
-            else if (roll < 98) { gi.item.kind = ItemKind::PotionShielding; gi.item.count = 1; }
-            else if (roll < 99) { gi.item.kind = ItemKind::PotionHaste; gi.item.count = 1; }
+            else if (roll < 73) { gi.item.kind = ItemKind::FoodRation; gi.item.count = rng.range(1, 2); }
+            else if (roll < 82) { gi.item.kind = ItemKind::PotionHealing; gi.item.count = 1; }
+            else if (roll < 88) { gi.item.kind = ItemKind::PotionAntidote; gi.item.count = 1; }
+            else if (roll < 92) { gi.item.kind = ItemKind::PotionRegeneration; gi.item.count = 1; }
+            else if (roll < 96) { gi.item.kind = ItemKind::ScrollTeleport; gi.item.count = 1; }
+            else if (roll < 98) { gi.item.kind = (rng.chance(0.5f) ? ItemKind::ScrollIdentify : ItemKind::ScrollDetectTraps); gi.item.count = 1; }
+            else if (roll < 101) { gi.item.kind = ItemKind::ScrollEnchantWeapon; gi.item.count = 1; }
+            else if (roll < 104) { gi.item.kind = ItemKind::ScrollEnchantArmor; gi.item.count = 1; }
+            else if (roll < 105) { gi.item.kind = ItemKind::Dagger; gi.item.count = 1; }
+            else if (roll < 106) { gi.item.kind = ItemKind::PotionShielding; gi.item.count = 1; }
+            else if (roll < 107) { gi.item.kind = ItemKind::PotionHaste; gi.item.count = 1; }
             else { gi.item.kind = ItemKind::PotionVision; gi.item.count = 1; }
 
             // Chance for dropped gear to be lightly enchanted on deeper floors.

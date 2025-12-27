@@ -66,10 +66,12 @@ enum class ItemKind : uint8_t {
     // --- New items (append-only to keep save compatibility) ---
     Axe,
     PlateArmor,
+    FoodRation,
+    ScrollDetectTraps,
 };
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::PlateArmor) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollDetectTraps) + 1;
 
 inline bool isPotionKind(ItemKind k) {
     switch (k) {
@@ -93,6 +95,7 @@ inline bool isScrollKind(ItemKind k) {
         case ItemKind::ScrollEnchantWeapon:
         case ItemKind::ScrollEnchantArmor:
         case ItemKind::ScrollIdentify:
+        case ItemKind::ScrollDetectTraps:
             return true;
         default:
             return false;
@@ -128,6 +131,7 @@ struct ItemDef {
 
     // Consumable effects
     int healAmount = 0;
+    int hungerRestore = 0; // 0 = no hunger effect
 };
 
 struct Item {

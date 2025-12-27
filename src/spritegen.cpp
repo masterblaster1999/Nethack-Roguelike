@@ -105,6 +105,7 @@ float densityFor(EntityKind k) {
         case EntityKind::Snake: return 0.48f;
         case EntityKind::Spider: return 0.46f;
         case EntityKind::Ogre: return 0.72f;
+        case EntityKind::Mimic: return 0.74f;
         default: return 0.55f;
     }
 }
@@ -124,6 +125,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::Snake: return add({ 80, 190, 100, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Spider: return add({ 80, 80, 95, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
         case EntityKind::Ogre: return add({ 150, 120, 70, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
+        case EntityKind::Mimic: return add({ 150, 110, 60, 255 }, rng.range(-18,18), rng.range(-18,18), rng.range(-18,18));
         default: return add({ 180, 180, 180, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
     }
 }
@@ -248,6 +250,28 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
         setPx(s, 6, 2, horn);
         setPx(s, 9, 2, horn);
         rect(s, 5, 11, 6, 1, {60,40,20,255});
+    }
+
+    if (kind == EntityKind::Mimic) {
+        // Chest-like bands + a toothy maw.
+        Color band = mul(base, 0.55f);
+        rect(s, 4, 8, 8, 1, band);
+        rect(s, 4, 9, 8, 1, mul(band, 0.90f));
+
+        Color maw = {25, 18, 12, 255};
+        rect(s, 5, 10, 6, 3, maw);
+
+        // Teeth
+        for (int x = 5; x <= 10; x += 2) {
+            setPx(s, x, 10, {245, 245, 245, 255});
+        }
+
+        // Tongue highlight
+        setPx(s, 7, 12, {200, 70, 70, 255});
+        setPx(s, 8, 12, {200, 70, 70, 255});
+
+        // Little latch / glint
+        setPx(s, 8, 8, {230, 200, 80, 255});
     }
 
     // Soft outline (helps readability)

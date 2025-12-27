@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <deque>
+#include <unordered_map>
 #include <sstream>
 #include <fstream>
 #include <cstring>
@@ -36,6 +37,42 @@ static std::string toLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s;
+}
+
+struct ThrowAmmoSpec {
+    AmmoKind ammo = AmmoKind::None;
+    ProjectileKind proj = ProjectileKind::Rock;
+    ItemKind item = ItemKind::Rock;
+};
+
+static bool choosePlayerThrowAmmo(const std::vector<Item>& inv, ThrowAmmoSpec& out) {
+    // Prefer rocks (a common "throwable") when available; otherwise fall back to arrows.
+    const int rocks = ammoCount(inv, AmmoKind::Rock);
+    if (rocks > 0) {
+        out.ammo = AmmoKind::Rock;
+        out.proj = ProjectileKind::Rock;
+        out.item = ItemKind::Rock;
+        return true;
+    }
+
+    const int arrows = ammoCount(inv, AmmoKind::Arrow);
+    if (arrows > 0) {
+        out.ammo = AmmoKind::Arrow;
+        out.proj = ProjectileKind::Arrow;
+        out.item = ItemKind::Arrow;
+        return true;
+    }
+
+    return false;
+}
+
+static int throwRangeFor(const Entity& p, AmmoKind ammo) {
+    // A small, simple "throw by hand" range.
+    // Arrows fly a bit farther than rocks; stronger characters get a small bonus.
+    int base = (ammo == AmmoKind::Arrow) ? 5 : 4;
+    int bonus = std::max(0, (p.baseAtk - 3) / 2);
+    int range = base + bonus;
+    return std::clamp(range, 3, 9);
 }
 
 
@@ -296,6 +333,7 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
             case EntityKind::Snake:  return 'n';
             case EntityKind::Spider: return 's';
             case EntityKind::Ogre:   return 'O';
+            case EntityKind::Mimic:  return 'm';
             default:                 return 'M';
         }
     };
@@ -486,11 +524,13 @@ static int hungerStateFor(int hunger, int hungerMax) {
 // - bit 1: trapped
 // - bit 2: opened
 // - bit 3: trap discovered (for "search" / detect traps UI)
+// - bit 4: mimic (looks like a chest until you try to open it)
 // Trap kind is stored in charges bits 8..15.
 static constexpr int CHEST_FLAG_LOCKED = 1 << 0;
 static constexpr int CHEST_FLAG_TRAPPED = 1 << 1;
 static constexpr int CHEST_FLAG_OPENED = 1 << 2;
 static constexpr int CHEST_FLAG_TRAP_KNOWN = 1 << 3;
+static constexpr int CHEST_FLAG_MIMIC = 1 << 4;
 static constexpr int CHEST_TRAP_SHIFT = 8;
 
 static bool chestLocked(const Item& it) {
@@ -503,6 +543,10 @@ static bool chestTrapped(const Item& it) {
 
 static bool chestTrapKnown(const Item& it) {
     return (it.charges & CHEST_FLAG_TRAP_KNOWN) != 0;
+}
+
+static bool chestMimic(const Item& it) {
+    return (it.charges & CHEST_FLAG_MIMIC) != 0;
 }
 
 static TrapKind chestTrapKind(const Item& it) {
@@ -528,6 +572,11 @@ static void setChestTrapped(Item& it, bool v) {
 static void setChestTrapKnown(Item& it, bool v) {
     if (v) it.charges |= CHEST_FLAG_TRAP_KNOWN;
     else it.charges &= ~CHEST_FLAG_TRAP_KNOWN;
+}
+
+static void setChestMimic(Item& it, bool v) {
+    if (v) it.charges |= CHEST_FLAG_MIMIC;
+    else it.charges &= ~CHEST_FLAG_MIMIC;
 }
 
 static void setChestTrapKind(Item& it, TrapKind k) {
@@ -1351,6 +1400,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Snake: return "SNAKE";
         case EntityKind::Spider: return "SPIDER";
         case EntityKind::Ogre: return "OGRE";
+        case EntityKind::Mimic: return "MIMIC";
         default: return "THING";
     }
 }
@@ -1546,31 +1596,58 @@ int Game::playerDefense() const {
 }
 
 int Game::playerRangedRange() const {
-    const Item* w = equippedRanged();
-    if (!w) return 0;
-    return itemDef(w->kind).range;
+    // Preferred: an equipped ranged weapon that is actually ready (ammo/charges).
+    if (const Item* w = equippedRanged()) {
+        const ItemDef& d = itemDef(w->kind);
+        const bool hasRange = (d.range > 0);
+        const bool chargesOk = (d.maxCharges <= 0) || (w->charges > 0);
+        const bool ammoOk = (d.ammo == AmmoKind::None) || (ammoCount(inv, d.ammo) > 0);
+
+        if (hasRange && chargesOk && ammoOk) {
+            return d.range;
+        }
+    }
+
+    // Fallback: "throw by hand" when you have ammo (rocks/arrows) but no usable ranged weapon.
+    ThrowAmmoSpec spec;
+    if (choosePlayerThrowAmmo(inv, spec)) {
+        return throwRangeFor(player(), spec.ammo);
+    }
+
+    return 0;
 }
 
+
 bool Game::playerHasRangedReady(std::string* reasonOut) const {
-    const Item* w = equippedRanged();
-    if (!w) {
-        if (reasonOut) *reasonOut = "NO RANGED WEAPON EQUIPPED.";
-        return false;
-    }
-    const ItemDef& d = itemDef(w->kind);
-    if (d.range <= 0) {
-        if (reasonOut) *reasonOut = "THAT WEAPON CAN'T FIRE.";
-        return false;
-    }
+    // Prefer an equipped ranged weapon when it is ready (ammo/charges).
+    if (const Item* w = equippedRanged()) {
+        const ItemDef& d = itemDef(w->kind);
 
-    if (d.maxCharges > 0 && w->charges <= 0) {
-        if (reasonOut) *reasonOut = "THE WAND IS OUT OF CHARGES.";
-        return false;
-    }
+        const bool hasRange = (d.range > 0);
+        const bool chargesOk = (d.maxCharges <= 0) || (w->charges > 0);
+        const bool ammoOk = (d.ammo == AmmoKind::None) || (ammoCount(inv, d.ammo) > 0);
 
-    if (d.ammo != AmmoKind::None) {
-        int have = ammoCount(inv, d.ammo);
-        if (have <= 0) {
+        if (hasRange && chargesOk && ammoOk) {
+            return true;
+        }
+
+        // Fallback: if the equipped weapon can't be used (no ammo/charges), allow throwing
+        // (rocks/arrows) so the player still has a ranged option without menu friction.
+        ThrowAmmoSpec spec;
+        if (choosePlayerThrowAmmo(inv, spec)) {
+            return true;
+        }
+
+        // No fallback available: explain why the equipped weapon can't be used.
+        if (!hasRange) {
+            if (reasonOut) *reasonOut = "THAT WEAPON CAN'T FIRE.";
+            return false;
+        }
+        if (!chargesOk) {
+            if (reasonOut) *reasonOut = "THE WAND IS OUT OF CHARGES.";
+            return false;
+        }
+        if (!ammoOk) {
             if (reasonOut) {
                 *reasonOut = (d.ammo == AmmoKind::Arrow) ? "NO ARROWS." : "NO ROCKS.";
             }
@@ -1578,8 +1655,14 @@ bool Game::playerHasRangedReady(std::string* reasonOut) const {
         }
     }
 
-    return true;
+    // No equipped ranged weapon: allow throwing ammo by hand if available.
+    ThrowAmmoSpec spec;
+    if (choosePlayerThrowAmmo(inv, spec)) return true;
+
+    if (reasonOut) *reasonOut = "NO RANGED WEAPON OR THROWABLE AMMO.";
+    return false;
 }
+
 
 int Game::xpFor(EntityKind k) const {
     switch (k) {
@@ -1595,6 +1678,7 @@ int Game::xpFor(EntityKind k) const {
         case EntityKind::Troll: return 28;
         case EntityKind::Ogre: return 30;
         case EntityKind::Wizard: return 32;
+        case EntityKind::Mimic: return 22;
         default: return 10;
     }
 }
@@ -2221,6 +2305,25 @@ bool Game::consumeLockpicks(int n) {
     }), inv.end());
 
     return need <= 0;
+}
+
+void Game::alertMonstersTo(Vec2i pos, int radius) {
+    // radius<=0 means "global" (all monsters regardless of distance)
+    for (auto& m : ents) {
+        if (m.id == playerId_) continue;
+        if (m.hp <= 0) continue;
+
+        if (radius > 0) {
+            int dx = std::abs(m.pos.x - pos.x);
+            int dy = std::abs(m.pos.y - pos.y);
+            int cheb = std::max(dx, dy);
+            if (cheb > radius) continue;
+        }
+
+        m.alerted = true;
+        m.lastKnownPlayerPos = pos;
+        m.lastKnownPlayerAge = 0;
+    }
 }
 
 
@@ -4693,8 +4796,10 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
 
     // Webbed: you can still act (use items, fire, etc.) but cannot move.
     // Attempting to move consumes a turn (so the web can wear off).
-    if (e.kind == EntityKind::Player && e.webTurns > 0) {
-        pushMsg("YOU STRUGGLE AGAINST STICKY WEBBING!", MessageKind::Warning, true);
+    if (e.webTurns > 0) {
+        if (e.kind == EntityKind::Player) {
+            pushMsg("YOU STRUGGLE AGAINST STICKY WEBBING!", MessageKind::Warning, true);
+        }
         return true;
     }
 
@@ -4716,7 +4821,11 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     // Closed door: opening consumes a turn.
     if (dung.isDoorClosed(nx, ny)) {
         dung.openDoor(nx, ny);
-        if (e.kind == EntityKind::Player) pushMsg("YOU OPEN THE DOOR.");
+        if (e.kind == EntityKind::Player) {
+            pushMsg("YOU OPEN THE DOOR.");
+            // Opening doors is noisy; nearby monsters may investigate.
+            alertMonstersTo({nx, ny}, 8);
+        }
         return true;
     }
 
@@ -4781,9 +4890,11 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         if (autoPickup != AutoPickupMode::Off) {
             (void)autoPickupAtPlayer();
         }
-        // Traps trigger on enter.
-        triggerTrapAt(e.pos, e);
     }
+
+    // Traps trigger on enter (monsters can trigger them too).
+    triggerTrapAt(e.pos, e);
+
     return true;
 }
 
@@ -4798,69 +4909,119 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
     Trap* t = trapAtMut(pos.x, pos.y);
     if (!t) return;
 
-    // At the moment, only the player meaningfully interacts with traps.
-    if (victim.kind != EntityKind::Player) return;
+    const bool isPlayer = (victim.kind == EntityKind::Player);
+    const bool tileVisible = dung.inBounds(pos.x, pos.y) && dung.at(pos.x, pos.y).visible;
 
-    t->discovered = true;
+    // You only "discover" a trap when you trigger it yourself, or when you can see it happen.
+    if (isPlayer || tileVisible) {
+        t->discovered = true;
+    }
 
-    Entity& p = playerMut();
+    auto msgIfSeen = [&](const std::string& s, MessageKind kind, bool fromPlayer = false) {
+        if (isPlayer || tileVisible) {
+            pushMsg(s, kind, fromPlayer);
+        }
+    };
 
     switch (t->kind) {
         case TrapKind::Spike: {
             int dmg = rng.range(2, 5) + std::min(3, depth_ / 2);
-            p.hp -= dmg;
-            std::ostringstream ss;
-            if (fromDisarm) {
-                ss << "YOU SET OFF A SPIKE TRAP! YOU TAKE " << dmg << ".";
-            } else {
-                ss << "YOU STEP ON A SPIKE TRAP! YOU TAKE " << dmg << ".";
-            }
-            pushMsg(ss.str(), MessageKind::Combat, false);
-            if (p.hp <= 0) {
-                pushMsg("YOU DIE.", MessageKind::Combat, false);
-                if (endCause_.empty()) endCause_ = "KILLED BY SPIKE TRAP";
-                gameOver = true;
+            victim.hp -= dmg;
+
+            if (isPlayer) {
+                std::ostringstream ss;
+                if (fromDisarm) {
+                    ss << "YOU SET OFF A SPIKE TRAP! YOU TAKE " << dmg << ".";
+                } else {
+                    ss << "YOU STEP ON A SPIKE TRAP! YOU TAKE " << dmg << ".";
+                }
+                pushMsg(ss.str(), MessageKind::Combat, false);
+                if (victim.hp <= 0) {
+                    pushMsg("YOU DIE.", MessageKind::Combat, false);
+                    if (endCause_.empty()) endCause_ = "KILLED BY SPIKE TRAP";
+                    gameOver = true;
+                }
+            } else if (tileVisible) {
+                std::ostringstream ss;
+                ss << kindName(victim.kind) << " STEPS ON A SPIKE TRAP!";
+                pushMsg(ss.str(), MessageKind::Combat, false);
+                if (victim.hp <= 0) {
+                    std::ostringstream ds;
+                    ds << kindName(victim.kind) << " DIES.";
+                    pushMsg(ds.str(), MessageKind::Combat, false);
+                }
             }
             break;
         }
         case TrapKind::PoisonDart: {
             int dmg = rng.range(1, 2);
-            p.hp -= dmg;
-            p.poisonTurns = std::max(p.poisonTurns, rng.range(6, 12));
-            std::ostringstream ss;
-            ss << "A POISON DART HITS YOU! YOU TAKE " << dmg << ".";
-            pushMsg(ss.str(), MessageKind::Combat, false);
-            pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
-            if (p.hp <= 0) {
-                pushMsg("YOU DIE.", MessageKind::Combat, false);
-                if (endCause_.empty()) endCause_ = "KILLED BY POISON DART TRAP";
-                gameOver = true;
+            victim.hp -= dmg;
+            victim.poisonTurns = std::max(victim.poisonTurns, rng.range(6, 12));
+
+            if (isPlayer) {
+                std::ostringstream ss;
+                ss << "A POISON DART HITS YOU! YOU TAKE " << dmg << ".";
+                pushMsg(ss.str(), MessageKind::Combat, false);
+                pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
+                if (victim.hp <= 0) {
+                    pushMsg("YOU DIE.", MessageKind::Combat, false);
+                    if (endCause_.empty()) endCause_ = "KILLED BY POISON DART TRAP";
+                    gameOver = true;
+                }
+            } else if (tileVisible) {
+                {
+                    std::ostringstream ss;
+                    ss << "A POISON DART HITS " << kindName(victim.kind) << "!";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                }
+                if (victim.hp <= 0) {
+                    std::ostringstream ds;
+                    ds << kindName(victim.kind) << " DIES.";
+                    pushMsg(ds.str(), MessageKind::Combat, false);
+                } else {
+                    std::ostringstream ps;
+                    ps << kindName(victim.kind) << " IS POISONED!";
+                    pushMsg(ps.str(), MessageKind::Warning, false);
+                }
             }
             break;
         }
         case TrapKind::Teleport: {
-            pushMsg("A TELEPORT TRAP ACTIVATES!", MessageKind::Warning, false);
-            // Teleport the player to a random floor tile.
+            if (isPlayer) {
+                pushMsg("A TELEPORT TRAP ACTIVATES!", MessageKind::Warning, false);
+            } else if (tileVisible) {
+                std::ostringstream ss;
+                ss << kindName(victim.kind) << " IS TELEPORTED!";
+                pushMsg(ss.str(), MessageKind::Warning, false);
+            }
+
+            // Teleport to a random floor tile.
             Vec2i dst = dung.randomFloor(rng, true);
             for (int tries = 0; tries < 200; ++tries) {
                 dst = dung.randomFloor(rng, true);
                 if (!entityAt(dst.x, dst.y) && dst != dung.stairsUp && dst != dung.stairsDown) break;
             }
-            p.pos = dst;
-            recomputeFov();
+
+            victim.pos = dst;
+            if (isPlayer) recomputeFov();
             break;
         }
         case TrapKind::Alarm: {
-            pushMsg("AN ALARM BLARES!", MessageKind::Warning, false);
-            for (auto& m : ents) {
-                if (m.id != playerId_) m.alerted = true;
-            }
+            msgIfSeen("AN ALARM BLARES!", MessageKind::Warning, false);
+            // Alert everything on the level to the alarm location.
+            alertMonstersTo(pos, 0);
             break;
         }
         case TrapKind::Web: {
             const int turns = rng.range(4, 7) + std::min(6, depth_ / 2);
-            p.webTurns = std::max(p.webTurns, turns);
-            pushMsg("YOU ARE CAUGHT IN STICKY WEBBING!", MessageKind::Warning, true);
+            victim.webTurns = std::max(victim.webTurns, turns);
+            if (isPlayer) {
+                pushMsg("YOU ARE CAUGHT IN STICKY WEBBING!", MessageKind::Warning, true);
+            } else if (tileVisible) {
+                std::ostringstream ss;
+                ss << kindName(victim.kind) << " IS CAUGHT IN STICKY WEBBING!";
+                pushMsg(ss.str(), MessageKind::Warning, false);
+            }
             break;
         }
         default:
@@ -4962,6 +5123,25 @@ bool Game::disarmTrap() {
 
     Entity& p = playerMut();
 
+    // Trapped chests can also be disarmed (when their trap is known).
+    GroundItem* bestChest = nullptr;
+    int bestChestDist = 999;
+    for (auto& gi : ground) {
+        if (gi.item.kind != ItemKind::Chest) continue;
+        if (!chestTrapped(gi.item)) continue;
+        if (!chestTrapKnown(gi.item)) continue;
+
+        int dx = std::abs(gi.pos.x - p.pos.x);
+        int dy = std::abs(gi.pos.y - p.pos.y);
+        int cheb = std::max(dx, dy);
+        if (cheb > 1) continue;
+
+        if (cheb < bestChestDist) {
+            bestChestDist = cheb;
+            bestChest = &gi;
+        }
+    }
+
     // Choose the nearest discovered trap adjacent to the player (including underfoot).
     int bestIndex = -1;
     int bestDist = 999;
@@ -4978,12 +5158,15 @@ bool Game::disarmTrap() {
         }
     }
 
-    if (bestIndex < 0) {
+    // Prefer the closest target. When distances tie, keep the original behavior
+    // and disarm floor traps first.
+    const bool targetIsChest = (bestChest != nullptr) &&
+                               (bestIndex < 0 || bestChestDist < bestDist);
+
+    if (bestIndex < 0 && !targetIsChest) {
         pushMsg("NO ADJACENT TRAP TO DISARM.", MessageKind::Info, true);
         return false;
     }
-
-    Trap& tr = trapsCur[static_cast<size_t>(bestIndex)];
 
     auto trapName = [&](TrapKind k) -> const char* {
         switch (k) {
@@ -4995,6 +5178,123 @@ bool Game::disarmTrap() {
         }
         return "TRAP";
     };
+
+    // --- Chest trap disarm ---
+    if (targetIsChest) {
+        Item& chest = bestChest->item;
+        const TrapKind tk = chestTrapKind(chest);
+        const int tier = chestTier(chest);
+
+        const bool hasPicks = (lockpickCount() > 0);
+
+        // Slightly harder than floor traps; higher-tier chests are also tougher.
+        float chance = 0.25f + 0.04f * static_cast<float>(charLevel);
+        chance = std::min(0.80f, chance);
+        chance -= 0.05f * static_cast<float>(tier);
+        if (hasPicks) chance = std::min(0.95f, chance + 0.20f);
+
+        if (tk == TrapKind::Teleport) chance *= 0.85f;
+        if (tk == TrapKind::Alarm) chance *= 0.90f;
+        if (tk == TrapKind::Web) chance *= 0.95f;
+
+        chance = std::clamp(chance, 0.05f, 0.95f);
+
+        if (rng.chance(chance)) {
+            setChestTrapped(chest, false);
+            setChestTrapKnown(chest, true);
+            std::ostringstream ss;
+            ss << "YOU DISARM THE CHEST'S " << trapName(tk) << " TRAP.";
+            pushMsg(ss.str(), MessageKind::Success, true);
+            return true;
+        }
+
+        {
+            std::ostringstream ss;
+            ss << "YOU FAIL TO DISARM THE CHEST'S " << trapName(tk) << " TRAP.";
+            pushMsg(ss.str(), MessageKind::Warning, true);
+        }
+
+        // Mishaps: lockpicks can break, and you may set off the trap.
+        if (hasPicks && rng.chance(0.20f)) {
+            consumeLockpicks(1);
+            pushMsg("YOUR LOCKPICK BREAKS!", MessageKind::Warning, true);
+        }
+
+        float setOffChance = 0.18f + 0.05f * static_cast<float>(tier);
+        if (tk == TrapKind::Alarm) setOffChance += 0.10f;
+        if (tk == TrapKind::Teleport) setOffChance += 0.06f;
+        if (tk == TrapKind::Web) setOffChance += 0.04f;
+        setOffChance = std::clamp(setOffChance, 0.10f, 0.60f);
+
+        if (rng.chance(setOffChance)) {
+            pushMsg("YOU SET OFF THE CHEST TRAP!", MessageKind::Warning, true);
+
+            // Chest traps are single-use.
+            setChestTrapped(chest, false);
+            setChestTrapKnown(chest, true);
+
+            switch (tk) {
+                case TrapKind::Spike: {
+                    int dmg = rng.range(2, 5) + std::min(3, depth_ / 2);
+                    p.hp -= dmg;
+                    std::ostringstream ss;
+                    ss << "NEEDLES JAB YOU! YOU TAKE " << dmg << ".";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                    if (p.hp <= 0) {
+                        pushMsg("YOU DIE.", MessageKind::Combat, false);
+                        if (endCause_.empty()) endCause_ = "KILLED BY CHEST TRAP";
+                        gameOver = true;
+                    }
+                    break;
+                }
+                case TrapKind::PoisonDart: {
+                    int dmg = rng.range(1, 2);
+                    p.hp -= dmg;
+                    p.poisonTurns = std::max(p.poisonTurns, rng.range(6, 12));
+                    std::ostringstream ss;
+                    ss << "POISON NEEDLES HIT YOU! YOU TAKE " << dmg << ".";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                    pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
+                    if (p.hp <= 0) {
+                        pushMsg("YOU DIE.", MessageKind::Combat, false);
+                        if (endCause_.empty()) endCause_ = "KILLED BY POISON CHEST TRAP";
+                        gameOver = true;
+                    }
+                    break;
+                }
+                case TrapKind::Teleport: {
+                    pushMsg("A TELEPORT GLYPH FLARES!", MessageKind::Warning, false);
+                    Vec2i dst = dung.randomFloor(rng, true);
+                    for (int tries = 0; tries < 200; ++tries) {
+                        dst = dung.randomFloor(rng, true);
+                        if (!entityAt(dst.x, dst.y) && dst != dung.stairsUp && dst != dung.stairsDown) break;
+                    }
+                    p.pos = dst;
+                    recomputeFov();
+                    break;
+                }
+                case TrapKind::Alarm: {
+                    pushMsg("AN ALARM BLARES!", MessageKind::Warning, false);
+                    // The noise comes from the chest.
+                    alertMonstersTo(bestChest->pos, 0);
+                    break;
+                }
+                case TrapKind::Web: {
+                    const int turns = rng.range(4, 7) + std::min(6, depth_ / 2);
+                    p.webTurns = std::max(p.webTurns, turns);
+                    pushMsg("STICKY WEBBING EXPLODES OUT!", MessageKind::Warning, true);
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+
+        return true; // Disarming costs a turn.
+    }
+
+    // --- Floor trap disarm ---
+    Trap& tr = trapsCur[static_cast<size_t>(bestIndex)];
 
     const bool hasPicks = (lockpickCount() > 0);
 
@@ -5317,6 +5617,11 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
     const bool msgFromPlayer = (attacker.kind == EntityKind::Player);
     pushMsg(ss.str(), MessageKind::Combat, msgFromPlayer);
 
+    if (attacker.kind == EntityKind::Player) {
+        // Fighting is noisy; nearby monsters may investigate.
+        alertMonstersTo(attacker.pos, 9);
+    }
+
     // Monster special effects.
     if (defender.hp > 0 && defender.kind == EntityKind::Player) {
         if (attacker.kind == EntityKind::Snake && rng.chance(0.35f)) {
@@ -5347,6 +5652,35 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
     }
 }
 
+void Game::dropGroundItem(Vec2i pos, ItemKind k, int count, int enchant) {
+    count = std::max(1, count);
+
+    // Merge into an existing stack on the same tile when possible.
+    // (Only for stackables and when metadata matches.)
+    if (isStackable(k) && enchant == 0) {
+        for (auto& gi : ground) {
+            if (gi.pos != pos) continue;
+            if (gi.item.kind != k) continue;
+            if (gi.item.enchant != enchant) continue;
+            gi.item.count += count;
+            return;
+        }
+    }
+
+    Item it;
+    it.id = nextItemId++;
+    it.kind = k;
+    it.count = count;
+    it.enchant = enchant;
+    it.spriteSeed = rng.nextU32();
+    if (k == ItemKind::WandSparks) it.charges = itemDef(k).maxCharges;
+
+    GroundItem gi;
+    gi.item = it;
+    gi.pos = pos;
+    ground.push_back(gi);
+}
+
 std::vector<Vec2i> Game::bresenhamLine(Vec2i a, Vec2i b) {
     std::vector<Vec2i> pts;
     int x0 = a.x, y0 = a.y, x1 = b.x, y1 = b.y;
@@ -5371,6 +5705,11 @@ std::vector<Vec2i> Game::bresenhamLine(Vec2i a, Vec2i b) {
 void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atk, ProjectileKind projKind, bool fromPlayer) {
     std::vector<Vec2i> line = bresenhamLine(attacker.pos, target);
     if (line.size() <= 1) return;
+
+    if (fromPlayer) {
+        // Ranged attacks are noisy; nearby monsters may investigate.
+        alertMonstersTo(attacker.pos, 10);
+    }
 
     // Clamp to range (+ start tile)
     if (range > 0 && static_cast<int>(line.size()) > range + 1) {
@@ -5441,6 +5780,35 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atk, Proj
         if (fromPlayer) pushMsg("THE SHOT HITS A WALL.", MessageKind::Warning, true);
     } else {
         if (fromPlayer) pushMsg("YOU FIRE.", MessageKind::Combat, true);
+    }
+
+    // Recoverable ammo: arrows/rocks may remain on the ground after firing.
+    // This keeps ranged weapons fun without making ammo management too punishing.
+    if (projKind == ProjectileKind::Arrow || projKind == ProjectileKind::Rock) {
+        ItemKind dropK = (projKind == ProjectileKind::Arrow) ? ItemKind::Arrow : ItemKind::Rock;
+
+        // Default landing tile is the last tile the projectile reached.
+        Vec2i land = line[stopIdx];
+        // If we hit a wall/closed door, the projectile can't occupy that tile; land on the last open tile instead.
+        if (hitWall && stopIdx > 0) {
+            land = line[stopIdx - 1];
+        }
+
+        if (dung.inBounds(land.x, land.y) && !dung.isOpaque(land.x, land.y)) {
+            // Base drop chance varies by ammo type.
+            float dropChance = (projKind == ProjectileKind::Arrow) ? 0.60f : 0.75f;
+
+            // Smashing into a wall/door is more likely to ruin the projectile.
+            if (hitWall) dropChance -= 0.20f;
+
+            // Enemy volleys shouldn't become infinite ammo printers.
+            if (!fromPlayer) dropChance -= 0.15f;
+
+            dropChance = std::clamp(dropChance, 0.10f, 0.95f);
+            if (rng.chance(dropChance)) {
+                dropGroundItem(land, dropK, 1);
+            }
+        }
     }
 
     // FX projectile path (truncate)
@@ -5615,6 +5983,89 @@ bool Game::openChestAtPlayer() {
 
     Item& chest = chestGi->item;
 
+    // Mimic: a fake chest that turns into a monster when you try to open it.
+    if (chestMimic(chest)) {
+        // Remove the chest first.
+        Vec2i chestPos = chestGi->pos;
+        ground.erase(std::remove_if(ground.begin(), ground.end(), [&](const GroundItem& gi) {
+            return gi.pos == chestPos && gi.item.id == chest.id;
+        }), ground.end());
+
+        pushMsg("THE CHEST WAS A MIMIC!", MessageKind::Warning, true);
+
+        // Prefer spawning adjacent so we don't overlap the player (chests are opened underfoot).
+        static const int dirs[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
+        Vec2i spawn = {-1, -1};
+        // Randomize direction order a bit.
+        int order[8] = {0,1,2,3,4,5,6,7};
+        for (int i = 7; i > 0; --i) {
+            int j = rng.range(0, i);
+            std::swap(order[i], order[j]);
+        }
+        for (int ii = 0; ii < 8; ++ii) {
+            int di = order[ii];
+            int nx = chestPos.x + dirs[di][0];
+            int ny = chestPos.y + dirs[di][1];
+            if (!dung.inBounds(nx, ny)) continue;
+            if (!dung.isWalkable(nx, ny)) continue;
+            if (entityAt(nx, ny)) continue;
+            if (Vec2i{nx, ny} == dung.stairsUp || Vec2i{nx, ny} == dung.stairsDown) continue;
+            spawn = {nx, ny};
+            break;
+        }
+
+        // Worst-case: if surrounded, shove the player to a nearby free tile and spawn in place.
+        if (spawn.x < 0) {
+            Vec2i dst = chestPos;
+            for (int r = 2; r <= 6 && dst == chestPos; ++r) {
+                for (int y = chestPos.y - r; y <= chestPos.y + r; ++y) {
+                    for (int x = chestPos.x - r; x <= chestPos.x + r; ++x) {
+                        if (!dung.inBounds(x, y)) continue;
+                        if (!dung.isWalkable(x, y)) continue;
+                        if (entityAt(x, y)) continue;
+                        Vec2i cand{x, y};
+                        if (cand == dung.stairsUp || cand == dung.stairsDown) continue;
+                        dst = cand;
+                        break;
+                    }
+                    if (dst != chestPos) break;
+                }
+            }
+            if (dst != chestPos) {
+                playerMut().pos = dst;
+                pushMsg("THE MIMIC SHOVES YOU BACK!", MessageKind::Warning, true);
+            }
+            spawn = chestPos;
+        }
+
+        // Spawn the mimic.
+        Entity m;
+        m.id = nextEntityId++;
+        m.kind = EntityKind::Mimic;
+        m.pos = spawn;
+        m.spriteSeed = rng.nextU32();
+        m.groupId = 0;
+        m.hpMax = 16;
+        m.baseAtk = 4;
+        m.baseDef = 2;
+        m.willFlee = false;
+
+        // Depth scaling (match regular monsters).
+        int dd = std::max(0, depth_ - 1);
+        if (dd > 0) {
+            m.hpMax += dd;
+            m.baseAtk += dd / 3;
+            m.baseDef += dd / 4;
+        }
+        m.hp = m.hpMax;
+        m.alerted = true;
+        m.lastKnownPlayerPos = player().pos;
+        m.lastKnownPlayerAge = 0;
+
+        ents.push_back(m);
+        return true; // Opening costs a turn.
+    }
+
     // Locked chest: consume a key or attempt lockpick.
     if (chestLocked(chest)) {
         if (keyCount() > 0) {
@@ -5699,9 +6150,8 @@ bool Game::openChestAtPlayer() {
             }
             case TrapKind::Alarm: {
                 pushMsg("AN ALARM BLARES FROM THE CHEST!", MessageKind::Warning, false);
-                for (auto& m : ents) {
-                    if (m.id != playerId_) m.alerted = true;
-                }
+                // The alarm reveals the chest's location to the whole floor.
+                alertMonstersTo(pos, 0);
                 break;
             }
             case TrapKind::Web: {
@@ -6325,6 +6775,29 @@ void Game::beginTargeting() {
         pushMsg(reason);
         return;
     }
+
+    // Provide a helpful hint about what will actually be used (weapon vs throw).
+    std::string msg = "TARGETING...";
+
+    if (const Item* w = equippedRanged()) {
+        const ItemDef& d = itemDef(w->kind);
+        const bool weaponReady =
+            (d.range > 0) &&
+            ((d.maxCharges <= 0) || (w->charges > 0)) &&
+            ((d.ammo == AmmoKind::None) || (ammoCount(inv, d.ammo) > 0));
+
+        if (weaponReady) {
+            msg = "TARGETING (" + displayItemName(*w) + ")...";
+        }
+    }
+
+    if (msg == "TARGETING...") {
+        ThrowAmmoSpec spec;
+        if (choosePlayerThrowAmmo(inv, spec)) {
+            msg = (spec.ammo == AmmoKind::Arrow) ? "TARGETING (THROW ARROW)..." : "TARGETING (THROW ROCK)...";
+        }
+    }
+
     targeting = true;
     invOpen = false;
     helpOpen = false;
@@ -6334,8 +6807,9 @@ void Game::beginTargeting() {
     msgScroll = 0;
     targetPos = player().pos;
     recomputeTargetLine();
-    pushMsg("TARGETING...");
+    pushMsg(msg);
 }
+
 
 void Game::endTargeting(bool fire) {
     if (!targeting) return;
@@ -6344,19 +6818,20 @@ void Game::endTargeting(bool fire) {
         if (!targetValid) {
             pushMsg("NO CLEAR SHOT.");
         } else {
+            bool didAttack = false;
+
+            // First choice: fire the equipped ranged weapon if it is ready.
             int wIdx = equippedRangedIndex();
-            if (wIdx < 0) {
-                pushMsg("NO RANGED WEAPON.");
-            } else {
+            if (wIdx >= 0) {
                 Item& w = inv[static_cast<size_t>(wIdx)];
                 const ItemDef& d = itemDef(w.kind);
 
-                // Re-check readiness (ammo/charges) to be safe.
-                if (d.maxCharges > 0 && w.charges <= 0) {
-                    pushMsg("THE WAND IS OUT OF CHARGES.");
-                } else if (d.ammo != AmmoKind::None && ammoCount(inv, d.ammo) <= 0) {
-                    pushMsg(d.ammo == AmmoKind::Arrow ? "NO ARROWS." : "NO ROCKS.");
-                } else {
+                const bool weaponReady =
+                    (d.range > 0) &&
+                    ((d.maxCharges <= 0) || (w.charges > 0)) &&
+                    ((d.ammo == AmmoKind::None) || (ammoCount(inv, d.ammo) > 0));
+
+                if (weaponReady) {
                     // Consume charge/ammo.
                     if (d.maxCharges > 0) {
                         w.charges -= 1;
@@ -6366,7 +6841,7 @@ void Game::endTargeting(bool fire) {
                     }
 
                     // Compute attack.
-            int atk = std::max(1, player().baseAtk + d.rangedAtk + w.enchant + rng.range(0, 1));
+                    int atk = std::max(1, player().baseAtk + d.rangedAtk + w.enchant + rng.range(0, 1));
                     if (w.kind == ItemKind::WandSparks) {
                         atk += 2 + rng.range(0, 2);
                     }
@@ -6376,7 +6851,30 @@ void Game::endTargeting(bool fire) {
                     if (w.kind == ItemKind::WandSparks && w.charges <= 0) {
                         pushMsg("YOUR WAND SPUTTERS OUT.");
                     }
+
+                    didAttack = true;
                 }
+            }
+
+            // Fallback: if no ranged weapon is ready, allow throwing ammo by hand.
+            if (!didAttack) {
+                ThrowAmmoSpec spec;
+                if (choosePlayerThrowAmmo(inv, spec)) {
+                    // Consume one projectile from the inventory.
+                    consumeAmmo(inv, spec.ammo, 1);
+
+                    const int range = throwRangeFor(player(), spec.ammo);
+                    const int atk = std::max(1, player().baseAtk - 1 + rng.range(0, 1));
+                    attackRanged(playerMut(), targetPos, range, atk, spec.proj, true);
+                    didAttack = true;
+                }
+            }
+
+            if (!didAttack) {
+                // Should be rare (inventory changed mid-targeting, etc).
+                std::string reason;
+                if (!playerHasRangedReady(&reason)) pushMsg(reason);
+                else pushMsg("YOU CAN'T FIRE RIGHT NOW.");
             }
         }
     }
@@ -6385,6 +6883,8 @@ void Game::endTargeting(bool fire) {
     targetLine.clear();
     targetValid = false;
 }
+
+
 
 
 void Game::moveTargetCursor(int dx, int dy) {
@@ -6515,6 +7015,10 @@ void Game::spawnMonsters() {
             break;
         case EntityKind::Ogre:
             e.hpMax = 20; e.baseAtk = 5; e.baseDef = 2;
+            e.willFlee = false;
+            break;
+        case EntityKind::Mimic:
+            e.hpMax = 16; e.baseAtk = 4; e.baseDef = 2;
             e.willFlee = false;
             break;
         default:
@@ -6737,6 +7241,23 @@ void Game::spawnItems() {
             setChestTrapped(chest, true);
             setChestTrapKnown(chest, false);
             setChestTrapKind(chest, rollChestTrap());
+        }
+
+        // Mimic chance (NetHack flavor): some chests are actually monsters.
+        // Starts appearing a bit deeper; higher-tier chests are more likely.
+        if (depth_ >= 2) {
+            float mimicChance = 0.04f + 0.01f * static_cast<float>(std::min(6, depth_ - 2));
+            mimicChance += 0.03f * static_cast<float>(tier);
+            mimicChance = std::min(0.20f, mimicChance);
+
+            if (rng.chance(mimicChance)) {
+                setChestMimic(chest, true);
+                // Avoid "double gotcha" stacking with locks/traps.
+                setChestLocked(chest, false);
+                setChestTrapped(chest, false);
+                setChestTrapKnown(chest, false);
+                setChestTrapKind(chest, TrapKind::Spike);
+            }
         }
 
         Vec2i pos = randomEmptyTileInRoom(r);
@@ -7033,35 +7554,56 @@ void Game::monsterTurn() {
     const int W = dung.width;
     const int H = dung.height;
 
-    // Build distance map from player (passable tiles).
-    std::vector<int> dist(static_cast<size_t>(W * H), -1);
     auto idx = [&](int x, int y) { return y * W + x; };
-
-    std::deque<Vec2i> q;
-    dist[static_cast<size_t>(idx(p.pos.x, p.pos.y))] = 0;
-    q.push_back(p.pos);
 
     const int dirs[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
 
-    while (!q.empty()) {
-        Vec2i cur = q.front();
-        q.pop_front();
-        int cd = dist[static_cast<size_t>(idx(cur.x, cur.y))];
-        for (auto& dv : dirs) {
-            int dx = dv[0], dy = dv[1];
-            int nx = cur.x + dx;
-            int ny = cur.y + dy;
-            if (!dung.inBounds(nx, ny)) continue;
-            if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
-            if (!dung.isPassable(nx, ny)) continue;
-            if (dist[static_cast<size_t>(idx(nx, ny))] != -1) continue;
-            dist[static_cast<size_t>(idx(nx, ny))] = cd + 1;
-            q.push_back({nx, ny});
-        }
-    }
+    auto buildDistMap = [&](Vec2i origin) -> std::vector<int> {
+        std::vector<int> dist(static_cast<size_t>(W * H), -1);
+        if (!dung.inBounds(origin.x, origin.y)) return dist;
 
-    // Helper to choose move based on dist map.
-    auto stepToward = [&](const Entity& m) -> Vec2i {
+        std::deque<Vec2i> q;
+        dist[static_cast<size_t>(idx(origin.x, origin.y))] = 0;
+        q.push_back(origin);
+
+        while (!q.empty()) {
+            Vec2i cur = q.front();
+            q.pop_front();
+            int cd = dist[static_cast<size_t>(idx(cur.x, cur.y))];
+            for (auto& dv : dirs) {
+                int dx = dv[0], dy = dv[1];
+                int nx = cur.x + dx;
+                int ny = cur.y + dy;
+                if (!dung.inBounds(nx, ny)) continue;
+                if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
+                if (!dung.isPassable(nx, ny)) continue;
+                if (dist[static_cast<size_t>(idx(nx, ny))] != -1) continue;
+                dist[static_cast<size_t>(idx(nx, ny))] = cd + 1;
+                q.push_back({nx, ny});
+            }
+        }
+
+        return dist;
+    };
+
+    // Cache distance maps for this turn (keyed by the target tile index).
+    // Monsters now chase the player only when they have line-of-sight, otherwise they
+    // path toward their last known/heard position and can eventually lose the trail.
+    std::unordered_map<int, std::vector<int>> distCache;
+    distCache.reserve(8);
+
+    auto getDistMap = [&](Vec2i target) -> const std::vector<int>& {
+        const int key = idx(target.x, target.y);
+        auto it = distCache.find(key);
+        if (it != distCache.end()) return it->second;
+        auto [it2, inserted] = distCache.emplace(key, buildDistMap(target));
+        (void)inserted;
+        return it2->second;
+    };
+
+    const std::vector<int>& distToPlayer = getDistMap(p.pos);
+
+    auto stepToward = [&](const Entity& m, const std::vector<int>& distMap) -> Vec2i {
         Vec2i best = m.pos;
         int bestD = 1000000000;
         for (auto& dv : dirs) {
@@ -7071,8 +7613,8 @@ void Game::monsterTurn() {
             if (!dung.inBounds(nx, ny)) continue;
             if (dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
             if (!dung.isPassable(nx, ny)) continue;
-            if (entityAt(nx, ny) && !(nx == p.pos.x && ny == p.pos.y)) continue;
-            int d0 = dist[static_cast<size_t>(idx(nx, ny))];
+            if (entityAt(nx, ny)) continue;
+            int d0 = distMap[static_cast<size_t>(idx(nx, ny))];
             if (d0 >= 0 && d0 < bestD) {
                 bestD = d0;
                 best = {nx, ny};
@@ -7081,7 +7623,7 @@ void Game::monsterTurn() {
         return best;
     };
 
-    auto stepAway = [&](const Entity& m) -> Vec2i {
+    auto stepAway = [&](const Entity& m, const std::vector<int>& distMap) -> Vec2i {
         Vec2i best = m.pos;
         int bestD = -1;
         for (auto& dv : dirs) {
@@ -7092,7 +7634,7 @@ void Game::monsterTurn() {
             if (dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
             if (!dung.isPassable(nx, ny)) continue;
             if (entityAt(nx, ny)) continue;
-            int d0 = dist[static_cast<size_t>(idx(nx, ny))];
+            int d0 = distMap[static_cast<size_t>(idx(nx, ny))];
             if (d0 >= 0 && d0 > bestD) {
                 bestD = d0;
                 best = {nx, ny};
@@ -7101,22 +7643,54 @@ void Game::monsterTurn() {
         return best;
     };
 
+    constexpr int LOS_MANHATTAN = 12;
+    constexpr int TRACK_TURNS = 16;
+
     for (auto& m : ents) {
         if (m.id == playerId_) continue;
         if (m.hp <= 0) continue;
 
-        int d0 = dist[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
-        int man = manhattan(m.pos, p.pos);
+        const int man = manhattan(m.pos, p.pos);
 
         bool seesPlayer = false;
-        if (man <= 12) {
+        if (man <= LOS_MANHATTAN) {
             seesPlayer = dung.hasLineOfSight(m.pos.x, m.pos.y, p.pos.x, p.pos.y);
         }
 
-        if (seesPlayer) m.alerted = true;
+        if (seesPlayer) {
+            m.alerted = true;
+            m.lastKnownPlayerPos = p.pos;
+            m.lastKnownPlayerAge = 0;
+        } else if (m.alerted) {
+            if (m.lastKnownPlayerAge < 9999) m.lastKnownPlayerAge += 1;
+        }
 
-        if (!m.alerted) {
-            // Idle wander
+        // Compatibility fallback: if something flagged the monster alerted but didn't provide a
+        // last-known position (older saves or older code paths), assume the alert was to the
+        // player's current location.
+        if (m.alerted && m.lastKnownPlayerPos.x < 0) {
+            m.lastKnownPlayerPos = p.pos;
+            m.lastKnownPlayerAge = 0;
+        }
+
+        // Determine hunt target.
+        Vec2i target{-1, -1};
+        bool hunting = false;
+
+        if (seesPlayer) {
+            target = p.pos;
+            hunting = true;
+        } else if (m.alerted && m.lastKnownPlayerPos.x >= 0 && m.lastKnownPlayerPos.y >= 0 && m.lastKnownPlayerAge <= TRACK_TURNS) {
+            target = m.lastKnownPlayerPos;
+            hunting = true;
+        }
+
+        if (!hunting) {
+            // Idle wander.
+            m.alerted = false;
+            m.lastKnownPlayerPos = {-1, -1};
+            m.lastKnownPlayerAge = 9999;
+
             float wanderChance = (m.kind == EntityKind::Bat) ? 0.65f : 0.25f;
             if (rng.chance(wanderChance)) {
                 int di = rng.range(0, 7);
@@ -7124,6 +7698,9 @@ void Game::monsterTurn() {
             }
             continue;
         }
+
+        const std::vector<int>& distMap = (target == p.pos) ? distToPlayer : getDistMap(target);
+        const int d0 = distMap[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
 
         // If adjacent, melee attack.
         if (isAdjacent8(m.pos, p.pos)) {
@@ -7155,20 +7732,34 @@ void Game::monsterTurn() {
             }
         }
 
-        // Fleeing behavior
+        // If the monster reached the last-known spot but can't see the player, it will "search"
+        // around for a little while and then eventually give up.
+        if (!seesPlayer && m.pos == target) {
+            float searchChance = (m.kind == EntityKind::Bat) ? 0.75f : 0.55f;
+            if (rng.chance(searchChance)) {
+                int di = rng.range(0, 7);
+                tryMove(m, dirs[di][0], dirs[di][1]);
+            }
+
+            // Searching without finding the player makes the monster forget faster.
+            m.lastKnownPlayerAge = std::min(9999, m.lastKnownPlayerAge + 1);
+            continue;
+        }
+
+        // Fleeing behavior (away from whatever the monster is currently "hunting").
         if (m.willFlee && m.hp <= std::max(1, m.hpMax / 3) && d0 >= 0) {
-            Vec2i to = stepAway(m);
+            Vec2i to = stepAway(m, distMap);
             if (to != m.pos) {
                 tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
             }
             continue;
         }
 
-        // Ranged behavior
+        // Ranged behavior (only when the monster can actually see the player).
         if (m.canRanged && seesPlayer && man <= m.rangedRange) {
-            // If too close, step back a bit
+            // If too close, step back a bit.
             if (man <= 2 && d0 >= 0) {
-                Vec2i to = stepAway(m);
+                Vec2i to = stepAway(m, distMap);
                 if (to != m.pos) {
                     tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
                     continue;
@@ -7179,9 +7770,8 @@ void Game::monsterTurn() {
             continue;
         }
 
-        // Pack behavior: try to occupy adjacent tiles around player
-        if (m.packAI) {
-            // If any adjacent tile is free, take it.
+        // Pack behavior: try to occupy adjacent tiles around player (only when seeing the player).
+        if (m.packAI && seesPlayer) {
             Vec2i bestAdj = m.pos;
             bool found = false;
             for (auto& dv : dirs) {
@@ -7190,21 +7780,23 @@ void Game::monsterTurn() {
                 if (!dung.inBounds(ax, ay)) continue;
                 if (!dung.isPassable(ax, ay)) continue;
                 if (entityAt(ax, ay)) continue;
-                // Prefer closer-to-monster candidate
+                // Prefer closer-to-monster candidate.
                 if (!found || manhattan({ax, ay}, m.pos) < manhattan(bestAdj, m.pos)) {
                     bestAdj = {ax, ay};
                     found = true;
                 }
             }
             if (found) {
-                Vec2i lineStep = stepToward(m); // fallback
-                // Move toward chosen adjacent tile using a greedy step
+                // Move toward chosen adjacent tile using a greedy step.
                 std::vector<Vec2i> path = bresenhamLine(m.pos, bestAdj);
                 if (path.size() > 1) {
                     Vec2i step = path[1];
                     tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
                     continue;
                 }
+
+                // Fallback: just chase directly.
+                Vec2i lineStep = stepToward(m, distToPlayer);
                 if (lineStep != m.pos) {
                     tryMove(m, lineStep.x - m.pos.x, lineStep.y - m.pos.y);
                     continue;
@@ -7212,32 +7804,39 @@ void Game::monsterTurn() {
             }
         }
 
-        // Default: step toward using dist map
+        // Default: step toward the hunt target using a distance map.
         if (d0 >= 0) {
-            Vec2i to = stepToward(m);
+            Vec2i to = stepToward(m, distMap);
             if (to != m.pos) {
                 tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
             }
+        } else {
+            // No path found: wander a bit so the monster doesn't freeze.
+            float wanderChance = (m.kind == EntityKind::Bat) ? 0.65f : 0.25f;
+            if (rng.chance(wanderChance)) {
+                int di = rng.range(0, 7);
+                tryMove(m, dirs[di][0], dirs[di][1]);
+            }
         }
     }
-// Post-turn passive effects (regen, etc.).
-for (auto& m : ents) {
-    if (m.id == playerId_) continue;
-    if (m.hp <= 0) continue;
-    if (m.regenAmount <= 0 || m.regenChancePct <= 0) continue;
-    if (m.hp >= m.hpMax) continue;
-    if (rng.range(1, 100) <= m.regenChancePct) {
-        m.hp = std::min(m.hpMax, m.hp + m.regenAmount);
 
-        // Only message if the monster is currently visible to the player.
-        if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
-            std::ostringstream ss;
-            ss << kindName(m.kind) << " REGENERATES.";
-            pushMsg(ss.str());
+    // Post-turn passive effects (regen, etc.).
+    for (auto& m : ents) {
+        if (m.id == playerId_) continue;
+        if (m.hp <= 0) continue;
+        if (m.regenAmount <= 0 || m.regenChancePct <= 0) continue;
+        if (m.hp >= m.hpMax) continue;
+        if (rng.range(1, 100) <= m.regenChancePct) {
+            m.hp = std::min(m.hpMax, m.hp + m.regenAmount);
+
+            // Only message if the monster is currently visible to the player.
+            if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                std::ostringstream ss;
+                ss << kindName(m.kind) << " REGENERATES.";
+                pushMsg(ss.str());
+            }
         }
     }
-}
-
 }
 
 void Game::applyEndOfTurnEffects() {
@@ -7335,6 +7934,46 @@ void Game::applyEndOfTurnEffects() {
                 if (endCause_.empty()) endCause_ = "STARVED TO DEATH";
                 gameOver = true;
                 return;
+            }
+        }
+    }
+
+
+    // Timed effects for monsters (poison, web). These tick with time just like the player.
+    for (auto& m : ents) {
+        if (m.id == playerId_) continue;
+        if (m.hp <= 0) continue;
+
+        // Timed poison: lose 1 HP per full turn.
+        if (m.poisonTurns > 0) {
+            m.poisonTurns = std::max(0, m.poisonTurns - 1);
+            m.hp -= 1;
+
+            if (m.hp <= 0) {
+                // Only message if the monster is currently visible to the player.
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(m.kind) << " SUCCUMBS TO POISON.";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                }
+            } else if (m.poisonTurns == 0) {
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(m.kind) << " RECOVERS FROM POISON.";
+                    pushMsg(ss.str(), MessageKind::System, false);
+                }
+            }
+        }
+
+        // Timed webbing: prevents movement while >0, then wears off.
+        if (m.webTurns > 0) {
+            m.webTurns = std::max(0, m.webTurns - 1);
+            if (m.webTurns == 0) {
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(m.kind) << " BREAKS FREE OF THE WEB.";
+                    pushMsg(ss.str(), MessageKind::System, false);
+                }
             }
         }
     }

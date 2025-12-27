@@ -8,6 +8,54 @@
 
 
 
+## [0.20.6] - 2025-12-27
+
+### Added
+- **Throw-by-hand fallback** for ranged attacks: if you don’t have a *ready* ranged weapon, you can still use **Fire** to **throw a Rock/Arrow** (if you have ammo).
+  - Rocks are preferred when both are available.
+  - Throw range scales slightly with your attack stat (as a simple stand-in for strength).
+- Targeting UI now indicates whether you’re **firing** an equipped weapon or **throwing** a projectile.
+
+## [0.20.5] - 2025-12-27
+
+### Added
+- **Monster tracking (last known position)**: monsters now hunt toward the **last seen/heard** player location instead of having perfect information when line-of-sight is broken.
+  - If they reach the spot and still can't see you, they will **search** nearby briefly and can eventually **give up**.
+- **Noise alerting**: **opening doors** and **attacking** (melee/ranged) will alert nearby monsters to investigate.
+
+### Changed
+- **Alarm traps** now alert monsters to the alarm's **location** (so they path toward the source).
+
+## [0.20.4] - 2025-12-27
+
+### Added
+- **Recoverable ammo**: **Arrows** and **Rocks** can now sometimes remain on the ground after a ranged attack.
+  - Works for both your shots and enemy volleys.
+  - Recovery chance is lower when the projectile hits a wall/closed door, and also reduced for enemy shots (so archers don’t become infinite ammo printers).
+
+## [0.20.3] - 2025-12-27
+
+### Added
+- **Monsters trigger traps**: spike, poison dart, teleport, alarm, and web traps now affect monsters too (and can even kill them).
+- **Monster timed effects**: **poison** and **webbing** now tick down on monsters over time (webbing prevents movement while active).
+
+### Changed
+- Traps are only marked as **discovered** when **you** trigger them, or when you can **see** another creature trigger them.
+
+## [0.20.2] - 2025-12-27
+
+### Added
+- **Mimic chests**: some **Chests** are actually **Mimics** in disguise.
+  - They look like normal chests until you try to **open** them.
+  - Mimics prefer to spawn **adjacent** when revealed to avoid overlapping the player (since chests are opened underfoot).
+
+## [0.20.1] - 2025-12-27
+
+### Added
+- **Disarm chest trap**: the **Disarm** action (`T` by default) can now disarm a *known* trapped **Chest** adjacent to you (or underfoot).
+  - On failure you may **set the trap off**.
+  - **Lockpicks** improve your chances, but can break.
+
 ## [0.20.0] - 2025-12-27
 
 ### Added

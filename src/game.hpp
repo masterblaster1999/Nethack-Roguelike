@@ -27,6 +27,7 @@ enum class EntityKind : uint8_t {
     Snake,
     Spider,
     Ogre,
+    Mimic,
 };
 
 enum class Action : uint8_t {
@@ -166,6 +167,11 @@ struct Entity {
     int regenAmount = 0;
 
     bool alerted = false;
+
+    // Monster perception: last known player (or noise) location and how long ago it was confirmed.
+    // This prevents monsters from having perfect information when they lose line of sight.
+    Vec2i lastKnownPlayerPos{-1, -1};
+    int lastKnownPlayerAge = 9999; // turns since last sight/hearing; large means "unknown"
 
     // Timed status effects (mostly used by player, but can be applied to monsters too).
     int poisonTurns = 0;   // lose 1 HP per full turn
@@ -420,6 +426,10 @@ public:
     void setTargetCursor(Vec2i p);
 
 private:
+    // Drop an item on the ground, merging into an existing stack when possible.
+    // This reduces clutter for stackable items (ammo, gold, potions, scrolls, etc.).
+    void dropGroundItem(Vec2i pos, ItemKind k, int count = 1, int enchant = 0);
+
     Dungeon dung;
     RNG rng;
 
@@ -670,6 +680,8 @@ private:
     bool lockDoor();
     Trap* trapAtMut(int x, int y);
     void triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm = false);
+    // Alert monsters to a sound/event at `pos`. radius<=0 means "global" (all monsters).
+    void alertMonstersTo(Vec2i pos, int radius);
     void applyEndOfTurnEffects();
     Vec2i randomFreeTileInRoom(const Room& r, int tries = 200);
 

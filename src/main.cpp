@@ -14,6 +14,7 @@
 #include "keybinds.hpp"
 #include "render.hpp"
 #include "settings.hpp"
+#include "slot_utils.hpp"
 #include "version.hpp"
 
 static std::optional<uint32_t> parseSeedArg(int argc, char** argv) {
@@ -48,57 +49,6 @@ static std::optional<std::string> parseStringArg(int argc, char** argv, const ch
     }
     return std::nullopt;
 }
-
-static bool isWindowsReservedBasename(const std::string& lower) {
-    static const char* reserved[] = {
-        "con", "prn", "aux", "nul",
-        "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
-        "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"
-    };
-    for (const char* r : reserved) {
-        if (lower == r) return true;
-    }
-    return false;
-}
-
-static std::string sanitizeSlotName(std::string raw) {
-    // Keep only filename-safe characters for a slot name (portable + predictable).
-    auto toLower = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-        return s;
-    };
-
-    // trim
-    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front()))) raw.erase(raw.begin());
-    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back()))) raw.pop_back();
-
-    raw = toLower(std::move(raw));
-
-    std::string out;
-    out.reserve(raw.size());
-
-    for (unsigned char c : raw) {
-        if (std::isalnum(c)) out.push_back(static_cast<char>(c));
-        else if (c == '_' || c == '-') out.push_back(static_cast<char>(c));
-        else if (std::isspace(c)) out.push_back('_');
-        else out.push_back('_');
-    }
-
-    // Collapse repeated underscores
-    out.erase(std::unique(out.begin(), out.end(), [](char a, char b) { return a == '_' && b == '_'; }), out.end());
-
-    // Trim underscores/hyphens from ends
-    while (!out.empty() && (out.front() == '_' || out.front() == '-')) out.erase(out.begin());
-    while (!out.empty() && (out.back() == '_' || out.back() == '-')) out.pop_back();
-
-    if (out.empty()) out = "slot";
-    if (out.size() > 32) out.resize(32);
-
-    if (isWindowsReservedBasename(out)) out = "_" + out;
-
-    return out;
-}
-
 
 static void printUsage(const char* exe) {
     std::cout

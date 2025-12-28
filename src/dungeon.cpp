@@ -658,6 +658,9 @@ void Dungeon::generate(RNG& rng) {
 
 bool Dungeon::lineOfSight(int x0, int y0, int x1, int y1) const {
     // Bresenham line; stop if opaque tile blocks.
+    // Additionally, prevent "corner peeking": if the line takes a diagonal step
+    // between two opaque tiles, we treat LOS as blocked. This keeps monster LOS
+    // consistent with player FOV and diagonal movement rules.
     int dx = std::abs(x1 - x0);
     int dy = std::abs(y1 - y0);
     int sx = (x0 < x1) ? 1 : -1;
@@ -673,11 +676,28 @@ bool Dungeon::lineOfSight(int x0, int y0, int x1, int y1) const {
         }
         if (x == x1 && y == y1) break;
 
+        const int prevX = x;
+        const int prevY = y;
+
         int e2 = err * 2;
         if (e2 > -dy) { err -= dy; x += sx; }
         if (e2 <  dx) { err += dx; y += sy; }
 
         if (!inBounds(x, y)) return false;
+
+        const int stepX = x - prevX;
+        const int stepY = y - prevY;
+        if (stepX != 0 && stepY != 0) {
+            // Diagonal step: check the two cardinal neighbors we are "cutting" between.
+            const int ax = prevX + stepX;
+            const int ay = prevY;
+            const int bx = prevX;
+            const int by = prevY + stepY;
+
+            if (inBounds(ax, ay) && inBounds(bx, by)) {
+                if (isOpaque(ax, ay) && isOpaque(bx, by)) return false;
+            }
+        }
     }
 
     return true;

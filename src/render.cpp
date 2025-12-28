@@ -565,7 +565,11 @@ void Renderer::drawHud(const Game& game) {
             case MessageKind::Success: c = green; break;
             case MessageKind::System: c = gray; break;
         }
-        drawText5x7(renderer, 8, y, 2, c, msg.text);
+        std::string line = msg.text;
+        if (msg.repeat > 1) {
+            line += " (x" + std::to_string(msg.repeat) + ")";
+        }
+        drawText5x7(renderer, 8, y, 2, c, line);
         y += lineH;
     }
 
@@ -820,7 +824,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
 
     y += 6;
     lineWhite("TIPS:");
-    lineGray("SEARCH CAN REVEAL TRAPS AND SECRET DOORS.");
+    lineGray("SEARCH CAN REVEAL TRAPS AND SECRET DOORS. EXT: #SEARCH N [ALL]");
     lineGray("LOCKED DOORS: USE KEYS, LOCKPICKS, OR A SCROLL OF KNOCK.");
     lineGray("SOME VAULT DOORS MAY BE TRAPPED.");
     lineGray("AUTO-EXPLORE STOPS IF YOU SEE AN ENEMY OR GET HURT/DEBUFFED.");

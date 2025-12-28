@@ -1,5 +1,6 @@
 #include "game.hpp"
 #include "settings.hpp"
+#include "slot_utils.hpp"
 #include "version.hpp"
 #include <algorithm>
 #include <numeric>
@@ -76,6 +77,23 @@ static int throwRangeFor(const Entity& p, AmmoKind ammo) {
 }
 
 
+
+static std::string formatSearchDiscoveryMessage(int foundTraps, int foundSecrets) {
+    std::ostringstream ss;
+    ss << "YOU DISCOVER ";
+    bool first = true;
+    if (foundTraps > 0) {
+        ss << foundTraps << " TRAP" << (foundTraps == 1 ? "" : "S");
+        first = false;
+    }
+    if (foundSecrets > 0) {
+        if (!first) ss << " AND ";
+        ss << foundSecrets << " SECRET DOOR" << (foundSecrets == 1 ? "" : "S");
+    }
+    ss << "!";
+    return ss.str();
+}
+
 static void moveFileWithFallback(const std::filesystem::path& from, const std::filesystem::path& to) {
     std::error_code ec;
     std::filesystem::rename(from, to, ec);
@@ -129,56 +147,7 @@ static std::string timestampForFilename() {
 }
 
 
-static bool isWindowsReservedBasename(const std::string& lower) {
-    // Windows device names are invalid as file basenames (even with extensions).
-    // We only guard against the common ones to avoid surprising save-slot failures.
-    static const char* reserved[] = {
-        "con", "prn", "aux", "nul",
-        "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
-        "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"
-    };
-    for (const char* r : reserved) {
-        if (lower == r) return true;
-    }
-    return false;
-}
-
-static std::string sanitizeSlotName(std::string raw) {
-    raw = trim(std::move(raw));
-    raw = toLower(std::move(raw));
-
-    std::string out;
-    out.reserve(raw.size());
-
-    for (unsigned char c : raw) {
-        if (std::isalnum(c)) {
-            out.push_back(static_cast<char>(c));
-        } else if (c == '_' || c == '-') {
-            out.push_back(static_cast<char>(c));
-        } else if (std::isspace(c)) {
-            out.push_back('_');
-        } else {
-            // Avoid path separators / dots / other punctuation.
-            out.push_back('_');
-        }
-    }
-
-    // Collapse repeated underscores.
-    out.erase(std::unique(out.begin(), out.end(), [](char a, char b) { return a == '_' && b == '_'; }), out.end());
-
-    // Trim underscores/hyphens from ends.
-    while (!out.empty() && (out.front() == '_' || out.front() == '-')) out.erase(out.begin());
-    while (!out.empty() && (out.back() == '_' || out.back() == '-')) out.pop_back();
-
-    if (out.empty()) out = "slot";
-    if (out.size() > 32) out.resize(32);
-
-    if (isWindowsReservedBasename(out)) {
-        out = "_" + out;
-    }
-
-    return out;
-}
+// sanitizeSlotName() lives in slot_utils.hpp so main/settings/game share identical behavior.
 
 static std::filesystem::path makeSlotPath(const std::string& basePathStr, const std::string& slot) {
     std::filesystem::path p(basePathStr);
@@ -1019,7 +988,32 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     }
 
     if (cmd == "search") {
-        game.handleAction(Action::Search);
+        // Optional: #search N [all]
+        //   #search        -> single search (same as pressing C)
+        //   #search 20     -> repeat search up to 20 turns, stop on first discovery or danger
+        //   #search 20 all -> repeat full 20 turns even if something is discovered (summary at end)
+        if (toks.size() <= 1) {
+            game.handleAction(Action::Search);
+            return;
+        }
+
+        int n = 0;
+        try {
+            n = std::stoi(toks[1], nullptr, 0);
+        } catch (...) {
+            game.pushSystemMessage("USAGE: search [N] [all]");
+            return;
+        }
+
+        n = clampi(n, 1, 2000);
+
+        bool stopOnFind = true;
+        if (toks.size() > 2) {
+            std::string m = toLower(toks[2]);
+            if (m == "all" || m == "full" || m == "continue") stopOnFind = false;
+        }
+
+        game.repeatSearch(n, stopOnFind);
         return;
     }
 
@@ -1475,6 +1469,18 @@ Entity& Game::playerMut() {
 }
 
 void Game::pushMsg(const std::string& s, MessageKind kind, bool fromPlayer) {
+    // Coalesce consecutive identical messages to reduce spam in combat / auto-move.
+    // This preserves the original text and adds a repeat counter for the renderer.
+    if (!msgs.empty()) {
+        Message& last = msgs.back();
+        if (last.text == s && last.kind == kind && last.fromPlayer == fromPlayer) {
+            if (last.repeat < 9999) {
+                ++last.repeat;
+            }
+            return;
+        }
+    }
+
     // Keep some scrollback
     if (msgs.size() > 400) {
         msgs.erase(msgs.begin(), msgs.begin() + 100);
@@ -4790,6 +4796,80 @@ void Game::restUntilSafe() {
     }
 }
 
+
+int Game::repeatSearch(int maxTurns, bool stopOnFind) {
+    if (isFinished()) return 0;
+    if (inputLock) return 0;
+
+    if (maxTurns <= 0) return 0;
+    maxTurns = clampi(maxTurns, 1, 2000);
+
+    // Cancel auto-move to avoid fighting the stepper.
+    if (autoMode != AutoMoveMode::None) {
+        stopAutoMove(true);
+    }
+
+    // Single-turn: behave exactly like the normal Search action.
+    if (maxTurns == 1) {
+        (void)searchForTraps(true);
+        advanceAfterPlayerAction();
+        return 1;
+    }
+
+    // Repeated searching is usually only safe when no hostiles are visible.
+    if (anyVisibleHostiles()) {
+        pushMsg("TOO DANGEROUS TO SEARCH REPEATEDLY!", MessageKind::Warning, true);
+        return 0;
+    }
+
+    pushMsg("YOU SEARCH...", MessageKind::Info, true);
+
+    int steps = 0;
+    int totalFoundTraps = 0;
+    int totalFoundSecrets = 0;
+    bool foundAny = false;
+    bool interrupted = false;
+
+    while (!isFinished() && steps < maxTurns) {
+        // Abort if something hostile comes into view.
+        if (anyVisibleHostiles()) {
+            pushMsg("SEARCH INTERRUPTED!", MessageKind::Warning, true);
+            interrupted = true;
+            break;
+        }
+
+        int ft = 0;
+        int fs = 0;
+        (void)searchForTraps(false, &ft, &fs);
+
+        totalFoundTraps += ft;
+        totalFoundSecrets += fs;
+
+        if (ft > 0 || fs > 0) {
+            foundAny = true;
+            if (stopOnFind) {
+                // Report the discovery immediately (before monsters act), like normal search.
+                pushMsg(formatSearchDiscoveryMessage(ft, fs), MessageKind::Info, true);
+            }
+        }
+
+        advanceAfterPlayerAction();
+        ++steps;
+
+        if (foundAny && stopOnFind) break;
+    }
+
+    if (!isFinished()) {
+        if (foundAny && !stopOnFind) {
+            pushMsg(formatSearchDiscoveryMessage(totalFoundTraps, totalFoundSecrets), MessageKind::Info, true);
+        } else if (!foundAny && !interrupted) {
+            pushMsg("YOU FIND NOTHING.", MessageKind::Info, true);
+        }
+    }
+
+    return steps;
+}
+
 bool Game::tryMove(Entity& e, int dx, int dy) {
     if (e.hp <= 0) return false;
     if (dx == 0 && dy == 0) return false;
@@ -5029,7 +5109,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
     }
 }
 
-bool Game::searchForTraps() {
+bool Game::searchForTraps(bool verbose, int* foundTrapsOut, int* foundSecretsOut) {
     Entity& p = playerMut();
     const int radius = 2;
 
@@ -5096,23 +5176,17 @@ bool Game::searchForTraps() {
         }
     }
 
-    if (foundTraps > 0 || foundSecrets > 0) {
-        std::ostringstream ss;
-        ss << "YOU DISCOVER ";
-        bool first = true;
-        if (foundTraps > 0) {
-            ss << foundTraps << " TRAP" << (foundTraps == 1 ? "" : "S");
-            first = false;
+    if (foundTrapsOut) *foundTrapsOut = foundTraps;
+    if (foundSecretsOut) *foundSecretsOut = foundSecrets;
+
+    if (verbose) {
+        if (foundTraps > 0 || foundSecrets > 0) {
+            pushMsg(formatSearchDiscoveryMessage(foundTraps, foundSecrets), MessageKind::Info, true);
+        } else {
+            pushMsg("YOU SEARCH, BUT FIND NOTHING.", MessageKind::Info, true);
         }
-        if (foundSecrets > 0) {
-            if (!first) ss << " AND ";
-            ss << foundSecrets << " SECRET DOOR" << (foundSecrets == 1 ? "" : "S");
-        }
-        ss << "!";
-        pushMsg(ss.str(), MessageKind::Info, true);
-    } else {
-        pushMsg("YOU SEARCH, BUT FIND NOTHING.", MessageKind::Info, true);
     }
+
 
     return true; // Searching costs a turn.
 }

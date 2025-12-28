@@ -124,6 +124,10 @@ struct Message {
     std::string text;
     MessageKind kind = MessageKind::Info;
     bool fromPlayer = true;
+
+    // Consecutive duplicate messages are compacted by incrementing this counter.
+    // Example: "YOU HIT THE ORC." repeated 3 times becomes one log line with repeat=3.
+    int repeat = 1;
 };
 
 enum class TrapKind : uint8_t {
@@ -214,6 +218,12 @@ public:
     void newGame(uint32_t seed);
 
     void handleAction(Action a);
+
+    // QoL: repeat the Search action multiple times without spamming the log.
+    // Used by the extended command: #search N
+    // Returns how many turns were actually spent searching.
+    int repeatSearch(int maxTurns, bool stopOnFind = true);
+
 
     // Shrine interaction (use via #pray or future keybind).
     // mode: \"heal\" | \"cure\" | \"identify\" | \"bless\" | \"\" (auto)
@@ -674,7 +684,7 @@ private:
     Vec2i findNearestExploreFrontier() const;
     std::vector<Vec2i> findPathBfs(Vec2i start, Vec2i goal, bool requireExplored) const;
     void stopAutoMove(bool silent);
-    bool searchForTraps();
+    bool searchForTraps(bool verbose = true, int* foundTrapsOut = nullptr, int* foundSecretsOut = nullptr);
     bool disarmTrap();
     bool closeDoor();
     bool lockDoor();

@@ -3,6 +3,7 @@
 #include "rng.hpp"
 #include "scores.hpp"
 #include "settings.hpp"
+#include "slot_utils.hpp"
 
 #include <cstdint>
 #include <cctype>
@@ -203,6 +204,36 @@ void test_fov_locked_door_blocks_visibility() {
     d.at(3, 2).type = TileType::DoorOpen;
     d.computeFov(1, 2, 10);
     expect(d.at(4, 2).visible, "Tile behind open door should be visible");
+}
+
+
+void test_los_blocks_diagonal_corner_peek() {
+    Dungeon d(5, 5);
+
+    // Start with open floor everywhere.
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Floor;
+        }
+    }
+
+    // Two adjacent orthogonal walls should block diagonal LOS between (1,1) and (2,2).
+    // Layout (P=origin, X=target, #=wall):
+    //   . . . . .
+    //   . P # . .
+    //   . # X . .
+    //   . . . . .
+    //   . . . . .
+    d.at(2, 1).type = TileType::Wall;
+    d.at(1, 2).type = TileType::Wall;
+
+    expect(!d.hasLineOfSight(1, 1, 2, 2),
+           "LOS should be blocked by diagonal corner walls (no corner peeking)");
+
+    // If one side is open, LOS should be allowed.
+    d.at(2, 1).type = TileType::Floor;
+    expect(d.hasLineOfSight(1, 1, 2, 2),
+           "LOS should allow diagonal visibility if at least one side is open");
 }
 
 void test_item_defs_sane() {
@@ -1010,6 +1041,60 @@ void test_settings_ini_helpers_create_update_remove() {
     std::remove(path.c_str());
 #endif
 }
+
+void test_sanitize_slot_name() {
+    expect(sanitizeSlotName("  My Slot  ") == "my_slot", "sanitizeSlotName should trim/lower and replace spaces");
+    expect(sanitizeSlotName("../../evil") == "evil", "sanitizeSlotName should strip path-like characters");
+    expect(sanitizeSlotName("COM1") == "_com1", "sanitizeSlotName should guard Windows reserved basenames");
+    expect(sanitizeSlotName("   ---___   ") == "slot", "sanitizeSlotName should fall back to 'slot' on empty");
+
+    std::string longName(100, 'a');
+    const std::string capped = sanitizeSlotName(longName);
+    expect(capped.size() == 32, "sanitizeSlotName should cap to 32 characters");
+}
+
+void test_message_dedup_consecutive() {
+    Game g;
+    g.newGame(123u);
+
+    const size_t base = g.messages().size();
+
+    g.pushSystemMessage("HELLO");
+    expect(g.messages().size() == base + 1, "pushSystemMessage should append a message");
+    expect(g.messages().back().text == "HELLO", "message text should match");
+    expect(g.messages().back().repeat == 1, "new message should start with repeat=1");
+
+    // Same message, consecutive: should merge.
+    g.pushSystemMessage("HELLO");
+    expect(g.messages().size() == base + 1, "consecutive duplicate messages should be merged");
+    expect(g.messages().back().repeat == 2, "merged message should increment repeat count");
+
+    // Different message: should append.
+    g.pushSystemMessage("WORLD");
+    expect(g.messages().size() == base + 2, "different message should append a new entry");
+
+    // Non-consecutive duplicate: should append.
+    g.pushSystemMessage("HELLO");
+    expect(g.messages().size() == base + 3, "non-consecutive duplicates should not be merged");
+
+    // Scroll interaction: when scrolled up, new messages should increase scroll offset;
+    // merged duplicates should NOT.
+    // Ensure there are enough messages to scroll.
+    for (int i = 0; i < 10; ++i) g.pushSystemMessage("MSG " + std::to_string(i));
+    g.handleAction(Action::LogUp);
+    g.handleAction(Action::LogUp);
+    const int scrollBefore = g.messageScroll();
+    expect(scrollBefore > 0, "log should be scrolled up for this test");
+
+    g.pushSystemMessage("SCROLLTEST");
+    const int scrollAfterNew = g.messageScroll();
+    expect(scrollAfterNew == scrollBefore + 1, "new message should increase msgScroll when scrolled up");
+
+    g.pushSystemMessage("SCROLLTEST");
+    const int scrollAfterDup = g.messageScroll();
+    expect(scrollAfterDup == scrollAfterNew, "merged duplicate should not change msgScroll");
+    expect(g.messages().back().repeat >= 2, "merged duplicate should increase repeat count (scrolled case)");
+}
 } // namespace
 
 int main() {
@@ -1022,6 +1107,7 @@ int main() {
     test_close_door_tile_rules();
     test_lock_door_tile_rules();
     test_fov_locked_door_blocks_visibility();
+    test_los_blocks_diagonal_corner_peek();
     test_item_defs_sane();
 
     test_scores_legacy_load();
@@ -1042,6 +1128,8 @@ int main() {
     test_settings_autopickup_smart_parse();
     test_settings_default_slot_parse();
     test_settings_ini_helpers_create_update_remove();
+    test_sanitize_slot_name();
+    test_message_dedup_consecutive();
 
     if (failures == 0) {
         std::cout << "All tests passed.\n";

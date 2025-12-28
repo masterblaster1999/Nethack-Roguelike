@@ -45,6 +45,8 @@ private:
     bool vsyncEnabled = false;
 
     bool initialized = false;
+	// Cached animation frame index for overlay/UI draws.
+	int lastFrame = 0;
 
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;

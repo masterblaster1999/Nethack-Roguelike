@@ -771,22 +771,28 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 
     auto itemEffectDesc = [&](const Item& it, bool identified) -> std::string {
         const ItemDef& def = itemDef(it.kind);
-        if (!identified && def.identifiable) return "EFFECT: UNKNOWN";
+		if (!identified && isIdentifiableKind(it.kind)) return "EFFECT: UNKNOWN";
         switch (it.kind) {
-            case ItemKind::PotionHealing: return "EFFECT: HEAL";
+			case ItemKind::PotionHealing:
+				return "EFFECT: HEAL +" + std::to_string(std::max(0, def.healAmount)) + " HP";
             case ItemKind::PotionAntidote: return "EFFECT: CURE POISON";
             case ItemKind::PotionStrength: return "EFFECT: +ATK";
             case ItemKind::PotionRegeneration: return "EFFECT: REGEN";
-            case ItemKind::PotionShielding: return "EFFECT: SHIELD";
+			case ItemKind::PotionShielding: return "EFFECT: STONESKIN";
             case ItemKind::PotionHaste: return "EFFECT: HASTE";
             case ItemKind::PotionVision: return "EFFECT: VISION";
             case ItemKind::ScrollTeleport: return "EFFECT: TELEPORT";
             case ItemKind::ScrollMapping: return "EFFECT: MAPPING";
             case ItemKind::ScrollDetectTraps: return "EFFECT: DETECT TRAPS";
+			case ItemKind::ScrollDetectSecrets: return "EFFECT: DETECT SECRETS";
             case ItemKind::ScrollKnock: return "EFFECT: KNOCK";
             case ItemKind::ScrollEnchantWeapon: return "EFFECT: ENCHANT WEAPON";
             case ItemKind::ScrollEnchantArmor: return "EFFECT: ENCHANT ARMOR";
             case ItemKind::ScrollIdentify: return "EFFECT: IDENTIFY";
+			case ItemKind::FoodRation:
+				return def.hungerRestore > 0
+					? ("EFFECT: RESTORE HUNGER +" + std::to_string(def.hungerRestore))
+					: "EFFECT: FOOD";
             default: break;
         }
         return "EFFECT: —";
@@ -840,50 +846,124 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             iy += 18;
         };
 
-        // Type
-        switch (def.type) {
-            case ItemType::MeleeWeapon:
-                statLine("TYPE: MELEE WEAPON", white);
-                statLine("ATK: " + std::to_string(def.meleeAttack) + "  (ENCH: " + std::to_string(it.enchant) + ")", gray);
-                break;
-            case ItemType::RangedWeapon:
-                statLine("TYPE: RANGED WEAPON", white);
-                statLine("ATK: " + std::to_string(def.rangedAttack) + "  RNG: " + std::to_string(def.range), gray);
-                statLine("AMMO: " + toUpper(itemDisplayNameSingle(def.ammoType)), gray);
-                break;
-            case ItemType::Armor:
-                statLine("TYPE: ARMOR", white);
-                statLine("DEF: " + std::to_string(def.defense) + "  (ENCH: " + std::to_string(it.enchant) + ")", gray);
-                break;
-            case ItemType::Food:
-                statLine("TYPE: FOOD", white);
-                statLine("EFFECT: SATIATION", gray);
-                break;
-            case ItemType::Consumable:
-                statLine(def.identifiable ? "TYPE: CONSUMABLE (IDENTIFIABLE)" : "TYPE: CONSUMABLE", white);
-                statLine(itemEffectDesc(it, identified), gray);
-                break;
-            case ItemType::Key:
-                statLine("TYPE: KEY", white);
-                statLine("USED FOR: LOCKED DOORS", gray);
-                break;
-            case ItemType::Lockpick:
-                statLine("TYPE: LOCKPICK", white);
-                statLine("USED FOR: PICK LOCKS", gray);
-                break;
-            case ItemType::Gold:
-                statLine("TYPE: GOLD", white);
-                statLine("VALUE: " + std::to_string(it.count), gray);
-                break;
-            case ItemType::Wand:
-                statLine("TYPE: WAND", white);
-                statLine("CHARGES: " + std::to_string(it.charges), gray);
-                break;
-        }
+		// Type / stats
+		auto ammoLabel = [](AmmoKind a) -> const char* {
+			switch (a) {
+				case AmmoKind::Arrow: return "ARROWS";
+				case AmmoKind::Rock:  return "ROCKS";
+				default: return "NONE";
+			}
+		};
+
+		auto statCompare = [&](const char* label, int cur, int after) {
+			const int delta = after - cur;
+			std::ostringstream ss;
+			ss << label << ": " << cur << " -> " << after;
+			if (delta > 0) ss << " (+" << delta << ")";
+			else if (delta < 0) ss << " (" << delta << ")";
+			statLine(ss.str(), gray);
+		};
+
+		// Find currently equipped gear by tag (renderer can't see equip IDs directly).
+		auto findEquippedBy = [&](char ch) -> const Item* {
+			for (const Item& v : inv) {
+				const std::string t = game.equippedTag(v.id);
+				if (t.find(ch) != std::string::npos) return &v;
+			}
+			return nullptr;
+		};
+
+		const Entity& p = game.player();
+		const int baseAtk = p.baseAtk;
+		const int baseDef = p.baseDef;
+		const int shieldBonus = (p.shieldTurns > 0) ? 2 : 0;
+		const int curAtk = game.playerAttack();
+		const int curDef = game.playerDefense();
+
+		const Item* eqM = findEquippedBy('M');
+		const Item* eqR = findEquippedBy('R');
+		const Item* eqA = findEquippedBy('A');
+		(void)eqM;
+		(void)eqA;
+
+		const bool identifiable = isIdentifiableKind(it.kind);
+		const bool isWand = (it.kind == ItemKind::WandSparks) || (def.maxCharges > 0 && def.projectile == ProjectileKind::Spark);
+		const bool isFood = (def.hungerRestore > 0) || (it.kind == ItemKind::FoodRation);
+
+		if (isGold(it.kind)) {
+			statLine("TYPE: GOLD", white);
+			statLine("VALUE: " + std::to_string(it.count), gray);
+		} else if (it.kind == ItemKind::Key) {
+			statLine("TYPE: KEY", white);
+			statLine("USED FOR: LOCKED DOORS / CHESTS", gray);
+		} else if (it.kind == ItemKind::Lockpick) {
+			statLine("TYPE: LOCKPICK", white);
+			statLine("USED FOR: PICK LOCKS (CHANCE)", gray);
+		} else if (isFood) {
+			statLine("TYPE: FOOD", white);
+			if (game.hungerEnabled() && def.hungerRestore > 0) {
+				statLine("RESTORE: +" + std::to_string(def.hungerRestore) + " HUNGER", gray);
+			} else {
+				statLine("HUNGER SYSTEM: DISABLED", gray);
+			}
+		} else if (isMeleeWeapon(it.kind)) {
+			statLine("TYPE: MELEE WEAPON", white);
+			const int newAtk = baseAtk + def.meleeAtk + it.enchant;
+			statCompare("ATK", curAtk, newAtk);
+		} else if (isArmor(it.kind)) {
+			statLine("TYPE: ARMOR", white);
+			const int newDef = baseDef + shieldBonus + def.defense + it.enchant;
+			statCompare("DEF", curDef, newDef);
+			if (shieldBonus > 0) {
+				statLine("(INCLUDES SHIELD +2)", gray);
+			}
+		} else if (isWand) {
+			statLine("TYPE: WAND", white);
+			statLine("EFFECT: SPARKS", gray);
+			statLine("RANGE: " + std::to_string(def.range), gray);
+			statLine("CHARGES: " + std::to_string(it.charges) + "/" + std::to_string(def.maxCharges), gray);
+			const int baseRAtk = std::max(1, baseAtk + def.rangedAtk + it.enchant + 2);
+			statLine("RATK (BASE): " + std::to_string(baseRAtk) + "+", gray);
+			statLine(std::string("READY: ") + (it.charges > 0 ? "YES" : "NO"), gray);
+		} else if (isRangedWeapon(it.kind)) {
+			statLine("TYPE: RANGED WEAPON", white);
+			const int thisRAtk = std::max(1, baseAtk + def.rangedAtk + it.enchant);
+			if (eqR) {
+				const ItemDef& curD = itemDef(eqR->kind);
+				const int curRAtk = std::max(1, baseAtk + curD.rangedAtk + eqR->enchant);
+				statCompare("RATK", curRAtk, thisRAtk);
+			} else {
+				statLine("RATK (BASE): " + std::to_string(thisRAtk), gray);
+			}
+			statLine("RANGE: " + std::to_string(def.range), gray);
+			if (def.ammo != AmmoKind::None) {
+				const int have = ammoCount(inv, def.ammo);
+				statLine(std::string("AMMO: ") + ammoLabel(def.ammo) + " (" + std::to_string(have) + ")", gray);
+			}
+			const bool chargesOk = (def.maxCharges <= 0) || (it.charges > 0);
+			const bool ammoOk = (def.ammo == AmmoKind::None) || (ammoCount(inv, def.ammo) > 0);
+			const bool ready = (def.range > 0) && chargesOk && ammoOk;
+			statLine(std::string("READY: ") + (ready ? "YES" : "NO"), gray);
+		} else if (def.consumable) {
+			statLine(identifiable ? "TYPE: CONSUMABLE (IDENTIFIABLE)" : "TYPE: CONSUMABLE", white);
+			statLine(itemEffectDesc(it, identified), gray);
+			if (identifiable) {
+				statLine(std::string("IDENTIFIED: ") + (identified ? "YES" : "NO"), gray);
+			}
+		} else {
+			statLine("TYPE: MISC", white);
+		}
 
         if (it.count > 1) {
             statLine("COUNT: " + std::to_string(it.count), gray);
         }
+
+		// Quick equipment summary (useful when comparing gear).
+		iy += 6;
+		statLine("EQUIPPED", yellow);
+		statLine("M: " + game.equippedMeleeName(), gray);
+		statLine("R: " + game.equippedRangedName(), gray);
+		statLine("A: " + game.equippedArmorName(), gray);
     }
 }
 

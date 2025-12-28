@@ -50,15 +50,22 @@ private:
     SDL_Renderer* renderer = nullptr;
     SDL_PixelFormat* pixfmt = nullptr;
 
-    // Tile textures (some have variants)
-    std::vector<SDL_Texture*> floorVar;
-    std::vector<SDL_Texture*> wallVar;
+    // Tile textures (some have variants + animation frames)
+    using AnimTex = std::array<SDL_Texture*, FRAMES>;
+    std::vector<AnimTex> floorVar;
+    std::vector<AnimTex> wallVar;
 
     std::array<SDL_Texture*, FRAMES> stairsUpTex{};
     std::array<SDL_Texture*, FRAMES> stairsDownTex{};
     std::array<SDL_Texture*, FRAMES> doorClosedTex{};
     std::array<SDL_Texture*, FRAMES> doorLockedTex{};
     std::array<SDL_Texture*, FRAMES> doorOpenTex{};
+
+// UI skin textures (procedurally generated; refreshed if theme changes)
+bool uiAssetsValid = false;
+UITheme uiThemeCached = UITheme::DarkStone;
+std::array<SDL_Texture*, FRAMES> uiPanelTileTex{};
+std::array<SDL_Texture*, FRAMES> uiOrnamentTex{};
 
     // Entity / item / projectile textures (keyed by kind+seed)
     std::unordered_map<uint64_t, std::array<SDL_Texture*, FRAMES>> entityTex;
@@ -71,6 +78,10 @@ private:
     SDL_Texture* entityTexture(const Entity& e, int frame);
     SDL_Texture* itemTexture(const Item& it, int frame);
     SDL_Texture* projectileTexture(ProjectileKind k, int frame);
+
+    // UI skin helpers
+    void ensureUIAssets(const Game& game);
+    void drawPanel(const Game& game, const SDL_Rect& rect, uint8_t alpha, int frame);
 
     void drawHud(const Game& game);
     void drawInventoryOverlay(const Game& game);

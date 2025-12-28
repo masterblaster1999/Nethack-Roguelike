@@ -162,6 +162,17 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "show_effect_timers") {
             bool b = true;
             if (parseBool(val, b)) s.showEffectTimers = b;
+        } else if (key == "ui_theme") {
+            std::string v = toLower(val);
+            if (v == "dark" || v == "darkstone" || v == "stone") s.uiTheme = UITheme::DarkStone;
+            else if (v == "parchment" || v == "paper") s.uiTheme = UITheme::Parchment;
+            else if (v == "arcane" || v == "purple") s.uiTheme = UITheme::Arcane;
+        } else if (key == "ui_panels") {
+            std::string v = toLower(val);
+            bool b = true;
+            if (parseBool(val, b)) s.uiPanelsTextured = b;
+            else if (v == "textured" || v == "tiles" || v == "tile") s.uiPanelsTextured = true;
+            else if (v == "solid" || v == "flat") s.uiPanelsTextured = false;
         } else if (key == "vsync") {
             bool b = true;
             if (parseBool(val, b)) s.vsync = b;
@@ -235,6 +246,12 @@ player_name = PLAYER
 # HUD
 # show_effect_timers: true/false (shows remaining turns on POISON/REGEN/... in the HUD)
 show_effect_timers = true
+
+# UI skin (cosmetic)
+# ui_theme: darkstone | parchment | arcane
+ui_theme = darkstone
+# ui_panels: textured | solid
+ui_panels = textured
 
 # Rendering / performance
 # vsync: true/false  (true = lower CPU usage, smoother rendering)

@@ -765,7 +765,6 @@ SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int fr
 }
 
 SpritePixels generateFloorTile(uint32_t seed, int frame) {
-    (void)frame;
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});
     RNG rng(hash32(seed));
 
@@ -795,11 +794,26 @@ SpritePixels generateFloorTile(uint32_t seed, int frame) {
         s.at(x, y) = add(s.at(x, y), rng.range(-20, 20), rng.range(-20, 20), rng.range(-20, 20));
     }
 
+    // Subtle animated "glint" pixels (torchlight shimmer).
+    // Frame 1 brightens a few deterministic pixels; frame 0 is the baseline.
+    if (frame % 2 == 1) {
+        RNG g(hash32(seed ^ 0xF17A4u));
+        for (int i = 0; i < 3; ++i) {
+            int x = g.range(0, 15);
+            int y = g.range(0, 15);
+            s.at(x, y) = add(s.at(x, y), 35, 35, 35);
+        }
+        // A tiny 2px streak looks like a reflective grain line.
+        int sx = g.range(1, 14);
+        int sy = g.range(1, 14);
+        setPx(s, sx, sy, add(s.at(sx, sy), 25, 25, 25));
+        setPx(s, sx + 1, sy, add(s.at(sx + 1, sy), 18, 18, 18));
+    }
+
     return s;
 }
 
 SpritePixels generateWallTile(uint32_t seed, int frame) {
-    (void)frame;
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});
     RNG rng(hash32(seed));
 
@@ -820,6 +834,22 @@ SpritePixels generateWallTile(uint32_t seed, int frame) {
             float nf = 0.85f + noise * 0.25f;
 
             s.at(x, y) = mul(base, f * nf);
+        }
+    }
+
+    // Subtle animated highlight on a few mortar pixels.
+    if (frame % 2 == 1) {
+        RNG g(hash32(seed ^ 0xBADD1u));
+        for (int i = 0; i < 4; ++i) {
+            int x = g.range(0, 15);
+            int y = g.range(0, 15);
+            // Prefer mortar lines for the highlight (looks like a light sweep).
+            if ((y % 4) == 0 || (((x + ((y / 4) % 2 ? 2 : 0)) % 6) == 0)) {
+                s.at(x, y) = add(s.at(x, y), 25, 25, 30);
+            } else {
+                // If we missed mortar, just add a tiny glint anyway.
+                s.at(x, y) = add(s.at(x, y), 15, 15, 18);
+            }
         }
     }
 
@@ -925,6 +955,135 @@ SpritePixels generateLockedDoorTile(uint32_t seed, int frame) {
     // Tiny shimmer highlight every so often.
     if ((frame % 16) < 2) {
         setPx(s, x0 + 2, y0 + 4, Color{ 245, 235, 130, 255 });
+    }
+
+    return s;
+}
+
+SpritePixels generateUIPanelTile(UITheme theme, uint32_t seed, int frame) {
+    SpritePixels s = makeSprite(16, 16, {0,0,0,255});
+
+    // Theme palette (kept fairly dark so HUD/overlay text stays readable).
+    Color base{22, 24, 32, 255};
+    Color accent{120, 140, 180, 255};
+
+    switch (theme) {
+        case UITheme::DarkStone:
+            base   = {22, 24, 32, 255};
+            accent = {110, 140, 190, 255};
+            break;
+        case UITheme::Parchment:
+            base   = {44, 38, 26, 255};
+            accent = {170, 150, 95, 255};
+            break;
+        case UITheme::Arcane:
+            base   = {32, 18, 40, 255};
+            accent = {190, 120, 255, 255};
+            break;
+    }
+
+    const uint32_t t = static_cast<uint32_t>(theme);
+    RNG rng(hash32(seed ^ (0xC0FFEEu + t * 101u)));
+
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            uint32_t n = hashCombine(seed ^ (0xA11CEu + t * 177u),
+                                     static_cast<uint32_t>(x + y * 17 + frame * 131));
+            float noise = ((n & 0xFFu) / 255.0f);
+            float f = 0.72f + noise * 0.35f;
+
+            // Very subtle banding makes the panels feel less flat.
+            float band = 0.92f + 0.08f * std::sin((x + frame * 2) * 0.9f + (seed & 0xFFu) * 0.10f);
+            f *= band;
+
+            // Darken edges a bit (helps framing).
+            if (x == 0 || y == 0 || x == 15 || y == 15) f *= 0.85f;
+
+            s.at(x, y) = mul(base, f);
+        }
+    }
+
+    // Theme-specific micro-details.
+    if (theme == UITheme::DarkStone) {
+        // Hairline cracks.
+        for (int i = 0; i < 2; ++i) {
+            int x0 = rng.range(0, 15);
+            int y0 = rng.range(0, 15);
+            int x1 = std::clamp(x0 + rng.range(-6, 6), 0, 15);
+            int y1 = std::clamp(y0 + rng.range(-6, 6), 0, 15);
+            line(s, x0, y0, x1, y1, mul(accent, 0.25f));
+        }
+    } else if (theme == UITheme::Parchment) {
+        // Fibers.
+        for (int i = 0; i < 6; ++i) {
+            int x = rng.range(0, 15);
+            int y = rng.range(0, 15);
+            int len = rng.range(3, 7);
+            for (int j = 0; j < len; ++j) {
+                int yy = std::clamp(y + j, 0, 15);
+                setPx(s, x, yy, mul(accent, 0.18f));
+            }
+        }
+    } else { // Arcane
+        // Subtle rune-dots, with a mild "pulse" every other frame.
+        Color rune = mul(accent, 0.28f);
+        rune.a = 220;
+        Color rune2 = mul(accent, 0.18f);
+        rune2.a = 200;
+
+        const int dots = 8;
+        for (int i = 0; i < dots; ++i) {
+            int x = rng.range(2, 13);
+            int y = rng.range(2, 13);
+            setPx(s, x, y, (i % 2 == 0) ? rune : rune2);
+        }
+
+        if (frame % 2 == 1) {
+            // One extra bright spark on pulse frame.
+            int x = rng.range(3, 12);
+            int y = rng.range(3, 12);
+            Color spark = accent;
+            spark.a = 120;
+            setPx(s, x, y, spark);
+        }
+    }
+
+    return s;
+}
+
+SpritePixels generateUIOrnamentTile(UITheme theme, uint32_t seed, int frame) {
+    (void)seed;
+
+    // Transparent sprite; drawn on top of panel backgrounds.
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+
+    Color c{200, 210, 230, 190};
+    switch (theme) {
+        case UITheme::DarkStone: c = {200, 210, 230, 190}; break;
+        case UITheme::Parchment: c = {230, 210, 150, 190}; break;
+        case UITheme::Arcane:    c = {220, 160, 255, 190}; break;
+    }
+
+    Color c2 = mul(c, 0.65f);
+    c2.a = 160;
+
+    // Corner bracket
+    line(s, 0, 0, 7, 0, c);
+    line(s, 0, 0, 0, 7, c);
+    line(s, 1, 1, 6, 1, c2);
+    line(s, 1, 1, 1, 6, c2);
+
+    // Tiny rune-ish mark
+    setPx(s, 3, 3, c);
+    setPx(s, 4, 3, c2);
+    setPx(s, 3, 4, c2);
+    setPx(s, 5, 4, c2);
+
+    // Flicker highlight for a bit of life.
+    if (frame % 2 == 1) {
+        setPx(s, 2, 0, {255,255,255,110});
+        setPx(s, 0, 2, {255,255,255,80});
+        setPx(s, 3, 2, {255,255,255,60});
     }
 
     return s;

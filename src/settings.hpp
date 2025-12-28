@@ -17,6 +17,10 @@ struct Settings {
     // HUD status tags: show remaining turns for timed effects (POISON(6), REGEN(3), ...)
     bool showEffectTimers = true;
 
+    // UI skin (purely cosmetic)
+    UITheme uiTheme = UITheme::DarkStone;   // darkstone|parchment|arcane
+    bool uiPanelsTextured = true;           // textured|solid
+
     // Rendering / performance
     // - vsync: enables SDL_Renderer vsync (lower CPU usage, smoother rendering).
     // - maxFps: optional software cap when vsync is disabled (0 = uncapped).

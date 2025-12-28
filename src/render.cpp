@@ -53,15 +53,22 @@ bool Renderer::init() {
         return false;
     }
 
-    // Pre-generate a few tile variants
-    const int tileVars = 10;
-    floorVar.reserve(tileVars);
-    wallVar.reserve(tileVars);
+// Pre-generate a few tile variants (with animation frames)
+const int tileVars = 10;
+floorVar.clear();
+wallVar.clear();
+floorVar.resize(static_cast<size_t>(tileVars));
+wallVar.resize(static_cast<size_t>(tileVars));
 
-    for (int i = 0; i < tileVars; ++i) {
-        floorVar.push_back(textureFromSprite(generateFloorTile(hashCombine(0xF1000u, static_cast<uint32_t>(i)), 0)));
-        wallVar.push_back(textureFromSprite(generateWallTile(hashCombine(0xAA110u, static_cast<uint32_t>(i)), 0)));
+for (int i = 0; i < tileVars; ++i) {
+    const uint32_t fSeed = hashCombine(0xF1000u, static_cast<uint32_t>(i));
+    const uint32_t wSeed = hashCombine(0xAA110u, static_cast<uint32_t>(i));
+
+    for (int f = 0; f < FRAMES; ++f) {
+        floorVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateFloorTile(fSeed, f));
+        wallVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateWallTile(wSeed, f));
     }
+}
 
     for (int f = 0; f < FRAMES; ++f) {
         stairsUpTex[static_cast<size_t>(f)]   = textureFromSprite(generateStairsTile(0x515A1u, true, f));
@@ -70,6 +77,14 @@ bool Renderer::init() {
         doorLockedTex[static_cast<size_t>(f)] = textureFromSprite(generateLockedDoorTile(0xD00Du, f));
         doorOpenTex[static_cast<size_t>(f)]   = textureFromSprite(generateDoorTile(0xD00Du, true, f));
     }
+
+// Default UI skin assets (will refresh if theme changes at runtime).
+uiThemeCached = UITheme::DarkStone;
+uiAssetsValid = true;
+for (int f = 0; f < FRAMES; ++f) {
+    uiPanelTileTex[static_cast<size_t>(f)] = textureFromSprite(generateUIPanelTile(uiThemeCached, 0x51A11u, f));
+    uiOrnamentTex[static_cast<size_t>(f)]  = textureFromSprite(generateUIOrnamentTile(uiThemeCached, 0x0ABCDu, f));
+}
 
     initialized = true;
     return true;
@@ -81,10 +96,24 @@ void Renderer::shutdown() {
         return;
     }
 
-    for (SDL_Texture* t : floorVar) if (t) SDL_DestroyTexture(t);
-    for (SDL_Texture* t : wallVar) if (t) SDL_DestroyTexture(t);
-    floorVar.clear();
-    wallVar.clear();
+for (auto& arr : floorVar) {
+    for (SDL_Texture* t : arr) {
+        if (t) SDL_DestroyTexture(t);
+    }
+}
+for (auto& arr : wallVar) {
+    for (SDL_Texture* t : arr) {
+        if (t) SDL_DestroyTexture(t);
+    }
+}
+floorVar.clear();
+wallVar.clear();
+
+for (auto& t : uiPanelTileTex) if (t) SDL_DestroyTexture(t);
+for (auto& t : uiOrnamentTex) if (t) SDL_DestroyTexture(t);
+uiPanelTileTex.fill(nullptr);
+uiOrnamentTex.fill(nullptr);
+uiAssetsValid = false;
 
     for (auto& t : stairsUpTex) if (t) SDL_DestroyTexture(t);
     for (auto& t : stairsDownTex) if (t) SDL_DestroyTexture(t);
@@ -174,18 +203,18 @@ SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int fram
         case TileType::Floor: {
             if (floorVar.empty()) return nullptr;
             size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(floorVar.size()));
-            return floorVar[idx];
+            return floorVar[idx][static_cast<size_t>(frame % FRAMES)];
         }
         case TileType::Wall: {
             if (wallVar.empty()) return nullptr;
             size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(wallVar.size()));
-            return wallVar[idx];
+            return wallVar[idx][static_cast<size_t>(frame % FRAMES)];
         }
         case TileType::DoorSecret: {
             // Draw secret doors as walls until discovered (tile is converted to DoorClosed).
             if (wallVar.empty()) return nullptr;
             size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(wallVar.size()));
-            return wallVar[idx];
+            return wallVar[idx][static_cast<size_t>(frame % FRAMES)];
         }
         case TileType::StairsUp:
             return stairsUpTex[static_cast<size_t>(frame % FRAMES)];
@@ -244,11 +273,115 @@ SDL_Texture* Renderer::projectileTexture(ProjectileKind k, int frame) {
     return it->second[static_cast<size_t>(frame % FRAMES)];
 }
 
+void Renderer::ensureUIAssets(const Game& game) {
+    if (!initialized) return;
+
+    const UITheme want = game.uiTheme();
+    if (uiAssetsValid && want == uiThemeCached) return;
+
+    for (auto& t : uiPanelTileTex) {
+        if (t) SDL_DestroyTexture(t);
+        t = nullptr;
+    }
+    for (auto& t : uiOrnamentTex) {
+        if (t) SDL_DestroyTexture(t);
+        t = nullptr;
+    }
+
+    uiThemeCached = want;
+
+    for (int f = 0; f < FRAMES; ++f) {
+        uiPanelTileTex[static_cast<size_t>(f)] = textureFromSprite(generateUIPanelTile(uiThemeCached, 0x51A11u, f));
+        uiOrnamentTex[static_cast<size_t>(f)]  = textureFromSprite(generateUIOrnamentTile(uiThemeCached, 0x0ABCDu, f));
+    }
+
+    uiAssetsValid = true;
+}
+
+static Color uiBorderForTheme(UITheme theme) {
+    switch (theme) {
+        case UITheme::DarkStone: return {180, 200, 235, 255};
+        case UITheme::Parchment: return {235, 215, 160, 255};
+        case UITheme::Arcane:    return {230, 170, 255, 255};
+    }
+    return {200, 200, 200, 255};
+}
+
+void Renderer::drawPanel(const Game& game, const SDL_Rect& rect, uint8_t alpha, int frame) {
+    if (!renderer) return;
+
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    // Drop shadow (subtle)
+    SDL_Rect shadow{ rect.x + 2, rect.y + 2, rect.w, rect.h };
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, static_cast<Uint8>(std::min<int>(alpha, 200) / 2));
+    SDL_RenderFillRect(renderer, &shadow);
+
+    if (game.uiPanelsTextured()) {
+        ensureUIAssets(game);
+
+        SDL_Texture* tileTex = uiPanelTileTex[static_cast<size_t>(frame % FRAMES)];
+        if (tileTex) {
+            Uint8 oldA = 255;
+            SDL_GetTextureAlphaMod(tileTex, &oldA);
+            SDL_SetTextureAlphaMod(tileTex, alpha);
+
+            SDL_RenderSetClipRect(renderer, &rect);
+            const int step = 16;
+            for (int y = rect.y; y < rect.y + rect.h; y += step) {
+                for (int x = rect.x; x < rect.x + rect.w; x += step) {
+                    SDL_Rect dst{ x, y, step, step };
+                    SDL_RenderCopy(renderer, tileTex, nullptr, &dst);
+                }
+            }
+            SDL_RenderSetClipRect(renderer, nullptr);
+
+            SDL_SetTextureAlphaMod(tileTex, oldA);
+        } else {
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, alpha);
+            SDL_RenderFillRect(renderer, &rect);
+        }
+    } else {
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, alpha);
+        SDL_RenderFillRect(renderer, &rect);
+    }
+
+    const Color border = uiBorderForTheme(game.uiTheme());
+    SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b, static_cast<Uint8>(std::min<int>(alpha + 40, 255)));
+    SDL_RenderDrawRect(renderer, &rect);
+
+    if (game.uiPanelsTextured()) {
+        SDL_Texture* orn = uiOrnamentTex[static_cast<size_t>(frame % FRAMES)];
+        if (orn) {
+            Uint8 oldA = 255;
+            SDL_GetTextureAlphaMod(orn, &oldA);
+            SDL_SetTextureAlphaMod(orn, static_cast<Uint8>(std::min<int>(alpha, 220)));
+
+            const int os = 16;
+            SDL_Rect dstTL{ rect.x, rect.y, os, os };
+            SDL_RenderCopyEx(renderer, orn, nullptr, &dstTL, 0.0, nullptr, SDL_FLIP_NONE);
+
+            SDL_Rect dstTR{ rect.x + rect.w - os, rect.y, os, os };
+            SDL_RenderCopyEx(renderer, orn, nullptr, &dstTR, 0.0, nullptr, SDL_FLIP_HORIZONTAL);
+
+            SDL_Rect dstBL{ rect.x, rect.y + rect.h - os, os, os };
+            SDL_RenderCopyEx(renderer, orn, nullptr, &dstBL, 0.0, nullptr, SDL_FLIP_VERTICAL);
+
+            SDL_Rect dstBR{ rect.x + rect.w - os, rect.y + rect.h - os, os, os };
+            SDL_RenderCopyEx(renderer, orn, nullptr, &dstBR, 0.0, nullptr,
+                static_cast<SDL_RendererFlip>(SDL_FLIP_HORIZONTAL | SDL_FLIP_VERTICAL));
+
+            SDL_SetTextureAlphaMod(orn, oldA);
+        }
+    }
+}
+
 void Renderer::render(const Game& game) {
     if (!initialized) return;
 
     const uint32_t ticks = SDL_GetTicks();
     const int frame = static_cast<int>((ticks / 220u) % FRAMES);
+    lastFrame = frame;
 
     // Background clear
     SDL_SetRenderDrawColor(renderer, 8, 8, 12, 255);
@@ -480,8 +613,7 @@ std::string Renderer::saveScreenshotBMP(const std::string& directory, const std:
 void Renderer::drawHud(const Game& game) {
     // HUD background
     SDL_Rect hudRect = {0, winH - hudH, winW, hudH};
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
-    SDL_RenderFillRect(renderer, &hudRect);
+    drawPanel(game, hudRect, 220, lastFrame);
 
     const Color white{240,240,240,255};
     const Color gray{160,160,160,255};
@@ -583,145 +715,236 @@ void Renderer::drawHud(const Game& game) {
 
 
 void Renderer::drawInventoryOverlay(const Game& game) {
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-
     const int panelW = winW - 40;
     const int panelH = winH - 40;
     SDL_Rect bg{ 20, 20, panelW, panelH };
 
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 190);
-    SDL_RenderFillRect(renderer, &bg);
+    drawPanel(game, bg, 210, lastFrame);
 
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 60);
-    SDL_RenderDrawRect(renderer, &bg);
+    const Color white{240,240,240,255};
+    const Color gray{160,160,160,255};
+    const Color yellow{255,230,120,255};
+    const Color cyan{140,220,255,255};
 
     const int scale = 2;
-    const Color white{ 240, 240, 240, 255 };
-    const Color yellow{ 255, 230, 120, 255 };
-    const Color gray{ 160, 160, 160, 255 };
+    const int pad = 16;
 
-    int x = bg.x + 12;
-    int y = bg.y + 12;
+    int x = bg.x + pad;
+    int y = bg.y + pad;
 
-    if (game.isInventoryIdentifyMode()) {
-        drawText5x7(renderer, x, y, scale, yellow,
-                   "IDENTIFY  (UP/DOWN SELECT, ENTER IDENTIFY, ESC RANDOM/CLOSE, SHIFT+S SORT)");
-    } else {
-        drawText5x7(renderer, x, y, scale, yellow,
-                   "INVENTORY  (UP/DOWN SELECT, ENTER ACT, E EQUIP, U USE, X DROP, SHIFT+X DROP ALL, SHIFT+S SORT, ESC CLOSE)");
-    }
-    y += 7 * scale + 4;
-    drawText5x7(renderer, x, y, scale, yellow, "[M]=MELEE [R]=RANGED [A]=ARMOR");
-    y += 7 * scale + 10;
+    drawText5x7(renderer, x, y, scale, yellow, "INVENTORY");
+    drawText5x7(renderer, x + 160, y, scale, gray, "(ENTER: use/equip, D: drop, ESC: close)");
+    y += 28;
 
     const auto& inv = game.inventory();
-    int sel = game.inventorySelection();
+    const int sel = game.inventorySelection();
+
+    // Layout: list (left) + preview/info (right)
+    const int colGap = 18;
+    const int listW = (bg.w * 58) / 100;
+    SDL_Rect listRect{ x, y, listW, bg.y + bg.h - pad - y };
+    SDL_Rect infoRect{ x + listW + colGap, y, bg.x + bg.w - pad - (x + listW + colGap), listRect.h };
+
+    // List scroll
+    const int lineH = 18;
+    const int maxLines = std::max(1, listRect.h / lineH);
+    int start = 0;
+    if (!inv.empty()) {
+        start = std::clamp(sel - maxLines / 2, 0, std::max(0, (int)inv.size() - maxLines));
+    }
+    const int end = std::min((int)inv.size(), start + maxLines);
+
+    // Selection background
+    if (!inv.empty() && sel >= start && sel < end) {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_Rect hi{ listRect.x - 6, listRect.y + (sel - start) * lineH - 2, listRect.w + 12, lineH };
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 20);
+        SDL_RenderFillRect(renderer, &hi);
+    }
+
+    // Helpers
+    auto fitToChars = [](const std::string& s, int maxChars) -> std::string {
+        if ((int)s.size() <= maxChars) return s;
+        if (maxChars <= 1) return s.substr(0, 1);
+        return s.substr(0, static_cast<size_t>(std::max(0, maxChars - 3))) + "...";
+    };
+
+    auto itemEffectDesc = [&](const Item& it, bool identified) -> std::string {
+        const ItemDef& def = itemDef(it.kind);
+        if (!identified && def.identifiable) return "EFFECT: UNKNOWN";
+        switch (it.kind) {
+            case ItemKind::PotionHealing: return "EFFECT: HEAL";
+            case ItemKind::PotionAntidote: return "EFFECT: CURE POISON";
+            case ItemKind::PotionStrength: return "EFFECT: +ATK";
+            case ItemKind::PotionRegeneration: return "EFFECT: REGEN";
+            case ItemKind::PotionShielding: return "EFFECT: SHIELD";
+            case ItemKind::PotionHaste: return "EFFECT: HASTE";
+            case ItemKind::PotionVision: return "EFFECT: VISION";
+            case ItemKind::ScrollTeleport: return "EFFECT: TELEPORT";
+            case ItemKind::ScrollMapping: return "EFFECT: MAPPING";
+            case ItemKind::ScrollDetectTraps: return "EFFECT: DETECT TRAPS";
+            case ItemKind::ScrollKnock: return "EFFECT: KNOCK";
+            case ItemKind::ScrollEnchantWeapon: return "EFFECT: ENCHANT WEAPON";
+            case ItemKind::ScrollEnchantArmor: return "EFFECT: ENCHANT ARMOR";
+            case ItemKind::ScrollIdentify: return "EFFECT: IDENTIFY";
+            default: break;
+        }
+        return "EFFECT: —";
+    };
+
+    // Draw list
+    int yy = listRect.y;
+    const int maxChars = std::max(10, (listRect.w - 24) / (scale * 6));
+    for (int i = start; i < end; ++i) {
+        const Item& it = inv[static_cast<size_t>(i)];
+        const std::string tag = game.equippedTag(it.id); // "" or "M"/"R"/"A"/...
+
+        std::stringstream row;
+        row << (i == sel ? "> " : "  ");
+        if (!tag.empty()) row << "[" << tag << "] ";
+        row << game.displayItemName(it);
+
+        const Color c = (i == sel) ? white : gray;
+        drawText5x7(renderer, listRect.x, yy, scale, c, fitToChars(row.str(), maxChars));
+        yy += lineH;
+    }
 
     if (inv.empty()) {
-        drawText5x7(renderer, x, y, scale, white, "(EMPTY)");
-        return;
+        drawText5x7(renderer, listRect.x, listRect.y, scale, gray, "(EMPTY)");
+    } else if (sel >= 0 && sel < (int)inv.size()) {
+        // Draw preview / info panel
+        const Item& it = inv[static_cast<size_t>(sel)];
+        const ItemDef& def = itemDef(it.kind);
+
+        bool identified = (game.displayItemNameSingle(it.kind) == itemDisplayNameSingle(it.kind));
+
+        int ix = infoRect.x;
+        int iy = infoRect.y;
+
+        // Name (top)
+        drawText5x7(renderer, ix, iy, scale, cyan, fitToChars(game.displayItemName(it), 30));
+        iy += 22;
+
+        // Sprite preview
+        const int icon = std::min(96, infoRect.w);
+        SDL_Rect sprDst{ ix, iy, icon, icon };
+        SDL_Texture* tex = itemTexture(it, lastFrame);
+        if (tex) {
+            SDL_RenderCopy(renderer, tex, nullptr, &sprDst);
+        }
+        iy += icon + 10;
+
+        // Stats lines
+        auto statLine = [&](const std::string& s, const Color& c) {
+            drawText5x7(renderer, ix, iy, scale, c, fitToChars(s, 32));
+            iy += 18;
+        };
+
+        // Type
+        switch (def.type) {
+            case ItemType::MeleeWeapon:
+                statLine("TYPE: MELEE WEAPON", white);
+                statLine("ATK: " + std::to_string(def.meleeAttack) + "  (ENCH: " + std::to_string(it.enchant) + ")", gray);
+                break;
+            case ItemType::RangedWeapon:
+                statLine("TYPE: RANGED WEAPON", white);
+                statLine("ATK: " + std::to_string(def.rangedAttack) + "  RNG: " + std::to_string(def.range), gray);
+                statLine("AMMO: " + toUpper(itemDisplayNameSingle(def.ammoType)), gray);
+                break;
+            case ItemType::Armor:
+                statLine("TYPE: ARMOR", white);
+                statLine("DEF: " + std::to_string(def.defense) + "  (ENCH: " + std::to_string(it.enchant) + ")", gray);
+                break;
+            case ItemType::Food:
+                statLine("TYPE: FOOD", white);
+                statLine("EFFECT: SATIATION", gray);
+                break;
+            case ItemType::Consumable:
+                statLine(def.identifiable ? "TYPE: CONSUMABLE (IDENTIFIABLE)" : "TYPE: CONSUMABLE", white);
+                statLine(itemEffectDesc(it, identified), gray);
+                break;
+            case ItemType::Key:
+                statLine("TYPE: KEY", white);
+                statLine("USED FOR: LOCKED DOORS", gray);
+                break;
+            case ItemType::Lockpick:
+                statLine("TYPE: LOCKPICK", white);
+                statLine("USED FOR: PICK LOCKS", gray);
+                break;
+            case ItemType::Gold:
+                statLine("TYPE: GOLD", white);
+                statLine("VALUE: " + std::to_string(it.count), gray);
+                break;
+            case ItemType::Wand:
+                statLine("TYPE: WAND", white);
+                statLine("CHARGES: " + std::to_string(it.charges), gray);
+                break;
+        }
+
+        if (it.count > 1) {
+            statLine("COUNT: " + std::to_string(it.count), gray);
+        }
     }
-
-    for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
-        const Item& it = inv[static_cast<size_t>(i)];
-        std::string line = (i == sel ? "> " : "  ");
-        std::string tag = game.equippedTag(it.id);
-        if (!tag.empty()) line += "[" + tag + "] ";
-        else line += "    ";
-        line += game.displayItemName(it);
-
-        drawText5x7(renderer, x, y, scale, (i == sel ? white : gray), toUpper(line));
-        y += 7 * scale + 4;
-
-        if (y > bg.y + bg.h - 80) break;
-    }
-
-    // Footer hints about current selection
-    const Item& cur = inv[static_cast<size_t>(clampi(sel, 0, static_cast<int>(inv.size()) - 1))];
-    std::string hint;
-    if (game.isInventoryIdentifyMode()) {
-        hint = "IDENTIFY: " + game.displayItemName(cur);
-    } else {
-        hint = "SELECTED: " + game.displayItemName(cur);
-    }
-    drawText5x7(renderer, x, bg.y + bg.h - 40, scale, yellow, toUpper(hint));
 }
 
-
-
 void Renderer::drawOptionsOverlay(const Game& game) {
-    const int panelW = std::min(winW - 80, 760);
-    const int panelH = 340;
+    const int panelW = std::min(winW - 80, 820);
+    const int panelH = 440;
     const int x0 = (winW - panelW) / 2;
     const int y0 = (winH - panelH) / 2;
 
     SDL_Rect bg{x0, y0, panelW, panelH};
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 210);
-    SDL_RenderFillRect(renderer, &bg);
+    drawPanel(game, bg, 210, lastFrame);
 
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-    SDL_RenderDrawRect(renderer, &bg);
+    const Color white{240,240,240,255};
+    const Color gray{160,160,160,255};
+    const Color yellow{255,230,120,255};
 
-    const int pad = 12;
-    int x = x0 + pad;
-    int y = y0 + pad;
+    const int scale = 2;
+    int y = y0 + 16;
 
-    // Local UI palette.
-    const Color white{255, 255, 255, 255};
-    const Color gray{180, 180, 180, 255};
+    drawText5x7(renderer, x0 + 16, y, scale, yellow, "OPTIONS");
+    y += 26;
 
-    drawText5x7(renderer, x, y, 2, white, "OPTIONS");
-    y += 24;
-    drawText5x7(renderer, x, y, 1, gray, "UP/DOWN SELECT  LEFT/RIGHT CHANGE  ESC CLOSE");
-    y += 18;
+    auto yesNo = [](bool b) { return b ? "ON" : "OFF"; };
 
-    auto apLabel = [&]() -> const char* {
-        switch (game.autoPickupMode()) {
-            case AutoPickupMode::Off: return "OFF";
-            case AutoPickupMode::Gold: return "GOLD";
-            case AutoPickupMode::Smart: return "SMART";
-            case AutoPickupMode::All: return "ALL";
+    auto uiThemeLabel = [](UITheme t) -> const char* {
+        switch (t) {
+            case UITheme::DarkStone: return "DARKSTONE";
+            case UITheme::Parchment: return "PARCHMENT";
+            case UITheme::Arcane:    return "ARCANE";
         }
-        return "GOLD";
+        return "UNKNOWN";
     };
 
     const int sel = game.optionsSelection();
 
     auto drawOpt = [&](int idx, const std::string& label, const std::string& value) {
-        const Color c = (sel == idx) ? white : gray;
-        const std::string line = (sel == idx ? "> " : "  ") + label + value;
-        drawText5x7(renderer, x, y, 2, c, line);
-        y += 22;
+        const Color c = (idx == sel) ? white : gray;
+        std::stringstream ss;
+        ss << (idx == sel ? "> " : "  ");
+        ss << label;
+        if (!value.empty()) ss << ": " << value;
+        drawText5x7(renderer, x0 + 16, y, scale, c, ss.str());
+        y += 18;
     };
 
-    drawOpt(0, "AUTO-PICKUP: ", apLabel());
-    drawOpt(1, "AUTO-STEP DELAY: ", std::to_string(game.autoStepDelayMs()) + " MS");
-    drawOpt(2, "AUTOSAVE EVERY: ", std::to_string(game.autosaveEveryTurns()) + " TURNS");
-    drawOpt(3, "IDENTIFY ITEMS: ", game.identificationEnabled() ? "ON" : "OFF");
-    drawOpt(4, "HUNGER SYSTEM: ", game.hungerEnabled() ? "ON" : "OFF");
-    drawOpt(5, "EFFECT TIMERS: ", game.showEffectTimers() ? "ON" : "OFF");
-    drawOpt(6, "CONFIRM QUIT: ", game.confirmQuitEnabled() ? "ON" : "OFF");
-    drawOpt(7, "AUTO MORTEM: ", game.autoMortemEnabled() ? "ON" : "OFF");
-    drawOpt(8, "SAVE BACKUPS: ", std::to_string(game.saveBackups()));
-    drawOpt(9, "", "CLOSE");
+    drawOpt(0, "AUTO-PICKUP", yesNo(game.autoPickupMode() == AutoPickupMode::All));
+    drawOpt(1, "AUTO-STEP DELAY", std::to_string(game.autoStepDelayMs()) + "ms");
+    drawOpt(2, "AUTOSAVE", (game.autosaveEveryTurns() > 0 ? ("EVERY " + std::to_string(game.autosaveEveryTurns()) + " TURNS") : "OFF"));
+    drawOpt(3, "IDENTIFY ITEMS", yesNo(game.identificationEnabled()));
+    drawOpt(4, "HUNGER SYSTEM", yesNo(game.hungerEnabled()));
+    drawOpt(5, "EFFECT TIMERS", yesNo(game.showEffectTimers()));
+    drawOpt(6, "CONFIRM QUIT", yesNo(game.confirmQuitEnabled()));
+    drawOpt(7, "AUTO MORTEM", yesNo(game.autoMortemEnabled()));
+    drawOpt(8, "SAVE BACKUPS", (game.saveBackups() > 0 ? std::to_string(game.saveBackups()) : "OFF"));
+    drawOpt(9, "UI THEME", uiThemeLabel(game.uiTheme()));
+    drawOpt(10, "UI PANELS", (game.uiPanelsTextured() ? "TEXTURED" : "SOLID"));
+    drawOpt(11, "CLOSE", "");
 
-    y = y0 + panelH - 42;
-
-    auto baseName = [](const std::string& p) -> std::string {
-        if (p.empty()) return {};
-        size_t i = p.find_last_of("/\\");
-        if (i == std::string::npos) return p;
-        return p.substr(i + 1);
-    };
-
-    const std::string settingsFile = baseName(game.settingsPath());
-    if (!settingsFile.empty()) {
-        drawText5x7(renderer, x, y, 1, gray, "KEYBINDS: EDIT " + settingsFile + " (bind_*)");
-    } else {
-        drawText5x7(renderer, x, y, 1, gray, "KEYBINDS: EDIT procrogue_settings.ini (bind_*)");
-    }
     y += 14;
-    drawText5x7(renderer, x, y, 1, gray, "TIP: PRESS # FOR EXTENDED COMMANDS (save, load, pray, quit...)");
+    drawText5x7(renderer, x0 + 16, y, scale, gray,
+        "LEFT/RIGHT: change | ENTER: toggle/next | ESC: close");
 }
 
 void Renderer::drawCommandOverlay(const Game& game) {

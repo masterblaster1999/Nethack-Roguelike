@@ -446,6 +446,8 @@ static std::pair<bool, bool> exportRunDumpToFile(const Game& game, const std::fi
 }
 
 
+} // namespace
+
 
 uint32_t dailySeedUtc(std::string* outDateIso) {
     const std::time_t t = std::time(nullptr);
@@ -470,6 +472,9 @@ uint32_t dailySeedUtc(std::string* outDateIso) {
     const uint32_t ymd = static_cast<uint32_t>(year * 10000 + mon * 100 + day);
     return hash32(ymd ^ 0xDABA0B1Du);
 }
+
+
+namespace {
 
 static std::vector<std::string> splitWS(const std::string& s) {
     std::istringstream iss(s);
@@ -576,6 +581,8 @@ static std::vector<std::string> extendedCommandList() {
         "stepdelay",
         "identify",
         "timers",
+        "uitheme",
+        "uipanels",
         "seed",
         "version",
         "name",
@@ -894,12 +901,12 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         for (const auto& kv : slots) {
             const std::string& name = kv.first;
             const SlotInfo& si = kv.second;
-            std::string line = "  " + name + " [";
-            line += si.save ? "save" : "-";
-            line += ", ";
-            line += si.autosave ? "autosave" : "-";
-            line += "]";
-            game.pushSystemMessage(line);
+            std::string slotLine = "  " + name + " [";
+            slotLine += si.save ? "save" : "-";
+            slotLine += ", ";
+            slotLine += si.autosave ? "autosave" : "-";
+            slotLine += "]";
+            game.pushSystemMessage(slotLine);
             if (++shown >= 30) {
                 game.pushSystemMessage("  ...");
                 break;
@@ -1104,13 +1111,14 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             const std::string who = e.name.empty() ? std::string("PLAYER") : e.name;
             const std::string res = e.won ? std::string("WIN") : std::string("DEAD");
 
-            std::string line = "#" + std::to_string(i + 1) + " " + who + " " + res + " ";
-            line += "S" + std::to_string(e.score) + " D" + std::to_string(e.depth);
-            if (!e.slot.empty() && e.slot != "default") line += " [" + e.slot + "]";
-            line += " T" + std::to_string(e.turns) + " K" + std::to_string(e.kills);
-            if (!e.cause.empty()) line += " " + e.cause;
+            std::string scoreLine = "#" + std::to_string(i + 1) + " " + who + " " + res + " ";
+            scoreLine += "S" + std::to_string(e.score) + " D" + std::to_string(e.depth);
+            if (!e.slot.empty() && e.slot != "default") scoreLine += " [" + e.slot + "]";
+            scoreLine += " T" + std::to_string(e.turns) + " K" + std::to_string(e.kills);
+            scoreLine += " SEED" + std::to_string(e.seed);
+            if (!e.cause.empty()) scoreLine += " " + e.cause;
 
-            game.pushSystemMessage(line);
+            game.pushSystemMessage(scoreLine);
         }
         return;
     }
@@ -1148,18 +1156,19 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         for (int i = 0; i < count; ++i) {
             const auto& e = es[idx[static_cast<size_t>(i)]];
 
-            std::ostringstream line;
-            line << "#" << (i + 1) << " ";
-            line << (e.timestamp.empty() ? "(no timestamp)" : e.timestamp) << " ";
-            line << (e.name.empty() ? "PLAYER" : e.name) << " ";
-            line << (e.won ? "WIN" : "DEAD") << " ";
-            line << "S" << e.score << " D" << e.depth << " T" << e.turns << " K" << e.kills;
+            std::ostringstream oss;
+            oss << "#" << (i + 1) << " ";
+            oss << (e.timestamp.empty() ? "(no timestamp)" : e.timestamp) << " ";
+            oss << (e.name.empty() ? "PLAYER" : e.name) << " ";
+            oss << (e.won ? "WIN" : "DEAD") << " ";
+            oss << "S" << e.score << " D" << e.depth << " T" << e.turns << " K" << e.kills;
+            oss << " SEED" << e.seed;
 
-            if (!e.slot.empty() && e.slot != "default") line << " [" << e.slot << "]";
-            if (!e.cause.empty()) line << " " << e.cause;
-            if (!e.gameVersion.empty()) line << " V" << e.gameVersion;
+            if (!e.slot.empty() && e.slot != "default") oss << " [" << e.slot << "]";
+            if (!e.cause.empty()) oss << " " << e.cause;
+            if (!e.gameVersion.empty()) oss << " V" << e.gameVersion;
 
-            game.pushSystemMessage(line.str());
+            game.pushSystemMessage(oss.str());
         }
         return;
     }
@@ -1813,16 +1822,16 @@ uint8_t Game::appearanceFor(ItemKind k) const {
 
 std::string Game::appearanceName(ItemKind k) const {
     if (isPotionKind(k)) {
-        const auto n = sizeof(POTION_APPEARANCES) / sizeof(POTION_APPEARANCES[0]);
+        constexpr size_t n = sizeof(POTION_APPEARANCES) / sizeof(POTION_APPEARANCES[0]);
+        static_assert(n > 0, "POTION_APPEARANCES must not be empty");
         uint8_t a = appearanceFor(k);
-        if (n == 0) return "";
         if (a >= n) a = static_cast<uint8_t>(a % n);
         return POTION_APPEARANCES[a];
     }
     if (isScrollKind(k)) {
-        const auto n = sizeof(SCROLL_APPEARANCES) / sizeof(SCROLL_APPEARANCES[0]);
+        constexpr size_t n = sizeof(SCROLL_APPEARANCES) / sizeof(SCROLL_APPEARANCES[0]);
+        static_assert(n > 0, "SCROLL_APPEARANCES must not be empty");
         uint8_t a = appearanceFor(k);
-        if (n == 0) return "";
         if (a >= n) a = static_cast<uint8_t>(a % n);
         return SCROLL_APPEARANCES[a];
     }
@@ -3525,7 +3534,7 @@ void Game::handleAction(Action a) {
 
     // Overlay: options menu (does not consume turns)
     if (optionsOpen) {
-        constexpr int kOptionCount = 10;
+        constexpr int kOptionCount = 12;
 
         if (a == Action::Cancel || a == Action::Options) {
             optionsOpen = false;
@@ -3644,11 +3653,34 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 9) Close
-        if (optionsSel == 9) {
-            if (left || right || confirm) optionsOpen = false;
-            return;
-        }
+// 9) UI Theme (cycle)
+if (optionsSel == 9) {
+    if (left || right || confirm) {
+        int dir = right ? 1 : -1;
+        if (confirm && !left && !right) dir = 1;
+
+        int ti = static_cast<int>(uiTheme_);
+        ti = (ti + dir + 3) % 3;
+        uiTheme_ = static_cast<UITheme>(ti);
+        settingsDirtyFlag = true;
+    }
+    return;
+}
+
+// 10) UI Panels (textured / solid)
+if (optionsSel == 10) {
+    if (left || right || confirm) {
+        uiPanelsTextured_ = !uiPanelsTextured_;
+        settingsDirtyFlag = true;
+    }
+    return;
+}
+
+// 11) Close
+if (optionsSel == 11) {
+    if (left || right || confirm) optionsOpen = false;
+    return;
+}
 
         return;
     }

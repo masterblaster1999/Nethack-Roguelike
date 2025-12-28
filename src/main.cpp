@@ -224,6 +224,8 @@ int main(int argc, char** argv) {
 
     game.setPlayerName(settings.playerName);
     game.setShowEffectTimers(settings.showEffectTimers);
+    game.setUITheme(settings.uiTheme);
+    game.setUIPanelsTextured(settings.uiPanelsTextured);
     game.setSettingsPath(settingsPath);
 
     KeyBinds keyBinds = KeyBinds::defaults();
@@ -438,11 +440,11 @@ int main(int argc, char** argv) {
                                 if (!game.confirmQuitEnabled()) {
                                     running = false;
                                 } else {
-                                    const uint32_t now = SDL_GetTicks();
-                                    if (lastEscPressMs != 0 && (now - lastEscPressMs) < 1500u) {
+                                    const uint32_t nowTicks = SDL_GetTicks();
+                                    if (lastEscPressMs != 0 && (nowTicks - lastEscPressMs) < 1500u) {
                                         running = false;
                                     } else {
-                                        lastEscPressMs = now;
+                                        lastEscPressMs = nowTicks;
                                         game.pushSystemMessage("PRESS ESC AGAIN TO QUIT.");
                                     }
                                 }
@@ -569,6 +571,17 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "player_name", game.playerName());
             ok &= updateIniKey(settingsPath, "show_effect_timers", game.showEffectTimers() ? "true" : "false");
 
+auto uiThemeToString = [](UITheme t) -> const char* {
+    switch (t) {
+        case UITheme::DarkStone: return "darkstone";
+        case UITheme::Parchment: return "parchment";
+        case UITheme::Arcane:    return "arcane";
+    }
+    return "darkstone";
+};
+ok &= updateIniKey(settingsPath, "ui_theme", uiThemeToString(game.uiTheme()));
+ok &= updateIniKey(settingsPath, "ui_panels", game.uiPanelsTextured() ? "textured" : "solid");
+
             if (!ok) game.pushSystemMessage("FAILED TO SAVE SETTINGS.");
 
             game.clearSlotDirty();
@@ -593,6 +606,8 @@ int main(int argc, char** argv) {
             game.setAutoMortemEnabled(newSettings.autoMortem);
             game.setPlayerName(newSettings.playerName);
             game.setShowEffectTimers(newSettings.showEffectTimers);
+            game.setUITheme(newSettings.uiTheme);
+            game.setUIPanelsTextured(newSettings.uiPanelsTextured);
 
             // Keep the local copy up-to-date for any later use.
             settings = newSettings;

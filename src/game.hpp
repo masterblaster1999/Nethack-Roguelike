@@ -116,6 +116,14 @@ enum class MessageKind : uint8_t {
     Success,
 };
 
+// UI skin theme (purely cosmetic; persisted via settings).
+enum class UITheme : uint8_t {
+    DarkStone = 0,
+    Parchment,
+    Arcane,
+};
+
+
 // Deterministic "daily" seed derived from the current UTC date.
 // If outDateIso is non-null, it receives an ISO date like "2025-12-27".
 uint32_t dailySeedUtc(std::string* outDateIso = nullptr);
@@ -261,6 +269,13 @@ public:
     // HUD preferences
     bool showEffectTimers() const { return showEffectTimers_; }
     void setShowEffectTimers(bool enabled) { showEffectTimers_ = enabled; }
+
+// UI skin (purely cosmetic)
+UITheme uiTheme() const { return uiTheme_; }
+void setUITheme(UITheme theme) { uiTheme_ = theme; }
+
+bool uiPanelsTextured() const { return uiPanelsTextured_; }
+void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
 
     // Inventory/UI accessors for renderer
     const std::vector<Item>& inventory() const { return inv; }
@@ -583,6 +598,8 @@ private:
 
     // UI preferences (persisted via settings)
     bool showEffectTimers_ = true;
+    UITheme uiTheme_ = UITheme::DarkStone;
+    bool uiPanelsTextured_ = true;
 
     // Autosave
     int autosaveInterval = 0; // 0 = off

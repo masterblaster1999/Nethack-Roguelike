@@ -1,6 +1,9 @@
 #include "dungeon.hpp"
 #include "items.hpp"
 #include "combat_rules.hpp"
+#include "grid_utils.hpp"
+#include "physics.hpp"
+#include "pathfinding.hpp"
 #include "rng.hpp"
 #include "scores.hpp"
 #include "settings.hpp"
@@ -57,7 +60,7 @@ void test_dungeon_stairs_connected() {
     for (int depth : depthsToTest) {
         RNG rng(42u + static_cast<uint32_t>(depth));
         Dungeon d(30, 20);
-        d.generate(rng, depth);
+        d.generate(rng, depth, /*maxDepth=*/10);
 
         auto inBounds = [&](Vec2i p) {
             return d.inBounds(p.x, p.y);
@@ -123,6 +126,37 @@ void test_dungeon_stairs_connected() {
     }
 }
 
+void test_final_floor_sanctum_layout() {
+    RNG rng(999u);
+    Dungeon d;
+    d.generate(rng, /*depth=*/10, /*maxDepth=*/10);
+
+    expect(d.inBounds(d.stairsUp.x, d.stairsUp.y), "final floor has stairs up");
+    expect(!d.inBounds(d.stairsDown.x, d.stairsDown.y), "final floor has no stairs down");
+
+    bool hasLockedDoor = false;
+    bool hasChasm = false;
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const TileType t = d.at(x, y).type;
+            if (t == TileType::DoorLocked) hasLockedDoor = true;
+            if (t == TileType::Chasm) hasChasm = true;
+        }
+    }
+
+    expect(hasLockedDoor, "final floor contains at least one locked door");
+    expect(hasChasm, "final floor contains chasms (moat) for tactical play");
+
+    bool hasTreasureRoom = false;
+    for (const Room& r : d.rooms) {
+        if (r.type == RoomType::Treasure) {
+            hasTreasureRoom = true;
+            break;
+        }
+    }
+    expect(hasTreasureRoom, "final floor defines a treasure room (amulet anchor)");
+}
+
 void test_secret_door_tile_rules() {
     Dungeon d(10, 10);
     d.at(5, 5).type = TileType::DoorSecret;
@@ -130,6 +164,32 @@ void test_secret_door_tile_rules() {
     expect(!d.isPassable(5, 5), "Secret doors should not be passable until discovered");
     expect(d.isOpaque(5, 5), "Secret doors should be opaque (block FOV/LOS) until discovered");
     expect(!d.isWalkable(5, 5), "Secret doors should not be walkable until discovered");
+}
+
+void test_chasm_and_pillar_tile_rules() {
+    Dungeon d(10, 10);
+
+    d.at(5, 5).type = TileType::Chasm;
+    expect(!d.isPassable(5, 5), "Chasm should not be passable");
+    expect(!d.isWalkable(5, 5), "Chasm should not be walkable");
+    expect(!d.isOpaque(5, 5), "Chasm should not block FOV/LOS");
+
+    d.at(6, 5).type = TileType::Pillar;
+    expect(!d.isPassable(6, 5), "Pillar should not be passable");
+    expect(!d.isWalkable(6, 5), "Pillar should not be walkable");
+    expect(d.isOpaque(6, 5), "Pillar should block FOV/LOS");
+
+    // LOS sanity: a chasm tile shouldn't block visibility.
+    // Carve a 1x5 corridor with a chasm in the middle.
+    for (int x = 1; x <= 8; ++x) d.at(x, 2).type = TileType::Floor;
+    d.at(4, 2).type = TileType::Chasm;
+    d.computeFov(1, 2, 20);
+    expect(d.at(8, 2).visible, "Chasm should not block FOV in a corridor");
+
+    // Pillar should block visibility.
+    d.at(6, 2).type = TileType::Pillar;
+    d.computeFov(1, 2, 20);
+    expect(!d.at(8, 2).visible, "Pillar should block FOV in a corridor");
 }
 
 void test_locked_door_tile_rules() {
@@ -298,6 +358,60 @@ void test_sound_diagonal_corner_cutting_is_blocked() {
     expect(sound2[2 * d.width + 2] == 1, "Sound should propagate diagonally if a corner is open");
 }
 
+void test_weighted_pathfinding_prefers_open_route_over_closed_door() {
+    Dungeon d(7, 5);
+
+    // Start with solid walls.
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Wall;
+        }
+    }
+
+    // Two routes from (1,2) -> (5,2):
+    //  - Straight hallway with a CLOSED door in the middle.
+    //  - A diagonal-capable "upper" hallway that avoids the door.
+    for (int x = 1; x <= 5; ++x) {
+        d.at(x, 2).type = TileType::Floor;
+        d.at(x, 1).type = TileType::Floor;
+    }
+    d.at(3, 2).type = TileType::DoorClosed;
+
+    const Vec2i start{1, 2};
+    const Vec2i goal{5, 2};
+
+    auto passable = [&](int x, int y) -> bool {
+        if (!d.inBounds(x, y)) return false;
+        const TileType t = d.at(x, y).type;
+        return t != TileType::Wall;
+    };
+
+    auto stepCost = [&](int x, int y) -> int {
+        const TileType t = d.at(x, y).type;
+        if (t == TileType::DoorClosed) return 2;
+        return 1;
+    };
+
+    auto diagOk = [&](int fromX, int fromY, int dx, int dy) -> bool {
+        return diagonalPassable(d, {fromX, fromY}, dx, dy);
+    };
+
+    const auto path = dijkstraPath(d.width, d.height, start, goal, passable, stepCost, diagOk);
+    expect(!path.empty(), "Weighted Dijkstra path should find a route in a simple corridor");
+
+    bool usesClosedDoor = false;
+    for (const auto& p : path) {
+        if (p.x == 3 && p.y == 2) usesClosedDoor = true;
+    }
+    expect(!usesClosedDoor,
+           "Weighted Dijkstra should avoid a closed door when an equally short open route exists");
+
+    // Cost-to-target sanity: optimal route is 4 floor entries.
+    const auto cost = dijkstraCostToTarget(d.width, d.height, goal, passable, stepCost, diagOk);
+    expect(cost[static_cast<size_t>(start.y * d.width + start.x)] == 4,
+           "Cost-to-target map should reflect the 4-turn open route");
+}
+
 void test_item_defs_sane() {
     for (int k = 0; k < ITEM_KIND_COUNT; ++k) {
         const ItemKind kind = static_cast<ItemKind>(k);
@@ -382,6 +496,171 @@ void test_combat_dice_rules() {
         const int v = rollDice(rng, {2, 6, 3});
         expect(v >= 5 && v <= 15, "rollDice(2d6+3) out of bounds");
     }
+}
+
+void test_physics_knockback_fall_into_chasm_kills_monster() {
+    Dungeon d(5, 5);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Floor;
+        }
+    }
+
+    // A bottomless chasm directly behind the defender.
+    d.at(3, 2).type = TileType::Chasm;
+
+    RNG rng(123u);
+    std::vector<Entity> ents;
+
+    Entity attacker;
+    attacker.id = 1;
+    attacker.kind = EntityKind::Player;
+    attacker.pos = {1, 2};
+    attacker.hp = attacker.hpMax = 10;
+
+    Entity defender;
+    defender.id = 2;
+    defender.kind = EntityKind::Goblin;
+    defender.pos = {2, 2};
+    defender.hp = defender.hpMax = 5;
+
+    ents.push_back(attacker);
+    ents.push_back(defender);
+
+    KnockbackConfig cfg;
+    cfg.distance = 1;
+    cfg.power = 2;
+    cfg.collisionMin = cfg.collisionMax = 1;
+
+    KnockbackResult r = applyKnockback(d, ents, rng, attacker.id, defender.id, 1, 0, cfg);
+    expect(r.stop == KnockbackStop::FellIntoChasm, "knockback into chasm should report FellIntoChasm");
+    expect(ents[1].hp <= 0, "monster knocked into chasm should die");
+}
+
+void test_physics_knockback_slam_into_wall_deals_collision_damage() {
+    Dungeon d(5, 5);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Floor;
+        }
+    }
+
+    // Solid wall directly behind the defender.
+    d.at(3, 2).type = TileType::Wall;
+
+    RNG rng(1u);
+    std::vector<Entity> ents;
+
+    Entity attacker;
+    attacker.id = 1;
+    attacker.kind = EntityKind::Player;
+    attacker.pos = {1, 2};
+    attacker.hp = attacker.hpMax = 10;
+
+    Entity defender;
+    defender.id = 2;
+    defender.kind = EntityKind::Orc;
+    defender.pos = {2, 2};
+    defender.hp = defender.hpMax = 10;
+
+    ents.push_back(attacker);
+    ents.push_back(defender);
+
+    KnockbackConfig cfg;
+    cfg.distance = 1;
+    cfg.power = 1;
+    cfg.collisionMin = cfg.collisionMax = 4; // deterministic
+
+    KnockbackResult r = applyKnockback(d, ents, rng, attacker.id, defender.id, 1, 0, cfg);
+    expect(r.stop == KnockbackStop::SlammedWall, "knockback into wall should report SlammedWall");
+    expect(r.stepsMoved == 0, "defender should not move into a wall");
+    expect(r.collisionDamageDefender == 4, "collision damage should match configured fixed amount");
+    expect(ents[1].hp == 6, "defender HP should be reduced by collision damage");
+}
+
+void test_physics_knockback_slam_into_closed_door_when_smash_disabled() {
+    Dungeon d(5, 5);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Floor;
+        }
+    }
+
+    d.at(3, 2).type = TileType::DoorClosed;
+
+    RNG rng(1u);
+    std::vector<Entity> ents;
+
+    Entity attacker;
+    attacker.id = 1;
+    attacker.kind = EntityKind::Player;
+    attacker.pos = {1, 2};
+    attacker.hp = attacker.hpMax = 10;
+
+    Entity defender;
+    defender.id = 2;
+    defender.kind = EntityKind::Orc;
+    defender.pos = {2, 2};
+    defender.hp = defender.hpMax = 10;
+
+    ents.push_back(attacker);
+    ents.push_back(defender);
+
+    KnockbackConfig cfg;
+    cfg.distance = 1;
+    cfg.power = 1;
+    cfg.allowDoorSmash = false;
+    cfg.collisionMin = cfg.collisionMax = 3; // deterministic
+
+    KnockbackResult r = applyKnockback(d, ents, rng, attacker.id, defender.id, 1, 0, cfg);
+    expect(r.stop == KnockbackStop::SlammedDoor, "knockback into closed door (smash disabled) should report SlammedDoor");
+    expect(d.at(3, 2).type == TileType::DoorClosed, "door should remain closed when door-smash disabled");
+    expect(ents[1].hp == 7, "defender HP should be reduced by deterministic collision damage");
+}
+
+void test_physics_knockback_hits_other_entity_damages_both() {
+    Dungeon d(6, 5);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Floor;
+        }
+    }
+
+    RNG rng(1u);
+    std::vector<Entity> ents;
+
+    Entity attacker;
+    attacker.id = 1;
+    attacker.kind = EntityKind::Player;
+    attacker.pos = {1, 2};
+    attacker.hp = attacker.hpMax = 10;
+
+    Entity defender;
+    defender.id = 2;
+    defender.kind = EntityKind::Goblin;
+    defender.pos = {2, 2};
+    defender.hp = defender.hpMax = 10;
+
+    Entity other;
+    other.id = 3;
+    other.kind = EntityKind::Orc;
+    other.pos = {3, 2};
+    other.hp = other.hpMax = 10;
+
+    ents.push_back(attacker);
+    ents.push_back(defender);
+    ents.push_back(other);
+
+    KnockbackConfig cfg;
+    cfg.distance = 1;
+    cfg.power = 1;
+    cfg.collisionMin = cfg.collisionMax = 2; // deterministic
+
+    KnockbackResult r = applyKnockback(d, ents, rng, attacker.id, defender.id, 1, 0, cfg);
+    expect(r.stop == KnockbackStop::HitEntity, "knockback into another entity should report HitEntity");
+    expect(r.otherEntityId == 3, "HitEntity should report the ID of the blocking entity");
+    expect(ents[1].hp == 8, "defender should take collision damage");
+    expect(ents[2].hp == 9, "other entity should take some collision spill damage");
 }
 
 void test_scores_legacy_load() {
@@ -1233,7 +1512,7 @@ void test_message_dedup_consecutive() {
 void test_fov_mask_matches_compute_fov() {
     RNG rng(123u);
     Dungeon d(15, 9);
-    d.generate(rng, /*depth=*/1);
+    d.generate(rng, /*depth=*/1, /*maxDepth=*/10);
 
     const int cx = 3;
     const int cy = 3;
@@ -1257,7 +1536,7 @@ void test_fov_mask_matches_compute_fov() {
 void test_fov_mark_explored_flag() {
     RNG rng(123u);
     Dungeon d(15, 9);
-    d.generate(rng, /*depth=*/1);
+    d.generate(rng, /*depth=*/1, /*maxDepth=*/10);
 
     // Clear explored flags.
     for (int y = 0; y < d.height; ++y) {
@@ -1285,12 +1564,107 @@ void test_fov_mark_explored_flag() {
     expect(anyExplored == true, "markExplored=true should set explored tiles");
 }
 
+
+
+void test_dungeon_digging() {
+    Dungeon d(5, 5);
+    for (int y = 0; y < 5; ++y) {
+        for (int x = 0; x < 5; ++x) {
+            d.at(x, y).type = TileType::Wall;
+        }
+    }
+
+    expect(d.isDiggable(2, 2), "Wall should be diggable");
+    expect(d.dig(2, 2), "Digging a wall should succeed");
+    expect(d.at(2, 2).type == TileType::Floor, "Dig should convert wall to floor");
+    expect(d.isWalkable(2, 2), "Dug tile should become walkable");
+    expect(!d.isOpaque(2, 2), "Dug tile should no longer be opaque");
+
+    d.at(1, 1).type = TileType::DoorLocked;
+    expect(d.isDiggable(1, 1), "Locked door should be diggable");
+    expect(d.dig(1, 1), "Digging a locked door should succeed");
+    expect(d.at(1, 1).type == TileType::Floor, "Dig should destroy door into floor");
+}
+
+void test_wand_display_shows_charges() {
+    Item it;
+    it.kind = ItemKind::WandDigging;
+    it.count = 1;
+    it.charges = 3;
+
+    const std::string name = itemDisplayName(it);
+    expect(name.find("(3/8)") != std::string::npos, "Wand of digging should show charges in display name");
+}
+
+void test_monster_energy_scheduling_basic() {
+    // Basic sanity checks for the monster speed/energy scheduler.
+    // Fast monsters should sometimes take 2 actions per player turn; slow monsters should sometimes skip.
+
+    constexpr int ENERGY_PER_ACTION = 100;
+    constexpr int MAX_ACTIONS_PER_TURN = 3;
+
+    // Bat is fast.
+    {
+        Entity bat;
+        bat.kind = EntityKind::Bat;
+        bat.speed = baseSpeedFor(bat.kind);
+        bat.energy = 0;
+
+        // Turn 1: 150 energy -> 1 action (50 remaining)
+        bat.energy += clampi(bat.speed, 10, 200);
+        int a1 = 0;
+        while (bat.energy >= ENERGY_PER_ACTION && a1 < MAX_ACTIONS_PER_TURN) {
+            bat.energy -= ENERGY_PER_ACTION;
+            ++a1;
+        }
+        expect(a1 == 1, "Fast monsters should act at least once per turn");
+
+        // Turn 2: 50 + 150 = 200 energy -> 2 actions
+        bat.energy += clampi(bat.speed, 10, 200);
+        int a2 = 0;
+        while (bat.energy >= ENERGY_PER_ACTION && a2 < MAX_ACTIONS_PER_TURN) {
+            bat.energy -= ENERGY_PER_ACTION;
+            ++a2;
+        }
+        expect(a2 == 2, "Fast monsters should sometimes act twice per turn");
+    }
+
+    // Slime is slow.
+    {
+        Entity slime;
+        slime.kind = EntityKind::Slime;
+        slime.speed = baseSpeedFor(slime.kind);
+        slime.energy = 0;
+
+        // Turn 1: 70 energy -> 0 actions
+        slime.energy += clampi(slime.speed, 10, 200);
+        int a1 = 0;
+        while (slime.energy >= ENERGY_PER_ACTION && a1 < MAX_ACTIONS_PER_TURN) {
+            slime.energy -= ENERGY_PER_ACTION;
+            ++a1;
+        }
+        expect(a1 == 0, "Slow monsters should sometimes skip turns");
+
+        // Turn 2: 70 + 70 = 140 energy -> 1 action
+        slime.energy += clampi(slime.speed, 10, 200);
+        int a2 = 0;
+        while (slime.energy >= ENERGY_PER_ACTION && a2 < MAX_ACTIONS_PER_TURN) {
+            slime.energy -= ENERGY_PER_ACTION;
+            ++a2;
+        }
+        expect(a2 == 1, "Slow monsters should still eventually act");
+    }
+}
+
+
 int main() {
     std::cout << "Running ProcRogue tests...\n";
 
     test_rng_reproducible();
     test_dungeon_stairs_connected();
+    test_final_floor_sanctum_layout();
     test_secret_door_tile_rules();
+    test_chasm_and_pillar_tile_rules();
     test_locked_door_tile_rules();
     test_close_door_tile_rules();
     test_lock_door_tile_rules();
@@ -1298,9 +1672,15 @@ int main() {
     test_los_blocks_diagonal_corner_peek();
     test_sound_propagation_respects_walls_and_muffling_doors();
     test_sound_diagonal_corner_cutting_is_blocked();
+    test_weighted_pathfinding_prefers_open_route_over_closed_door();
     test_item_defs_sane();
     test_item_weight_helpers();
     test_combat_dice_rules();
+
+    test_physics_knockback_fall_into_chasm_kills_monster();
+    test_physics_knockback_slam_into_wall_deals_collision_damage();
+    test_physics_knockback_slam_into_closed_door_when_smash_disabled();
+    test_physics_knockback_hits_other_entity_damages_both();
 
     test_scores_legacy_load();
     test_scores_new_format_load_and_escape();
@@ -1326,6 +1706,11 @@ int main() {
     test_fov_mask_matches_compute_fov();
     test_fov_mark_explored_flag();
 
+    // Patch-specific regression tests.
+    test_dungeon_digging();
+    test_wand_display_shows_charges();
+    test_monster_energy_scheduling_basic();
+
     if (failures == 0) {
         std::cout << "All tests passed.\n";
         return 0;
@@ -1334,4 +1719,3 @@ int main() {
     std::cerr << failures << " test(s) failed.\n";
     return 1;
 }
-

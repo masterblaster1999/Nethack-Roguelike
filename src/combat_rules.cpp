@@ -22,6 +22,7 @@ DiceExpr meleeDiceForWeapon(ItemKind weapon) {
         case ItemKind::Dagger: return {1, 4, 0};
         case ItemKind::Sword:  return {1, 6, 0};
         case ItemKind::Axe:    return {1, 8, 0};
+        case ItemKind::Pickaxe:return {1, 6, 0};
 
         // Ranged weapons as improvised melee (rare): keep weak.
         case ItemKind::Bow:    return {1, 3, 0};
@@ -46,6 +47,7 @@ DiceExpr meleeDiceForMonster(EntityKind kind) {
         case EntityKind::Spider:         return {1, 3, 0};
         case EntityKind::Ogre:           return {1, 10, 0};
         case EntityKind::Mimic:          return {1, 8, 0};
+        case EntityKind::Minotaur:       return {2, 6, 0};
         case EntityKind::Shopkeeper:     return {2, 4, 0};
         case EntityKind::Player:         return {1, 2, 0};
         default:                         return {1, 4, 0};

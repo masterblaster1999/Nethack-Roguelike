@@ -2,6 +2,7 @@
 #include "common.hpp"
 #include "dungeon.hpp"
 #include "items.hpp"
+#include "effects.hpp"
 #include "rng.hpp"
 #include "scores.hpp"
 
@@ -30,7 +31,34 @@ enum class EntityKind : uint8_t {
     Mimic,
     // --- Shops (appended to keep save compatibility) ---
     Shopkeeper,
+    Minotaur,
 };
+
+
+// Baseline movement speed for monsters (used by the energy-based turn scheduler).
+// 100 = normal speed (roughly 1 action per player turn).
+// Values above 100 act more often; values below 100 act less often.
+inline int baseSpeedFor(EntityKind k) {
+    switch (k) {
+        case EntityKind::Player: return 100;
+        case EntityKind::Goblin: return 100;
+        case EntityKind::Orc: return 95;
+        case EntityKind::Bat: return 150;
+        case EntityKind::Slime: return 70;
+        case EntityKind::SkeletonArcher: return 90;
+        case EntityKind::KoboldSlinger: return 110;
+        case EntityKind::Wolf: return 125;
+        case EntityKind::Troll: return 85;
+        case EntityKind::Wizard: return 105;
+        case EntityKind::Snake: return 135;
+        case EntityKind::Spider: return 110;
+        case EntityKind::Ogre: return 80;
+        case EntityKind::Mimic: return 60;
+        case EntityKind::Shopkeeper: return 100;
+        case EntityKind::Minotaur: return 105;
+        default: return 100;
+    }
+}
 
 enum class Action : uint8_t {
     None = 0,
@@ -156,6 +184,8 @@ enum class TrapKind : uint8_t {
     Teleport,
     Alarm,
     Web,
+    // New traps (append-only)
+    ConfusionGas,
 };
 
 struct Trap {
@@ -197,21 +227,17 @@ struct Entity {
     Vec2i lastKnownPlayerPos{-1, -1};
     int lastKnownPlayerAge = 9999; // turns since last sight/hearing; large means "unknown"
 
-    // Timed status effects (mostly used by player, but can be applied to monsters too).
-    int poisonTurns = 0;   // lose 1 HP per full turn
-    int regenTurns = 0;    // heal 1 HP per full turn
-    int shieldTurns = 0;   // temporary defense boost
-
-    // New timed buffs
-    int hasteTurns = 0;    // grants extra player actions (decrements on monster turns)
-    int visionTurns = 0;   // increases FOV radius
-
-    int invisTurns = 0;   // makes it harder for monsters to track/see you
-
-    // New timed debuffs
-    int webTurns = 0;      // prevents movement while >0
+    // Timed status effects (buffs/debuffs). Kept as a separate struct so
+    // adding new effects is append-only for save compatibility.
+    Effects effects;
 
     uint32_t spriteSeed = 0;
+
+    // Turn scheduling (energy-based).
+    // Each full player turn, monsters gain `speed` energy and can act once per 100 energy.
+    // Example: speed=150 -> ~1.5 actions/turn (sometimes 2).
+    int speed = 100;
+    int energy = 0;
 };
 
 struct FXProjectile {
@@ -235,6 +261,12 @@ public:
     static constexpr int MAP_W = 30;
     static constexpr int MAP_H = 20;
 
+    // Run structure / quest pacing.
+    // The default run now spans 10 floors.
+    static constexpr int DUNGEON_MAX_DEPTH = 10;
+    static constexpr int QUEST_DEPTH = DUNGEON_MAX_DEPTH; // where the Amulet of Yendor is guaranteed
+    static constexpr int MIDPOINT_DEPTH = DUNGEON_MAX_DEPTH / 2;
+
     Game();
 
     void newGame(uint32_t seed);
@@ -244,6 +276,10 @@ public:
     // Spend a turn to emit a loud noise (useful to lure monsters).
     // Available via extended command: #shout
     void shout();
+
+    // Dig/tunnel using a pickaxe (adjacent tile). Used by extended command: #dig <dir>
+    // Returns true if a turn was spent.
+    bool digInDirection(int dx, int dy);
 
     // QoL: repeat the Search action multiple times without spamming the log.
     // Used by the extended command: #search N
@@ -267,6 +303,9 @@ public:
     int playerId() const { return playerId_; }
 
     int depth() const { return depth_; }
+
+    int dungeonMaxDepth() const { return DUNGEON_MAX_DEPTH; }
+    int questDepth() const { return QUEST_DEPTH; }
 
     bool isGameOver() const { return gameOver; }
     bool isGameWon() const { return gameWon; }
@@ -703,6 +742,7 @@ private:
     void endTargeting(bool fire);
     void moveTargetCursor(int dx, int dy);
     void recomputeTargetLine();
+    void zapDiggingWand(int range);
 
     // Level transitions
     void storeCurrentLevel();

@@ -57,16 +57,24 @@ bool Renderer::init() {
 const int tileVars = 10;
 floorVar.clear();
 wallVar.clear();
+chasmVar.clear();
+pillarVar.clear();
 floorVar.resize(static_cast<size_t>(tileVars));
 wallVar.resize(static_cast<size_t>(tileVars));
+chasmVar.resize(static_cast<size_t>(tileVars));
+pillarVar.resize(static_cast<size_t>(tileVars));
 
 for (int i = 0; i < tileVars; ++i) {
     const uint32_t fSeed = hashCombine(0xF1000u, static_cast<uint32_t>(i));
     const uint32_t wSeed = hashCombine(0xAA110u, static_cast<uint32_t>(i));
+    const uint32_t cSeed = hashCombine(0xC1A500u, static_cast<uint32_t>(i));
+    const uint32_t pSeed = hashCombine(0x9111A0u, static_cast<uint32_t>(i));
 
     for (int f = 0; f < FRAMES; ++f) {
         floorVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateFloorTile(fSeed, f));
         wallVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateWallTile(wSeed, f));
+        chasmVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateChasmTile(cSeed, f));
+        pillarVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generatePillarTile(pSeed, f));
     }
 }
 
@@ -106,8 +114,20 @@ for (auto& arr : wallVar) {
         if (t) SDL_DestroyTexture(t);
     }
 }
+for (auto& arr : chasmVar) {
+    for (SDL_Texture* t : arr) {
+        if (t) SDL_DestroyTexture(t);
+    }
+}
+for (auto& arr : pillarVar) {
+    for (SDL_Texture* t : arr) {
+        if (t) SDL_DestroyTexture(t);
+    }
+}
 floorVar.clear();
 wallVar.clear();
+chasmVar.clear();
+pillarVar.clear();
 
 for (auto& t : uiPanelTileTex) if (t) SDL_DestroyTexture(t);
 for (auto& t : uiOrnamentTex) if (t) SDL_DestroyTexture(t);
@@ -209,6 +229,16 @@ SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int fram
             if (wallVar.empty()) return nullptr;
             size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(wallVar.size()));
             return wallVar[idx][static_cast<size_t>(frame % FRAMES)];
+        }
+        case TileType::Chasm: {
+            if (chasmVar.empty()) return nullptr;
+            size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(chasmVar.size()));
+            return chasmVar[idx][static_cast<size_t>(frame % FRAMES)];
+        }
+        case TileType::Pillar: {
+            if (pillarVar.empty()) return nullptr;
+            size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(pillarVar.size()));
+            return pillarVar[idx][static_cast<size_t>(frame % FRAMES)];
         }
         case TileType::DoorSecret: {
             // Draw secret doors as walls until discovered (tile is converted to DoorClosed).
@@ -661,8 +691,8 @@ void Renderer::drawHud(const Game& game) {
         }
     }
     ss << " | KEYS: " << game.keyCount() << " | PICKS: " << game.lockpickCount();
-    ss << " | DEPTH: " << game.depth();
-    ss << " | MAX: " << game.maxDepthReached();
+    ss << " | DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth();
+    ss << " | DEEPEST: " << game.maxDepthReached();
     ss << " | TURNS: " << game.turns();
     ss << " | KILLS: " << game.kills();
 
@@ -676,13 +706,13 @@ void Renderer::drawHud(const Game& game) {
         }
     };
 
-    addStatus("POISON", p.poisonTurns);
-    addStatus("WEB", p.webTurns);
-    addStatus("REGEN", p.regenTurns);
-    addStatus("SHIELD", p.shieldTurns);
-    addStatus("HASTE", p.hasteTurns);
-    addStatus("VISION", p.visionTurns);
-    addStatus("INVIS", p.invisTurns);
+    addStatus("POISON", p.effects.poisonTurns);
+    addStatus("WEB", p.effects.webTurns);
+    addStatus("REGEN", p.effects.regenTurns);
+    addStatus("SHIELD", p.effects.shieldTurns);
+    addStatus("HASTE", p.effects.hasteTurns);
+    addStatus("VISION", p.effects.visionTurns);
+    addStatus("INVIS", p.effects.invisTurns);
     {
         const std::string ht = game.hungerTag();
         if (!ht.empty()) ss << " | " << ht;
@@ -920,7 +950,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 		const Entity& p = game.player();
 		const int baseAtk = p.baseAtk;
 		const int baseDef = p.baseDef;
-		const int shieldBonus = (p.shieldTurns > 0) ? 2 : 0;
+		const int shieldBonus = (p.effects.shieldTurns > 0) ? 2 : 0;
 		const int curAtk = game.playerAttack();
 		const int curDef = game.playerDefense();
 
@@ -1261,6 +1291,15 @@ void Renderer::drawMinimapOverlay(const Game& game) {
             if (t.type == TileType::Wall) {
                 if (vis) drawCell(x, y, 110, 110, 110);
                 else     drawCell(x, y, 60, 60, 60);
+            } else if (t.type == TileType::Pillar) {
+                // Pillars are interior "walls"; show them slightly brighter so
+                // they read as distinct from border stone.
+                if (vis) drawCell(x, y, 130, 130, 130);
+                else     drawCell(x, y, 75, 75, 75);
+            } else if (t.type == TileType::Chasm) {
+                // Chasms are impassable but not opaque.
+                if (vis) drawCell(x, y, 20, 30, 55);
+                else     drawCell(x, y, 12, 18, 32);
             } else if (t.type == TileType::DoorClosed) {
                 if (vis) drawCell(x, y, 160, 110, 60);
                 else     drawCell(x, y, 90, 70, 40);
@@ -1335,7 +1374,7 @@ void Renderer::drawStatsOverlay(const Game& game) {
     }
     {
         std::stringstream ss;
-        ss << "DEPTH: " << game.depth() << "  (MAX: " << game.maxDepthReached() << ")";
+        ss << "DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth() << "  (DEEPEST: " << game.maxDepthReached() << ")";
         drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
         y += 18;
     }

@@ -1,6 +1,7 @@
 #include "game.hpp"
 
 #include "combat_rules.hpp"
+#include "physics.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -24,6 +25,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Ogre: return "OGRE";
         case EntityKind::Mimic: return "MIMIC";
         case EntityKind::Shopkeeper: return "SHOPKEEPER";
+        case EntityKind::Minotaur: return "MINOTAUR";
         default: return "THING";
     }
 }
@@ -83,8 +85,8 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
     // Attacking breaks invisibility (balance + clarity).
     if (attacker.kind == EntityKind::Player) {
         Entity& p = playerMut();
-        if (p.invisTurns > 0) {
-            p.invisTurns = 0;
+        if (p.effects.invisTurns > 0) {
+            p.effects.invisTurns = 0;
             pushMsg("YOU BECOME VISIBLE!", MessageKind::System, true);
         }
     }
@@ -167,12 +169,181 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
     // Monster special effects.
     if (defender.hp > 0 && defender.kind == EntityKind::Player) {
         if (attacker.kind == EntityKind::Snake && rng.chance(0.35f)) {
-            defender.poisonTurns = std::max(defender.poisonTurns, rng.range(4, 8));
+            defender.effects.poisonTurns = std::max(defender.effects.poisonTurns, rng.range(4, 8));
             pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
         }
         if (attacker.kind == EntityKind::Spider && rng.chance(0.45f)) {
-            defender.webTurns = std::max(defender.webTurns, rng.range(2, 4));
+            defender.effects.webTurns = std::max(defender.effects.webTurns, rng.range(2, 4));
             pushMsg("YOU ARE ENSNARED BY WEBBING!", MessageKind::Warning, false);
+        }
+    }
+
+    // Knockback / forced movement.
+    // Adds tactical positioning and makes chasms/pillars matter more.
+    bool skipDeathMsg = false;
+    if (defender.hp > 0) {
+        KnockbackConfig kcfg;
+        kcfg.distance = 1;
+        kcfg.power = 1;
+        float chance = 0.0f;
+        const bool critKnockback = hc.crit;
+
+        auto isHeavyAttacker = [&]() -> bool {
+            if (attacker.kind == EntityKind::Ogre) return true;
+            if (attacker.kind == EntityKind::Troll) return true;
+            if (attacker.kind == EntityKind::Minotaur) return true;
+            if (attacker.kind == EntityKind::Player) {
+                if (const Item* w = equippedMelee()) {
+                    return (w->kind == ItemKind::Axe);
+                }
+            }
+            return false;
+        };
+
+        if (attacker.kind == EntityKind::Player) {
+            if (const Item* w = equippedMelee()) {
+                switch (w->kind) {
+                    case ItemKind::Axe:    chance = 0.26f; kcfg.power = 3; break;
+                    case ItemKind::Sword:  chance = 0.18f; kcfg.power = 2; break;
+                    case ItemKind::Dagger: chance = 0.12f; kcfg.power = 1; break;
+                    default:               chance = 0.10f; kcfg.power = 1; break;
+                }
+            } else {
+                chance = 0.10f;
+                kcfg.power = 1;
+            }
+        } else {
+            switch (attacker.kind) {
+                case EntityKind::Ogre:  chance = 0.30f; kcfg.power = 3; break;
+                case EntityKind::Troll: chance = 0.22f; kcfg.power = 2; break;
+                case EntityKind::Minotaur: chance = 0.35f; kcfg.power = 4; break;
+                case EntityKind::Wolf:  chance = 0.12f; kcfg.power = 1; break;
+                default:                chance = 0.0f;  kcfg.power = 1; break;
+            }
+        }
+
+        // Critical hits always attempt knockback when the attacker has any knockback profile.
+        if (hc.crit) {
+            kcfg.power = std::max(kcfg.power, 2);
+        }
+
+        // Defender resistance: agile/armored targets are harder to shove around.
+        chance -= 0.04f * static_cast<float>(std::max(0, defender.baseDef));
+        if (defender.kind == EntityKind::Player) {
+            const int drNow = damageReduction(*this, defender);
+            chance -= 0.03f * static_cast<float>(std::max(0, drNow));
+            if (player().effects.shieldTurns > 0) chance -= 0.10f;
+        }
+        chance = std::clamp(chance, 0.0f, 1.0f);
+
+        if (chance > 0.0f && (critKnockback || rng.chance(chance))) {
+            // Distance: heavy crits can push 2 tiles.
+            kcfg.distance = 1;
+            if (hc.crit && isHeavyAttacker()) {
+                kcfg.distance = 2;
+            } else if (!hc.crit && kcfg.power >= 3 && rng.chance(0.25f)) {
+                kcfg.distance = 2;
+            }
+
+            // If the defender is the player, compute chance to catch the edge of a chasm.
+            if (defender.kind == EntityKind::Player) {
+                float catchP = 0.65f;
+                catchP += 0.02f * static_cast<float>(std::max(0, defender.baseDef));
+                if (encumbranceEnabled_) {
+                    switch (burdenState()) {
+                        case BurdenState::Unburdened: break;
+                        case BurdenState::Burdened:   catchP -= 0.05f; break;
+                        case BurdenState::Stressed:   catchP -= 0.10f; break;
+                        case BurdenState::Strained:   catchP -= 0.18f; break;
+                        case BurdenState::Overloaded: catchP -= 0.30f; break;
+                    }
+                }
+                if (defender.effects.shieldTurns > 0) catchP += 0.08f;
+                catchP = std::clamp(catchP, 0.10f, 0.90f);
+                kcfg.playerCatchChance = catchP;
+            }
+
+            // Direction away from attacker.
+            const int kdx = clampi(defender.pos.x - attacker.pos.x, -1, 1);
+            const int kdy = clampi(defender.pos.y - attacker.pos.y, -1, 1);
+
+            const Vec2i before = defender.pos;
+            KnockbackResult kb = applyKnockback(dung, ents, rng, attacker.id, defender.id, kdx, kdy, kcfg);
+
+            if (kb.stepsMoved > 0) {
+                std::ostringstream ks;
+                if (attacker.kind == EntityKind::Player) {
+                    ks << "YOU KNOCK " << kindName(defender.kind) << " BACK!";
+                } else if (defender.kind == EntityKind::Player) {
+                    ks << kindName(attacker.kind) << " KNOCKS YOU BACK!";
+                } else {
+                    ks << kindName(attacker.kind) << " KNOCKS " << kindName(defender.kind) << " BACK.";
+                }
+                pushMsg(ks.str(), MessageKind::Combat, msgFromPlayer);
+
+                // Forced movement can trigger traps.
+                if (defender.hp > 0) {
+                    triggerTrapAt(defender.pos, defender);
+                }
+            }
+
+            // Door smash feedback.
+            if (kb.doorChanged) {
+                pushMsg("A DOOR BURSTS OPEN!", MessageKind::System, msgFromPlayer);
+                emitNoise(kb.doorPos, 14);
+            }
+
+            // Stop reasons.
+            if (kb.stop == KnockbackStop::SlammedWall || kb.stop == KnockbackStop::SlammedDoor) {
+                std::ostringstream cs;
+                const bool door = (kb.stop == KnockbackStop::SlammedDoor);
+                if (defender.kind == EntityKind::Player) cs << "YOU";
+                else cs << kindName(defender.kind);
+                cs << (door ? " SLAM INTO THE DOOR" : " SLAM INTO THE WALL");
+                if (kb.collisionDamageDefender > 0) cs << " FOR " << kb.collisionDamageDefender;
+                cs << "!";
+                pushMsg(cs.str(), MessageKind::Combat, msgFromPlayer);
+                emitNoise(defender.pos, door ? 12 : 10);
+            } else if (kb.stop == KnockbackStop::HitEntity) {
+                const Entity* other = nullptr;
+                for (const auto& e : ents) {
+                    if (e.id == kb.otherEntityId) { other = &e; break; }
+                }
+                std::ostringstream cs;
+                if (other) {
+                    if (defender.kind == EntityKind::Player) cs << "YOU";
+                    else cs << kindName(defender.kind);
+                    cs << " CRASH INTO ";
+                    if (other->kind == EntityKind::Player) cs << "YOU";
+                    else cs << kindName(other->kind);
+                    cs << "!";
+                } else {
+                    cs << "SOMETHING GETS RAMMED!";
+                }
+                pushMsg(cs.str(), MessageKind::Combat, msgFromPlayer);
+                emitNoise(defender.pos, 12);
+            } else if (kb.stop == KnockbackStop::FellIntoChasm) {
+                std::ostringstream fs;
+                if (defender.kind == EntityKind::Player) {
+                    fs << "YOU FALL INTO THE CHASM!";
+                    pushMsg(fs.str(), MessageKind::Warning, false);
+                    if (endCause_.empty()) endCause_ = "FELL INTO A CHASM";
+                } else {
+                    fs << kindName(defender.kind) << " FALLS INTO THE CHASM!";
+                    pushMsg(fs.str(), MessageKind::Combat, msgFromPlayer);
+                    skipDeathMsg = true;
+                }
+                emitNoise(before, 16);
+            } else if (kb.stop == KnockbackStop::CaughtEdge) {
+                pushMsg("YOU CATCH THE EDGE OF THE CHASM!", MessageKind::Warning, false);
+                emitNoise(defender.pos, 10);
+            } else if (kb.stop == KnockbackStop::ImmuneToChasm) {
+                if (defender.kind != EntityKind::Player) {
+                    std::ostringstream fs;
+                    fs << kindName(defender.kind) << " DODGES THE CHASM.";
+                    pushMsg(fs.str(), MessageKind::Info, msgFromPlayer);
+                }
+            }
         }
     }
 
@@ -182,9 +353,11 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
             if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindName(attacker.kind);
             gameOver = true;
         } else {
-            std::ostringstream ds;
-            ds << kindName(defender.kind) << " DIES.";
-            pushMsg(ds.str(), MessageKind::Combat, msgFromPlayer);
+            if (!skipDeathMsg) {
+                std::ostringstream ds;
+                ds << kindName(defender.kind) << " DIES.";
+                pushMsg(ds.str(), MessageKind::Combat, msgFromPlayer);
+            }
 
             if (attacker.kind == EntityKind::Player) {
                 ++killCount;
@@ -196,14 +369,35 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
 
 
 void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer) {
+    // Confusion: shots drift and accuracy suffers.
+    if (attacker.effects.confusionTurns > 0) {
+        atkBonus -= 3;
+
+        int ox = 0;
+        int oy = 0;
+        for (int tries = 0; tries < 4 && ox == 0 && oy == 0; ++tries) {
+            ox = rng.range(-2, 2);
+            oy = rng.range(-2, 2);
+        }
+
+        const int maxX = std::max(0, dung.width - 1);
+        const int maxY = std::max(0, dung.height - 1);
+        target.x = clampi(target.x + ox, 0, maxX);
+        target.y = clampi(target.y + oy, 0, maxY);
+
+        if (fromPlayer) {
+            pushMsg("YOU FIRE WILDLY IN YOUR CONFUSION!", MessageKind::Warning, true);
+        }
+    }
+
     std::vector<Vec2i> line = bresenhamLine(attacker.pos, target);
     if (line.size() <= 1) return;
 
     if (fromPlayer) {
         // Attacking breaks invisibility.
         Entity& p = playerMut();
-        if (p.invisTurns > 0) {
-            p.invisTurns = 0;
+        if (p.effects.invisTurns > 0) {
+            p.effects.invisTurns = 0;
             pushMsg("YOU BECOME VISIBLE!", MessageKind::System, true);
         }
 

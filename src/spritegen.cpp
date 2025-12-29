@@ -107,6 +107,7 @@ float densityFor(EntityKind k) {
         case EntityKind::Ogre: return 0.72f;
         case EntityKind::Mimic: return 0.74f;
         case EntityKind::Shopkeeper: return 0.54f;
+        case EntityKind::Minotaur: return 0.76f;
         default: return 0.55f;
     }
 }
@@ -128,6 +129,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::Ogre: return add({ 150, 120, 70, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Mimic: return add({ 150, 110, 60, 255 }, rng.range(-18,18), rng.range(-18,18), rng.range(-18,18));
         case EntityKind::Shopkeeper: return add({ 220, 200, 120, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
+        case EntityKind::Minotaur: return add({ 160, 90, 60, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         default: return add({ 180, 180, 180, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
     }
 }
@@ -254,6 +256,22 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
         rect(s, 5, 11, 6, 1, {60,40,20,255});
     }
 
+    if (kind == EntityKind::Minotaur) {
+        // Big horns + nose ring
+        Color horn = {245,245,245,255};
+        setPx(s, 5, 2, horn);
+        setPx(s, 10, 2, horn);
+        setPx(s, 4, 3, horn);
+        setPx(s, 11, 3, horn);
+
+        // Snout / ring shimmer
+        setPx(s, 8, 10, {30,30,30,255});
+        if (frame % 2 == 1) setPx(s, 8, 11, {255,220,160,180});
+
+        // Simple belt
+        rect(s, 5, 12, 6, 1, {80,50,30,255});
+    }
+
     if (kind == EntityKind::Mimic) {
         // Chest-like bands + a toothy maw.
         Color band = mul(base, 0.55f);
@@ -343,6 +361,22 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
             sparkle();
             break;
         }
+
+        case ItemKind::Pickaxe: {
+            Color steel = add({210,210,220,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color wood  = add({125,85,40,255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
+            // Handle
+            line(s, 8, 3, 8, 14, wood);
+            line(s, 7, 4, 7, 13, mul(wood, 0.85f));
+            // Pick head (cross)
+            rect(s, 5, 4, 7, 2, steel);
+            rect(s, 6, 3, 5, 1, mul(steel, 0.85f));
+            // Highlight
+            setPx(s, 10, 4, {255,255,255,200});
+            sparkle();
+            break;
+        }
+
         case ItemKind::Bow: {
             Color wood = add({150,100,50,255}, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
             // Simple arc
@@ -369,6 +403,18 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
             }
             break;
         }
+
+        case ItemKind::WandDigging: {
+            Color stick = add({120,80,45,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color gem   = add({170,120,60,255}, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
+            rect(s, 7, 3, 3, 10, stick);
+            rect(s, 6, 2, 5, 2, gem);
+            // Small rune on the shaft
+            setPx(s, 8, 8, {240,210,160,200});
+            sparkle();
+            break;
+        }
+
         case ItemKind::LeatherArmor: {
             Color leather = add({140,90,55,255}, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
             outlineRect(s, 4, 4, 8, 10, mul(leather, 0.8f));
@@ -751,6 +797,36 @@ case ItemKind::Arrow: {
             if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
             break;
         }
+        case ItemKind::PotionClarity: {
+            // A mostly-clear potion with a subtle blue tint ("clarity").
+            Color glass = {200,200,220,180};
+            Color fluid = {200,230,255,140};
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+            // Tiny sparkles
+            if (frame % 2 == 1) {
+                setPx(s, 8, 7, {255,255,255,160});
+                setPx(s, 9, 9, {255,255,255,120});
+            }
+            break;
+        }
+        case ItemKind::ScrollConfusion: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+            // Swirl glyph
+            setPx(s, 7, 7, {80,50,30,255});
+            setPx(s, 8, 7, {80,50,30,255});
+            setPx(s, 9, 7, {80,50,30,255});
+            setPx(s, 9, 8, {80,50,30,255});
+            setPx(s, 8, 9, {80,50,30,255});
+            setPx(s, 7, 9, {80,50,30,255});
+            setPx(s, 7, 8, paper);
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+
         case ItemKind::Torch: {
             Color wood = add({130,90,45,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
             Color tip = {60,40,25,255};
@@ -906,6 +982,97 @@ SpritePixels generateWallTile(uint32_t seed, int frame) {
                 s.at(x, y) = add(s.at(x, y), 15, 15, 18);
             }
         }
+    }
+
+    return s;
+}
+
+SpritePixels generateChasmTile(uint32_t seed, int frame) {
+    SpritePixels s = makeSprite(16, 16, {0,0,0,255});
+    RNG rng(hash32(seed));
+
+    // A dark "void" with subtle cool highlights so it reads differently than
+    // unexplored black and the regular stone floor.
+    Color base = { 10, 12, 18, 255 };
+    base = add(base, rng.range(-2, 2), rng.range(-2, 2), rng.range(-2, 2));
+
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            uint32_t n = hashCombine(seed, static_cast<uint32_t>(x + y * 31));
+            float noise = ((n & 0xFFu) / 255.0f);
+
+            // Stronger vignette than floor to suggest depth.
+            float cx = (x - 7.5f) / 7.5f;
+            float cy = (y - 7.5f) / 7.5f;
+            float v = 1.0f - 0.22f * (cx*cx + cy*cy);
+
+            // A faint ripple banding effect.
+            float ripple = 0.90f + 0.10f * std::sin((x * 0.55f) + (y * 0.35f) + (seed % 97u) * 0.05f);
+
+            float f = (0.78f + noise * 0.22f) * v * ripple;
+            Color c = mul(base, f);
+
+            // Cool tint. Keep subtle so global lighting mods still read.
+            c = add(c, 0, 2, 10);
+            s.at(x, y) = c;
+        }
+    }
+
+    // Tiny "embers" of reflected light in the abyss.
+    RNG sp(hash32(seed ^ 0xC4A5Au));
+    int sparks = 6;
+    if (frame % 2 == 1) sparks = 8;
+    for (int i = 0; i < sparks; ++i) {
+        int x = sp.range(1, 14);
+        int y = sp.range(1, 14);
+        Color c = s.at(x, y);
+        c = add(c, 15, 18, 30);
+        if (frame % 2 == 1 && (i % 2 == 0)) c = add(c, 18, 20, 35);
+        s.at(x, y) = c;
+    }
+
+    return s;
+}
+
+SpritePixels generatePillarTile(uint32_t seed, int frame) {
+    RNG rng(hash32(seed));
+
+    // Base floor so the pillar feels embedded in the room.
+    SpritePixels s = generateFloorTile(seed ^ 0x911A4u, frame);
+
+    Color stone = { 128, 132, 145, 255 };
+    stone = add(stone, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
+    Color dark = mul(stone, 0.65f);
+    Color light = add(mul(stone, 1.08f), 8, 8, 10);
+
+    // Soft shadow on the floor.
+    for (int y = 11; y < 15; ++y) {
+        for (int x = 4; x < 12; ++x) {
+            s.at(x, y) = mul(s.at(x, y), 0.72f);
+        }
+    }
+
+    // Pillar body (a simple column).
+    outlineRect(s, 5, 2, 6, 13, dark);
+    rect(s, 6, 3, 4, 11, stone);
+
+    // Carve vertical grooves.
+    for (int y = 3; y < 14; ++y) {
+        if (y % 3 == 0) {
+            setPx(s, 7, y, mul(stone, 0.85f));
+            setPx(s, 8, y, mul(stone, 0.92f));
+        }
+    }
+
+    // Cap and base rings.
+    rect(s, 5, 2, 6, 1, light);
+    rect(s, 5, 13, 6, 1, mul(stone, 0.92f));
+
+    // A slight highlight shimmer on frame 1 to match other tiles.
+    if (frame % 2 == 1) {
+        setPx(s, 6, 4, add(s.at(6, 4), 25, 25, 28));
+        setPx(s, 6, 9, add(s.at(6, 9), 18, 18, 20));
+        setPx(s, 9, 6, add(s.at(9, 6), 12, 12, 14));
     }
 
     return s;

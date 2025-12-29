@@ -28,6 +28,9 @@ SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int fr
 // 16x16 tiles
 SpritePixels generateFloorTile(uint32_t seed, int frame);
 SpritePixels generateWallTile(uint32_t seed, int frame);
+// New terrain tiles
+SpritePixels generateChasmTile(uint32_t seed, int frame);
+SpritePixels generatePillarTile(uint32_t seed, int frame);
 SpritePixels generateStairsTile(uint32_t seed, bool up, int frame);
 SpritePixels generateDoorTile(uint32_t seed, bool open, int frame);
 SpritePixels generateLockedDoorTile(uint32_t seed, int frame);

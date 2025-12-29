@@ -368,6 +368,172 @@ std::vector<int> bfsDistanceMap(const Dungeon& d, Vec2i start) {
     return dist;
 }
 
+bool stairsConnected(const Dungeon& d) {
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) return true;
+    if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) return true;
+    const auto dist = bfsDistanceMap(d, d.stairsUp);
+    const size_t ii = static_cast<size_t>(d.stairsDown.y * d.width + d.stairsDown.x);
+    if (ii >= dist.size()) return false;
+    return dist[ii] >= 0;
+}
+
+struct TileChange {
+    int x = 0;
+    int y = 0;
+    TileType prev{};
+};
+
+bool isStairsTile(const Dungeon& d, int x, int y) {
+    if (!d.inBounds(x, y)) return false;
+    return (x == d.stairsUp.x && y == d.stairsUp.y)
+        || (x == d.stairsDown.x && y == d.stairsDown.y);
+}
+
+void trySetTile(Dungeon& d, int x, int y, TileType t, std::vector<TileChange>& changes) {
+    if (!d.inBounds(x, y)) return;
+    if (isStairsTile(d, x, y)) return;
+
+    Tile& cur = d.at(x, y);
+    if (cur.type == t) return;
+
+    // Only allow replacing plain floor (or an already-decorated tile if we are layering).
+    if (!(cur.type == TileType::Floor || cur.type == TileType::Chasm || cur.type == TileType::Pillar)) {
+        return;
+    }
+
+    changes.push_back({x, y, cur.type});
+    cur.type = t;
+}
+
+void undoChanges(Dungeon& d, const std::vector<TileChange>& changes) {
+    for (auto it = changes.rbegin(); it != changes.rend(); ++it) {
+        if (!d.inBounds(it->x, it->y)) continue;
+        d.at(it->x, it->y).type = it->prev;
+    }
+}
+
+bool decorateRoomPillars(Dungeon& d, const Room& r, RNG& rng) {
+    // Only decorate sufficiently large rooms.
+    if (r.w < 7 || r.h < 7) return false;
+
+    std::vector<TileChange> changes;
+    changes.reserve(32);
+
+    // Pick a pattern: 0 = corner pillars, 1 = grid pillars, 2 = cross pillars
+    int pattern = 0;
+    if (r.w >= 10 && r.h >= 10) pattern = rng.range(0, 2);
+    else pattern = rng.range(0, 1);
+
+    auto inInterior = [&](int x, int y) {
+        return x >= r.x + 1 && x < r.x2() - 1 && y >= r.y + 1 && y < r.y2() - 1;
+    };
+
+    if (pattern == 0) {
+        // Four pillars near the corners.
+        const int xs[2] = {r.x + 2, r.x2() - 3};
+        const int ys[2] = {r.y + 2, r.y2() - 3};
+        for (int yy : ys) {
+            for (int xx : xs) {
+                if (!inInterior(xx, yy)) continue;
+                trySetTile(d, xx, yy, TileType::Pillar, changes);
+            }
+        }
+    } else if (pattern == 1) {
+        // A loose grid of pillars.
+        const int stepX = (r.w >= 12) ? 3 : 4;
+        const int stepY = (r.h >= 12) ? 3 : 4;
+        for (int y = r.y + 2; y < r.y2() - 2; y += stepY) {
+            for (int x = r.x + 2; x < r.x2() - 2; x += stepX) {
+                if (!inInterior(x, y)) continue;
+                if (rng.chance(0.75f)) trySetTile(d, x, y, TileType::Pillar, changes);
+            }
+        }
+    } else {
+        // Cross pillars: a vertical/horizontal line near the center.
+        const int cx = r.cx();
+        const int cy = r.cy();
+        for (int y = r.y + 2; y < r.y2() - 2; ++y) {
+            if (rng.chance(0.45f)) trySetTile(d, cx, y, TileType::Pillar, changes);
+        }
+        for (int x = r.x + 2; x < r.x2() - 2; ++x) {
+            if (rng.chance(0.45f)) trySetTile(d, x, cy, TileType::Pillar, changes);
+        }
+
+        // Clear the exact center to avoid total blockage.
+        if (d.inBounds(cx, cy) && d.at(cx, cy).type == TileType::Pillar) {
+            changes.push_back({cx, cy, TileType::Pillar});
+            d.at(cx, cy).type = TileType::Floor;
+        }
+    }
+
+    // Avoid breaking the critical path between stairs.
+    if (!stairsConnected(d)) {
+        undoChanges(d, changes);
+        return false;
+    }
+    return !changes.empty();
+}
+
+bool decorateRoomChasm(Dungeon& d, const Room& r, RNG& rng) {
+    // Only decorate sufficiently large rooms.
+    if (r.w < 8 || r.h < 6) return false;
+
+    std::vector<TileChange> changes;
+    changes.reserve(48);
+
+    const bool vertical = rng.chance(0.5f);
+    if (vertical) {
+        const int x = r.cx();
+        // A vertical chasm line with a single bridge tile.
+        const int bridgeY = rng.range(r.y + 2, r.y2() - 3);
+        for (int y = r.y + 1; y < r.y2() - 1; ++y) {
+            if (y == bridgeY) continue;
+            trySetTile(d, x, y, TileType::Chasm, changes);
+        }
+    } else {
+        const int y = r.cy();
+        const int bridgeX = rng.range(r.x + 2, r.x2() - 3);
+        for (int x = r.x + 1; x < r.x2() - 1; ++x) {
+            if (x == bridgeX) continue;
+            trySetTile(d, x, y, TileType::Chasm, changes);
+        }
+    }
+
+    if (!stairsConnected(d)) {
+        undoChanges(d, changes);
+        return false;
+    }
+    return !changes.empty();
+}
+
+void decorateRooms(Dungeon& d, RNG& rng, int depth) {
+    // Decoration pacing: more structural variation deeper.
+    float pPillars = 0.18f;
+    float pChasm = 0.10f;
+    if (depth >= 3) { pPillars += 0.07f; pChasm += 0.06f; }
+    if (depth >= 5) { pPillars += 0.08f; pChasm += 0.08f; }
+
+    for (const Room& r : d.rooms) {
+        // Don't decorate special rooms: they have bespoke gameplay (shops, shrines, etc.).
+        if (r.type != RoomType::Normal) continue;
+
+        // Avoid the start/end rooms that hold stairs.
+        if (r.contains(d.stairsUp.x, d.stairsUp.y)) continue;
+        if (r.contains(d.stairsDown.x, d.stairsDown.y)) continue;
+
+        // Skip tiny rooms.
+        if (r.w < 6 || r.h < 6) continue;
+
+        // One or two decorations per room (rare).
+        if (rng.chance(pChasm)) {
+            (void)decorateRoomChasm(d, r, rng);
+        }
+        if (rng.chance(pPillars)) {
+            (void)decorateRoomPillars(d, r, rng);
+        }
+    }
+}
+
 enum class GenKind : uint8_t {
     RoomsBsp = 0,
     Cavern,
@@ -375,18 +541,25 @@ enum class GenKind : uint8_t {
 };
 
 GenKind chooseGenKind(int depth, RNG& rng) {
-    // The game is fairly short by default (goal on depth 5), so ensure the
-    // player actually sees the new map types.
-    if (depth <= 2) return GenKind::RoomsBsp;
-    if (depth == 3) return GenKind::Cavern;
-    if (depth == 4) return GenKind::Maze;
+    // The default run now spans 10 floors, so we can pace out variety:
+    // - Early: classic rooms
+    // - Mid: first cavern / first maze
+    // - Deep: alternating cavern/maze spikes
+    if (depth <= 3) return GenKind::RoomsBsp;
+    if (depth == 4) return GenKind::Cavern;
+    if (depth == 5) return GenKind::Maze;
+    if (depth == 6) return GenKind::RoomsBsp;
+    if (depth == 7) return GenKind::Cavern;
+    if (depth == 8) return GenKind::Maze;
+    if (depth == 9) return GenKind::RoomsBsp;
 
-    // Beyond the "core" run, sprinkle variety.
+    // Beyond the intended run depth (e.g., in tests or future endless mode), sprinkle variety.
     float r = rng.next01();
-    if (r < 0.18f) return GenKind::Maze;
-    if (r < 0.42f) return GenKind::Cavern;
+    if (r < 0.22f) return GenKind::Maze;
+    if (r < 0.52f) return GenKind::Cavern;
     return GenKind::RoomsBsp;
 }
+
 
 void markSpecialRooms(Dungeon& d, RNG& rng, int depth) {
     if (d.rooms.empty()) return;
@@ -428,12 +601,23 @@ void markSpecialRooms(Dungeon& d, RNG& rng, int depth) {
     int t = pickAndRemove(pool);
     if (t >= 0) d.rooms[static_cast<size_t>(t)].type = RoomType::Treasure;
 
+    // Deep floors can carry extra treasure to support a longer run.
+    if (depth >= 7) {
+        float extraTreasureChance = std::min(0.55f, 0.25f + 0.05f * static_cast<float>(depth - 7));
+        if (rng.chance(extraTreasureChance)) {
+            int t2 = pickAndRemove(pool);
+            if (t2 >= 0) d.rooms[static_cast<size_t>(t2)].type = RoomType::Treasure;
+        }
+    }
+
     // Shops: give gold real meaning and provide a mid-run power curve. More common deeper.
     float shopChance = 0.25f;
     if (depth >= 2) shopChance = 0.55f;
     if (depth >= 4) shopChance = 0.70f;
     // Tiny ramp for longer runs.
     shopChance = std::min(0.85f, shopChance + 0.02f * std::max(0, depth - 4));
+    // Midpoint floor: guarantee at least one shop if there's room.
+    if (depth == 5) shopChance = 1.0f;
     if (!pool.empty() && rng.chance(shopChance)) {
         int sh = pickAndRemove(pool);
         if (sh >= 0) d.rooms[static_cast<size_t>(sh)].type = RoomType::Shop;
@@ -959,6 +1143,128 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
     }
 }
 
+
+
+void generateSanctum(Dungeon& d, RNG& rng, int depth) {
+    (void)depth; // reserved for future per-depth theming
+    fillWalls(d);
+
+    // Open the interior: the final floor is an arena-like layout with a central locked sanctum.
+    carveRect(d, 1, 1, d.width - 2, d.height - 2, TileType::Floor);
+
+    const int cx = d.width / 2;
+    const int cy = d.height / 2;
+
+    // Central sanctum (walled chamber) with a locked door and a chasm moat.
+    const int wallW = 13;
+    const int wallH = 9;
+    int wallX = clampi(cx - wallW / 2, 4, d.width - wallW - 4);
+    int wallY = clampi(cy - wallH / 2, 4, d.height - wallH - 4);
+
+    for (int y = wallY; y < wallY + wallH; ++y) {
+        for (int x = wallX; x < wallX + wallW; ++x) {
+            if (d.inBounds(x, y)) d.at(x, y).type = TileType::Wall;
+        }
+    }
+
+    carveRect(d, wallX + 1, wallY + 1, wallW - 2, wallH - 2, TileType::Floor);
+
+    // Locked door on the north wall.
+    const int doorX = wallX + wallW / 2;
+    const int doorY = wallY;
+    if (d.inBounds(doorX, doorY)) d.at(doorX, doorY).type = TileType::DoorLocked;
+
+    // Moat ring (1 tile away from the sanctum wall).
+    const int moatX = wallX - 1;
+    const int moatY = wallY - 1;
+    const int moatW = wallW + 2;
+    const int moatH = wallH + 2;
+
+    auto setChasm = [&](int x, int y) {
+        if (!d.inBounds(x, y)) return;
+        // Don't overwrite the sanctum walls or the upstairs.
+        TileType t = d.at(x, y).type;
+        if (t == TileType::Wall || t == TileType::StairsUp) return;
+        d.at(x, y).type = TileType::Chasm;
+    };
+
+    for (int x = moatX; x < moatX + moatW; ++x) {
+        setChasm(x, moatY);
+        setChasm(x, moatY + moatH - 1);
+    }
+    for (int y = moatY; y < moatY + moatH; ++y) {
+        setChasm(moatX, y);
+        setChasm(moatX + moatW - 1, y);
+    }
+
+    // Bridges across the moat (keep the entrance obvious, with extra flank bridges).
+    if (d.inBounds(doorX, doorY - 1)) d.at(doorX, doorY - 1).type = TileType::Floor;
+    if (d.inBounds(doorX, doorY + wallH)) d.at(doorX, doorY + wallH).type = TileType::Floor;
+    if (d.inBounds(wallX - 1, cy)) d.at(wallX - 1, cy).type = TileType::Floor;
+    if (d.inBounds(wallX + wallW, cy)) d.at(wallX + wallW, cy).type = TileType::Floor;
+
+    // Pillars inside the sanctum for cover and to make knockback fights more interesting.
+    const int ix0 = wallX + 2;
+    const int ix1 = wallX + wallW - 3;
+    const int iy0 = wallY + 2;
+    const int iy1 = wallY + wallH - 3;
+    const Vec2i sanctumPillars[] = {
+        {ix0, iy0}, {ix1, iy0},
+        {ix0, iy1}, {ix1, iy1},
+        {cx - 1, cy}, {cx + 1, cy},
+    };
+    for (const auto& p : sanctumPillars) {
+        if (!d.inBounds(p.x, p.y)) continue;
+        if (d.at(p.x, p.y).type == TileType::Floor) d.at(p.x, p.y).type = TileType::Pillar;
+    }
+
+    // A few arena pillars outside the moat (symmetrical-ish).
+    const Vec2i hallPillars[] = {
+        {cx - 10, cy - 4}, {cx + 10, cy - 4},
+        {cx - 10, cy + 4}, {cx + 10, cy + 4},
+        {cx - 12, cy}, {cx + 12, cy},
+    };
+    for (const auto& p : hallPillars) {
+        if (!d.inBounds(p.x, p.y)) continue;
+        if (d.at(p.x, p.y).type == TileType::Floor) d.at(p.x, p.y).type = TileType::Pillar;
+    }
+
+    // Define rooms (for spawns and room-type mechanics).
+    d.rooms.clear();
+
+    // Start room around the upstairs.
+    const int sx = 2;
+    const int sy = 2;
+    const int sw = 8;
+    const int sh = 6;
+    d.rooms.push_back({sx, sy, sw, sh, RoomType::Normal});
+
+    // A "last chance" shrine alcove (extra healing/utility before the sanctum).
+    const int rx = d.width - 10;
+    const int ry = 2;
+    const int rw = 8;
+    const int rh = 6;
+    d.rooms.push_back({rx, ry, rw, rh, RoomType::Shrine});
+
+    // A guard staging area (more monsters can spawn here).
+    const int gx = 2;
+    const int gy = d.height - 8;
+    const int gw = 8;
+    const int gh = 6;
+    d.rooms.push_back({gx, gy, gw, gh, RoomType::Normal});
+
+    // The sanctum interior is the treasure room.
+    d.rooms.push_back({wallX + 1, wallY + 1, wallW - 2, wallH - 2, RoomType::Treasure});
+
+    // Stairs.
+    d.stairsUp = {sx + sw / 2, sy + sh / 2};
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
+    d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+
+    // No downstairs on the final floor.
+    d.stairsDown = {-1, -1};
+}
+
 } // namespace
 
 Dungeon::Dungeon(int w, int h) : width(w), height(h) {
@@ -981,7 +1287,7 @@ bool Dungeon::isPassable(int x, int y) const {
 bool Dungeon::isOpaque(int x, int y) const {
     if (!inBounds(x, y)) return true;
     TileType t = at(x, y).type;
-    return (t == TileType::Wall || t == TileType::DoorClosed || t == TileType::DoorLocked || t == TileType::DoorSecret);
+    return (t == TileType::Wall || t == TileType::Pillar || t == TileType::DoorClosed || t == TileType::DoorLocked || t == TileType::DoorSecret);
 }
 
 bool Dungeon::isDoorClosed(int x, int y) const {
@@ -1028,7 +1334,42 @@ void Dungeon::unlockDoor(int x, int y) {
     }
 }
 
-void Dungeon::generate(RNG& rng, int depth) {
+
+bool Dungeon::isDiggable(int x, int y) const {
+    if (!inBounds(x, y)) return false;
+    TileType t = at(x, y).type;
+    switch (t) {
+        case TileType::Wall:
+        case TileType::Pillar:
+        case TileType::DoorClosed:
+        case TileType::DoorLocked:
+        case TileType::DoorSecret:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool Dungeon::dig(int x, int y) {
+    if (!inBounds(x, y)) return false;
+    if (!isDiggable(x, y)) return false;
+
+    // Digging destroys the obstacle and leaves a clear floor tile behind.
+    at(x, y).type = TileType::Floor;
+    return true;
+}
+
+void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
+    // Sanity clamp.
+    if (maxDepth < 1) maxDepth = 1;
+
+    // Final floor: a bespoke arena-like sanctum that caps the run.
+    if (depth >= maxDepth) {
+        generateSanctum(*this, rng, depth);
+        ensureBorders(*this);
+        return;
+    }
+
     fillWalls(*this);
 
     // Choose a generation style (rooms vs caverns vs mazes) and build the base layout.
@@ -1047,8 +1388,20 @@ void Dungeon::generate(RNG& rng, int depth) {
 
     // Optional hidden/locked treasure side rooms.
     // These never affect critical connectivity (stairs already placed).
-    if (rng.chance(0.30f)) (void)tryCarveSecretRoom(*this, rng);
-    if (rng.chance(0.22f)) (void)tryCarveVaultRoom(*this, rng);
+    float pSecret = 0.30f;
+    float pVault = 0.22f;
+    if (depth >= 6) {
+        const float t = static_cast<float>(depth - 5);
+        pSecret = std::min(0.55f, pSecret + 0.03f * t);
+        pVault = std::min(0.45f, pVault + 0.03f * t);
+    }
+    if (rng.chance(pSecret)) (void)tryCarveSecretRoom(*this, rng);
+    if (rng.chance(pVault)) (void)tryCarveVaultRoom(*this, rng);
+
+    // Structural decoration pass: add interior columns/chasm features that
+    // change combat geometry and line-of-sight without breaking the critical
+    // stairs path.
+    decorateRooms(*this, rng, depth);
 
     ensureBorders(*this);
 }
@@ -1113,8 +1466,8 @@ std::vector<int> Dungeon::computeSoundMap(int sx, int sy, int maxCost) const {
     auto soundPassable = [&](int x, int y) -> bool {
         if (!inBounds(x, y)) return false;
         const TileType t = at(x, y).type;
-        // Walls and secret doors completely block sound propagation.
-        return (t != TileType::Wall && t != TileType::DoorSecret);
+        // Walls, pillars, and secret doors completely block sound propagation.
+        return (t != TileType::Wall && t != TileType::Pillar && t != TileType::DoorSecret);
     };
 
     auto tileCost = [&](int x, int y) -> int {
@@ -1201,7 +1554,7 @@ void Dungeon::computeFov(int px, int py, int radius, bool markExplored) {
     auto isOpaqueTile = [&](int x, int y) {
         if (!inBounds(x, y)) return true;
         TileType tt = at(x, y).type;
-        return (tt == TileType::Wall || tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorSecret);
+        return (tt == TileType::Wall || tt == TileType::Pillar || tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorSecret);
     };
 
     auto markVis = [&](int x, int y) {
@@ -1284,7 +1637,7 @@ void Dungeon::computeFovMask(int px, int py, int radius, std::vector<uint8_t>& o
     auto isOpaqueTile = [&](int x, int y) {
         if (!inBounds(x, y)) return true;
         TileType tt = at(x, y).type;
-        return (tt == TileType::Wall || tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorSecret);
+        return (tt == TileType::Wall || tt == TileType::Pillar || tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorSecret);
     };
 
     auto markVis = [&](int x, int y) {

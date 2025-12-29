@@ -15,6 +15,11 @@ enum class TileType : uint8_t {
     DoorSecret,
     // Append-only: visible but requires a Key to open.
     DoorLocked,
+    // Append-only: impassable terrain that does NOT block line-of-sight.
+    // Used for pits/chasm features that shape room flow without creating "walls".
+    Chasm,
+    // Append-only: interior column that blocks movement and line-of-sight.
+    Pillar,
 };
 
 struct Tile {
@@ -84,11 +89,17 @@ public:
     void lockDoor(int x, int y);
     void unlockDoor(int x, int y);
 
+    // Terrain modification
+    bool isDiggable(int x, int y) const;
+    // Converts a diggable tile (wall/pillar/door variants) into floor.
+    // Returns true if the tile changed.
+    bool dig(int x, int y);
+
     // Procedural generation.
     //
     // `depth` is used to vary generation style (rooms vs caverns vs mazes)
     // and difficulty pacing.
-    void generate(RNG& rng, int depth);
+    void generate(RNG& rng, int depth, int maxDepth);
 
     void computeFov(int px, int py, int radius, bool markExplored = true);
 

@@ -7,7 +7,19 @@ add_executable(procrogue_tests
     ../src/scores.cpp
     ../src/settings.cpp
     ../src/game.cpp
+    ../src/game_save.cpp
+    ../src/game_loop.cpp
+    ../src/game_automove.cpp
+    ../src/game_look.cpp
+    ../src/game_interact.cpp
+    ../src/game_world.cpp
+    ../src/game_inventory.cpp
+    ../src/game_targeting.cpp
+    ../src/game_spawn.cpp
+    ../src/pathfinding.cpp
+    ../src/ai.cpp
     ../src/combat.cpp
+    ../src/physics.cpp
     # spritegen contains large static tables used only by the renderer;
     # the test target is logic-only, so skipping it keeps test builds fast.
 )

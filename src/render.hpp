@@ -56,6 +56,8 @@ private:
     using AnimTex = std::array<SDL_Texture*, FRAMES>;
     std::vector<AnimTex> floorVar;
     std::vector<AnimTex> wallVar;
+    std::vector<AnimTex> chasmVar;
+    std::vector<AnimTex> pillarVar;
 
     std::array<SDL_Texture*, FRAMES> stairsUpTex{};
     std::array<SDL_Texture*, FRAMES> stairsDownTex{};

@@ -92,10 +92,18 @@ enum class ItemKind : uint8_t {
 
     // --- Curses / blessings (append-only) ---
     ScrollRemoveCurse,
+
+    // --- Mind / control (append-only) ---
+    PotionClarity,
+    ScrollConfusion,
+
+    // --- Terrain / digging (append-only) ---
+    Pickaxe,
+    WandDigging,
 };
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollRemoveCurse) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::WandDigging) + 1;
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;
@@ -111,6 +119,7 @@ inline bool isPotionKind(ItemKind k) {
         case ItemKind::PotionHaste:
         case ItemKind::PotionVision:
         case ItemKind::PotionInvisibility:
+        case ItemKind::PotionClarity:
             return true;
         default:
             return false;
@@ -127,6 +136,7 @@ inline bool isScrollKind(ItemKind k) {
         case ItemKind::ScrollDetectTraps:
         case ItemKind::ScrollDetectSecrets:
         case ItemKind::ScrollRemoveCurse:
+        case ItemKind::ScrollConfusion:
             return true;
         case ItemKind::ScrollKnock:
             return true;

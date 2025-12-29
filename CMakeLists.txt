@@ -33,7 +33,18 @@ set(PROCROGUE_SOURCES
     src/main.cpp
     src/keybinds.cpp
     src/game.cpp
+    src/game_save.cpp
+    src/game_loop.cpp
+    src/game_automove.cpp
+    src/game_look.cpp
+    src/game_interact.cpp
+    src/game_world.cpp
+    src/game_inventory.cpp
+    src/game_targeting.cpp
+    src/game_spawn.cpp
+    src/pathfinding.cpp
     src/combat.cpp
+    src/physics.cpp
     src/combat_rules.cpp
     src/dungeon.cpp
     src/render.cpp

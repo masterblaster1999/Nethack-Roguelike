@@ -100,6 +100,14 @@ const ItemDef& itemDef(ItemKind k) {
 
         // Curses / blessings (append-only)
         { ItemKind::ScrollRemoveCurse, "SCROLL OF REMOVE CURSE", true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 120 },
+
+        // Mind / control (append-only)
+        { ItemKind::PotionClarity,   "POTION OF CLARITY",   true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 2, 45 },
+        { ItemKind::ScrollConfusion, "SCROLL OF CONFUSION", true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 85 },
+
+        // Terrain / digging (append-only)
+        { ItemKind::Pickaxe,          "PICKAXE",           false, false, false, EquipSlot::MeleeWeapon,  1, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 9, 55 },
+        { ItemKind::WandDigging,      "WAND OF DIGGING",   false, false, false, EquipSlot::RangedWeapon, 0, 0, 0, 7, AmmoKind::None,  ProjectileKind::Spark, 8, 0, 0, 5, 90 },
     };
 
     const size_t idx = static_cast<size_t>(k);
@@ -135,10 +143,10 @@ std::string itemDisplayName(const Item& it) {
         ss << d.name;
     }
 
-    if (it.kind == ItemKind::WandSparks) {
-        ss << " (" << it.charges << "/" << d.maxCharges << ")";
-    } else if (it.kind == ItemKind::TorchLit) {
+    if (it.kind == ItemKind::TorchLit) {
         ss << " (" << it.charges << "T)";
+    } else if (d.maxCharges > 0) {
+        ss << " (" << it.charges << "/" << d.maxCharges << ")";
     }
 
     // Shop tag: show the total price for the stack (or 1 unit for non-stackables).

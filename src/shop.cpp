@@ -42,8 +42,8 @@ int shopBaseValuePerUnit(const Item& it) {
 
     int v = base;
 
-    // Wands: scale with remaining charges.
-    if (it.kind == ItemKind::WandSparks) {
+    // Wands / charged tools: scale with remaining charges.
+    if (d.maxCharges > 0) {
         const int maxCh = std::max(1, d.maxCharges);
         const int ch = std::clamp(it.charges, 0, maxCh);
         // Even empty wands have a tiny "residual" value.

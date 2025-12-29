@@ -1,5 +1,6 @@
 #include "dungeon.hpp"
 #include "items.hpp"
+#include "combat_rules.hpp"
 #include "rng.hpp"
 #include "scores.hpp"
 #include "settings.hpp"
@@ -51,70 +52,74 @@ void test_rng_reproducible() {
 }
 
 void test_dungeon_stairs_connected() {
-    RNG rng(42u);
-    Dungeon d(30, 20);
-    d.generate(rng);
+    const int depthsToTest[] = {1, 3, 4, 5};
 
-    auto inBounds = [&](Vec2i p) {
-        return d.inBounds(p.x, p.y);
-    };
+    for (int depth : depthsToTest) {
+        RNG rng(42u + static_cast<uint32_t>(depth));
+        Dungeon d(30, 20);
+        d.generate(rng, depth);
 
-    expect(inBounds(d.stairsUp), "stairsUp out of bounds");
-    expect(inBounds(d.stairsDown), "stairsDown out of bounds");
+        auto inBounds = [&](Vec2i p) {
+            return d.inBounds(p.x, p.y);
+        };
 
-    if (inBounds(d.stairsUp)) {
-        expect(d.at(d.stairsUp.x, d.stairsUp.y).type == TileType::StairsUp,
-               "stairsUp tile type incorrect");
-    }
-    if (inBounds(d.stairsDown)) {
-        expect(d.at(d.stairsDown.x, d.stairsDown.y).type == TileType::StairsDown,
-               "stairsDown tile type incorrect");
-    }
+        expect(inBounds(d.stairsUp), "stairsUp out of bounds (depth " + std::to_string(depth) + ")");
+        expect(inBounds(d.stairsDown), "stairsDown out of bounds (depth " + std::to_string(depth) + ")");
 
-    // BFS from up to down using passable tiles.
-    std::vector<uint8_t> visited(static_cast<size_t>(d.width * d.height), 0);
-    auto idx = [&](int x, int y) { return static_cast<size_t>(y * d.width + x); };
-
-    std::queue<Vec2i> q;
-    if (inBounds(d.stairsUp)) {
-        q.push(d.stairsUp);
-        visited[idx(d.stairsUp.x, d.stairsUp.y)] = 1;
-    }
-
-    const int dirs[8][2] = {
-        {1,0},{-1,0},{0,1},{0,-1},
-        {1,1},{1,-1},{-1,1},{-1,-1},
-    };
-
-    while (!q.empty()) {
-        Vec2i p = q.front();
-        q.pop();
-
-        for (auto& dxy : dirs) {
-            int nx = p.x + dxy[0];
-            int ny = p.y + dxy[1];
-            if (!d.inBounds(nx, ny)) continue;
-            // Match in-game diagonal movement rules: no cutting corners.
-            if (dxy[0] != 0 && dxy[1] != 0) {
-                int ox = p.x + dxy[0];
-                int oy = p.y;
-                int px = p.x;
-                int py = p.y + dxy[1];
-                if (!d.inBounds(ox, oy) || !d.inBounds(px, py)) continue;
-                if (!d.isWalkable(ox, oy)) continue;
-                if (!d.isWalkable(px, py)) continue;
-            }
-            if (!d.isPassable(nx, ny)) continue;
-            size_t id = idx(nx, ny);
-            if (visited[id]) continue;
-            visited[id] = 1;
-            q.push({nx, ny});
+        if (inBounds(d.stairsUp)) {
+            expect(d.at(d.stairsUp.x, d.stairsUp.y).type == TileType::StairsUp,
+                   "stairsUp tile type incorrect (depth " + std::to_string(depth) + ")");
         }
-    }
+        if (inBounds(d.stairsDown)) {
+            expect(d.at(d.stairsDown.x, d.stairsDown.y).type == TileType::StairsDown,
+                   "stairsDown tile type incorrect (depth " + std::to_string(depth) + ")");
+        }
 
-    if (inBounds(d.stairsDown)) {
-        expect(visited[idx(d.stairsDown.x, d.stairsDown.y)] != 0,
-               "stairsDown not reachable from stairsUp");
+        // BFS from up to down using passable tiles.
+        std::vector<uint8_t> visited(static_cast<size_t>(d.width * d.height), 0);
+        auto idx = [&](int x, int y) { return static_cast<size_t>(y * d.width + x); };
+
+        std::queue<Vec2i> q;
+        if (inBounds(d.stairsUp)) {
+            q.push(d.stairsUp);
+            visited[idx(d.stairsUp.x, d.stairsUp.y)] = 1;
+        }
+
+        const int dirs[8][2] = {
+            {1,0},{-1,0},{0,1},{0,-1},
+            {1,1},{1,-1},{-1,1},{-1,-1},
+        };
+
+        while (!q.empty()) {
+            Vec2i p = q.front();
+            q.pop();
+
+            for (auto& dxy : dirs) {
+                int nx = p.x + dxy[0];
+                int ny = p.y + dxy[1];
+                if (!d.inBounds(nx, ny)) continue;
+                // Match in-game diagonal movement rules: no cutting corners.
+                if (dxy[0] != 0 && dxy[1] != 0) {
+                    int ox = p.x + dxy[0];
+                    int oy = p.y;
+                    int px = p.x;
+                    int py = p.y + dxy[1];
+                    if (!d.inBounds(ox, oy) || !d.inBounds(px, py)) continue;
+                    if (!d.isWalkable(ox, oy)) continue;
+                    if (!d.isWalkable(px, py)) continue;
+                }
+                if (!d.isPassable(nx, ny)) continue;
+                size_t id = idx(nx, ny);
+                if (visited[id]) continue;
+                visited[id] = 1;
+                q.push({nx, ny});
+            }
+        }
+
+        if (inBounds(d.stairsDown)) {
+            expect(visited[idx(d.stairsDown.x, d.stairsDown.y)] != 0,
+                   "stairsDown not reachable from stairsUp (depth " + std::to_string(depth) + ")");
+        }
     }
 }
 
@@ -236,6 +241,63 @@ void test_los_blocks_diagonal_corner_peek() {
            "LOS should allow diagonal visibility if at least one side is open");
 }
 
+
+void test_sound_propagation_respects_walls_and_muffling_doors() {
+    Dungeon d(5, 5);
+
+    // Start with solid walls.
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Wall;
+        }
+    }
+
+    // Carve a 1-tile corridor: (1,2) -> (3,2)
+    d.at(1, 2).type = TileType::Floor;
+    d.at(2, 2).type = TileType::DoorClosed; // muffling, but transmits sound
+    d.at(3, 2).type = TileType::Floor;
+
+    // Through a closed door: cost should be 2 (door) + 1 (floor) = 3.
+    auto sound = d.computeSoundMap(1, 2, 10);
+    expect(sound[2 * d.width + 1] == 0, "Sound source should be 0 cost");
+    expect(sound[2 * d.width + 3] == 3, "Sound should pass through closed door with muffling cost");
+
+    // If we cap maxCost below 3, the target should remain unreachable (-1).
+    auto soundTight = d.computeSoundMap(1, 2, 2);
+    expect(soundTight[2 * d.width + 3] == -1, "maxCost should limit sound propagation");
+
+    // Replace the door with a wall: sound should not reach.
+    d.at(2, 2).type = TileType::Wall;
+    auto soundBlocked = d.computeSoundMap(1, 2, 10);
+    expect(soundBlocked[2 * d.width + 3] == -1, "Walls should block sound propagation");
+}
+
+void test_sound_diagonal_corner_cutting_is_blocked() {
+    Dungeon d(3, 3);
+
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Wall;
+        }
+    }
+
+    // Origin and diagonal target.
+    d.at(1, 1).type = TileType::Floor;
+    d.at(2, 2).type = TileType::Floor;
+
+    // Both orthogonal tiles are walls -> diagonal should be blocked.
+    d.at(2, 1).type = TileType::Wall;
+    d.at(1, 2).type = TileType::Wall;
+
+    auto sound = d.computeSoundMap(1, 1, 5);
+    expect(sound[2 * d.width + 2] == -1, "Sound should not cut diagonally through two blocking tiles");
+
+    // If one orthogonal tile is passable, diagonal propagation is allowed.
+    d.at(2, 1).type = TileType::Floor;
+    auto sound2 = d.computeSoundMap(1, 1, 5);
+    expect(sound2[2 * d.width + 2] == 1, "Sound should propagate diagonally if a corner is open");
+}
+
 void test_item_defs_sane() {
     for (int k = 0; k < ITEM_KIND_COUNT; ++k) {
         const ItemKind kind = static_cast<ItemKind>(k);
@@ -249,6 +311,76 @@ void test_item_defs_sane() {
         if (def.consumable) {
             expect(def.stackable, "Consumable item should be stackable (kind " + std::to_string(k) + ")");
         }
+
+        expect(def.weight >= 0, "ItemDef weight should be non-negative (kind " + std::to_string(k) + ")");
+    }
+}
+
+void test_item_weight_helpers() {
+    // Stackable items scale with count.
+    Item arrows;
+    arrows.kind = ItemKind::Arrow;
+    arrows.count = 25;
+    expect(itemWeight(arrows) == itemDef(ItemKind::Arrow).weight * 25, "Arrow stack weight scales with count");
+
+    // Non-stackable items use a single-item weight regardless of count.
+    Item sword;
+    sword.kind = ItemKind::Sword;
+    sword.count = 99;
+    expect(itemWeight(sword) == itemDef(ItemKind::Sword).weight, "Non-stackable items use single-item weight");
+
+    // Gold is weightless by default.
+    Item gold;
+    gold.kind = ItemKind::Gold;
+    gold.count = 500;
+    expect(itemWeight(gold) == 0, "Gold should be weightless by default");
+
+    std::vector<Item> v;
+    v.push_back(arrows);
+    v.push_back(sword);
+    v.push_back(gold);
+    expect(totalWeight(v) == itemWeight(arrows) + itemWeight(sword), "totalWeight sums itemWeight across a container");
+}
+
+void test_combat_dice_rules() {
+    // Weapon dice table sanity.
+    {
+        const DiceExpr d = meleeDiceForWeapon(ItemKind::Dagger);
+        expect(d.count == 1 && d.sides == 4 && d.bonus == 0, "Dagger base dice should be 1d4");
+    }
+    {
+        const DiceExpr d = meleeDiceForWeapon(ItemKind::Sword);
+        expect(d.count == 1 && d.sides == 6 && d.bonus == 0, "Sword base dice should be 1d6");
+    }
+    {
+        const DiceExpr d = meleeDiceForWeapon(ItemKind::Axe);
+        expect(d.count == 1 && d.sides == 8 && d.bonus == 0, "Axe base dice should be 1d8");
+    }
+
+    // Projectile dice table sanity.
+    {
+        const DiceExpr d = rangedDiceForProjectile(ProjectileKind::Arrow, false);
+        expect(d.count == 1 && d.sides == 6, "Arrow base dice should be 1d6");
+    }
+    {
+        const DiceExpr d = rangedDiceForProjectile(ProjectileKind::Rock, false);
+        expect(d.count == 1 && d.sides == 4, "Rock base dice should be 1d4");
+    }
+    {
+        const DiceExpr d = rangedDiceForProjectile(ProjectileKind::Spark, false);
+        expect(d.count == 1 && d.sides == 6, "Spark base dice should be 1d6");
+    }
+
+    // Formatting.
+    expect(diceToString({1, 6, 0}) == "1d6", "diceToString 1d6");
+    expect(diceToString({2, 4, 2}) == "2d4+2", "diceToString 2d4+2");
+    expect(diceToString({3, 8, -1}) == "3d8-1", "diceToString 3d8-1");
+
+    // rollDice stays in expected bounds.
+    RNG rng(123u);
+    for (int i = 0; i < 200; ++i) {
+        const int v = rollDice(rng, {2, 6, 3});
+        expect(v >= 5 && v <= 15, "rollDice(2d6+3) out of bounds");
     }
 }
 
@@ -1097,6 +1229,62 @@ void test_message_dedup_consecutive() {
 }
 } // namespace
 
+
+void test_fov_mask_matches_compute_fov() {
+    RNG rng(123u);
+    Dungeon d(15, 9);
+    d.generate(rng, /*depth=*/1);
+
+    const int cx = 3;
+    const int cy = 3;
+    const int radius = 8;
+
+    std::vector<uint8_t> mask;
+    d.computeFovMask(cx, cy, radius, mask);
+
+    // computeFov (no exploring) and compare the visible flags to the mask.
+    d.computeFov(cx, cy, radius, false);
+
+    expect(static_cast<int>(mask.size()) == d.width * d.height, "mask size should match dungeon size");
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const size_t i = static_cast<size_t>(y * d.width + x);
+            expect((mask[i] != 0) == d.at(x, y).visible, "mask visibility should match computeFov visibility");
+        }
+    }
+}
+
+void test_fov_mark_explored_flag() {
+    RNG rng(123u);
+    Dungeon d(15, 9);
+    d.generate(rng, /*depth=*/1);
+
+    // Clear explored flags.
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).explored = false;
+        }
+    }
+
+    d.computeFov(3, 3, 8, false);
+    bool anyExplored = false;
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            anyExplored = anyExplored || d.at(x, y).explored;
+        }
+    }
+    expect(anyExplored == false, "markExplored=false should not set explored tiles");
+
+    d.computeFov(3, 3, 8, true);
+    anyExplored = false;
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            anyExplored = anyExplored || d.at(x, y).explored;
+        }
+    }
+    expect(anyExplored == true, "markExplored=true should set explored tiles");
+}
+
 int main() {
     std::cout << "Running ProcRogue tests...\n";
 
@@ -1108,7 +1296,11 @@ int main() {
     test_lock_door_tile_rules();
     test_fov_locked_door_blocks_visibility();
     test_los_blocks_diagonal_corner_peek();
+    test_sound_propagation_respects_walls_and_muffling_doors();
+    test_sound_diagonal_corner_cutting_is_blocked();
     test_item_defs_sane();
+    test_item_weight_helpers();
+    test_combat_dice_rules();
 
     test_scores_legacy_load();
     test_scores_new_format_load_and_escape();
@@ -1131,6 +1323,9 @@ int main() {
     test_sanitize_slot_name();
     test_message_dedup_consecutive();
 
+    test_fov_mask_matches_compute_fov();
+    test_fov_mark_explored_flag();
+
     if (failures == 0) {
         std::cout << "All tests passed.\n";
         return 0;
@@ -1139,3 +1334,4 @@ int main() {
     std::cerr << failures << " test(s) failed.\n";
     return 1;
 }
+

@@ -10,6 +10,11 @@ A tiny NetHack-inspired roguelike with:
 
 ## New in this build (QoL + big usability upgrades)
 
+- **New dungeon generation variety**:
+  - **Depth 3** is a **cavern** (cellular automata)
+  - **Depth 4** is a **maze** (perfect maze + a few loops + door chokepoints)
+  - Deeper depths may randomly mix rooms / caverns / mazes
+
 - **Inventory hotkeys**: while inventory is open:
   - **E** equip/unequip
   - **U** use (consumables)
@@ -23,6 +28,10 @@ A tiny NetHack-inspired roguelike with:
 - **Configurable keybindings**: add `bind_*` entries in `procrogue_settings.ini` (multiple keys per action).
 - **In-game options menu**: press **F2** to tweak common settings (auto-pickup, autosave, etc.).
 - **NetHack-like extended commands**: press **#** (Shift+3) to open a command prompt (`save`, `load`, `pray`, `quit`, ...).
+
+- **Sound propagation + investigation:** noisy actions (footsteps, doors, combat) now generate dungeon-aware sound; monsters can investigate through corridors, while walls/secret doors block and closed/locked doors muffle.
+- **Potion of Invisibility:** makes you much harder to see (most monsters only notice you when adjacent). Attacking breaks invisibility.
+- **New extended command:** `#shout` (or `#yell`) spends a turn to make a loud noise to lure monsters.
 
 - **Auto-travel**: enter look mode (`L` / `V` or **right-click**) and press **Enter** to auto-walk to the cursor tile.
 - **Auto-explore**: press **O** to walk to the nearest unexplored frontier until interrupted.
@@ -59,14 +68,23 @@ A tiny NetHack-inspired roguelike with:
   - **Mouse wheel**: scroll message log
 - **Settings file** (auto-created on first run): tweak tile size, HUD height, fullscreen, auto-move speed, auto-pickup/autosave, and `bind_*` keybindings.
 - **Optional hunger system**: enable `hunger_enabled` to add food + starvation (and a new **Food Ration** item).
+- **Optional encumbrance system**: enable `encumbrance_enabled` for carrying capacity + burden states.
+  - HUD shows `WT: current/max` and a burden tag (BURDENED/STRESSED/STRAINED/OVERLOADED).
+  - Overloaded prevents movement until you drop items (and also blocks stairs).
+  - Toggle via the options menu or `#encumbrance [on|off]`.
 - **Safer quitting**: `confirm_quit` (default ON) requires **ESC twice** to exit (prevents accidental quits).
 - **Context pickup**: when not on stairs, **Enter** will pick up items you’re standing on.
 
 - **NetHack-style item identification**: potions + scrolls start unknown each run (randomized appearances). Using them identifies the item type; you can also find/read a **Scroll of Identify**. (Toggle via `identify_items` in settings.)
 - **New scroll**: **Scroll of Detect Traps** reveals all traps on the current floor (and identifies itself when used).
-- **Shrines**: use **#pray** (`pray heal|cure|identify|bless`) to spend gold for a small blessing (consumes a turn).
+- **Shrines**: use **#pray** (`pray heal|cure|identify|bless|uncurse`) to spend gold for a small blessing (consumes a turn).
+- **Curses + blessings (BUC)**: weapons/armor can be **BLESSED**, **UNCURSED**, or **CURSED**.
+  - **Cursed** gear can't be unequipped or dropped until uncursed.
+  - New **Scroll of Remove Curse** can cleanse cursed gear.
+  - Shrines support `pray uncurse` (and `pray bless` may bless a piece of equipped gear).
+
 - **New trap**: **Web traps** can immobilize you for a few turns.
-- **New combat spice**: spiders can web you (movement blocked for a few turns), and wizards can occasionally "blink" (teleport) to reposition.
+- **New combat spice**: spiders can web you (movement blocked for a few turns), and wizards can occasionally "blink" (teleport) to reposition — and sometimes curse your equipped gear.
 - **New content**: **Axe** + **Plate Armor**, and a new monster: the **Ogre**.
 - **CI build workflow** for Linux/macOS/Windows.
 

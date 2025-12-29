@@ -15,6 +15,7 @@ std::string pluralizeStackableName(ItemKind kind, const char* name, int count) {
 
     if (kind == ItemKind::Arrow) return "ARROWS";
     if (kind == ItemKind::Rock) return "ROCKS";
+    if (kind == ItemKind::Torch) return "TORCHES";
 
     // Very small "good enough" pluralization for our short item list.
     if (s.rfind("POTION", 0) == 0) {
@@ -38,59 +39,67 @@ const ItemDef& itemDef(ItemKind k) {
     // Keep in sync with enum ordering.
     static const ItemDef defs[] = {
         // Weapons
-        { ItemKind::Dagger,         "DAGGER",            false, false, false, EquipSlot::MeleeWeapon,  1, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
-        { ItemKind::Sword,          "SWORD",             false, false, false, EquipSlot::MeleeWeapon,  2, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
-        { ItemKind::Bow,            "BOW",               false, false, false, EquipSlot::RangedWeapon, 0, 1, 0, 8, AmmoKind::Arrow, ProjectileKind::Arrow, 0, 0 },
-        { ItemKind::Sling,          "SLING",             false, false, false, EquipSlot::RangedWeapon, 0, 1, 0, 7, AmmoKind::Rock,  ProjectileKind::Rock,  0, 0 },
-        { ItemKind::WandSparks,     "WAND OF SPARKS",    false, false, false, EquipSlot::RangedWeapon, 0, 2, 0, 7, AmmoKind::None,  ProjectileKind::Spark, 12, 0 },
+        { ItemKind::Dagger,         "DAGGER",            false, false, false, EquipSlot::MeleeWeapon,  1, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 10, 8 },
+        { ItemKind::Sword,          "SWORD",             false, false, false, EquipSlot::MeleeWeapon,  2, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 20, 20 },
+        { ItemKind::Bow,            "BOW",               false, false, false, EquipSlot::RangedWeapon, 0, 1, 0, 8, AmmoKind::Arrow, ProjectileKind::Arrow, 0, 0, 0, 15, 25 },
+        { ItemKind::Sling,          "SLING",             false, false, false, EquipSlot::RangedWeapon, 0, 1, 0, 7, AmmoKind::Rock,  ProjectileKind::Rock,  0, 0, 0, 10, 15 },
+        { ItemKind::WandSparks,     "WAND OF SPARKS",    false, false, false, EquipSlot::RangedWeapon, 0, 2, 0, 7, AmmoKind::None,  ProjectileKind::Spark, 12, 0, 0, 5, 60 },
 
         // Armor
-        { ItemKind::LeatherArmor,   "LEATHER ARMOR",     false, false, false, EquipSlot::Armor,       0, 0, 1, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
-        { ItemKind::ChainArmor,     "CHAIN ARMOR",       false, false, false, EquipSlot::Armor,       0, 0, 2, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
+        { ItemKind::LeatherArmor,   "LEATHER ARMOR",     false, false, false, EquipSlot::Armor,       0, 0, 1, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 25, 25 },
+        { ItemKind::ChainArmor,     "CHAIN ARMOR",       false, false, false, EquipSlot::Armor,       0, 0, 2, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 40, 45 },
 
         // Consumables
-        { ItemKind::PotionHealing,  "POTION OF HEALING",  true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 6 },
-        { ItemKind::PotionStrength, "POTION OF STRENGTH", true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
-        { ItemKind::ScrollTeleport, "SCROLL OF TELEPORT", true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
-        { ItemKind::ScrollMapping,  "SCROLL OF MAPPING",  true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
+        { ItemKind::PotionHealing,  "POTION OF HEALING",  true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 6, 0, 2, 30 },
+        { ItemKind::PotionStrength, "POTION OF STRENGTH", true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 2, 55 },
+        { ItemKind::ScrollTeleport, "SCROLL OF TELEPORT", true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 80 },
+        { ItemKind::ScrollMapping,  "SCROLL OF MAPPING",  true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 50 },
 
         // Quest / special
-        { ItemKind::AmuletYendor,   "AMULET OF YENDOR",   false, false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
+        { ItemKind::AmuletYendor,   "AMULET OF YENDOR",   false, false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 5, 0 },
 
         // Ammo / misc
-        { ItemKind::Arrow,          "ARROW",             true,  false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Arrow, 0, 0 },
-        { ItemKind::Rock,           "ROCK",              true,  false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
-        { ItemKind::Gold,           "GOLD",              true,  false, true,  EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0 },
+        { ItemKind::Arrow,          "ARROW",             true,  false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Arrow, 0, 0, 0, 1, 2 },
+        { ItemKind::Rock,           "ROCK",              true,  false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 2, 1 },
+        { ItemKind::Gold,           "GOLD",              true,  false, true,  EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 0, 0 },
 
         // New consumables / progression
-        { ItemKind::PotionAntidote,      "POTION OF ANTIDOTE",       true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::PotionRegeneration,  "POTION OF REGENERATION",   true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::PotionShielding,     "POTION OF STONESKIN",      true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::ScrollEnchantWeapon, "SCROLL OF ENCHANT WEAPON", true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::ScrollEnchantArmor,  "SCROLL OF ENCHANT ARMOR",  true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::PotionAntidote,      "POTION OF ANTIDOTE",       true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 35 },
+        { ItemKind::PotionRegeneration,  "POTION OF REGENERATION",   true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 70 },
+        { ItemKind::PotionShielding,     "POTION OF STONESKIN",      true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 75 },
+        { ItemKind::ScrollEnchantWeapon, "SCROLL OF ENCHANT WEAPON", true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 1, 90 },
+        { ItemKind::ScrollEnchantArmor,  "SCROLL OF ENCHANT ARMOR",  true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 1, 90 },
 
         // Even newer consumables (append-only)
-        { ItemKind::PotionHaste,         "POTION OF HASTE",          true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::PotionVision,        "POTION OF VISION",         true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::PotionHaste,         "POTION OF HASTE",          true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 70 },
+        { ItemKind::PotionVision,        "POTION OF VISION",         true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 40 },
 
         // Identification / utility (append-only)
-        { ItemKind::ScrollIdentify,      "SCROLL OF IDENTIFY",      true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::ScrollIdentify,      "SCROLL OF IDENTIFY",      true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 1, 60 },
 
         // New items (append-only)
-        { ItemKind::Axe,               "AXE",                false, false, false, EquipSlot::MeleeWeapon, 3, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::PlateArmor,        "PLATE ARMOR",        false, false, false, EquipSlot::Armor,       0, 0, 3, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::FoodRation,        "FOOD RATION",        true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 2, 250 },
-        { ItemKind::ScrollDetectTraps, "SCROLL OF DETECT TRAPS", true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::ScrollDetectSecrets, "SCROLL OF DETECT SECRETS", true, true, false, EquipSlot::None,       0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::Axe,               "AXE",                false, false, false, EquipSlot::MeleeWeapon, 3, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 25, 30 },
+        { ItemKind::PlateArmor,        "PLATE ARMOR",        false, false, false, EquipSlot::Armor,       0, 0, 3, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 60, 80 },
+        { ItemKind::FoodRation,        "FOOD RATION",        true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 2, 250, 6, 12 },
+        { ItemKind::ScrollDetectTraps, "SCROLL OF DETECT TRAPS", true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 1, 40 },
+        { ItemKind::ScrollDetectSecrets, "SCROLL OF DETECT SECRETS", true, true, false, EquipSlot::None,       0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 1, 50 },
 
         // Misc (append-only)
-        { ItemKind::Key,              "KEY",               true,  false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::Lockpick,         "LOCKPICK",          true,  false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::ScrollKnock,       "SCROLL OF KNOCK",   true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::Key,              "KEY",               true,  false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 1, 20 },
+        { ItemKind::Lockpick,         "LOCKPICK",          true,  false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 40 },
+        { ItemKind::ScrollKnock,       "SCROLL OF KNOCK",   true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 1, 50 },
 
         // Dungeon features (append-only)
-        { ItemKind::Chest,            "CHEST",            false, false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
-        { ItemKind::ChestOpen,        "OPEN CHEST",       false, false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0 },
+        { ItemKind::Chest,            "CHEST",            false, false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 0, 0 },
+        { ItemKind::ChestOpen,        "OPEN CHEST",       false, false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 0, 0 },
+        { ItemKind::PotionInvisibility, "POTION OF INVISIBILITY",  true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 80 },
+
+        // Lighting (append-only)
+        { ItemKind::Torch,            "TORCH",             true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 10 },
+        { ItemKind::TorchLit,         "LIT TORCH",         false, false, false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 0 },
+
+        // Curses / blessings (append-only)
+        { ItemKind::ScrollRemoveCurse, "SCROLL OF REMOVE CURSE", true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 120 },
     };
 
     const size_t idx = static_cast<size_t>(k);
@@ -108,11 +117,16 @@ std::string itemDisplayName(const Item& it) {
     const ItemDef& d = itemDef(it.kind);
     std::ostringstream ss;
 
-    // Prefix enchantment for non-stackable equipment.
+    // Prefix BUC (blessed/uncursed/cursed) + enchantment for non-stackable equipment.
     // (We intentionally keep new ItemKind values appended to preserve old save compatibility.)
-    if ((isWeapon(it.kind) || isArmor(it.kind)) && it.enchant != 0) {
-        if (it.enchant > 0) ss << "+";
-        ss << it.enchant << " ";
+    if (isWeapon(it.kind) || isArmor(it.kind)) {
+        if (it.buc < 0) ss << "CURSED ";
+        else if (it.buc > 0) ss << "BLESSED ";
+
+        if (it.enchant != 0) {
+            if (it.enchant > 0) ss << "+";
+            ss << it.enchant << " ";
+        }
     }
 
     if (d.stackable && it.count > 1) {
@@ -123,8 +137,33 @@ std::string itemDisplayName(const Item& it) {
 
     if (it.kind == ItemKind::WandSparks) {
         ss << " (" << it.charges << "/" << d.maxCharges << ")";
+    } else if (it.kind == ItemKind::TorchLit) {
+        ss << " (" << it.charges << "T)";
+    }
+
+    // Shop tag: show the total price for the stack (or 1 unit for non-stackables).
+    if (it.shopPrice > 0 && it.shopDepth > 0) {
+        const int n = d.stackable ? std::max(1, it.count) : 1;
+        const int total = it.shopPrice * n;
+        ss << " [PRICE " << total << "G]";
     }
     return ss.str();
+}
+
+int itemWeight(const Item& it) {
+    const ItemDef& d = itemDef(it.kind);
+    if (d.weight <= 0) return 0;
+
+    const int n = d.stackable ? std::max(0, it.count) : 1;
+    return d.weight * n;
+}
+
+int totalWeight(const std::vector<Item>& items) {
+    int w = 0;
+    for (const auto& it : items) {
+        w += itemWeight(it);
+    }
+    return w;
 }
 
 int countGold(const std::vector<Item>& inv) {
@@ -188,14 +227,20 @@ bool consumeAmmo(std::vector<Item>& inv, AmmoKind ammo, int amount) {
 }
 
 bool tryStackItem(std::vector<Item>& inv, const Item& incoming) {
-    const ItemDef& d = itemDef(incoming.kind);
-    if (!d.stackable) return false;
+    if (!isStackable(incoming.kind)) return false;
 
+    // For stackables we require the important per-item metadata to match.
+    // (This keeps future extensions like blessed/cursed consumables safe.)
     for (auto& it : inv) {
-        if (it.kind == incoming.kind) {
-            it.count += std::max(1, incoming.count);
-            return true;
-        }
+        if (it.kind != incoming.kind) continue;
+        if (it.charges != incoming.charges) continue;
+        if (it.enchant != incoming.enchant) continue;
+        if (it.buc != incoming.buc) continue;
+        if (it.shopPrice != incoming.shopPrice) continue;
+        if (it.shopDepth != incoming.shopDepth) continue;
+
+        it.count += incoming.count;
+        return true;
     }
     return false;
 }

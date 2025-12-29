@@ -1,6 +1,7 @@
 #include "game.hpp"
 #include "settings.hpp"
 #include "slot_utils.hpp"
+#include "shop.hpp"
 #include "version.hpp"
 #include <algorithm>
 #include <numeric>
@@ -73,10 +74,91 @@ static int throwRangeFor(const Entity& p, AmmoKind ammo) {
     int base = (ammo == AmmoKind::Arrow) ? 5 : 4;
     int bonus = std::max(0, (p.baseAtk - 3) / 2);
     int range = base + bonus;
-    return std::clamp(range, 3, 9);
+    range = clampi(range, 2, 12);
+    return range;
 }
 
 
+
+static int stackUnitsForPrice(const Item& it) {
+    return isStackable(it.kind) ? std::max(0, it.count) : 1;
+}
+
+static int totalShopPrice(const Item& it) {
+    if (it.shopPrice <= 0) return 0;
+    return it.shopPrice * stackUnitsForPrice(it);
+}
+
+static bool spendGoldFromInv(std::vector<Item>& inv, int amount) {
+    if (amount <= 0) return true;
+    const int have = countGold(inv);
+    if (have < amount) return false;
+
+    int need = amount;
+    for (auto& it : inv) {
+        if (it.kind != ItemKind::Gold) continue;
+        const int take = std::min(it.count, need);
+        it.count -= take;
+        need -= take;
+        if (need <= 0) break;
+    }
+
+    inv.erase(std::remove_if(inv.begin(), inv.end(), [](const Item& it) {
+        return it.kind == ItemKind::Gold && it.count <= 0;
+    }), inv.end());
+
+    return true;
+}
+
+static void gainGoldToInv(std::vector<Item>& inv, int amount, int& nextItemId, RNG& rng) {
+    if (amount <= 0) return;
+
+    Item g;
+    g.id = nextItemId++;
+    g.kind = ItemKind::Gold;
+    g.count = amount;
+    g.charges = 0;
+    g.enchant = 0;
+    g.buc = 0;
+    g.spriteSeed = rng.nextU32();
+    g.shopPrice = 0;
+    g.shopDepth = 0;
+
+    if (!tryStackItem(inv, g)) {
+        inv.push_back(g);
+    }
+}
+
+static bool anyLivingShopkeeper(const std::vector<Entity>& ents, int playerId) {
+    for (const auto& e : ents) {
+        if (e.id == playerId) continue;
+        if (e.hp <= 0) continue;
+        if (e.kind == EntityKind::Shopkeeper) return true;
+    }
+    return false;
+}
+
+static bool anyPeacefulShopkeeper(const std::vector<Entity>& ents, int playerId) {
+    for (const auto& e : ents) {
+        if (e.id == playerId) continue;
+        if (e.hp <= 0) continue;
+        if (e.kind == EntityKind::Shopkeeper && !e.alerted) return true;
+    }
+    return false;
+}
+
+static void setShopkeepersAlerted(std::vector<Entity>& ents, int playerId, Vec2i playerPos, bool alerted) {
+    for (auto& e : ents) {
+        if (e.id == playerId) continue;
+        if (e.hp <= 0) continue;
+        if (e.kind != EntityKind::Shopkeeper) continue;
+        e.alerted = alerted;
+        if (alerted) {
+            e.lastKnownPlayerPos = playerPos;
+            e.lastKnownPlayerAge = 0;
+        }
+    }
+}
 
 static std::string formatSearchDiscoveryMessage(int foundTraps, int foundSecrets) {
     std::ostringstream ss;
@@ -303,6 +385,7 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
             case EntityKind::Spider: return 's';
             case EntityKind::Ogre:   return 'O';
             case EntityKind::Mimic:  return 'm';
+            case EntityKind::Shopkeeper: return 'K';
             default:                 return 'M';
         }
     };
@@ -558,6 +641,54 @@ static void setChestTrapKind(Item& it, TrapKind k) {
     it.charges |= (static_cast<int>(k) & 0xFF) << CHEST_TRAP_SHIFT;
 }
 
+// --- Curses / blessings (BUC) helpers ---
+static RoomType roomTypeAt(const Dungeon& d, Vec2i p) {
+    for (const auto& r : d.rooms) {
+        if (r.contains(p.x, p.y)) return r.type;
+    }
+    return RoomType::Normal;
+}
+
+static int rollBucForGear(RNG& rng, int depth, RoomType roomType) {
+    // Baseline: mostly uncursed; deeper floors skew slightly toward cursed.
+    int cursePct = 8 + std::min(12, std::max(0, depth - 1) * 2);
+    int blessPct = 4 + std::min(6, std::max(0, depth - 1));
+
+    switch (roomType) {
+        case RoomType::Treasure:
+        case RoomType::Vault:
+            cursePct -= 3;
+            blessPct += 4;
+            break;
+        case RoomType::Shrine:
+            cursePct -= 2;
+            blessPct += 3;
+            break;
+        case RoomType::Lair:
+            cursePct += 3;
+            blessPct -= 1;
+            break;
+        case RoomType::Secret:
+            cursePct += 4;
+            break;
+        case RoomType::Shop:
+            // Merchants don't love selling cursed junk.
+            cursePct -= 5;
+            blessPct += 2;
+            break;
+        default:
+            break;
+    }
+
+    cursePct = clampi(cursePct, 0, 80);
+    blessPct = clampi(blessPct, 0, 60);
+
+    const int roll = rng.range(1, 100);
+    if (roll <= cursePct) return -1;
+    if (roll <= cursePct + blessPct) return 1;
+    return 0;
+}
+
 static std::vector<std::string> extendedCommandList() {
     // Keep these short and stable: they're user-facing and used for completion/prefix matching.
     return {
@@ -580,6 +711,7 @@ static std::vector<std::string> extendedCommandList() {
         "autosave",
         "stepdelay",
         "identify",
+        "encumbrance",
         "timers",
         "uitheme",
         "uipanels",
@@ -598,6 +730,7 @@ static std::vector<std::string> extendedCommandList() {
         "search",
         "rest",
         "pray",
+        "pay",
     };
 }
 
@@ -731,6 +864,8 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.pushSystemMessage("TIP: type a prefix (e.g., 'autop') and press ENTER.");
         game.pushSystemMessage("SLOTS: slot [name], save [slot], load [slot], loadauto [slot], saves");
         game.pushSystemMessage("EXPORT: exportlog/exportmap/export/exportall/dump");
+        game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse] (costs gold)");
+        game.pushSystemMessage("CURSES: CURSED weapons/armor can't be removed until uncursed (scroll or shrine).");
         game.pushSystemMessage("MORTEM: mortem [on/off]");
         game.pushSystemMessage("KEYBINDS: binds | bind <action> <keys> | unbind <action> | reload");
         return;
@@ -1031,6 +1166,11 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     if (cmd == "pray") {
         game.prayAtShrine(arg(1));
+        return;
+    }
+
+    if (cmd == "pay") {
+        game.payAtShop();
         return;
     }
 
@@ -1383,6 +1523,33 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "encumbrance") {
+        const std::string v = arg(1);
+        if (v.empty()) {
+            game.pushSystemMessage(std::string("ENCUMBRANCE: ") + (game.encumbranceEnabled() ? "ON" : "OFF"));
+            return;
+        }
+
+        bool on = game.encumbranceEnabled();
+        if (v == "on" || v == "true" || v == "1") on = true;
+        else if (v == "off" || v == "false" || v == "0") on = false;
+        else {
+            game.pushSystemMessage("USAGE: encumbrance [on|off]");
+            return;
+        }
+
+        game.setEncumbranceEnabled(on);
+        game.markSettingsDirty();
+        game.pushSystemMessage(std::string("ENCUMBRANCE: ") + (on ? "ON" : "OFF"));
+        return;
+    }
+
+
+    if (cmd == "shout" || cmd == "yell") {
+        game.shout();
+        return;
+    }
+
     // Should be unreachable because we validated against the command list, but keep a fallback.
     game.pushSystemMessage("UNHANDLED COMMAND: " + cmd);
 }
@@ -1404,6 +1571,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Spider: return "SPIDER";
         case EntityKind::Ogre: return "OGRE";
         case EntityKind::Mimic: return "MIMIC";
+        case EntityKind::Shopkeeper: return "SHOPKEEPER";
         default: return "THING";
     }
 }
@@ -1450,6 +1618,7 @@ constexpr ItemKind POTION_KINDS[] = {
     ItemKind::PotionShielding,
     ItemKind::PotionHaste,
     ItemKind::PotionVision,
+    ItemKind::PotionInvisibility,
 };
 
 constexpr ItemKind SCROLL_KINDS[] = {
@@ -1461,6 +1630,7 @@ constexpr ItemKind SCROLL_KINDS[] = {
     ItemKind::ScrollDetectTraps,
     ItemKind::ScrollDetectSecrets,
     ItemKind::ScrollKnock,
+    ItemKind::ScrollRemoveCurse,
 };
 
 } // namespace
@@ -1595,6 +1765,7 @@ int Game::playerAttack() const {
     if (const Item* w = equippedMelee()) {
         atk += itemDef(w->kind).meleeAtk;
         atk += w->enchant;
+        atk += (w->buc < 0 ? -1 : (w->buc > 0 ? 1 : 0));
     }
     return atk;
 }
@@ -1604,6 +1775,7 @@ int Game::playerDefense() const {
     if (const Item* a = equippedArmor()) {
         def += itemDef(a->kind).defense;
         def += a->enchant;
+        def += (a->buc < 0 ? -1 : (a->buc > 0 ? 1 : 0));
     }
     // Temporary shielding buff
     if (player().shieldTurns > 0) def += 2;
@@ -1694,6 +1866,7 @@ int Game::xpFor(EntityKind k) const {
         case EntityKind::Ogre: return 30;
         case EntityKind::Wizard: return 32;
         case EntityKind::Mimic: return 22;
+        case EntityKind::Shopkeeper: return 0;
         default: return 10;
     }
 }
@@ -1717,7 +1890,6 @@ void Game::grantXp(int amount) {
 
 void Game::onPlayerLevelUp() {
     Entity& p = playerMut();
-
     int hpGain = 2 + rng.range(0, 2);
     p.hpMax += hpGain;
 
@@ -1963,7 +2135,7 @@ void Game::newGame(uint32_t seed) {
     hunger = hungerMax;
     hungerStatePrev = hungerStateFor(hunger, hungerMax);
 
-    dung.generate(rng);
+    dung.generate(rng, depth_);
 
     // Create player
     Entity p;
@@ -1987,6 +2159,7 @@ void Game::newGame(uint32_t seed) {
         it.count = std::max(1, count);
         it.spriteSeed = rng.nextU32();
         if (k == ItemKind::WandSparks) it.charges = itemDef(k).maxCharges;
+
         inv.push_back(it);
         return it.id;
     };
@@ -1998,6 +2171,11 @@ void Game::newGame(uint32_t seed) {
     give(ItemKind::PotionHealing, 2);
     // New: basic food. Heals a little and (if hunger is enabled) restores hunger.
     give(ItemKind::FoodRation, hungerEnabled_ ? 2 : 1);
+
+    // If lighting/darkness is enabled, start with a couple torches so early dark floors are survivable.
+    if (lightingEnabled_) {
+        give(ItemKind::Torch, 2);
+    }
     give(ItemKind::ScrollTeleport, 1);
     give(ItemKind::ScrollMapping, 1);
     give(ItemKind::Gold, 10);
@@ -2013,6 +2191,9 @@ void Game::newGame(uint32_t seed) {
 
     storeCurrentLevel();
     recomputeFov();
+
+    // Encumbrance message throttling: establish initial burden state for this run.
+    burdenPrev_ = burdenState();
 
     pushMsg("WELCOME TO PROCROGUE++.", MessageKind::System);
     pushMsg("GOAL: FIND THE AMULET OF YENDOR (DEPTH 5), THEN RETURN TO THE EXIT (<) TO WIN.", MessageKind::System);
@@ -2058,6 +2239,15 @@ bool Game::restoreLevel(int depth) {
 void Game::changeLevel(int newDepth, bool goingDown) {
     if (newDepth < 1) return;
 
+    // If we're leaving a shop while still owing money, the shopkeeper becomes hostile.
+    if (playerInShop()) {
+        const int debt = shopDebtThisDepth();
+        if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
+            setShopkeepersAlerted(ents, playerId_, player().pos, true);
+            pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+        }
+    }
+
     storeCurrentLevel();
 
     // Clear transient states.
@@ -2081,7 +2271,6 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     bool restored = restoreLevel(depth_);
 
     Entity& p = playerMut();
-
     if (!restored) {
         // New level: generate and populate.
         ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
@@ -2090,7 +2279,7 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         ground.clear();
         trapsCur.clear();
 
-        dung.generate(rng);
+        dung.generate(rng, depth_);
 
         // Place player before spawning so we never spawn on top of them.
         p.pos = goingDown ? dung.stairsUp : dung.stairsDown;
@@ -2282,6 +2471,32 @@ int Game::lockpickCount() const {
     return n;
 }
 
+int Game::shopDebtTotal() const {
+    int total = 0;
+    for (const auto& it : inv) {
+        if (it.shopPrice <= 0 || it.shopDepth <= 0) continue;
+        const int n = isStackable(it.kind) ? std::max(0, it.count) : 1;
+        total += it.shopPrice * n;
+    }
+    return total;
+}
+
+int Game::shopDebtThisDepth() const {
+    const int d = depth_;
+    int total = 0;
+    for (const auto& it : inv) {
+        if (it.shopPrice <= 0 || it.shopDepth != d) continue;
+        const int n = isStackable(it.kind) ? std::max(0, it.count) : 1;
+        total += it.shopPrice * n;
+    }
+    return total;
+}
+
+bool Game::playerInShop() const {
+    const Entity& p = player();
+    return roomTypeAt(dung, p.pos) == RoomType::Shop;
+}
+
 bool Game::consumeKeys(int n) {
     if (n <= 0) return true;
 
@@ -2327,6 +2542,8 @@ void Game::alertMonstersTo(Vec2i pos, int radius) {
     for (auto& m : ents) {
         if (m.id == playerId_) continue;
         if (m.hp <= 0) continue;
+        // Peaceful shopkeepers ignore generic alerts/noise.
+        if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
 
         if (radius > 0) {
             int dx = std::abs(m.pos.x - pos.x);
@@ -2334,6 +2551,70 @@ void Game::alertMonstersTo(Vec2i pos, int radius) {
             int cheb = std::max(dx, dy);
             if (cheb > radius) continue;
         }
+
+        m.alerted = true;
+        m.lastKnownPlayerPos = pos;
+        m.lastKnownPlayerAge = 0;
+    }
+}
+
+namespace {
+constexpr int BASE_HEARING = 8;
+
+// A small amount of per-monster flavor: some creatures are better/worse at hearing.
+// This value is used as a modifier against noise "volume" (both are in tile-cost units).
+int hearingFor(EntityKind k) {
+    switch (k) {
+        case EntityKind::Bat:            return 12;
+        case EntityKind::Wolf:           return 10;
+        case EntityKind::Snake:          return 9;
+        case EntityKind::Wizard:         return 9;
+        case EntityKind::Spider:         return 8;
+        case EntityKind::Goblin:         return 8;
+        case EntityKind::Orc:            return 8;
+        case EntityKind::KoboldSlinger:  return 8;
+        case EntityKind::SkeletonArcher: return 7;
+        case EntityKind::Troll:          return 7;
+        case EntityKind::Ogre:           return 7;
+        case EntityKind::Shopkeeper:     return 10;
+        case EntityKind::Slime:          return 6;
+        case EntityKind::Mimic:          return 5;
+        default:                         return BASE_HEARING;
+    }
+}
+} // namespace
+
+void Game::emitNoise(Vec2i pos, int volume) {
+    if (volume <= 0) return;
+
+    const int W = dung.width;
+    auto idx = [&](int x, int y) { return y * W + x; };
+
+    // Compute the max effective volume we might need for the loudest-hearing monster.
+    int maxEff = volume;
+    for (const auto& m : ents) {
+        if (m.id == playerId_) continue;
+        if (m.hp <= 0) continue;
+        if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
+        const int eff = volume + (hearingFor(m.kind) - BASE_HEARING);
+        if (eff > maxEff) maxEff = eff;
+    }
+    maxEff = std::max(0, maxEff);
+
+    // Dungeon-aware propagation: walls/secret doors block sound; doors muffle.
+    const std::vector<int> sound = dung.computeSoundMap(pos.x, pos.y, maxEff);
+
+    for (auto& m : ents) {
+        if (m.id == playerId_) continue;
+        if (m.hp <= 0) continue;
+        if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
+        if (!dung.inBounds(m.pos.x, m.pos.y)) continue;
+
+        const int eff = volume + (hearingFor(m.kind) - BASE_HEARING);
+        if (eff <= 0) continue;
+
+        const int d = sound[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
+        if (d < 0 || d > eff) continue;
 
         m.alerted = true;
         m.lastKnownPlayerPos = pos;
@@ -2383,6 +2664,111 @@ std::string Game::hungerTag() const {
     return std::string();
 }
 
+namespace {
+BurdenState burdenStateForWeights(int weight, int capacity) {
+    // Use integer comparisons to avoid float edge cases.
+    // Thresholds (ratio = weight/capacity):
+    //   <=1.0: unburdened
+    //   <=1.2: burdened
+    //   <=1.4: stressed
+    //   <=1.6: strained
+    //   > 1.6: overloaded
+    if (capacity <= 0) {
+        return (weight > 0) ? BurdenState::Overloaded : BurdenState::Unburdened;
+    }
+
+    const int64_t w = static_cast<int64_t>(std::max(0, weight));
+    const int64_t cap = static_cast<int64_t>(std::max(1, capacity));
+
+    if (w <= cap) return BurdenState::Unburdened;
+    if (w <= (cap * 6) / 5) return BurdenState::Burdened;  // 1.2x
+    if (w <= (cap * 7) / 5) return BurdenState::Stressed;  // 1.4x
+    if (w <= (cap * 8) / 5) return BurdenState::Strained;  // 1.6x
+    return BurdenState::Overloaded;
+}
+}
+
+void Game::setEncumbranceEnabled(bool enabled) {
+    encumbranceEnabled_ = enabled;
+    burdenPrev_ = burdenState();
+}
+
+int Game::inventoryWeight() const {
+    return totalWeight(inv);
+}
+
+int Game::carryCapacity() const {
+    // Derive a simple carrying capacity from progression.
+    // We deliberately reuse baseAtk as a "strength-like" stat to avoid bloating the save format.
+    const Entity& p = player();
+
+    const int strLike = std::max(1, p.baseAtk);
+    int cap = 80 + (strLike * 18) + (std::max(1, charLevel) * 6);
+    cap = clampi(cap, 60, 9999);
+    return cap;
+}
+
+BurdenState Game::burdenState() const {
+    if (!encumbranceEnabled_) return BurdenState::Unburdened;
+    return burdenStateForWeights(inventoryWeight(), carryCapacity());
+}
+
+std::string Game::burdenTag() const {
+    if (!encumbranceEnabled_) return std::string();
+    switch (burdenState()) {
+        case BurdenState::Unburdened: return std::string();
+        case BurdenState::Burdened:   return "BURDENED";
+        case BurdenState::Stressed:   return "STRESSED";
+        case BurdenState::Strained:   return "STRAINED";
+        case BurdenState::Overloaded: return "OVERLOADED";
+    }
+    return std::string();
+}
+
+void Game::setLightingEnabled(bool enabled) {
+    lightingEnabled_ = enabled;
+    // Ensure cached lighting/FOV state matches the new mode.
+    recomputeLightMap();
+    recomputeFov();
+}
+
+bool Game::darknessActive() const {
+    // Keep early floors bright by default; darkness starts deeper.
+    return lightingEnabled_ && depth_ >= 3;
+}
+
+uint8_t Game::tileLightLevel(int x, int y) const {
+    if (!dung.inBounds(x, y)) return 0;
+    const size_t i = static_cast<size_t>(y * dung.width + x);
+    if (i >= lightMap_.size()) return 255;
+    return lightMap_[i];
+}
+
+std::string Game::lightTag() const {
+    if (!darknessActive()) return std::string();
+
+    // If carrying a lit torch, show remaining fuel (min across lit torches).
+    int best = -1;
+    for (const auto& it : inv) {
+        if (it.kind == ItemKind::TorchLit && it.charges > 0) {
+            if (best < 0) best = it.charges;
+            else best = std::min(best, it.charges);
+        }
+    }
+    if (best >= 0) {
+        std::ostringstream ss;
+        ss << "TORCH(" << best << ")";
+        return ss.str();
+    }
+
+    // Warning when you're standing in darkness without a light source.
+    const Vec2i p = player().pos;
+    if (dung.inBounds(p.x, p.y) && tileLightLevel(p.x, p.y) == 0) {
+        return "DARK";
+    }
+    return std::string();
+}
+
 void Game::setAutoStepDelayMs(int ms) {
     // Clamp to sane values to avoid accidental 0ms "teleport walking".
     const int clamped = clampi(ms, 10, 500);
@@ -2391,7 +2777,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 7u;
+constexpr uint32_t SAVE_VERSION = 11u;
 
 template <typename T>
 void writePod(std::ostream& out, const T& v) {
@@ -2431,6 +2817,16 @@ void writeItem(std::ostream& out, const Item& it) {
     writePod(out, it.spriteSeed);
     int32_t enchant = static_cast<int32_t>(it.enchant);
     writePod(out, enchant);
+
+    // v10: blessed/uncursed/cursed state (-1..1)
+    int8_t buc = static_cast<int8_t>(clampi(it.buc, -1, 1));
+    writePod(out, buc);
+
+    // v11: shop metadata (per-unit price + owning depth)
+    int32_t shopPrice = static_cast<int32_t>(std::max(0, it.shopPrice));
+    int32_t shopDepth = static_cast<int32_t>(std::max(0, it.shopDepth));
+    writePod(out, shopPrice);
+    writePod(out, shopDepth);
 }
 
 bool readItem(std::istream& in, Item& it, uint32_t version) {
@@ -2440,6 +2836,9 @@ bool readItem(std::istream& in, Item& it, uint32_t version) {
     int32_t charges = 0;
     uint32_t seed = 0;
     int32_t enchant = 0;
+    int8_t buc = 0;
+    int32_t shopPrice = 0;
+    int32_t shopDepth = 0;
     if (!readPod(in, id)) return false;
     if (!readPod(in, kind)) return false;
     if (!readPod(in, count)) return false;
@@ -2448,12 +2847,22 @@ bool readItem(std::istream& in, Item& it, uint32_t version) {
     if (version >= 2u) {
         if (!readPod(in, enchant)) return false;
     }
+    if (version >= 10u) {
+        if (!readPod(in, buc)) return false;
+    }
+    if (version >= 11u) {
+        if (!readPod(in, shopPrice)) return false;
+        if (!readPod(in, shopDepth)) return false;
+    }
     it.id = id;
     it.kind = static_cast<ItemKind>(kind);
     it.count = count;
     it.charges = charges;
     it.spriteSeed = seed;
     it.enchant = enchant;
+    it.buc = static_cast<int>(buc);
+    it.shopPrice = static_cast<int>(shopPrice);
+    it.shopDepth = static_cast<int>(shopDepth);
     return true;
 }
 
@@ -2518,6 +2927,10 @@ void writeEntity(std::ostream& out, const Entity& e) {
     // v6+: additional debuffs
     int32_t webTurns = e.webTurns;
     writePod(out, webTurns);
+
+    // v8+: invisibility
+    int32_t invisTurns = e.invisTurns;
+    writePod(out, invisTurns);
 }
 
 bool readEntity(std::istream& in, Entity& e, uint32_t version) {
@@ -2548,6 +2961,7 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     int32_t hasteTurns = 0;
     int32_t visionTurns = 0;
     int32_t webTurns = 0;
+    int32_t invisTurns = 0;
 
     if (!readPod(in, id)) return false;
     if (!readPod(in, kind)) return false;
@@ -2586,6 +3000,10 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         if (version >= 6u) {
             if (!readPod(in, webTurns)) return false;
         }
+
+        if (version >= 8u) {
+            if (!readPod(in, invisTurns)) return false;
+        }
     }
 
     e.id = id;
@@ -2617,6 +3035,7 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     e.hasteTurns = hasteTurns;
     e.visionTurns = visionTurns;
     e.webTurns = webTurns;
+    e.invisTurns = invisTurns;
     return true;
 }
 
@@ -2993,6 +3412,12 @@ bool Game::loadFromFile(const std::string& path) {
         if (!readPod(in, hungerMaxTmp)) return fail();
     }
 
+    // v9+: lighting system state (per-run)
+    uint8_t lightingEnabledTmp = lightingEnabled_ ? 1u : 0u;
+    if (version >= 9u) {
+        if (!readPod(in, lightingEnabledTmp)) return fail();
+    }
+
     Entity p;
     if (!readEntity(in, p, version)) return fail();
 
@@ -3220,6 +3645,9 @@ bool Game::loadFromFile(const std::string& path) {
 
     restoreLevel(depth_);
     recomputeFov();
+
+    // Encumbrance message throttling: avoid spurious "YOU FEEL BURDENED" on the first post-load turn.
+    burdenPrev_ = burdenState();
 
     pushMsg("GAME LOADED.");
     return true;
@@ -3534,7 +3962,7 @@ void Game::handleAction(Action a) {
 
     // Overlay: options menu (does not consume turns)
     if (optionsOpen) {
-        constexpr int kOptionCount = 12;
+        constexpr int kOptionCount = 14;
 
         if (a == Action::Cancel || a == Action::Options) {
             optionsOpen = false;
@@ -3615,8 +4043,26 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 5) Effect timers (HUD)
+        // 5) Encumbrance system
         if (optionsSel == 5) {
+            if (left || right || confirm) {
+                setEncumbranceEnabled(!encumbranceEnabled_);
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // 6) Lighting / darkness
+        if (optionsSel == 6) {
+            if (left || right || confirm) {
+                setLightingEnabled(!lightingEnabled_);
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // 7) Effect timers (HUD)
+        if (optionsSel == 7) {
             if (left || right || confirm) {
                 showEffectTimers_ = !showEffectTimers_;
                 settingsDirtyFlag = true;
@@ -3624,8 +4070,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 6) Confirm quit (double-ESC)
-        if (optionsSel == 6) {
+        // 8) Confirm quit (double-ESC)
+        if (optionsSel == 8) {
             if (left || right || confirm) {
                 confirmQuitEnabled_ = !confirmQuitEnabled_;
                 settingsDirtyFlag = true;
@@ -3633,8 +4079,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 7) Auto mortem (write a dump file on win/death)
-        if (optionsSel == 7) {
+        // 8) Auto mortem (write a dump file on win/death)
+        if (optionsSel == 9) {
             if (left || right || confirm) {
                 autoMortemEnabled_ = !autoMortemEnabled_;
                 settingsDirtyFlag = true;
@@ -3642,8 +4088,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 8) Save backups (0..10)
-        if (optionsSel == 8) {
+        // 10) Save backups (0..10)
+        if (optionsSel == 10) {
             if (left || right) {
                 int n = saveBackups_;
                 n += left ? -1 : +1;
@@ -3653,8 +4099,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-// 9) UI Theme (cycle)
-if (optionsSel == 9) {
+// 11) UI Theme (cycle)
+if (optionsSel == 11) {
     if (left || right || confirm) {
         int dir = right ? 1 : -1;
         if (confirm && !left && !right) dir = 1;
@@ -3667,8 +4113,8 @@ if (optionsSel == 9) {
     return;
 }
 
-// 10) UI Panels (textured / solid)
-if (optionsSel == 10) {
+// 11) UI Panels (textured / solid)
+if (optionsSel == 12) {
     if (left || right || confirm) {
         uiPanelsTextured_ = !uiPanelsTextured_;
         settingsDirtyFlag = true;
@@ -3676,8 +4122,8 @@ if (optionsSel == 10) {
     return;
 }
 
-// 11) Close
-if (optionsSel == 11) {
+// 13) Close
+if (optionsSel == 13) {
     if (left || right || confirm) optionsOpen = false;
     return;
 }
@@ -3843,8 +4289,7 @@ if (optionsSel == 11) {
     }
 
     // Normal play mode.
-    Entity& p = playerMut();
-    switch (a) {
+    Entity& p = playerMut();    switch (a) {
         case Action::Up:        acted = tryMove(p, 0, -1); break;
         case Action::Down:      acted = tryMove(p, 0, 1); break;
         case Action::Left:      acted = tryMove(p, -1, 0); break;
@@ -3888,12 +4333,18 @@ if (optionsSel == 11) {
             break;
         case Action::Confirm: {
             if (p.pos == dung.stairsDown) {
-                changeLevel(depth_ + 1, true);
+                if (encumbranceEnabled_ && burdenState() == BurdenState::Overloaded) {
+                    pushMsg("YOU ARE OVERLOADED!", MessageKind::Warning, true);
+                } else {
+                    changeLevel(depth_ + 1, true);
+                }
                 acted = false;
             } else if (p.pos == dung.stairsUp) {
                 // At depth 1, stairs up is the exit.
                 if (depth_ <= 1) {
-                    if (playerHasAmulet()) {
+                    if (encumbranceEnabled_ && burdenState() == BurdenState::Overloaded) {
+                        pushMsg("YOU ARE OVERLOADED!", MessageKind::Warning, true);
+                    } else if (playerHasAmulet()) {
                         gameWon = true;
                         if (endCause_.empty()) endCause_ = "ESCAPED WITH THE AMULET";
                         pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!", MessageKind::Success);
@@ -3903,7 +4354,11 @@ if (optionsSel == 11) {
                         pushMsg("THE EXIT IS HERE... BUT YOU STILL NEED THE AMULET.");
                     }
                 } else {
-                    changeLevel(depth_ - 1, false);
+                    if (encumbranceEnabled_ && burdenState() == BurdenState::Overloaded) {
+                        pushMsg("YOU ARE OVERLOADED!", MessageKind::Warning, true);
+                    } else {
+                        changeLevel(depth_ - 1, false);
+                    }
                 }
                 acted = false;
             } else {
@@ -3933,7 +4388,11 @@ if (optionsSel == 11) {
         } break;
         case Action::StairsDown:
             if (p.pos == dung.stairsDown) {
-                changeLevel(depth_ + 1, true);
+                if (encumbranceEnabled_ && burdenState() == BurdenState::Overloaded) {
+                    pushMsg("YOU ARE OVERLOADED!", MessageKind::Warning, true);
+                } else {
+                    changeLevel(depth_ + 1, true);
+                }
                 acted = false;
             } else {
                 pushMsg("THERE ARE NO STAIRS HERE.");
@@ -3941,6 +4400,11 @@ if (optionsSel == 11) {
             break;
         case Action::StairsUp:
             if (p.pos == dung.stairsUp) {
+                if (encumbranceEnabled_ && burdenState() == BurdenState::Overloaded) {
+                    pushMsg("YOU ARE OVERLOADED!", MessageKind::Warning, true);
+                    acted = false;
+                    break;
+                }
                 if (depth_ <= 1) {
                     if (playerHasAmulet()) {
                         gameWon = true;
@@ -3972,6 +4436,15 @@ if (optionsSel == 11) {
     }
 }
 
+void Game::shout() {
+    if (gameOver || gameWon) return;
+
+    // Shouting always costs a turn.
+    pushMsg("YOU SHOUT!", MessageKind::Info, true);
+    emitNoise(player().pos, 18);
+    advanceAfterPlayerAction();
+}
+
 void Game::advanceAfterPlayerAction() {
     // One "turn" = one player action that consumes time.
     // Haste gives the player an extra action every other turn by skipping the monster turn.
@@ -3986,7 +4459,6 @@ void Game::advanceAfterPlayerAction() {
     }
 
     Entity& p = playerMut();
-
     bool runMonsters = true;
     if (p.hasteTurns > 0) {
         if (!hastePhase) {
@@ -4008,12 +4480,47 @@ void Game::advanceAfterPlayerAction() {
 
     if (runMonsters) {
         monsterTurn();
+
+        // Encumbrance: heavier burdens make the player effectively slower.
+        // We model this as occasional extra monster turns (without additional hunger/regen ticks)
+        // to keep the pacing simple and predictable.
+        if (encumbranceEnabled_) {
+            int extra = 0;
+            switch (burdenState()) {
+                case BurdenState::Unburdened: extra = 0; break;
+                case BurdenState::Burdened:   extra = (turnCount % 7u == 0u) ? 1 : 0; break; // ~14%
+                case BurdenState::Stressed:   extra = (turnCount % 4u == 0u) ? 1 : 0; break; // 25%
+                case BurdenState::Strained:   extra = 1; break;
+                case BurdenState::Overloaded: extra = 1; break;
+            }
+
+            for (int i = 0; i < extra && !isFinished(); ++i) {
+                monsterTurn();
+            }
+        }
     }
 
     applyEndOfTurnEffects();
     cleanupDead();
     if (isFinished()) {
         maybeRecordRun();
+    }
+
+    // Burden status messages (throttled to threshold changes).
+    if (!encumbranceEnabled_) {
+        burdenPrev_ = BurdenState::Unburdened;
+    } else {
+        const BurdenState cur = burdenState();
+        if (cur != burdenPrev_) {
+            switch (cur) {
+                case BurdenState::Unburdened: pushMsg("YOU FEEL LESS BURDENED.", MessageKind::System, true); break;
+                case BurdenState::Burdened:   pushMsg("YOU FEEL BURDENED.", MessageKind::Warning, true); break;
+                case BurdenState::Stressed:   pushMsg("YOU FEEL STRESSED BY YOUR LOAD.", MessageKind::Warning, true); break;
+                case BurdenState::Strained:   pushMsg("YOU ARE STRAINED BY YOUR LOAD!", MessageKind::Warning, true); break;
+                case BurdenState::Overloaded: pushMsg("YOU ARE OVERLOADED!", MessageKind::Warning, true); break;
+            }
+            burdenPrev_ = cur;
+        }
     }
     recomputeFov();
     maybeAutosave();
@@ -4370,8 +4877,7 @@ bool Game::stepAutoMove() {
 
     if (autoPathIndex >= autoPathTiles.size()) return false;
 
-    Entity& p = playerMut();
-    const Vec2i next = autoPathTiles[autoPathIndex];
+    Entity& p = playerMut();    const Vec2i next = autoPathTiles[autoPathIndex];
 
     // Sanity: we expect a 4-neighbor path.
     if (!isAdjacent8(p.pos, next)) {
@@ -4911,7 +5417,18 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     if (e.webTurns > 0) {
         if (e.kind == EntityKind::Player) {
             pushMsg("YOU STRUGGLE AGAINST STICKY WEBBING!", MessageKind::Warning, true);
+            // Struggling is loud enough to draw attention.
+            emitNoise(e.pos, 7);
         }
+        return true;
+    }
+
+    // Encumbrance: overloaded players cannot move. Attempting to move still costs a turn
+    // (prevents "free" time-stalling by spamming movement inputs).
+    if (e.id == playerId_ && encumbranceEnabled_ && burdenState() == BurdenState::Overloaded) {
+        pushMsg("YOU ARE OVERLOADED!", MessageKind::Warning, true);
+        // Shifting under too much weight makes noise.
+        emitNoise(e.pos, 5);
         return true;
     }
 
@@ -4935,8 +5452,8 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         dung.openDoor(nx, ny);
         if (e.kind == EntityKind::Player) {
             pushMsg("YOU OPEN THE DOOR.");
-            // Opening doors is noisy; nearby monsters may investigate.
-            alertMonstersTo({nx, ny}, 8);
+            // Opening doors is noisy; monsters may investigate.
+            emitNoise({nx, ny}, 12);
         }
         return true;
     }
@@ -4953,6 +5470,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
             dung.unlockDoor(nx, ny);
             dung.openDoor(nx, ny);
             pushMsg("YOU UNLOCK THE DOOR.", MessageKind::System, true);
+            emitNoise({nx, ny}, 12);
             return true;
         }
 
@@ -4976,6 +5494,10 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
                     pushMsg("YOUR LOCKPICK BREAKS!", MessageKind::Warning, true);
                 }
             }
+
+            // Picking is noisy regardless of success.
+            emitNoise({nx, ny}, 10);
+
             return true; // picking takes a turn either way
         }
 
@@ -4990,14 +5512,47 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
 
     if (Entity* other = entityAtMut(nx, ny)) {
         if (other->id == e.id) return false;
+        if (e.kind == EntityKind::Player && other->kind == EntityKind::Shopkeeper && !other->alerted) {
+            pushMsg("THE SHOPKEEPER SAYS: \"NO FIGHTING IN HERE!\"", MessageKind::Warning, true);
+            return false;
+        }
         attackMelee(e, *other);
         return true;
     }
 
+    Vec2i prevPos = e.pos;
     e.pos.x = nx;
     e.pos.y = ny;
 
     if (e.kind == EntityKind::Player) {
+        const bool wasInShop = (roomTypeAt(dung, prevPos) == RoomType::Shop);
+        const bool nowInShop = (roomTypeAt(dung, e.pos) == RoomType::Shop);
+        if (wasInShop && !nowInShop) {
+            const int debt = shopDebtThisDepth();
+            if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
+                setShopkeepersAlerted(ents, playerId_, e.pos, true);
+                pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+            }
+        }
+        // Footstep noise: small, but enough for nearby monsters to investigate.
+        // Scales a bit with encumbrance + armor clank.
+        int vol = 4;
+        if (encumbranceEnabled_) {
+            switch (burdenState()) {
+                case BurdenState::Unburdened: break;
+                case BurdenState::Burdened:   vol += 1; break;
+                case BurdenState::Stressed:   vol += 2; break;
+                case BurdenState::Strained:   vol += 3; break;
+                case BurdenState::Overloaded: vol += 4; break;
+            }
+        }
+        if (const Item* a = equippedArmor()) {
+            if (a->kind == ItemKind::ChainArmor) vol += 1;
+            if (a->kind == ItemKind::PlateArmor) vol += 2;
+        }
+        vol = clampi(vol, 2, 14);
+        emitNoise(e.pos, vol);
+
         // Convenience / QoL: auto-pickup when stepping on items.
         if (autoPickup != AutoPickupMode::Off) {
             (void)autoPickupAtPlayer();
@@ -5114,8 +5669,20 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
                 if (!entityAt(dst.x, dst.y) && dst != dung.stairsUp && dst != dung.stairsDown) break;
             }
 
+            Vec2i prevPos = victim.pos;
             victim.pos = dst;
-            if (isPlayer) recomputeFov();
+            if (isPlayer) {
+                recomputeFov();
+                const bool wasInShop = (roomTypeAt(dung, prevPos) == RoomType::Shop);
+                const bool nowInShop = (roomTypeAt(dung, victim.pos) == RoomType::Shop);
+                if (wasInShop && !nowInShop) {
+                    const int debt = shopDebtThisDepth();
+                    if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
+                        setShopkeepersAlerted(ents, playerId_, victim.pos, true);
+                        pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+                    }
+                }
+            }
             break;
         }
         case TrapKind::Alarm: {
@@ -5142,7 +5709,9 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
 }
 
 bool Game::searchForTraps(bool verbose, int* foundTrapsOut, int* foundSecretsOut) {
-    Entity& p = playerMut();
+    Entity& p = playerMut();    // Searching is fairly quiet, but not silent.
+    emitNoise(p.pos, 3);
+
     const int radius = 2;
 
     int foundTraps = 0;
@@ -5228,7 +5797,6 @@ bool Game::disarmTrap() {
     if (gameOver || gameWon) return false;
 
     Entity& p = playerMut();
-
     // Trapped chests can also be disarmed (when their trap is known).
     GroundItem* bestChest = nullptr;
     int bestChestDist = 999;
@@ -5288,6 +5856,7 @@ bool Game::disarmTrap() {
     // --- Chest trap disarm ---
     if (targetIsChest) {
         Item& chest = bestChest->item;
+        emitNoise(bestChest->pos, 5);
         const TrapKind tk = chestTrapKind(chest);
         const int tier = chestTier(chest);
 
@@ -5303,7 +5872,6 @@ bool Game::disarmTrap() {
         if (tk == TrapKind::Alarm) chance *= 0.90f;
         if (tk == TrapKind::Web) chance *= 0.95f;
 
-        chance = std::clamp(chance, 0.05f, 0.95f);
 
         if (rng.chance(chance)) {
             setChestTrapped(chest, false);
@@ -5330,7 +5898,6 @@ bool Game::disarmTrap() {
         if (tk == TrapKind::Alarm) setOffChance += 0.10f;
         if (tk == TrapKind::Teleport) setOffChance += 0.06f;
         if (tk == TrapKind::Web) setOffChance += 0.04f;
-        setOffChance = std::clamp(setOffChance, 0.10f, 0.60f);
 
         if (rng.chance(setOffChance)) {
             pushMsg("YOU SET OFF THE CHEST TRAP!", MessageKind::Warning, true);
@@ -5375,8 +5942,18 @@ bool Game::disarmTrap() {
                         dst = dung.randomFloor(rng, true);
                         if (!entityAt(dst.x, dst.y) && dst != dung.stairsUp && dst != dung.stairsDown) break;
                     }
+                    Vec2i prevPos = p.pos;
                     p.pos = dst;
                     recomputeFov();
+                    const bool wasInShop = (roomTypeAt(dung, prevPos) == RoomType::Shop);
+                    const bool nowInShop = (roomTypeAt(dung, p.pos) == RoomType::Shop);
+                    if (wasInShop && !nowInShop) {
+                        const int debt = shopDebtThisDepth();
+                        if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
+                            setShopkeepersAlerted(ents, playerId_, p.pos, true);
+                            pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+                        }
+                    }
                     break;
                 }
                 case TrapKind::Alarm: {
@@ -5401,6 +5978,7 @@ bool Game::disarmTrap() {
 
     // --- Floor trap disarm ---
     Trap& tr = trapsCur[static_cast<size_t>(bestIndex)];
+    emitNoise(tr.pos, 5);
 
     const bool hasPicks = (lockpickCount() > 0);
 
@@ -5451,7 +6029,6 @@ bool Game::closeDoor() {
     if (gameOver || gameWon) return false;
 
     Entity& p = playerMut();
-
     struct Off { int dx, dy; };
     // Prefer cardinal directions (closing diagonals feels odd and can be ambiguous).
     const Off dirs[4] = { {0,-1}, {0,1}, {-1,0}, {1,0} };
@@ -5488,6 +6065,7 @@ bool Game::closeDoor() {
 
     dung.closeDoor(doorX, doorY);
     pushMsg("YOU CLOSE THE DOOR.", MessageKind::System, true);
+    emitNoise({doorX, doorY}, 8);
     return true; // Closing a door costs a turn.
 }
 
@@ -5495,7 +6073,6 @@ bool Game::lockDoor() {
     if (gameOver || gameWon) return false;
 
     Entity& p = playerMut();
-
     struct Off { int dx, dy; };
     // Prefer cardinal directions for door interactions.
     const Off dirs[4] = { {0,-1}, {0,1}, {-1,0}, {1,0} };
@@ -5580,6 +6157,8 @@ bool Game::lockDoor() {
         pushMsg("YOU LOCK THE DOOR.", MessageKind::System, true);
     }
 
+    emitNoise({doorX, doorY}, 8);
+
     return true; // Locking costs a turn.
 }
 
@@ -5589,6 +6168,15 @@ bool Game::prayAtShrine(const std::string& modeIn) {
 
     Entity& p = playerMut();
 
+    auto hasCursedEquipped = [&]() -> bool {
+        int idx = equippedMeleeIndex();
+        if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
+        idx = equippedRangedIndex();
+        if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
+        idx = equippedArmorIndex();
+        if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
+        return false;
+    };
     // Must be standing inside a shrine room.
     bool inShrine = false;
     for (const Room& r : dung.rooms) {
@@ -5605,14 +6193,15 @@ bool Game::prayAtShrine(const std::string& modeIn) {
 
     std::string mode = toLower(trim(modeIn));
     if (!mode.empty()) {
-        if (!(mode == "heal" || mode == "cure" || mode == "identify" || mode == "bless")) {
-            pushMsg("UNKNOWN PRAYER: " + mode + ". TRY: heal, cure, identify, bless.", MessageKind::System, true);
+        if (!(mode == "heal" || mode == "cure" || mode == "identify" || mode == "bless" || mode == "uncurse")) {
+            pushMsg("UNKNOWN PRAYER: " + mode + ". TRY: heal, cure, identify, bless, uncurse.", MessageKind::System, true);
             return false;
         }
     } else {
         // Auto-pick the most useful effect right now.
         if (p.poisonTurns > 0 || p.webTurns > 0) mode = "cure";
         else if (p.hp < p.hpMax) mode = "heal";
+        else if (hasCursedEquipped()) mode = "uncurse";
         else if (identifyItemsEnabled) {
             bool hasUnknown = false;
             for (const auto& it : inv) {
@@ -5633,6 +6222,7 @@ bool Game::prayAtShrine(const std::string& modeIn) {
     if (mode == "cure") cost = std::max(4, base - 2);
     else if (mode == "identify") cost = base + 6;
     else if (mode == "bless") cost = base + 10;
+    else if (mode == "uncurse") cost = base + 12;
 
     if (goldCount() < cost) {
         pushMsg("YOU NEED " + std::to_string(cost) + " GOLD TO PRAY HERE.", MessageKind::Warning, true);
@@ -5666,6 +6256,21 @@ bool Game::prayAtShrine(const std::string& modeIn) {
         p.webTurns = 0;
         if (hadPoison || hadWeb) pushMsg("YOU FEEL PURIFIED.", MessageKind::Success, true);
         else pushMsg("NOTHING SEEMS AMISS.", MessageKind::Info, true);
+    } else if (mode == "uncurse") {
+        int uncursed = 0;
+        for (auto& it : inv) {
+            if (!isWeapon(it.kind) && !isArmor(it.kind)) continue;
+            if (it.buc < 0) { it.buc = 0; uncursed++; }
+        }
+
+        if (uncursed <= 0) {
+            pushMsg("YOU FEEL BRIEFLY UNEASY... THEN FINE.", MessageKind::Info, true);
+        } else if (uncursed == 1) {
+            pushMsg("A MALEVOLENT WEIGHT LIFTS FROM YOUR GEAR.", MessageKind::Success, true);
+        } else {
+            pushMsg("MALEVOLENT WEIGHTS LIFT FROM YOUR GEAR.", MessageKind::Success, true);
+        }
+
     } else if (mode == "identify") {
         if (!identifyItemsEnabled) {
             pushMsg("THE SHRINE IS SILENT. (IDENTIFY ITEMS IS OFF.)", MessageKind::Info, true);
@@ -5689,6 +6294,32 @@ bool Game::prayAtShrine(const std::string& modeIn) {
     } else { // bless
         p.shieldTurns = std::max(p.shieldTurns, 18 + depth_ * 2);
         p.regenTurns = std::max(p.regenTurns, 10 + depth_);
+        // Bless (or uncurse) one equipped item to make shrine blessings feel tangible.
+        Item* target = nullptr;
+        int idx = equippedMeleeIndex();
+        if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
+        else {
+            idx = equippedArmorIndex();
+            if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
+            else {
+                idx = equippedRangedIndex();
+                if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
+            }
+        }
+
+        if (target && (isWeapon(target->kind) || isArmor(target->kind))) {
+            const std::string nm = displayItemName(*target);
+            if (target->buc < 0) {
+                target->buc = 0;
+                pushMsg("THE CURSE ON YOUR " + nm + " IS LIFTED!", MessageKind::Success, true);
+            } else if (target->buc == 0) {
+                target->buc = 1;
+                pushMsg("YOUR " + nm + " GLOWS SOFTLY.", MessageKind::Success, true);
+            } else {
+                pushMsg("YOUR " + nm + " SHINES BRIEFLY.", MessageKind::Info, true);
+            }
+        }
+
         pushMsg("A HOLY AURA SURROUNDS YOU.", MessageKind::Success, true);
     }
 
@@ -5698,76 +6329,119 @@ bool Game::prayAtShrine(const std::string& modeIn) {
 }
 
 
-void Game::attackMelee(Entity& attacker, Entity& defender) {
-    int atk = attacker.baseAtk;
-    int def = defender.baseDef;
+bool Game::payAtShop() {
+    if (gameOver || gameWon) return false;
 
-    if (attacker.kind == EntityKind::Player) atk = playerAttack();
-    if (defender.kind == EntityKind::Player) def = playerDefense();
-
-    int dmg = std::max(1, atk - def + rng.range(0, 1));
-    // Small crit chance for spicy combat.
-    if (rng.chance(0.10f)) {
-        dmg += std::max(1, dmg / 2);
-    }
-    defender.hp -= dmg;
-
-    std::ostringstream ss;
-    if (attacker.kind == EntityKind::Player) {
-        ss << "YOU HIT " << kindName(defender.kind) << " FOR " << dmg << ".";
-    } else if (defender.kind == EntityKind::Player) {
-        ss << kindName(attacker.kind) << " HITS YOU FOR " << dmg << ".";
-    } else {
-        ss << kindName(attacker.kind) << " HITS " << kindName(defender.kind) << ".";
-    }
-    const bool msgFromPlayer = (attacker.kind == EntityKind::Player);
-    pushMsg(ss.str(), MessageKind::Combat, msgFromPlayer);
-
-    if (attacker.kind == EntityKind::Player) {
-        // Fighting is noisy; nearby monsters may investigate.
-        alertMonstersTo(attacker.pos, 9);
+    if (!playerInShop()) {
+        pushMsg("YOU ARE NOT IN A SHOP.", MessageKind::Warning, true);
+        return false;
     }
 
-    // Monster special effects.
-    if (defender.hp > 0 && defender.kind == EntityKind::Player) {
-        if (attacker.kind == EntityKind::Snake && rng.chance(0.35f)) {
-            defender.poisonTurns = std::max(defender.poisonTurns, rng.range(4, 8));
-            pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
-        }
-        if (attacker.kind == EntityKind::Spider && rng.chance(0.45f)) {
-            defender.webTurns = std::max(defender.webTurns, rng.range(2, 4));
-            pushMsg("YOU ARE ENSNARED BY WEBBING!", MessageKind::Warning, false);
-        }
+    if (!anyLivingShopkeeper(ents, playerId_)) {
+        pushMsg("NO ONE IS HERE TO TAKE YOUR MONEY.", MessageKind::Info, true);
+        return false;
     }
 
-    if (defender.hp <= 0) {
-        if (defender.kind == EntityKind::Player) {
-            pushMsg("YOU DIE.", MessageKind::Combat, false);
-            if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindName(attacker.kind);
-            gameOver = true;
+    const int debt = shopDebtThisDepth();
+    if (debt <= 0) {
+        pushMsg("YOU OWE NOTHING.", MessageKind::Info, true);
+        return false;
+    }
+
+    int availableGold = goldCount();
+    if (availableGold <= 0) {
+        pushMsg("YOU HAVE NO GOLD.", MessageKind::Warning, true);
+        return false;
+    }
+
+    int spent = 0;
+    int remainingGold = availableGold;
+
+    // Apply payments across unpaid items on this depth.
+    // - Stackables: pay whole units (split stack if only partially paid).
+    // - Non-stackables: allow partial payments by reducing the remaining owed.
+    for (size_t i = 0; i < inv.size(); ++i) {
+        if (remainingGold <= 0) break;
+
+        Item& it = inv[i];
+        if (it.shopPrice <= 0 || it.shopDepth != depth_) continue;
+
+        const int perUnit = it.shopPrice;
+        if (perUnit <= 0) continue;
+
+        if (isStackable(it.kind) && it.count > 1) {
+            // Pay as many whole units as possible.
+            const int canUnits = std::min(it.count, remainingGold / perUnit);
+            if (canUnits <= 0) continue;
+
+            const int pay = canUnits * perUnit;
+            remainingGold -= pay;
+            spent += pay;
+
+            if (canUnits == it.count) {
+                // Entire stack paid.
+                it.shopPrice = 0;
+                it.shopDepth = 0;
+            } else {
+                // Split: paid portion becomes a separate stack.
+                it.count -= canUnits;
+                Item paid = it;
+                paid.count = canUnits;
+                paid.shopPrice = 0;
+                paid.shopDepth = 0;
+                if (!tryStackItem(inv, paid)) {
+                    inv.push_back(paid);
+                }
+            }
         } else {
-            std::ostringstream ds;
-            ds << kindName(defender.kind) << " DIES.";
-            pushMsg(ds.str(), MessageKind::Combat, msgFromPlayer);
+            // Pay partially (or fully) for a single unit item.
+            const int pay = std::min(perUnit, remainingGold);
+            it.shopPrice -= pay;
+            remainingGold -= pay;
+            spent += pay;
 
-            if (attacker.kind == EntityKind::Player) {
-                ++killCount;
-                grantXp(xpFor(defender.kind));
+            if (it.shopPrice <= 0) {
+                it.shopPrice = 0;
+                it.shopDepth = 0;
             }
         }
     }
+
+    if (spent <= 0) {
+        pushMsg("YOU CANNOT PAY FOR ANYTHING RIGHT NOW.", MessageKind::Info, true);
+        return false;
+    }
+
+    (void)spendGoldFromInv(inv, spent);
+
+    const int stillOwe = shopDebtThisDepth();
+    if (stillOwe <= 0) {
+        pushMsg("YOU PAY " + std::to_string(spent) + " GOLD. YOUR DEBT IS CLEARED.", MessageKind::Success, true);
+        // Calm the shopkeeper if this payment settled the bill.
+        setShopkeepersAlerted(ents, playerId_, player().pos, false);
+    } else {
+        pushMsg("YOU PAY " + std::to_string(spent) + " GOLD. YOU STILL OWE " + std::to_string(stillOwe) + " GOLD.", MessageKind::Info, true);
+    }
+
+    // Paying takes a turn.
+    advanceAfterPlayerAction();
+    return true;
 }
+
 
 void Game::dropGroundItem(Vec2i pos, ItemKind k, int count, int enchant) {
     count = std::max(1, count);
 
     // Merge into an existing stack on the same tile when possible.
     // (Only for stackables and when metadata matches.)
-    if (isStackable(k) && enchant == 0) {
+    if (isStackable(k)) {
         for (auto& gi : ground) {
             if (gi.pos != pos) continue;
             if (gi.item.kind != k) continue;
+            // Only merge stacks when all metadata matches (e.g., enchant / charges / BUC).
             if (gi.item.enchant != enchant) continue;
+            if (gi.item.charges != 0) continue;
+            if (gi.item.buc != 0) continue;
             gi.item.count += count;
             return;
         }
@@ -5808,136 +6482,138 @@ std::vector<Vec2i> Game::bresenhamLine(Vec2i a, Vec2i b) {
     return pts;
 }
 
-void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atk, ProjectileKind projKind, bool fromPlayer) {
-    std::vector<Vec2i> line = bresenhamLine(attacker.pos, target);
-    if (line.size() <= 1) return;
+void Game::recomputeLightMap() {
+    const size_t n = static_cast<size_t>(dung.width * dung.height);
+    lightMap_.assign(n, 255);
 
-    if (fromPlayer) {
-        // Ranged attacks are noisy; nearby monsters may investigate.
-        alertMonstersTo(attacker.pos, 10);
+    if (!darknessActive()) {
+        // Treat early depths as fully lit for accessibility.
+        return;
     }
 
-    // Clamp to range (+ start tile)
-    if (range > 0 && static_cast<int>(line.size()) > range + 1) {
-        line.resize(static_cast<size_t>(range + 1));
-    }
+    lightMap_.assign(n, 0);
 
-    bool hitEntity = false;
-    bool hitWall = false;
-    Entity* hit = nullptr;
+    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * dung.width + x); };
+    auto setLight = [&](int x, int y, uint8_t v) {
+        if (!dung.inBounds(x, y)) return;
+        const size_t i = idx(x, y);
+        if (i >= lightMap_.size()) return;
+        if (lightMap_[i] < v) lightMap_[i] = v;
+    };
 
-    size_t stopIdx = line.size() - 1;
-
-    for (size_t i = 1; i < line.size(); ++i) {
-        Vec2i p = line[i];
-        if (!dung.inBounds(p.x, p.y)) { stopIdx = i - 1; break; }
-
-        // Walls/closed doors block projectiles
-        if (dung.isOpaque(p.x, p.y)) {
-            hitWall = true;
-            stopIdx = i;
-            break;
+    // Ambient room light: rooms are lit, corridors/caverns are dark.
+    for (const Room& r : dung.rooms) {
+        uint8_t amb = 140;
+        switch (r.type) {
+            case RoomType::Shrine:   amb = 190; break;
+            case RoomType::Treasure: amb = 170; break;
+            case RoomType::Vault:    amb = 175; break;
+            case RoomType::Secret:   amb = 120; break;
+            default:                 amb = 140; break;
         }
 
-        if (Entity* e = entityAtMut(p.x, p.y)) {
-            if (e->id != attacker.id && e->hp > 0) {
-                hitEntity = true;
-                hit = e;
-                stopIdx = i;
-                break;
+        for (int y = r.y; y < r.y + r.h; ++y) {
+            for (int x = r.x; x < r.x + r.w; ++x) {
+                setLight(x, y, amb);
             }
         }
     }
 
-    // Apply damage immediately (visual projectile is FX only).
-    if (hitEntity && hit) {
-        int def = hit->baseDef;
-        if (hit->kind == EntityKind::Player) def = playerDefense();
+    struct LightSource {
+        Vec2i pos;
+        int radius;
+        uint8_t intensity;
+    };
 
-        int dmg = std::max(1, atk - def + rng.range(0, 1));
-        hit->hp -= dmg;
+    std::vector<LightSource> sources;
+    sources.reserve(16);
 
-        std::ostringstream ss;
-        if (fromPlayer) {
-            ss << "YOU HIT " << kindName(hit->kind) << " FOR " << dmg << ".";
-        } else if (hit->kind == EntityKind::Player) {
-            ss << kindName(attacker.kind) << " HITS YOU FOR " << dmg << ".";
-        } else {
-            ss << kindName(attacker.kind) << " HITS " << kindName(hit->kind) << ".";
+    // Player-carried light source (lit torch).
+    bool playerHasTorch = false;
+    for (const Item& it : inv) {
+        if (it.kind == ItemKind::TorchLit && it.charges > 0) {
+            playerHasTorch = true;
+            break;
         }
-        pushMsg(ss.str(), MessageKind::Combat, fromPlayer);
+    }
+    if (playerHasTorch) {
+        sources.push_back({ player().pos, 8, 255 });
+    }
 
-        if (hit->hp <= 0) {
-            if (hit->kind == EntityKind::Player) {
-                pushMsg("YOU DIE.", MessageKind::Combat, false);
-                if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindName(attacker.kind);
-                gameOver = true;
-            } else {
-                std::ostringstream ds;
-                ds << kindName(hit->kind) << " DIES.";
-                pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
-                if (fromPlayer) {
-                    ++killCount;
-                    grantXp(xpFor(hit->kind));
+    // Ground light sources (dropped lit torches).
+    for (const auto& gi : ground) {
+        if (gi.item.kind == ItemKind::TorchLit && gi.item.charges > 0) {
+            sources.push_back({ gi.pos, 6, 230 });
+        }
+    }
+
+    // Apply each source using shadowcasting LOS from the source.
+    std::vector<uint8_t> mask;
+    for (const auto& s : sources) {
+        dung.computeFovMask(s.pos.x, s.pos.y, s.radius, mask);
+        if (mask.size() != lightMap_.size()) continue;
+
+        const int falloff = std::max(1, static_cast<int>(s.intensity) / (s.radius + 1));
+
+        for (int y = 0; y < dung.height; ++y) {
+            for (int x = 0; x < dung.width; ++x) {
+                const size_t i = idx(x, y);
+                if (!mask[i]) continue;
+
+                const int dist = std::max(std::abs(x - s.pos.x), std::abs(y - s.pos.y));
+                if (dist > s.radius) continue;
+
+                int b = static_cast<int>(s.intensity) - dist * falloff;
+                b = clampi(b, 0, 255);
+
+                if (lightMap_[i] < static_cast<uint8_t>(b)) {
+                    lightMap_[i] = static_cast<uint8_t>(b);
                 }
             }
         }
-    } else if (hitWall) {
-        if (fromPlayer) pushMsg("THE SHOT HITS A WALL.", MessageKind::Warning, true);
-    } else {
-        if (fromPlayer) pushMsg("YOU FIRE.", MessageKind::Combat, true);
+    }
+}
+
+void Game::recomputeFov() {
+    Entity& p = playerMut();    int radius = 9;
+    if (p.visionTurns > 0) radius += 3;
+
+    // Lighting is cached separately from FOV; keep it current.
+    recomputeLightMap();
+
+    if (!darknessActive()) {
+        // Classic behavior (fully lit).
+        dung.computeFov(p.pos.x, p.pos.y, radius, true);
+        return;
     }
 
-    // Recoverable ammo: arrows/rocks may remain on the ground after firing.
-    // This keeps ranged weapons fun without making ammo management too punishing.
-    if (projKind == ProjectileKind::Arrow || projKind == ProjectileKind::Rock) {
-        ItemKind dropK = (projKind == ProjectileKind::Arrow) ? ItemKind::Arrow : ItemKind::Rock;
+    // Compute raw LOS without auto-exploring; we'll apply darkness filtering first.
+    dung.computeFov(p.pos.x, p.pos.y, radius, false);
 
-        // Default landing tile is the last tile the projectile reached.
-        Vec2i land = line[stopIdx];
-        // If we hit a wall/closed door, the projectile can't occupy that tile; land on the last open tile instead.
-        if (hitWall && stopIdx > 0) {
-            land = line[stopIdx - 1];
-        }
+    constexpr int kDarkVisionRadius = 2;
 
-        if (dung.inBounds(land.x, land.y) && !dung.isOpaque(land.x, land.y)) {
-            // Base drop chance varies by ammo type.
-            float dropChance = (projKind == ProjectileKind::Arrow) ? 0.60f : 0.75f;
+    for (int y = 0; y < dung.height; ++y) {
+        for (int x = 0; x < dung.width; ++x) {
+            Tile& t = dung.at(x, y);
+            if (!t.visible) continue;
 
-            // Smashing into a wall/door is more likely to ruin the projectile.
-            if (hitWall) dropChance -= 0.20f;
+            const int dist = std::max(std::abs(x - p.pos.x), std::abs(y - p.pos.y));
+            if (dist <= kDarkVisionRadius) continue;
 
-            // Enemy volleys shouldn't become infinite ammo printers.
-            if (!fromPlayer) dropChance -= 0.15f;
-
-            dropChance = std::clamp(dropChance, 0.10f, 0.95f);
-            if (rng.chance(dropChance)) {
-                dropGroundItem(land, dropK, 1);
+            // Beyond "feel around" range, you only see lit tiles.
+            if (tileLightLevel(x, y) == 0) {
+                t.visible = false;
             }
         }
     }
 
-    // FX projectile path (truncate)
-    std::vector<Vec2i> fxPath;
-    fxPath.reserve(stopIdx + 1);
-    for (size_t i = 0; i <= stopIdx && i < line.size(); ++i) fxPath.push_back(line[i]);
-
-    FXProjectile fxp;
-    fxp.kind = projKind;
-    fxp.path = std::move(fxPath);
-    fxp.pathIndex = (fxp.path.size() > 1) ? 1 : 0;
-    fxp.stepTimer = 0.0f;
-    fxp.stepTime = (projKind == ProjectileKind::Spark) ? 0.02f : 0.03f;
-    fx.push_back(std::move(fxp));
-
-    inputLock = true;
-}
-
-void Game::recomputeFov() {
-    Entity& p = playerMut();
-    int radius = 9;
-    if (p.visionTurns > 0) radius += 3;
-    dung.computeFov(p.pos.x, p.pos.y, radius);
+    // Mark explored tiles only after darkness filtering.
+    for (int y = 0; y < dung.height; ++y) {
+        for (int x = 0; x < dung.width; ++x) {
+            Tile& t = dung.at(x, y);
+            if (t.visible) t.explored = true;
+        }
+    }
 }
 
 void Game::openInventory() {
@@ -6032,7 +6708,7 @@ bool Game::autoPickupAtPlayer() {
     std::vector<std::string> sampleNames;
 
     for (size_t i = 0; i < ground.size();) {
-        if (ground[i].pos == pos && autoPickupWouldPick(ground[i].item.kind)) {
+        if (ground[i].pos == pos && ground[i].item.shopPrice <= 0 && autoPickupWouldPick(ground[i].item.kind)) {
             Item it = ground[i].item;
 
             // Merge into existing stacks if possible.
@@ -6098,6 +6774,9 @@ bool Game::openChestAtPlayer() {
         }), ground.end());
 
         pushMsg("THE CHEST WAS A MIMIC!", MessageKind::Warning, true);
+
+        // A mimic reveal is loud.
+        emitNoise(chestPos, 14);
 
         // Prefer spawning adjacent so we don't overlap the player (chests are opened underfoot).
         static const int dirs[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
@@ -6178,18 +6857,20 @@ bool Game::openChestAtPlayer() {
             (void)consumeKeys(1);
             setChestLocked(chest, false);
             pushMsg("YOU UNLOCK THE CHEST.", MessageKind::Info, true);
+            emitNoise(pos, 10);
         } else if (lockpickCount() > 0) {
             // Lockpicking chance scales with character level, but higher-tier chests are harder.
             float chance = 0.35f + 0.05f * static_cast<float>(charLevel);
             chance -= 0.05f * static_cast<float>(chestTier(chest));
-            chance = std::clamp(chance, 0.15f, 0.95f);
 
             if (rng.chance(chance)) {
                 setChestLocked(chest, false);
                 pushMsg("YOU PICK THE CHEST'S LOCK.", MessageKind::Info, true);
+                emitNoise(pos, 10);
             } else {
                 // Failed pick still costs a turn.
                 pushMsg("YOU FAIL TO PICK THE CHEST'S LOCK.", MessageKind::Info, true);
+                emitNoise(pos, 10);
                 // Chance to break a lockpick.
                 float breakChance = 0.10f + 0.05f * static_cast<float>(chestTier(chest));
                 if (rng.chance(breakChance)) {
@@ -6206,6 +6887,7 @@ bool Game::openChestAtPlayer() {
 
     // Opening the chest consumes a turn.
     pushMsg("YOU OPEN THE CHEST.", MessageKind::Loot, true);
+    emitNoise(pos, 12);
 
     // Trigger trap if present.
     if (chestTrapped(chest)) {
@@ -6213,8 +6895,7 @@ bool Game::openChestAtPlayer() {
         setChestTrapped(chest, false);
         setChestTrapKnown(chest, true);
 
-        Entity& p = playerMut();
-        switch (tk) {
+        Entity& p = playerMut();        switch (tk) {
             case TrapKind::Spike: {
                 int dmg = rng.range(2, 5) + std::min(3, depth_ / 2);
                 p.hp -= dmg;
@@ -6285,6 +6966,26 @@ bool Game::openChestAtPlayer() {
         it.spriteSeed = rng.nextU32();
         it.enchant = enchant;
         if (k == ItemKind::WandSparks) it.charges = itemDef(k).maxCharges;
+
+        // Roll BUC (blessed/uncursed/cursed) for gear; and light enchant chance on deeper floors.
+        if (isWeapon(k) || isArmor(k)) {
+            const RoomType rt = roomTypeAt(dung, pos);
+            it.buc = rollBucForGear(rng, depth_, rt);
+
+            if (it.enchant == 0 && depth_ >= 3) {
+                float enchChance = 0.15f;
+                if (rt == RoomType::Treasure || rt == RoomType::Vault || rt == RoomType::Secret) enchChance += 0.10f;
+                if (rt == RoomType::Lair) enchChance -= 0.05f;
+                enchChance = std::max(0.05f, std::min(0.35f, enchChance));
+
+                if (rng.chance(enchChance)) {
+                    it.enchant = 1;
+                    if (depth_ >= 6 && rng.chance(0.08f)) {
+                        it.enchant = 2;
+                    }
+                }
+            }
+        }
         ground.push_back({it, pos});
     };
 
@@ -6298,7 +6999,7 @@ bool Game::openChestAtPlayer() {
     if (depth_ >= 4 && rng.chance(0.50f)) rolls += 1;
 
     for (int r = 0; r < rolls; ++r) {
-        int roll = rng.range(0, 139);
+        int roll = rng.range(0, 143);
 
         if (roll < 16) {
             // Weapons
@@ -6325,7 +7026,8 @@ bool Game::openChestAtPlayer() {
         } else if (roll < 116) {
             dropItemHere(ItemKind::PotionHaste, 1);
         } else if (roll < 124) {
-            dropItemHere(ItemKind::PotionVision, 1);
+            const ItemKind pk = rng.chance(0.25f) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
+            dropItemHere(pk, 1);
         } else if (roll < 130) {
             dropItemHere(ItemKind::ScrollMapping, 1);
         } else if (roll < 134) {
@@ -6334,6 +7036,8 @@ bool Game::openChestAtPlayer() {
             dropItemHere(ItemKind::ScrollEnchantWeapon, 1);
         } else if (roll < 138) {
             dropItemHere(ItemKind::ScrollEnchantArmor, 1);
+        } else if (roll < 142) {
+            dropItemHere(ItemKind::ScrollRemoveCurse, 1);
         } else {
             int pick = rng.range(0, 3);
             ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
@@ -6394,10 +7098,31 @@ bool Game::pickupAtPlayer() {
             continue;
         }
 
+        std::string msg;
+        const bool inShop = playerInShop();
+        const bool isShopStockHere = (inShop && it.shopPrice > 0 && it.shopDepth == depth_);
+        if (isShopStockHere && anyPeacefulShopkeeper(ents, playerId_)) {
+            const int cost = totalShopPrice(it);
+            Item named = it;
+            named.shopPrice = 0;
+            named.shopDepth = 0;
+
+            if (spendGoldFromInv(inv, cost)) {
+                it.shopPrice = 0;
+                it.shopDepth = 0;
+                msg = "YOU BUY " + displayItemName(it) + " FOR " + std::to_string(cost) + " GOLD.";
+            } else {
+                // Not enough gold: you can still pick up, but you now OWE the shop.
+                msg = "YOU PICK UP " + displayItemName(named) + ". YOU OWE " + std::to_string(cost) + " GOLD.";
+            }
+        } else {
+            msg = "YOU PICK UP " + displayItemName(it) + ".";
+        }
+
         if (tryStackItem(inv, it)) {
             // stacked
             pickedAny = true;
-            pushMsg("YOU PICK UP " + displayItemName(it) + ".", MessageKind::Loot, true);
+            pushMsg(msg, MessageKind::Loot, true);
             if (it.kind == ItemKind::AmuletYendor) {
                 pushMsg("YOU HAVE FOUND THE AMULET OF YENDOR! RETURN TO THE EXIT (<) TO WIN.", MessageKind::Success, true);
             }
@@ -6412,7 +7137,7 @@ bool Game::pickupAtPlayer() {
 
         inv.push_back(it);
         pickedAny = true;
-        pushMsg("YOU PICK UP " + displayItemName(it) + ".", MessageKind::Loot, true);
+        pushMsg(msg, MessageKind::Loot, true);
         if (it.kind == ItemKind::AmuletYendor) {
             pushMsg("YOU HAVE FOUND THE AMULET OF YENDOR! RETURN TO THE EXIT (<) TO WIN.", MessageKind::Success, true);
         }
@@ -6431,6 +7156,14 @@ bool Game::dropSelected() {
     invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
     Item& it = inv[static_cast<size_t>(invSel)];
 
+    // Cursed equipped items can't be removed/dropped (NetHack-style "welded" gear).
+    if (it.buc < 0 && (it.id == equipMeleeId || it.id == equipRangedId || it.id == equipArmorId)) {
+        if (it.id == equipMeleeId) pushMsg("YOUR WEAPON IS CURSED AND WELDED TO YOUR HAND!", MessageKind::Warning, true);
+        else if (it.id == equipRangedId) pushMsg("YOUR RANGED WEAPON IS CURSED AND WON'T LET GO!", MessageKind::Warning, true);
+        else pushMsg("YOUR ARMOR IS CURSED AND WON'T COME OFF!", MessageKind::Warning, true);
+        return false;
+    }
+
     // Unequip if needed
     if (it.id == equipMeleeId) equipMeleeId = 0;
     if (it.id == equipRangedId) equipRangedId = 0;
@@ -6446,12 +7179,39 @@ bool Game::dropSelected() {
         invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
     }
 
+    std::string msg;
+    const bool inShop = playerInShop();
+    const bool peacefulShop = inShop && anyPeacefulShopkeeper(ents, playerId_);
+
+    if (inShop && drop.shopPrice > 0 && drop.shopDepth == depth_) {
+        // Returning unpaid goods to the same shop reduces your debt automatically.
+        Item named = drop;
+        named.shopPrice = 0;
+        named.shopDepth = 0;
+        msg = "YOU RETURN " + displayItemName(named) + ".";
+    } else if (peacefulShop && drop.shopPrice <= 0 && itemCanBeSoldToShop(drop)) {
+        const int perUnit = shopSellPricePerUnit(drop, depth_);
+        const int gold = std::max(0, perUnit) * stackUnitsForPrice(drop);
+        if (gold > 0) gainGoldToInv(inv, gold, nextItemId, rng);
+
+        // The shop now owns the item and will resell it.
+        drop.shopPrice = shopBuyPricePerUnit(drop, depth_);
+        drop.shopDepth = depth_;
+
+        Item named = drop;
+        named.shopPrice = 0;
+        named.shopDepth = 0;
+        msg = "YOU SELL " + displayItemName(named) + " FOR " + std::to_string(gold) + " GOLD.";
+    } else {
+        msg = "YOU DROP " + displayItemName(drop) + ".";
+    }
+
     GroundItem gi;
     gi.item = drop;
     gi.pos = player().pos;
     ground.push_back(gi);
 
-    pushMsg("YOU DROP " + displayItemName(drop) + ".");
+    pushMsg(msg);
     return true;
 }
 
@@ -6464,6 +7224,14 @@ bool Game::dropSelectedAll() {
     invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
     Item& it = inv[static_cast<size_t>(invSel)];
 
+    // Cursed equipped items can't be removed/dropped (NetHack-style "welded" gear).
+    if (it.buc < 0 && (it.id == equipMeleeId || it.id == equipRangedId || it.id == equipArmorId)) {
+        if (it.id == equipMeleeId) pushMsg("YOUR WEAPON IS CURSED AND WELDED TO YOUR HAND!", MessageKind::Warning, true);
+        else if (it.id == equipRangedId) pushMsg("YOUR RANGED WEAPON IS CURSED AND WON'T LET GO!", MessageKind::Warning, true);
+        else pushMsg("YOUR ARMOR IS CURSED AND WON'T COME OFF!", MessageKind::Warning, true);
+        return false;
+    }
+
     // Unequip if needed
     if (it.id == equipMeleeId) equipMeleeId = 0;
     if (it.id == equipRangedId) equipRangedId = 0;
@@ -6475,12 +7243,37 @@ bool Game::dropSelectedAll() {
     inv.erase(inv.begin() + invSel);
     invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 
+    std::string msg;
+    const bool inShop = playerInShop();
+    const bool peacefulShop = inShop && anyPeacefulShopkeeper(ents, playerId_);
+
+    if (inShop && drop.shopPrice > 0 && drop.shopDepth == depth_) {
+        Item named = drop;
+        named.shopPrice = 0;
+        named.shopDepth = 0;
+        msg = "YOU RETURN " + displayItemName(named) + ".";
+    } else if (peacefulShop && drop.shopPrice <= 0 && itemCanBeSoldToShop(drop)) {
+        const int perUnit = shopSellPricePerUnit(drop, depth_);
+        const int gold = std::max(0, perUnit) * stackUnitsForPrice(drop);
+        if (gold > 0) gainGoldToInv(inv, gold, nextItemId, rng);
+
+        drop.shopPrice = shopBuyPricePerUnit(drop, depth_);
+        drop.shopDepth = depth_;
+
+        Item named = drop;
+        named.shopPrice = 0;
+        named.shopDepth = 0;
+        msg = "YOU SELL " + displayItemName(named) + " FOR " + std::to_string(gold) + " GOLD.";
+    } else {
+        msg = "YOU DROP " + displayItemName(drop) + ".";
+    }
+
     GroundItem gi;
     gi.item = drop;
     gi.pos = player().pos;
     ground.push_back(gi);
 
-    pushMsg("YOU DROP " + displayItemName(drop) + ".");
+    pushMsg(msg);
     return true;
 }
 
@@ -6493,11 +7286,26 @@ bool Game::equipSelected() {
     const Item& it = inv[static_cast<size_t>(invSel)];
     const ItemDef& d = itemDef(it.kind);
 
+    auto equippedItemCursed = [&](int id) -> bool {
+        if (id == 0) return false;
+        const int idx = findItemIndexById(inv, id);
+        if (idx < 0) return false;
+        return inv[static_cast<size_t>(idx)].buc < 0;
+    };
+
     if (d.slot == EquipSlot::MeleeWeapon) {
         if (equipMeleeId == it.id) {
+            if (it.buc < 0) {
+                pushMsg("YOUR WEAPON IS CURSED AND WELDED TO YOUR HAND!", MessageKind::Warning, true);
+                return false;
+            }
             equipMeleeId = 0;
             pushMsg("YOU UNWIELD " + displayItemName(it) + ".");
         } else {
+            if (equippedItemCursed(equipMeleeId)) {
+                pushMsg("YOUR CURSED WEAPON WON'T LET GO!", MessageKind::Warning, true);
+                return false;
+            }
             equipMeleeId = it.id;
             pushMsg("YOU WIELD " + displayItemName(it) + ".");
         }
@@ -6506,19 +7314,36 @@ bool Game::equipSelected() {
 
     if (d.slot == EquipSlot::RangedWeapon) {
         if (equipRangedId == it.id) {
+            if (it.buc < 0) {
+                pushMsg("YOUR RANGED WEAPON IS CURSED AND WON'T LET GO!", MessageKind::Warning, true);
+                return false;
+            }
             equipRangedId = 0;
             pushMsg("YOU UNEQUIP " + displayItemName(it) + ".");
         } else {
+            if (equippedItemCursed(equipRangedId)) {
+                pushMsg("YOUR CURSED RANGED WEAPON WON'T LET GO!", MessageKind::Warning, true);
+                return false;
+            }
             equipRangedId = it.id;
             pushMsg("YOU READY " + displayItemName(it) + ".");
         }
         return true;
     }
+
     if (d.slot == EquipSlot::Armor) {
         if (equipArmorId == it.id) {
+            if (it.buc < 0) {
+                pushMsg("YOUR ARMOR IS CURSED AND WON'T COME OFF!", MessageKind::Warning, true);
+                return false;
+            }
             equipArmorId = 0;
             pushMsg("YOU REMOVE " + displayItemName(it) + ".");
         } else {
+            if (equippedItemCursed(equipArmorId)) {
+                pushMsg("YOUR CURSED ARMOR WON'T COME OFF!", MessageKind::Warning, true);
+                return false;
+            }
             equipArmorId = it.id;
             pushMsg("YOU WEAR " + displayItemName(it) + ".");
         }
@@ -6547,8 +7372,7 @@ bool Game::useSelected() {
     };
 
     if (it.kind == ItemKind::PotionHealing) {
-        Entity& p = playerMut();
-        int heal = itemDef(it.kind).healAmount;
+        Entity& p = playerMut();        int heal = itemDef(it.kind).healAmount;
         int before = p.hp;
         p.hp = std::min(p.hpMax, p.hp + heal);
 
@@ -6561,8 +7385,7 @@ bool Game::useSelected() {
     }
 
     if (it.kind == ItemKind::PotionStrength) {
-        Entity& p = playerMut();
-        p.baseAtk += 1;
+        Entity& p = playerMut();        p.baseAtk += 1;
         std::ostringstream ss;
         ss << "YOU FEEL STRONGER! ATK IS NOW " << p.baseAtk << ".";
         pushMsg(ss.str(), MessageKind::Success, true);
@@ -6572,17 +7395,33 @@ bool Game::useSelected() {
     }
 
     if (it.kind == ItemKind::ScrollTeleport) {
-        // Teleport to a random free floor
+        // Teleport to a random free floor.
+        Vec2i prevPos = player().pos;
+        Vec2i dst = prevPos;
+
         for (int tries = 0; tries < 2000; ++tries) {
             Vec2i p = dung.randomFloor(rng, true);
             if (entityAt(p.x, p.y)) continue;
-            playerMut().pos = p;
+            dst = p;
             break;
         }
+
+        playerMut().pos = dst;
+
         pushMsg("YOU READ A SCROLL. YOU VANISH!", MessageKind::Info, true);
         (void)markIdentified(it.kind, false);
         consumeOneStackable();
         recomputeFov();
+
+        const bool wasInShop = (roomTypeAt(dung, prevPos) == RoomType::Shop);
+        const bool nowInShop = (roomTypeAt(dung, dst) == RoomType::Shop);
+        if (wasInShop && !nowInShop) {
+            const int debt = shopDebtThisDepth();
+            if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
+                setShopkeepersAlerted(ents, playerId_, dst, true);
+                pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+            }
+        }
         return true;
     }
 
@@ -6658,8 +7497,7 @@ bool Game::useSelected() {
     if (it.kind == ItemKind::ScrollKnock) {
         (void)markIdentified(it.kind, false);
 
-        Entity& p = playerMut();
-        const int radius = 6;
+        Entity& p = playerMut();        const int radius = 6;
         int opened = 0;
 
         for (int y = p.pos.y - radius; y <= p.pos.y + radius; ++y) {
@@ -6702,9 +7540,30 @@ bool Game::useSelected() {
         return true;
     }
 
+    if (it.kind == ItemKind::ScrollRemoveCurse) {
+        (void)markIdentified(it.kind, false);
+
+        int uncursed = 0;
+        for (auto& invIt : inv) {
+            if (!isWeapon(invIt.kind) && !isArmor(invIt.kind)) continue;
+            if (invIt.buc < 0) {
+                invIt.buc = 0;
+                uncursed++;
+            }
+        }
+
+        if (uncursed == 0) {
+            pushMsg("NOTHING SEEMS TO HAPPEN.", MessageKind::Info, true);
+        } else {
+            pushMsg("YOU FEEL A MALEVOLENT WEIGHT LIFT FROM YOUR GEAR.", MessageKind::System, true);
+        }
+
+        consumeOneStackable();
+        return true;
+    }
+
     if (it.kind == ItemKind::PotionAntidote) {
-        Entity& p = playerMut();
-        if (p.poisonTurns > 0) {
+        Entity& p = playerMut();        if (p.poisonTurns > 0) {
             p.poisonTurns = 0;
             pushMsg("YOU FEEL THE POISON LEAVE YOUR BODY.", MessageKind::Success, true);
         } else {
@@ -6716,8 +7575,7 @@ bool Game::useSelected() {
     }
 
     if (it.kind == ItemKind::PotionRegeneration) {
-        Entity& p = playerMut();
-        p.regenTurns = std::max(p.regenTurns, 18);
+        Entity& p = playerMut();        p.regenTurns = std::max(p.regenTurns, 18);
         pushMsg("YOUR WOUNDS BEGIN TO KNIT.", MessageKind::Success, true);
         (void)markIdentified(it.kind, false);
         consumeOneStackable();
@@ -6725,8 +7583,7 @@ bool Game::useSelected() {
     }
 
     if (it.kind == ItemKind::PotionShielding) {
-        Entity& p = playerMut();
-        p.shieldTurns = std::max(p.shieldTurns, 14);
+        Entity& p = playerMut();        p.shieldTurns = std::max(p.shieldTurns, 14);
         pushMsg("YOU FEEL PROTECTED.", MessageKind::Success, true);
         (void)markIdentified(it.kind, false);
         consumeOneStackable();
@@ -6734,8 +7591,7 @@ bool Game::useSelected() {
     }
 
     if (it.kind == ItemKind::PotionHaste) {
-        Entity& p = playerMut();
-        p.hasteTurns = std::min(40, p.hasteTurns + 6);
+        Entity& p = playerMut();        p.hasteTurns = std::min(40, p.hasteTurns + 6);
         hastePhase = false; // ensure the next action is the "free" haste action
         pushMsg("YOU FEEL QUICK!", MessageKind::Success, true);
         (void)markIdentified(it.kind, false);
@@ -6744,11 +7600,50 @@ bool Game::useSelected() {
     }
 
     if (it.kind == ItemKind::PotionVision) {
-        Entity& p = playerMut();
-        p.visionTurns = std::min(60, p.visionTurns + 20);
+        Entity& p = playerMut();        p.visionTurns = std::min(60, p.visionTurns + 20);
         pushMsg("YOUR EYES SHINE WITH INNER LIGHT.", MessageKind::Success, true);
         (void)markIdentified(it.kind, false);
         consumeOneStackable();
+        recomputeFov();
+        return true;
+    }
+
+    if (it.kind == ItemKind::PotionInvisibility) {
+        Entity& p = playerMut();        p.invisTurns = std::min(60, p.invisTurns + 18);
+        pushMsg("YOU FADE FROM SIGHT!", MessageKind::Success, true);
+        (void)markIdentified(it.kind, false);
+        consumeOneStackable();
+        return true;
+    }
+
+    if (it.kind == ItemKind::Torch) {
+        // Light a torch: consumes one TORCH from the stack and creates a LIT TORCH item that burns over time.
+        // (The LIT TORCH can be dropped to create a stationary light source.)
+        const int fuel = 180 + rng.range(0, 120);
+
+        // Consume one torch from the selected stack first (to avoid reference invalidation from inv push_back).
+        if (it.count > 1) {
+            it.count -= 1;
+        } else {
+            inv.erase(inv.begin() + static_cast<std::vector<Item>::difference_type>(invSel));
+            if (invSel >= static_cast<int>(inv.size())) invSel = static_cast<int>(inv.size()) - 1;
+        }
+
+        Item lit;
+        lit.id = nextItemId++;
+        lit.kind = ItemKind::TorchLit;
+        lit.count = 1;
+        lit.enchant = 0;
+        lit.charges = fuel;
+        lit.spriteSeed = rng.nextU32();
+
+        inv.push_back(lit);
+
+        pushMsg("YOU LIGHT A TORCH.", MessageKind::System, true);
+        // The flare is small but noticeable.
+        emitNoise(player().pos, 4);
+
+        // Lighting changes sight in dark levels.
         recomputeFov();
         return true;
     }
@@ -6839,8 +7734,7 @@ bool Game::useSelected() {
     }
 
     if (it.kind == ItemKind::FoodRation) {
-        Entity& p = playerMut();
-        const ItemDef& d = itemDef(it.kind);
+        Entity& p = playerMut();        const ItemDef& d = itemDef(it.kind);
 
         const int beforeState = hungerStateFor(hunger, hungerMax);
 
@@ -6946,13 +7840,11 @@ void Game::endTargeting(bool fire) {
                         consumeAmmo(inv, d.ammo, 1);
                     }
 
-                    // Compute attack.
-                    int atk = std::max(1, player().baseAtk + d.rangedAtk + w.enchant + rng.range(0, 1));
-                    if (w.kind == ItemKind::WandSparks) {
-                        atk += 2 + rng.range(0, 2);
-                    }
-
-                    attackRanged(playerMut(), targetPos, d.range, atk, d.projectile, true);
+                    // d20 to-hit + dice damage handled in attackRanged().
+                    const int bucBonus = (w.buc < 0 ? -1 : (w.buc > 0 ? 1 : 0));
+                    const int atkBonus = player().baseAtk + d.rangedAtk + w.enchant + bucBonus;
+                    const int dmgBonus = w.enchant + bucBonus;
+                    attackRanged(playerMut(), targetPos, d.range, atkBonus, dmgBonus, d.projectile, true);
 
                     if (w.kind == ItemKind::WandSparks && w.charges <= 0) {
                         pushMsg("YOUR WAND SPUTTERS OUT.");
@@ -6970,8 +7862,9 @@ void Game::endTargeting(bool fire) {
                     consumeAmmo(inv, spec.ammo, 1);
 
                     const int range = throwRangeFor(player(), spec.ammo);
-                    const int atk = std::max(1, player().baseAtk - 1 + rng.range(0, 1));
-                    attackRanged(playerMut(), targetPos, range, atk, spec.proj, true);
+                    const int atkBonus = player().baseAtk - 1;
+                    const int dmgBonus = 0;
+                    attackRanged(playerMut(), targetPos, range, atkBonus, dmgBonus, spec.proj, true);
                     didAttack = true;
                 }
             }
@@ -7127,6 +8020,11 @@ void Game::spawnMonsters() {
             e.hpMax = 16; e.baseAtk = 4; e.baseDef = 2;
             e.willFlee = false;
             break;
+        case EntityKind::Shopkeeper:
+            // Strong deterrent: shopkeepers are not meant to be "free loot".
+            e.hpMax = 26; e.baseAtk = 5; e.baseDef = 4;
+            e.willFlee = false;
+            break;
         default:
             e.hpMax = 6; e.baseAtk = 2; e.baseDef = 0;
             break;
@@ -7150,6 +8048,13 @@ void Game::spawnMonsters() {
 
         // Don't spawn in the starting room too aggressively.
         bool isStart = (r.contains(dung.stairsUp.x, dung.stairsUp.y));
+
+        if (r.type == RoomType::Shop && !isStart) {
+            // Shops get a single peaceful shopkeeper instead of random spawns.
+            Vec2i p = randomFreeTileInRoom(r);
+            addMonster(EntityKind::Shopkeeper, p, 0);
+            continue;
+        }
 
         int base = isStart ? 0 : 1;
         if (r.type == RoomType::Secret || r.type == RoomType::Vault) base = 0;
@@ -7259,6 +8164,63 @@ void Game::spawnItems() {
         it.spriteSeed = rng.nextU32();
         if (k == ItemKind::WandSparks) it.charges = itemDef(k).maxCharges;
 
+        // Roll BUC (blessed/uncursed/cursed) for gear; and light enchant chance on deeper floors.
+        if (isWeapon(k) || isArmor(k)) {
+            const RoomType rt = roomTypeAt(dung, pos);
+            it.buc = rollBucForGear(rng, depth_, rt);
+
+            if (it.enchant == 0 && depth_ >= 3) {
+                float enchChance = 0.15f;
+                if (rt == RoomType::Treasure || rt == RoomType::Vault || rt == RoomType::Secret) enchChance += 0.10f;
+                if (rt == RoomType::Lair) enchChance -= 0.05f;
+                enchChance = std::max(0.05f, std::min(0.35f, enchChance));
+
+                if (rng.chance(enchChance)) {
+                    it.enchant = 1;
+                    if (depth_ >= 6 && rng.chance(0.08f)) {
+                        it.enchant = 2;
+                    }
+                }
+            }
+        }
+
+        GroundItem gi;
+        gi.item = it;
+        gi.pos = pos;
+        ground.push_back(gi);
+    };
+
+    auto dropShopItemAt = [&](ItemKind k, Vec2i pos, int count = 1) {
+        Item it;
+        it.id = nextItemId++;
+        it.kind = k;
+        it.count = std::max(1, count);
+        it.enchant = 0;
+        it.buc = 0;
+        it.charges = 0;
+        it.spriteSeed = rng.nextU32();
+        it.shopPrice = 0;
+        it.shopDepth = 0;
+
+        const ItemDef d = itemDef(k);
+        if (k == ItemKind::WandSparks) it.charges = d.maxCharges;
+
+        // Shops sell mostly "clean" gear.
+        RoomType rt = RoomType::Shop;
+        if (isWeapon(k) || isArmor(k)) {
+            it.buc = rollBucForGear(rng, depth_, rt);
+            // A slightly higher chance of +1 items compared to the floor.
+            float enchChance = (depth_ >= 2) ? 0.22f : 0.12f;
+            enchChance += std::min(0.18f, depth_ * 0.02f);
+            if (rng.chance(enchChance)) {
+                it.enchant = 1;
+                if (depth_ >= 6 && rng.chance(0.08f)) it.enchant = 2;
+            }
+        }
+
+        it.shopPrice = shopBuyPricePerUnit(it, depth_);
+        it.shopDepth = depth_;
+
         GroundItem gi;
         gi.item = it;
         gi.pos = pos;
@@ -7267,7 +8229,7 @@ void Game::spawnItems() {
 
     auto dropGoodItem = [&](const Room& r) {
         // Treasure rooms are where you find the "spicy" gear.
-        int roll = rng.range(0, 135);
+        int roll = rng.range(0, 143);
 
         if (roll < 18) dropItemAt(ItemKind::Sword, randomFreeTileInRoom(r));
         else if (roll < 30) dropItemAt(ItemKind::Axe, randomFreeTileInRoom(r));
@@ -7281,7 +8243,10 @@ void Game::spawnItems() {
         else if (roll < 114) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
         else if (roll < 118) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
         else if (roll < 122) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
-        else if (roll < 126) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
+        else if (roll < 126) {
+            const ItemKind pk = rng.chance(0.25f) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
+            dropItemAt(pk, randomFreeTileInRoom(r), 1);
+        }
         else if (roll < 129) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
         else if (roll < 131) {
             int pick = rng.range(0, 3);
@@ -7293,6 +8258,7 @@ void Game::spawnItems() {
         }
         else if (roll < 133) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
         else if (roll < 135) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
+        else if (roll < 138) dropItemAt(ItemKind::ScrollRemoveCurse, randomFreeTileInRoom(r), 1);
         else dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
     };
 
@@ -7395,6 +8361,84 @@ void Game::spawnItems() {
             continue;
         }
 
+        if (r.type == RoomType::Shop) {
+            // Shops: a stocked room + a shopkeeper (spawned in spawnMonsters).
+            // Items are tagged with shopPrice/shopDepth and must be paid for.
+
+            // Pick a simple theme.
+            const int themeRoll = rng.range(0, 99);
+            // 0=General, 1=Armory, 2=Magic, 3=Supplies
+            const int theme = (themeRoll < 30) ? 0 : (themeRoll < 55) ? 1 : (themeRoll < 80) ? 2 : 3;
+
+            // Anchor item so every shop feels useful.
+            if (theme == 2) {
+                dropShopItemAt(ItemKind::ScrollIdentify, randomEmptyTileInRoom(r), 1);
+            } else {
+                dropShopItemAt(ItemKind::PotionHealing, randomEmptyTileInRoom(r), 1);
+            }
+
+            const int n = rng.range(7, 11);
+            for (int i = 0; i < n; ++i) {
+                ItemKind k = ItemKind::FoodRation;
+                int count = 1;
+
+                const int roll = rng.range(0, 99);
+                if (theme == 0) {
+                    // General store
+                    if (roll < 14) { k = ItemKind::FoodRation; count = rng.range(1, 3); }
+                    else if (roll < 26) { k = ItemKind::Torch; count = rng.range(1, 3); }
+                    else if (roll < 40) { k = ItemKind::PotionHealing; count = rng.range(1, 2); }
+                    else if (roll < 48) { k = ItemKind::PotionAntidote; }
+                    else if (roll < 58) { k = ItemKind::ScrollIdentify; }
+                    else if (roll < 64) { k = ItemKind::ScrollDetectTraps; }
+                    else if (roll < 70) { k = ItemKind::ScrollDetectSecrets; }
+                    else if (roll < 75) { k = ItemKind::ScrollKnock; }
+                    else if (roll < 80) { k = ItemKind::Lockpick; }
+                    else if (roll < 84) { k = ItemKind::Key; }
+                    else if (roll < 92) { k = ItemKind::Arrow; count = rng.range(8, 18); }
+                    else if (roll < 96) { k = ItemKind::Dagger; }
+                    else { k = (rng.chance(0.50f) ? ItemKind::LeatherArmor : ItemKind::Bow); }
+                } else if (theme == 1) {
+                    // Armory
+                    if (roll < 15) { k = ItemKind::Dagger; }
+                    else if (roll < 34) { k = ItemKind::Sword; }
+                    else if (roll < 46) { k = ItemKind::Axe; }
+                    else if (roll < 61) { k = ItemKind::Bow; }
+                    else if (roll < 70) { k = ItemKind::Sling; }
+                    else if (roll < 84) { k = ItemKind::Arrow; count = rng.range(10, 24); }
+                    else if (roll < 92) { k = ItemKind::LeatherArmor; }
+                    else if (roll < 98) { k = ItemKind::ChainArmor; }
+                    else { k = (depth_ >= 6 ? ItemKind::PlateArmor : ItemKind::ChainArmor); }
+                } else if (theme == 2) {
+                    // Magic shop
+                    if (roll < 18) { k = ItemKind::WandSparks; }
+                    else if (roll < 33) { k = ItemKind::ScrollTeleport; }
+                    else if (roll < 45) { k = ItemKind::ScrollMapping; }
+                    else if (roll < 60) { k = ItemKind::ScrollIdentify; }
+                    else if (roll < 68) { k = ItemKind::ScrollRemoveCurse; }
+                    else if (roll < 76) { k = ItemKind::PotionStrength; }
+                    else if (roll < 84) { k = ItemKind::PotionRegeneration; }
+                    else if (roll < 91) { k = ItemKind::PotionHaste; }
+                    else { k = (depth_ >= 5 ? ItemKind::PotionInvisibility : ItemKind::PotionVision); }
+                } else {
+                    // Supplies
+                    if (roll < 40) { k = ItemKind::FoodRation; count = rng.range(1, 4); }
+                    else if (roll < 60) { k = ItemKind::PotionHealing; count = rng.range(1, 2); }
+                    else if (roll < 78) { k = ItemKind::Torch; count = rng.range(1, 4); }
+                    else if (roll < 90) { k = ItemKind::PotionAntidote; count = rng.range(1, 2); }
+                    else if (roll < 96) { k = ItemKind::ScrollDetectTraps; }
+                    else { k = (rng.chance(0.55f) ? ItemKind::Lockpick : ItemKind::Key); }
+                }
+
+                // Depth-based small upgrades.
+                if (k == ItemKind::LeatherArmor && depth_ >= 4 && rng.chance(0.12f)) k = ItemKind::ChainArmor;
+                if (k == ItemKind::ChainArmor && depth_ >= 7 && rng.chance(0.06f)) k = ItemKind::PlateArmor;
+
+                dropShopItemAt(k, randomEmptyTileInRoom(r), count);
+            }
+            continue;
+        }
+
         if (r.type == RoomType::Secret) {
             // Secret rooms are optional bonus finds; keep them rewarding but not as
             // rich as full treasure rooms.
@@ -7431,15 +8475,20 @@ void Game::spawnItems() {
             if (rng.chance(0.30f)) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.22f)) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.15f)) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
-            if (rng.chance(0.15f)) dropItemAt(ItemKind::PotionVision, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.15f)) {
+            const ItemKind pk = rng.chance(0.20f) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
+            dropItemAt(pk, randomFreeTileInRoom(r), 1);
+        }
             if (rng.chance(0.18f)) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.12f)) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.08f)) dropItemAt(ItemKind::ScrollRemoveCurse, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.20f)) {
-                int pick = rng.range(0, 3);
+                int pick = rng.range(0, 4);
                 ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
                                           : (pick == 1) ? ItemKind::ScrollDetectTraps
                                           : (pick == 2) ? ItemKind::ScrollDetectSecrets
-                                                        : ItemKind::ScrollKnock;
+                                          : (pick == 3) ? ItemKind::ScrollKnock
+                                                        : ItemKind::ScrollRemoveCurse;
                 dropItemAt(sk, randomFreeTileInRoom(r), 1);
             }
             if (rng.chance(0.45f)) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
@@ -7467,35 +8516,42 @@ void Game::spawnItems() {
 
         if (rng.chance(0.35f)) {
             // Expanded table (added food rations).
-            int roll = rng.range(0, 107);
-
-            if (roll < 22) dropItemAt(ItemKind::Gold, p, rng.range(3, 10));
-            else if (roll < 30) dropItemAt(ItemKind::FoodRation, p, 1);
-            else if (roll < 44) dropItemAt(ItemKind::PotionHealing, p, 1);
-            else if (roll < 54) dropItemAt(ItemKind::PotionStrength, p, 1);
-            else if (roll < 62) dropItemAt(ItemKind::PotionAntidote, p, 1);
-            else if (roll < 68) dropItemAt(ItemKind::PotionRegeneration, p, 1);
-            else if (roll < 74) dropItemAt(ItemKind::ScrollTeleport, p, 1);
-            else if (roll < 80) dropItemAt(ItemKind::ScrollMapping, p, 1);
-            else if (roll < 82) {
-                int pick = rng.range(0, 3);
-                ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
-                                          : (pick == 1) ? ItemKind::ScrollDetectTraps
-                                          : (pick == 2) ? ItemKind::ScrollDetectSecrets
-                                                        : ItemKind::ScrollKnock;
+            int roll = rng.range(0, 115);
+            if (roll < 21) dropItemAt(ItemKind::Gold, p, rng.range(10, 55));
+            else if (roll < 29) dropItemAt(ItemKind::FoodRation, p, 1);
+            else if (roll < 37) dropItemAt(ItemKind::Torch, p, 1 + ((rng.range(1, 6) == 1) ? 1 : 0));
+            else if (roll < 51) dropItemAt(ItemKind::PotionHealing, p, 1);
+            else if (roll < 61) dropItemAt(ItemKind::PotionStrength, p, 1);
+            else if (roll < 69) dropItemAt(ItemKind::PotionAntidote, p, 1);
+            else if (roll < 75) dropItemAt(ItemKind::PotionRegeneration, p, 1);
+            else if (roll < 81) dropItemAt(ItemKind::ScrollTeleport, p, 1);
+            else if (roll < 87) dropItemAt(ItemKind::ScrollMapping, p, 1);
+            else if (roll < 89) {
+                // Small chance of a utility scroll.
+                const ItemKind pool[] = {
+                    ItemKind::ScrollEnchantWeapon,
+                    ItemKind::ScrollEnchantArmor,
+                    ItemKind::ScrollTeleport,
+                    ItemKind::ScrollMapping,
+                };
+                const ItemKind sk = pool[rng.range(0, static_cast<int>(sizeof(pool) / sizeof(pool[0])) - 1)];
                 dropItemAt(sk, p, 1);
+            } else if (roll < 93) dropItemAt(ItemKind::ScrollEnchantWeapon, p, 1);
+            else if (roll < 96) dropItemAt(ItemKind::ScrollEnchantArmor, p, 1);
+            else if (roll < 98) dropItemAt(ItemKind::ScrollRemoveCurse, p, 1);
+            else if (roll < 103) dropItemAt(ItemKind::Arrow, p, rng.range(4, 10));
+            else if (roll < 108) dropItemAt(ItemKind::Rock, p, rng.range(3, 8));
+            else if (roll < 111) dropItemAt(ItemKind::Dagger, p, 1);
+            else if (roll < 113) dropItemAt(ItemKind::LeatherArmor, p, 1);
+            else if (roll < 114) dropItemAt(ItemKind::PotionShielding, p, 1);
+            else if (roll < 115) dropItemAt(ItemKind::PotionHaste, p, 1);
+            else {
+                // Very rare: perception/stealth potions.
+                const ItemKind pk = rng.chance(0.25f) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
+                dropItemAt(pk, p, 1);
             }
-            else if (roll < 86) dropItemAt(ItemKind::ScrollEnchantWeapon, p, 1);
-            else if (roll < 90) dropItemAt(ItemKind::ScrollEnchantArmor, p, 1);
-            else if (roll < 95) dropItemAt(ItemKind::Arrow, p, rng.range(4, 10));
-            else if (roll < 100) dropItemAt(ItemKind::Rock, p, rng.range(3, 8));
-            else if (roll < 103) dropItemAt(ItemKind::Dagger, p, 1);
-            else if (roll < 105) dropItemAt(ItemKind::LeatherArmor, p, 1);
-            else if (roll < 106) dropItemAt(ItemKind::PotionShielding, p, 1);
-            else if (roll < 107) dropItemAt(ItemKind::PotionHaste, p, 1);
-            else dropItemAt(ItemKind::PotionVision, p, 1);
         }
-    }
+            }
 
     // Guarantee at least one key on any floor that contains locked doors.
     if (hasLockedDoor && keysPlacedThisFloor <= 0) {
@@ -7756,12 +8812,34 @@ void Game::monsterTurn() {
         if (m.id == playerId_) continue;
         if (m.hp <= 0) continue;
 
+        // Peaceful shopkeepers don't hunt or wander.
+        if (m.kind == EntityKind::Shopkeeper && !m.alerted) {
+            continue;
+        }
+
         const int man = manhattan(m.pos, p.pos);
 
         bool seesPlayer = false;
         if (man <= LOS_MANHATTAN) {
             seesPlayer = dung.hasLineOfSight(m.pos.x, m.pos.y, p.pos.x, p.pos.y);
         }
+
+        const bool adj8 = isAdjacent8(m.pos, p.pos);
+        // Invisibility: most monsters only notice you when adjacent.
+        // Wizards are special-cased to still see invisible (but not through walls).
+        if (p.invisTurns > 0 && m.kind != EntityKind::Wizard) {
+            seesPlayer = adj8;
+        }
+
+        // Darkness: if the player isn't lit, most monsters only notice you at very short range.
+        if (seesPlayer && darknessActive()) {
+            const bool playerLit = (tileLightLevel(p.pos.x, p.pos.y) > 0);
+            const bool hasDarkVision = (m.kind == EntityKind::Bat || m.kind == EntityKind::Wizard || m.kind == EntityKind::Spider);
+            if (!playerLit && !hasDarkVision && man > 2) {
+                seesPlayer = false;
+            }
+        }
+
 
         if (seesPlayer) {
             m.alerted = true;
@@ -7872,7 +8950,42 @@ void Game::monsterTurn() {
                 }
             }
 
-            attackRanged(m, p.pos, m.rangedRange, m.rangedAtk, m.rangedProjectile, false);
+            // Wizards sometimes cast a curse instead of throwing a projectile.
+            if (m.kind == EntityKind::Wizard && rng.chance(0.25f)) {
+                std::vector<int> candIdx;
+                int idx = equippedMeleeIndex();
+                if (idx >= 0 && inv[static_cast<size_t>(idx)].buc >= 0) candIdx.push_back(idx);
+                idx = equippedArmorIndex();
+                if (idx >= 0 && inv[static_cast<size_t>(idx)].buc >= 0) candIdx.push_back(idx);
+                idx = equippedRangedIndex();
+                if (idx >= 0 && inv[static_cast<size_t>(idx)].buc >= 0) candIdx.push_back(idx);
+
+                if (!candIdx.empty()) {
+                    // Saving throw: defense + shielding helps resist.
+                    int save = rng.range(1, 20) + playerDefense();
+                    if (p.shieldTurns > 0) save += 4;
+                    int dc = 13 + std::max(0, depth_ - 1) / 2;
+
+                    emitNoise(m.pos, 8);
+
+                    if (save >= dc) {
+                        pushMsg("YOU RESIST A MALEVOLENT CURSE.", MessageKind::System, false);
+                        continue;
+                    }
+
+                    Item& tgt = inv[static_cast<size_t>(candIdx[static_cast<size_t>(rng.range(0, static_cast<int>(candIdx.size()) - 1))])];
+                    if (tgt.buc > 0) {
+                        tgt.buc = 0;
+                        pushMsg("A DARK AURA SNUFFS OUT A BLESSING.", MessageKind::System, false);
+                    } else {
+                        tgt.buc = -1;
+                        pushMsg("YOUR EQUIPMENT FEELS... CURSED.", MessageKind::Warning, true);
+                    }
+                    continue;
+                }
+            }
+
+            attackRanged(m, p.pos, m.rangedRange, m.rangedAtk, 0, m.rangedProjectile, false);
             continue;
         }
 
@@ -7949,7 +9062,6 @@ void Game::applyEndOfTurnEffects() {
     if (gameOver) return;
 
     Entity& p = playerMut();
-
     // Timed poison: hurts once per full turn.
     if (p.poisonTurns > 0) {
         p.poisonTurns = std::max(0, p.poisonTurns - 1);
@@ -7990,6 +9102,14 @@ void Game::applyEndOfTurnEffects() {
         p.visionTurns = std::max(0, p.visionTurns - 1);
         if (p.visionTurns == 0) {
             pushMsg("YOUR VISION RETURNS TO NORMAL.", MessageKind::System, true);
+        }
+    }
+
+    // Timed invisibility: affects monster perception.
+    if (p.invisTurns > 0) {
+        p.invisTurns = std::max(0, p.invisTurns - 1);
+        if (p.invisTurns == 0) {
+            pushMsg("YOU FADE INTO VIEW.", MessageKind::System, true);
         }
     }
 
@@ -8045,6 +9165,46 @@ void Game::applyEndOfTurnEffects() {
     }
 
 
+    // Torches burn down (carried and dropped).
+    {
+        int burntInv = 0;
+        for (size_t i = 0; i < inv.size(); ) {
+            Item& it = inv[i];
+            if (it.kind == ItemKind::TorchLit) {
+                if (it.charges > 0) it.charges -= 1;
+                if (it.charges <= 0) {
+                    ++burntInv;
+                    inv.erase(inv.begin() + static_cast<std::vector<Item>::difference_type>(i));
+                    continue;
+                }
+            }
+            ++i;
+        }
+        if (burntInv > 0) {
+            pushMsg(burntInv == 1 ? "YOUR TORCH BURNS OUT." : "YOUR TORCHES BURN OUT.", MessageKind::System, true);
+        }
+
+        int burntGroundVis = 0;
+        for (size_t i = 0; i < ground.size(); ) {
+            auto& gi = ground[i];
+            if (gi.item.kind == ItemKind::TorchLit) {
+                if (gi.item.charges > 0) gi.item.charges -= 1;
+                if (gi.item.charges <= 0) {
+                    if (dung.inBounds(gi.pos.x, gi.pos.y) && dung.at(gi.pos.x, gi.pos.y).visible) {
+                        ++burntGroundVis;
+                    }
+                    ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(i));
+                    continue;
+                }
+            }
+            ++i;
+        }
+        if (burntGroundVis > 0) {
+            pushMsg(burntGroundVis == 1 ? "A TORCH FLICKERS OUT." : "SOME TORCHES FLICKER OUT.", MessageKind::System, true);
+        }
+    }
+
+
     // Timed effects for monsters (poison, web). These tick with time just like the player.
     for (auto& m : ents) {
         if (m.id == playerId_) continue;
@@ -8087,6 +9247,33 @@ void Game::applyEndOfTurnEffects() {
 }
 
 void Game::cleanupDead() {
+    // If a shopkeeper dies, the shop is effectively abandoned.
+    // Make all shop stock (and any unpaid goods) on this depth free.
+    bool shopkeeperDied = false;
+    for (const auto& e : ents) {
+        if (e.id == playerId_) continue;
+        if (e.hp > 0) continue;
+        if (e.kind == EntityKind::Shopkeeper) {
+            shopkeeperDied = true;
+            break;
+        }
+    }
+    if (shopkeeperDied) {
+        for (auto& gi : ground) {
+            if (gi.item.shopDepth == depth_ && gi.item.shopPrice > 0) {
+                gi.item.shopPrice = 0;
+                gi.item.shopDepth = 0;
+            }
+        }
+        for (auto& it : inv) {
+            if (it.shopDepth == depth_ && it.shopPrice > 0) {
+                it.shopPrice = 0;
+                it.shopDepth = 0;
+            }
+        }
+        pushMsg("THE SHOPKEEPER IS DEAD. EVERYTHING IS FREE!", MessageKind::Success, true);
+    }
+
     // Drop loot from dead monsters (before removal)
     for (const auto& e : ents) {
         if (e.id == playerId_) continue;
@@ -8099,16 +9286,17 @@ void Game::cleanupDead() {
             gi.item.id = nextItemId++;
             gi.item.spriteSeed = rng.nextU32();
 
-            int roll = rng.range(0, 107);
-            if (roll < 40) { gi.item.kind = ItemKind::Gold; gi.item.count = rng.range(2, 8); }
-            else if (roll < 55) { gi.item.kind = ItemKind::Arrow; gi.item.count = rng.range(3, 7); }
-            else if (roll < 65) { gi.item.kind = ItemKind::Rock; gi.item.count = rng.range(2, 6); }
-            else if (roll < 73) { gi.item.kind = ItemKind::FoodRation; gi.item.count = rng.range(1, 2); }
-            else if (roll < 82) { gi.item.kind = ItemKind::PotionHealing; gi.item.count = 1; }
-            else if (roll < 88) { gi.item.kind = ItemKind::PotionAntidote; gi.item.count = 1; }
-            else if (roll < 92) { gi.item.kind = ItemKind::PotionRegeneration; gi.item.count = 1; }
-            else if (roll < 96) { gi.item.kind = ItemKind::ScrollTeleport; gi.item.count = 1; }
-            else if (roll < 98) {
+            int roll = rng.range(0, 119);
+            if (roll < 39) { gi.item.kind = ItemKind::Gold; gi.item.count = rng.range(2, 8); }
+            else if (roll < 54) { gi.item.kind = ItemKind::Arrow; gi.item.count = rng.range(3, 7); }
+            else if (roll < 64) { gi.item.kind = ItemKind::Rock; gi.item.count = rng.range(2, 6); }
+            else if (roll < 72) { gi.item.kind = ItemKind::Torch; gi.item.count = 1; }
+            else if (roll < 80) { gi.item.kind = ItemKind::FoodRation; gi.item.count = rng.range(1, 2); }
+            else if (roll < 89) { gi.item.kind = ItemKind::PotionHealing; gi.item.count = 1; }
+            else if (roll < 95) { gi.item.kind = ItemKind::PotionAntidote; gi.item.count = 1; }
+            else if (roll < 99) { gi.item.kind = ItemKind::PotionRegeneration; gi.item.count = 1; }
+            else if (roll < 103) { gi.item.kind = ItemKind::ScrollTeleport; gi.item.count = 1; }
+            else if (roll < 105) {
                 int pick = rng.range(0, 3);
                 gi.item.kind = (pick == 0) ? ItemKind::ScrollIdentify
                                            : (pick == 1) ? ItemKind::ScrollDetectTraps
@@ -8116,12 +9304,21 @@ void Game::cleanupDead() {
                                                          : ItemKind::ScrollKnock;
                 gi.item.count = 1;
             }
-            else if (roll < 101) { gi.item.kind = ItemKind::ScrollEnchantWeapon; gi.item.count = 1; }
-            else if (roll < 104) { gi.item.kind = ItemKind::ScrollEnchantArmor; gi.item.count = 1; }
-            else if (roll < 105) { gi.item.kind = ItemKind::Dagger; gi.item.count = 1; }
-            else if (roll < 106) { gi.item.kind = ItemKind::PotionShielding; gi.item.count = 1; }
-            else if (roll < 107) { gi.item.kind = ItemKind::PotionHaste; gi.item.count = 1; }
-            else { gi.item.kind = ItemKind::PotionVision; gi.item.count = 1; }
+            else if (roll < 108) { gi.item.kind = ItemKind::ScrollEnchantWeapon; gi.item.count = 1; }
+            else if (roll < 111) { gi.item.kind = ItemKind::ScrollEnchantArmor; gi.item.count = 1; }
+            else if (roll < 113) { gi.item.kind = ItemKind::ScrollRemoveCurse; gi.item.count = 1; }
+            else if (roll < 114) { gi.item.kind = ItemKind::Dagger; gi.item.count = 1; }
+            else if (roll < 115) { gi.item.kind = ItemKind::PotionShielding; gi.item.count = 1; }
+            else if (roll < 116) { gi.item.kind = ItemKind::PotionHaste; gi.item.count = 1; }
+            else {
+                gi.item.kind = (rng.range(1, 4) == 1) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
+                gi.item.count = 1;
+            }
+
+            // Roll BUC (blessed/uncursed/cursed) for dropped gear.
+            if (isWeapon(gi.item.kind) || isArmor(gi.item.kind)) {
+                gi.item.buc = rollBucForGear(rng, depth_, roomTypeAt(dung, gi.pos));
+            }
 
             // Chance for dropped gear to be lightly enchanted on deeper floors.
             if ((isWeapon(gi.item.kind) || isArmor(gi.item.kind)) && depth_ >= 3) {
@@ -8158,4 +9355,3 @@ void Game::cleanupDead() {
 
     // Player death handled in attack functions
 }
-

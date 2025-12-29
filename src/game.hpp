@@ -28,6 +28,8 @@ enum class EntityKind : uint8_t {
     Spider,
     Ogre,
     Mimic,
+    // --- Shops (appended to keep save compatibility) ---
+    Shopkeeper,
 };
 
 enum class Action : uint8_t {
@@ -105,6 +107,16 @@ enum class AutoMoveMode : uint8_t {
     None = 0,
     Travel,
     Explore,
+};
+
+// Optional NetHack-style burden/encumbrance states.
+// Used by the carrying capacity system (when enabled in settings).
+enum class BurdenState : uint8_t {
+    Unburdened = 0,
+    Burdened,
+    Stressed,
+    Strained,
+    Overloaded,
 };
 
 enum class MessageKind : uint8_t {
@@ -194,6 +206,8 @@ struct Entity {
     int hasteTurns = 0;    // grants extra player actions (decrements on monster turns)
     int visionTurns = 0;   // increases FOV radius
 
+    int invisTurns = 0;   // makes it harder for monsters to track/see you
+
     // New timed debuffs
     int webTurns = 0;      // prevents movement while >0
 
@@ -226,6 +240,10 @@ public:
     void newGame(uint32_t seed);
 
     void handleAction(Action a);
+
+    // Spend a turn to emit a loud noise (useful to lure monsters).
+    // Available via extended command: #shout
+    void shout();
 
     // QoL: repeat the Search action multiple times without spamming the log.
     // Used by the extended command: #search N
@@ -298,6 +316,16 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
 
     // Convenience getters (kept for renderer/legacy naming)
     int goldCount() const { return countGold(inv); }
+    // Shops / economy
+    // Total gold owed for UNPAID items currently in inventory.
+    int shopDebtTotal() const;
+    // Gold owed to the shop on the current depth.
+    int shopDebtThisDepth() const;
+    // True if the player is standing inside a shop room.
+    bool playerInShop() const;
+    // Pay for all (or as many as possible) unpaid goods on this depth. Use via #pay.
+    bool payAtShop();
+
     int keyCount() const;
     int lockpickCount() const;
     int characterLevel() const { return charLevel; }
@@ -323,6 +351,28 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
     int hungerMaximum() const { return hungerMax; }
     // Returns an empty string when not hungry; otherwise "HUNGRY"/"STARVING".
     std::string hungerTag() const;
+
+    // Optional encumbrance system (carrying capacity + movement penalties).
+    void setEncumbranceEnabled(bool enabled);
+    bool encumbranceEnabled() const { return encumbranceEnabled_; }
+    // Total weight of inventory (stack-aware).
+    int inventoryWeight() const;
+    // Carry capacity derived from progression stats.
+    int carryCapacity() const;
+    BurdenState burdenState() const;
+    // A short HUD-friendly label for current burden state ("BURDENED", "STRESSED", ...).
+    std::string burdenTag() const;
+
+    // Lighting / darkness system (optional). When enabled, deeper levels can contain dark tiles
+    // that require light sources (torches, lit rooms) to see beyond a short range.
+    void setLightingEnabled(bool enabled);
+    bool lightingEnabled() const { return lightingEnabled_; }
+    // True when darkness rules are active on the current depth.
+    bool darknessActive() const;
+    // Per-tile light level (0..255) for the current level.
+    uint8_t tileLightLevel(int x, int y) const;
+    // A short HUD-friendly label for lighting state ("DARK", "TORCH(123)", ...).
+    std::string lightTag() const;
 
     // Quit confirmation (ESC requires a second press within a short window).
     void setConfirmQuitEnabled(bool enabled) { confirmQuitEnabled_ = enabled; }
@@ -540,6 +590,15 @@ private:
     int hungerMax = 0;
     int hungerStatePrev = 0; // for message throttling
 
+    // Encumbrance system (optional; when enabled, inventory weight slows/restricts the player).
+    bool encumbranceEnabled_ = false;
+    BurdenState burdenPrev_ = BurdenState::Unburdened; // for message throttling
+
+    // Lighting / darkness system (optional).
+    bool lightingEnabled_ = false;
+    // Light map for the current level (0..255 brightness per tile). Recomputed when FOV updates.
+    std::vector<uint8_t> lightMap_;
+
     // Item identification (NetHack-style). When enabled, potions/scrolls start unknown each run
     // and become identified through use/identify scrolls.
     bool identifyItemsEnabled = true;
@@ -620,12 +679,13 @@ private:
 
     bool tryMove(Entity& e, int dx, int dy);
     void attackMelee(Entity& attacker, Entity& defender);
-    void attackRanged(Entity& attacker, Vec2i target, int range, int atk, ProjectileKind projKind, bool fromPlayer);
+    void attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer);
 
     void monsterTurn();
     void cleanupDead();
 
     void recomputeFov();
+    void recomputeLightMap();
 
     // Inventory actions
     void openInventory();
@@ -709,6 +769,12 @@ private:
     void triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm = false);
     // Alert monsters to a sound/event at `pos`. radius<=0 means "global" (all monsters).
     void alertMonstersTo(Vec2i pos, int radius);
+    // Emit a positional noise and alert monsters that can hear it.
+    //
+    // Unlike alertMonstersTo(), this uses a dungeon-aware sound propagation
+    // (walls/secret doors block; doors muffle) so noise doesn't "teleport"
+    // through solid rock.
+    void emitNoise(Vec2i pos, int volume);
     void applyEndOfTurnEffects();
     Vec2i randomFreeTileInRoom(const Room& r, int tries = 200);
 

@@ -32,6 +32,8 @@ enum class RoomType : uint8_t {
     Secret,
     // Append-only: visible treasure room behind a locked door.
     Vault,
+    // Append-only: merchant shop stocked with items for sale.
+    Shop,
 };
 
 struct Room {
@@ -82,12 +84,32 @@ public:
     void lockDoor(int x, int y);
     void unlockDoor(int x, int y);
 
-    void generate(RNG& rng);
+    // Procedural generation.
+    //
+    // `depth` is used to vary generation style (rooms vs caverns vs mazes)
+    // and difficulty pacing.
+    void generate(RNG& rng, int depth);
 
-    void computeFov(int px, int py, int radius);
+    void computeFov(int px, int py, int radius, bool markExplored = true);
+
+    // Computes a visibility mask (0/1) from (px,py) within `radius` using the same shadowcasting
+    // as computeFov, but without mutating tiles.
+    // `outMask` is resized and filled with 0/1, length = width*height.
+    void computeFovMask(int px, int py, int radius, std::vector<uint8_t>& outMask) const;
     void revealAll();
 
     bool hasLineOfSight(int x0, int y0, int x1, int y1) const;
+
+    // Compute a simple sound-propagation cost map from (sx, sy).
+    //
+    // Returns a width*height array of minimum "attenuation cost" from the source,
+    // or -1 if unreachable.
+    //
+    // Walls and secret doors block sound. Closed/locked doors allow sound through
+    // but are treated as muffling (higher cost).
+    //
+    // `maxCost` limits the search for efficiency; tiles beyond this cost remain -1.
+    std::vector<int> computeSoundMap(int sx, int sy, int maxCost) const;
 
     Vec2i randomFloor(RNG& rng, bool avoidDoors = true) const;
 

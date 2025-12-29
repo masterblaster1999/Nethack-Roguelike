@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <deque>
 #include <functional>
+#include <queue>
+#include <utility>
 
 namespace {
 
@@ -17,6 +19,16 @@ struct Leaf {
 };
 
 inline bool isLeaf(const Leaf& n) { return n.left < 0 && n.right < 0; }
+
+int splitLeaf(const Leaf& n, bool splitH, RNG& rng, int minLeaf) {
+    // Returns the split offset (in tiles) or -1 if the leaf is too small.
+    if (splitH) {
+        if (n.h < minLeaf * 2) return -1;
+        return rng.range(minLeaf, n.h - minLeaf);
+    }
+    if (n.w < minLeaf * 2) return -1;
+    return rng.range(minLeaf, n.w - minLeaf);
+}
 
 void fillWalls(Dungeon& d) {
     for (auto& t : d.tiles) {
@@ -356,6 +368,597 @@ std::vector<int> bfsDistanceMap(const Dungeon& d, Vec2i start) {
     return dist;
 }
 
+enum class GenKind : uint8_t {
+    RoomsBsp = 0,
+    Cavern,
+    Maze,
+};
+
+GenKind chooseGenKind(int depth, RNG& rng) {
+    // The game is fairly short by default (goal on depth 5), so ensure the
+    // player actually sees the new map types.
+    if (depth <= 2) return GenKind::RoomsBsp;
+    if (depth == 3) return GenKind::Cavern;
+    if (depth == 4) return GenKind::Maze;
+
+    // Beyond the "core" run, sprinkle variety.
+    float r = rng.next01();
+    if (r < 0.18f) return GenKind::Maze;
+    if (r < 0.42f) return GenKind::Cavern;
+    return GenKind::RoomsBsp;
+}
+
+void markSpecialRooms(Dungeon& d, RNG& rng, int depth) {
+    if (d.rooms.empty()) return;
+
+    auto buildPool = [&](bool allowDown) {
+        std::vector<int> pool;
+        pool.reserve(d.rooms.size());
+        for (int i = 0; i < static_cast<int>(d.rooms.size()); ++i) {
+            const Room& r = d.rooms[static_cast<size_t>(i)];
+            // Prefer leaving the start room "normal" so early turns are fair.
+            if (r.contains(d.stairsUp.x, d.stairsUp.y)) continue;
+            if (!allowDown && r.contains(d.stairsDown.x, d.stairsDown.y)) continue;
+            // Only mark normal rooms.
+            if (r.type != RoomType::Normal) continue;
+            pool.push_back(i);
+        }
+        return pool;
+    };
+
+    auto pickAndRemove = [&](std::vector<int>& pool) -> int {
+        if (pool.empty()) return -1;
+        int j = rng.range(0, static_cast<int>(pool.size()) - 1);
+        int v = pool[static_cast<size_t>(j)];
+        pool[static_cast<size_t>(j)] = pool.back();
+        pool.pop_back();
+        return v;
+    };
+
+    std::vector<int> pool = buildPool(false);
+    if (pool.empty()) pool = buildPool(true);
+    if (pool.empty()) {
+        pool.reserve(d.rooms.size());
+        for (int i = 0; i < static_cast<int>(d.rooms.size()); ++i) {
+            if (d.rooms[static_cast<size_t>(i)].type == RoomType::Normal) pool.push_back(i);
+        }
+    }
+
+    // Treasure is the most important for gameplay pacing; lair/shrine are "nice to have".
+    int t = pickAndRemove(pool);
+    if (t >= 0) d.rooms[static_cast<size_t>(t)].type = RoomType::Treasure;
+
+    // Shops: give gold real meaning and provide a mid-run power curve. More common deeper.
+    float shopChance = 0.25f;
+    if (depth >= 2) shopChance = 0.55f;
+    if (depth >= 4) shopChance = 0.70f;
+    // Tiny ramp for longer runs.
+    shopChance = std::min(0.85f, shopChance + 0.02f * std::max(0, depth - 4));
+    if (!pool.empty() && rng.chance(shopChance)) {
+        int sh = pickAndRemove(pool);
+        if (sh >= 0) d.rooms[static_cast<size_t>(sh)].type = RoomType::Shop;
+    }
+
+    int l = pickAndRemove(pool);
+    if (l >= 0) d.rooms[static_cast<size_t>(l)].type = RoomType::Lair;
+
+    int s = pickAndRemove(pool);
+    if (s >= 0) d.rooms[static_cast<size_t>(s)].type = RoomType::Shrine;
+}
+
+Vec2i farthestPassableTile(const Dungeon& d, const std::vector<int>& dist, RNG& rng) {
+    int bestDist = -1;
+    std::vector<Vec2i> best;
+    best.reserve(16);
+
+    for (int y = 1; y < d.height - 1; ++y) {
+        for (int x = 1; x < d.width - 1; ++x) {
+            if (!d.isPassable(x, y)) continue;
+            const int di = dist[static_cast<size_t>(y * d.width + x)];
+            if (di < 0) continue;
+            if (di > bestDist) {
+                bestDist = di;
+                best.clear();
+                best.push_back({x, y});
+            } else if (di == bestDist) {
+                best.push_back({x, y});
+            }
+        }
+    }
+
+    if (best.empty()) return {1, 1};
+    return best[static_cast<size_t>(rng.range(0, static_cast<int>(best.size()) - 1))];
+}
+
+void generateBspRooms(Dungeon& d, RNG& rng) {
+    // BSP parameters tuned for small-ish maps.
+    const int minLeaf = 8;
+
+    std::vector<Leaf> nodes;
+    nodes.reserve(128);
+
+    nodes.push_back({1, 1, d.width - 2, d.height - 2, -1, -1, -1}); // root
+
+    // Build BSP tree
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        Leaf& n = nodes[i];
+        // Don't split too small leaves.
+        if (n.w < minLeaf * 2 && n.h < minLeaf * 2) continue;
+
+        // Random split orientation.
+        bool splitH = rng.chance(0.5f);
+        // Bias: split along longer dimension.
+        if (n.w > n.h && n.w / n.h >= 2) splitH = false;
+        else if (n.h > n.w && n.h / n.w >= 2) splitH = true;
+
+        int split = splitLeaf(n, splitH, rng, minLeaf);
+        if (split < 0) continue;
+
+        Leaf a = n;
+        Leaf b = n;
+        if (splitH) {
+            a.h = split;
+            b.y = n.y + split;
+            b.h = n.h - split;
+        } else {
+            a.w = split;
+            b.x = n.x + split;
+            b.w = n.w - split;
+        }
+
+        int leftIndex = static_cast<int>(nodes.size());
+        nodes.push_back(a);
+        int rightIndex = static_cast<int>(nodes.size());
+        nodes.push_back(b);
+        n.left = leftIndex;
+        n.right = rightIndex;
+    }
+
+    // Create rooms in each leaf that has no children.
+    d.rooms.clear();
+    d.rooms.reserve(nodes.size());
+
+    for (auto& n : nodes) {
+        if (n.left >= 0 || n.right >= 0) continue;
+
+        // Room size within leaf.
+        int rw = rng.range(4, std::max(4, n.w - 2));
+        int rh = rng.range(4, std::max(4, n.h - 2));
+        int rx = rng.range(n.x + 1, std::max(n.x + 1, n.x + n.w - rw - 1));
+        int ry = rng.range(n.y + 1, std::max(n.y + 1, n.y + n.h - rh - 1));
+
+        // Clamp.
+        rw = std::min(rw, n.w - 2);
+        rh = std::min(rh, n.h - 2);
+        if (rw < 4 || rh < 4) continue;
+
+        carveRect(d, rx, ry, rw, rh, TileType::Floor);
+        Room r;
+        r.x = rx;
+        r.y = ry;
+        r.w = rw;
+        r.h = rh;
+        r.type = RoomType::Normal;
+        d.rooms.push_back(r);
+        n.roomIndex = static_cast<int>(d.rooms.size()) - 1;
+    }
+
+    if (d.rooms.empty()) {
+        // Fallback to a basic room if BSP fails.
+        carveRect(d, 2, 2, d.width - 4, d.height - 4, TileType::Floor);
+        d.rooms.push_back({2, 2, d.width - 4, d.height - 4, RoomType::Normal});
+    }
+
+    // Connect rooms following the BSP tree.
+    for (int i = 0; i < static_cast<int>(nodes.size()); ++i) {
+        Leaf& n = nodes[static_cast<size_t>(i)];
+        if (n.left < 0 || n.right < 0) continue;
+
+        int ra = pickRandomRoomInSubtree(nodes, n.left, rng);
+        int rb = pickRandomRoomInSubtree(nodes, n.right, rng);
+        if (ra >= 0 && rb >= 0 && ra != rb) {
+            connectRooms(d, d.rooms[static_cast<size_t>(ra)], d.rooms[static_cast<size_t>(rb)], rng);
+        }
+    }
+
+    // Extra loops: connect random room pairs.
+    const int extra = std::max(1, static_cast<int>(d.rooms.size()) / 3);
+    for (int i = 0; i < extra; ++i) {
+        int a = rng.range(0, static_cast<int>(d.rooms.size()) - 1);
+        int b = rng.range(0, static_cast<int>(d.rooms.size()) - 1);
+        if (a == b) continue;
+        connectRooms(d, d.rooms[static_cast<size_t>(a)], d.rooms[static_cast<size_t>(b)], rng);
+    }
+
+    // Precompute which tiles are inside rooms (for branch carving).
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    for (const auto& r : d.rooms) {
+        for (int y = r.y; y < r.y2(); ++y) {
+            for (int x = r.x; x < r.x2(); ++x) {
+                if (d.inBounds(x, y)) inRoom[static_cast<size_t>(y * d.width + x)] = 1;
+            }
+        }
+    }
+
+    // Branch corridors (dead ends)
+    int branches = std::max(2, static_cast<int>(d.rooms.size()));
+    for (int i = 0; i < branches; ++i) {
+        int x = rng.range(1, d.width - 2);
+        int y = rng.range(1, d.height - 2);
+
+        if (!d.inBounds(x, y)) continue;
+        if (d.at(x, y).type != TileType::Floor) continue;
+        if (inRoom[static_cast<size_t>(y * d.width + x)] != 0) continue; // prefer corridors
+
+        const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+        int dIdx = rng.range(0, 3);
+        int dx = dirs[dIdx][0];
+        int dy = dirs[dIdx][1];
+
+        int nx = x + dx;
+        int ny = y + dy;
+        if (!d.inBounds(nx, ny)) continue;
+        if (d.at(nx, ny).type != TileType::Wall) continue; // needs to dig into wall
+
+        int len = rng.range(3, 8);
+        int cx = x;
+        int cy = y;
+        for (int step = 0; step < len; ++step) {
+            cx += dx;
+            cy += dy;
+            if (!d.inBounds(cx, cy)) break;
+            if (d.at(cx, cy).type != TileType::Wall) break;
+            carveFloor(d, cx, cy);
+        }
+    }
+
+    // Place stairs: up in the first room, down in the farthest room by BFS.
+    const Room& startRoom = d.rooms.front();
+    d.stairsUp = { startRoom.cx(), startRoom.cy() };
+    if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) {
+        d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+    }
+
+    auto dist = bfsDistanceMap(d, d.stairsUp);
+    int bestRoomIdx = 0;
+    int bestDist = -1;
+    for (int i = 0; i < static_cast<int>(d.rooms.size()); ++i) {
+        const Room& r = d.rooms[static_cast<size_t>(i)];
+        int cx = r.cx();
+        int cy = r.cy();
+        if (!d.inBounds(cx, cy)) continue;
+        int d0 = dist[static_cast<size_t>(cy * d.width + cx)];
+        if (d0 > bestDist) {
+            bestDist = d0;
+            bestRoomIdx = i;
+        }
+    }
+    const Room& endRoom = d.rooms[static_cast<size_t>(bestRoomIdx)];
+    d.stairsDown = { endRoom.cx(), endRoom.cy() };
+    if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) {
+        d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
+    }
+}
+
+void generateCavern(Dungeon& d, RNG& rng, int depth) {
+    // Cellular automata cavern generator.
+    // Start with noisy walls/floors, smooth, then keep the largest connected region.
+    const float baseFloor = 0.58f;
+    const float depthTighten = 0.01f * static_cast<float>(std::min(10, std::max(0, depth - 3)));
+    const float floorChance = std::max(0.45f, baseFloor - depthTighten);
+
+    for (int y = 1; y < d.height - 1; ++y) {
+        for (int x = 1; x < d.width - 1; ++x) {
+            d.at(x, y).type = rng.chance(floorChance) ? TileType::Floor : TileType::Wall;
+        }
+    }
+
+    auto wallCount8 = [&](int x, int y) {
+        int c = 0;
+        for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -1; ox <= 1; ++ox) {
+                if (ox == 0 && oy == 0) continue;
+                int nx = x + ox;
+                int ny = y + oy;
+                if (!d.inBounds(nx, ny)) { c++; continue; }
+                if (d.at(nx, ny).type == TileType::Wall) c++;
+            }
+        }
+        return c;
+    };
+
+    std::vector<TileType> next(static_cast<size_t>(d.width * d.height), TileType::Wall);
+    auto idx = [&](int x, int y) { return static_cast<size_t>(y * d.width + x); };
+
+    const int iters = 5;
+    for (int it = 0; it < iters; ++it) {
+        for (int y = 1; y < d.height - 1; ++y) {
+            for (int x = 1; x < d.width - 1; ++x) {
+                int wc = wallCount8(x, y);
+                TileType cur = d.at(x, y).type;
+                if (wc >= 5) next[idx(x, y)] = TileType::Wall;
+                else if (wc <= 2) next[idx(x, y)] = TileType::Floor;
+                else next[idx(x, y)] = cur;
+            }
+        }
+        for (int y = 1; y < d.height - 1; ++y) {
+            for (int x = 1; x < d.width - 1; ++x) {
+                d.at(x, y).type = next[idx(x, y)];
+            }
+        }
+    }
+
+    // Keep the largest connected floor region (4-neighborhood).
+    std::vector<int> comp(static_cast<size_t>(d.width * d.height), -1);
+    std::vector<int> compSize;
+    compSize.reserve(64);
+
+    auto isFloor = [&](int x, int y) {
+        TileType t = d.at(x, y).type;
+        return (t == TileType::Floor);
+    };
+
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+    int compIdx = 0;
+    for (int y = 1; y < d.height - 1; ++y) {
+        for (int x = 1; x < d.width - 1; ++x) {
+            if (!isFloor(x, y)) continue;
+            size_t ii = idx(x, y);
+            if (comp[ii] != -1) continue;
+
+            // BFS
+            int count = 0;
+            std::deque<Vec2i> q;
+            q.push_back({x, y});
+            comp[ii] = compIdx;
+            while (!q.empty()) {
+                Vec2i p = q.front();
+                q.pop_front();
+                count++;
+                for (auto& dv : dirs) {
+                    int nx = p.x + dv[0];
+                    int ny = p.y + dv[1];
+                    if (!d.inBounds(nx, ny)) continue;
+                    if (!isFloor(nx, ny)) continue;
+                    size_t jj = idx(nx, ny);
+                    if (comp[jj] != -1) continue;
+                    comp[jj] = compIdx;
+                    q.push_back({nx, ny});
+                }
+            }
+            compSize.push_back(count);
+            compIdx++;
+        }
+    }
+
+    if (compSize.empty()) {
+        // Fallback.
+        fillWalls(d);
+        generateBspRooms(d, rng);
+        return;
+    }
+
+    int bestComp = 0;
+    for (int i = 1; i < static_cast<int>(compSize.size()); ++i) {
+        if (compSize[static_cast<size_t>(i)] > compSize[static_cast<size_t>(bestComp)]) bestComp = i;
+    }
+
+    int kept = 0;
+    for (int y = 1; y < d.height - 1; ++y) {
+        for (int x = 1; x < d.width - 1; ++x) {
+            if (!isFloor(x, y)) continue;
+            if (comp[idx(x, y)] != bestComp) {
+                d.at(x, y).type = TileType::Wall;
+            } else {
+                kept++;
+            }
+        }
+    }
+
+    // If we ended up with a tiny cavern, fall back.
+    if (kept < (d.width * d.height) / 6) {
+        fillWalls(d);
+        generateBspRooms(d, rng);
+        return;
+    }
+
+    d.rooms.clear();
+
+    // Start chamber near the center.
+    const int cx = d.width / 2;
+    const int cy = d.height / 2;
+    const int sw = rng.range(6, 8);
+    const int sh = rng.range(5, 7);
+    int sx = clampi(cx - sw / 2, 1, d.width - sw - 1);
+    int sy = clampi(cy - sh / 2, 1, d.height - sh - 1);
+    carveRect(d, sx, sy, sw, sh, TileType::Floor);
+    d.rooms.push_back({sx, sy, sw, sh, RoomType::Normal});
+
+    // Extra chambers scattered through the cavern to create "landmarks".
+    const int extraRooms = rng.range(6, 10);
+    for (int i = 0; i < extraRooms; ++i) {
+        Vec2i p = d.randomFloor(rng, true);
+        int rw = rng.range(4, 8);
+        int rh = rng.range(4, 7);
+        int rx = clampi(p.x - rw / 2, 1, d.width - rw - 1);
+        int ry = clampi(p.y - rh / 2, 1, d.height - rh - 1);
+        carveRect(d, rx, ry, rw, rh, TileType::Floor);
+        d.rooms.push_back({rx, ry, rw, rh, RoomType::Normal});
+    }
+
+    // Place stairs using distance on passable tiles.
+    const Room& startRoom = d.rooms.front();
+    d.stairsUp = { startRoom.cx(), startRoom.cy() };
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
+    d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+
+    auto dist = bfsDistanceMap(d, d.stairsUp);
+    d.stairsDown = farthestPassableTile(d, dist, rng);
+    if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) d.stairsDown = {d.width - 2, d.height - 2};
+    d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
+}
+
+void generateMaze(Dungeon& d, RNG& rng, int depth) {
+    (void)depth;
+    // Perfect maze (recursive backtracker) carved on odd coordinates.
+    const int cellW = (d.width - 1) / 2;
+    const int cellH = (d.height - 1) / 2;
+    if (cellW <= 1 || cellH <= 1) {
+        generateBspRooms(d, rng);
+        return;
+    }
+
+    auto cellToPos = [&](int cx, int cy) -> Vec2i {
+        return { 1 + cx * 2, 1 + cy * 2 };
+    };
+    auto cidx = [&](int cx, int cy) { return static_cast<size_t>(cy * cellW + cx); };
+
+    std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), 0);
+    std::vector<Vec2i> stack;
+    stack.reserve(static_cast<size_t>(cellW * cellH));
+
+    const int startCx = cellW / 2;
+    const int startCy = cellH / 2;
+    stack.push_back({startCx, startCy});
+    vis[cidx(startCx, startCy)] = 1;
+    Vec2i sp = cellToPos(startCx, startCy);
+    d.at(sp.x, sp.y).type = TileType::Floor;
+
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    while (!stack.empty()) {
+        Vec2i cur = stack.back();
+
+        // Collect unvisited neighbors.
+        std::vector<Vec2i> neigh;
+        neigh.reserve(4);
+        for (auto& dv : dirs) {
+            int nx = cur.x + dv[0];
+            int ny = cur.y + dv[1];
+            if (nx < 0 || ny < 0 || nx >= cellW || ny >= cellH) continue;
+            if (vis[cidx(nx, ny)] != 0) continue;
+            neigh.push_back({nx, ny});
+        }
+
+        if (neigh.empty()) {
+            stack.pop_back();
+            continue;
+        }
+
+        Vec2i nxt = neigh[static_cast<size_t>(rng.range(0, static_cast<int>(neigh.size()) - 1))];
+        Vec2i a = cellToPos(cur.x, cur.y);
+        Vec2i b = cellToPos(nxt.x, nxt.y);
+        Vec2i mid{ (a.x + b.x) / 2, (a.y + b.y) / 2 };
+        d.at(mid.x, mid.y).type = TileType::Floor;
+        d.at(b.x, b.y).type = TileType::Floor;
+        vis[cidx(nxt.x, nxt.y)] = 1;
+        stack.push_back(nxt);
+    }
+
+    // Add a few loops (break walls) so the maze isn't a strict tree.
+    const int breaks = std::max(6, (cellW * cellH) / 6);
+    for (int i = 0; i < breaks; ++i) {
+        int x = rng.range(2, d.width - 3);
+        int y = rng.range(2, d.height - 3);
+        if (d.at(x, y).type != TileType::Wall) continue;
+
+        // Break walls that connect two corridors.
+        bool horiz = (d.at(x - 1, y).type == TileType::Floor && d.at(x + 1, y).type == TileType::Floor);
+        bool vert  = (d.at(x, y - 1).type == TileType::Floor && d.at(x, y + 1).type == TileType::Floor);
+        if (!(horiz || vert)) continue;
+        d.at(x, y).type = TileType::Floor;
+    }
+
+    // Carve a start chamber on top of an existing corridor near the center.
+    Vec2i best = { d.width / 2, d.height / 2 };
+    int bestDist = 1e9;
+    for (int y = 1; y < d.height - 1; ++y) {
+        for (int x = 1; x < d.width - 1; ++x) {
+            if (d.at(x, y).type != TileType::Floor) continue;
+            int md = std::abs(x - best.x) + std::abs(y - best.y);
+            if (md < bestDist) {
+                bestDist = md;
+                best = {x, y};
+            }
+        }
+    }
+    if (bestDist >= 1e9) {
+        fillWalls(d);
+        generateBspRooms(d, rng);
+        return;
+    }
+
+    d.rooms.clear();
+    const int sw = rng.range(6, 8);
+    const int sh = rng.range(5, 7);
+    int sx = clampi(best.x - sw / 2, 1, d.width - sw - 1);
+    int sy = clampi(best.y - sh / 2, 1, d.height - sh - 1);
+    carveRect(d, sx, sy, sw, sh, TileType::Floor);
+    d.rooms.push_back({sx, sy, sw, sh, RoomType::Normal});
+
+    // Additional chambers
+    const int extraRooms = rng.range(5, 8);
+    for (int i = 0; i < extraRooms; ++i) {
+        Vec2i p = d.randomFloor(rng, true);
+        int rw = rng.range(4, 8);
+        int rh = rng.range(4, 7);
+        int rx = clampi(p.x - rw / 2, 1, d.width - rw - 1);
+        int ry = clampi(p.y - rh / 2, 1, d.height - rh - 1);
+        carveRect(d, rx, ry, rw, rh, TileType::Floor);
+        d.rooms.push_back({rx, ry, rw, rh, RoomType::Normal});
+    }
+
+    // Stairs
+    const Room& startRoom = d.rooms.front();
+    d.stairsUp = { startRoom.cx(), startRoom.cy() };
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
+    d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+
+    auto dist = bfsDistanceMap(d, d.stairsUp);
+    d.stairsDown = farthestPassableTile(d, dist, rng);
+    if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) d.stairsDown = {d.width - 2, d.height - 2};
+    d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
+
+    // Sprinkle some closed doors in corridor chokepoints to make LOS + combat more interesting.
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    for (const auto& r : d.rooms) {
+        for (int y = r.y; y < r.y2(); ++y) {
+            for (int x = r.x; x < r.x2(); ++x) {
+                if (d.inBounds(x, y)) inRoom[static_cast<size_t>(y * d.width + x)] = 1;
+            }
+        }
+    }
+
+    auto nearStairs = [&](int x, int y) {
+        return (std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y) <= 2)
+            || (std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y) <= 2);
+    };
+
+    for (int y = 1; y < d.height - 1; ++y) {
+        for (int x = 1; x < d.width - 1; ++x) {
+            if (d.at(x, y).type != TileType::Floor) continue;
+            if (inRoom[static_cast<size_t>(y * d.width + x)] != 0) continue;
+            if (nearStairs(x, y)) continue;
+            if (!rng.chance(0.035f)) continue;
+
+            const TileType n = d.at(x, y - 1).type;
+            const TileType s = d.at(x, y + 1).type;
+            const TileType w = d.at(x - 1, y).type;
+            const TileType e = d.at(x + 1, y).type;
+
+            const bool nsOpen = (n == TileType::Floor && s == TileType::Floor);
+            const bool weOpen = (w == TileType::Floor && e == TileType::Floor);
+            const bool nsWall = (w == TileType::Wall && e == TileType::Wall);
+            const bool weWall = (n == TileType::Wall && s == TileType::Wall);
+
+            // Corridor segment between two walls.
+            if ((nsOpen && nsWall) || (weOpen && weWall)) {
+                d.at(x, y).type = TileType::DoorClosed;
+            }
+        }
+    }
+}
+
 } // namespace
 
 Dungeon::Dungeon(int w, int h) : width(w), height(h) {
@@ -425,233 +1028,27 @@ void Dungeon::unlockDoor(int x, int y) {
     }
 }
 
-void Dungeon::generate(RNG& rng) {
+void Dungeon::generate(RNG& rng, int depth) {
     fillWalls(*this);
 
-    // BSP parameters tuned for small-ish maps.
-    const int minLeaf = 8;
-    std::vector<Leaf> nodes;
-    nodes.reserve(64);
-    nodes.push_back({1, 1, width - 2, height - 2, -1, -1, -1});
-
-    // Split leaves recursively (iterative stack).
-    std::vector<int> stack;
-    stack.push_back(0);
-
-    while (!stack.empty()) {
-        int idx = stack.back();
-        stack.pop_back();
-
-        Leaf& n = nodes[static_cast<size_t>(idx)];
-
-        // Stop if too small.
-        if (n.w < minLeaf * 2 && n.h < minLeaf * 2) continue;
-
-        bool splitVert = false;
-        if (n.w > n.h) splitVert = true;
-        else if (n.h > n.w) splitVert = false;
-        else splitVert = rng.chance(0.5f);
-
-        if (splitVert) {
-            if (n.w < minLeaf * 2) continue;
-            int split = rng.range(minLeaf, n.w - minLeaf);
-            Leaf a{ n.x, n.y, split, n.h };
-            Leaf b{ n.x + split, n.y, n.w - split, n.h };
-            n.left = static_cast<int>(nodes.size());
-            nodes.push_back(a);
-            n.right = static_cast<int>(nodes.size());
-            nodes.push_back(b);
-        } else {
-            if (n.h < minLeaf * 2) continue;
-            int split = rng.range(minLeaf, n.h - minLeaf);
-            Leaf a{ n.x, n.y, n.w, split };
-            Leaf b{ n.x, n.y + split, n.w, n.h - split };
-            n.left = static_cast<int>(nodes.size());
-            nodes.push_back(a);
-            n.right = static_cast<int>(nodes.size());
-            nodes.push_back(b);
-        }
-
-        // Depth-ish control: random chance to keep splitting.
-        if (n.left >= 0 && n.right >= 0) {
-            // Push children for splitting.
-            stack.push_back(n.left);
-            stack.push_back(n.right);
-        }
+    // Choose a generation style (rooms vs caverns vs mazes) and build the base layout.
+    GenKind g = chooseGenKind(depth, rng);
+    switch (g) {
+        case GenKind::Cavern: generateCavern(*this, rng, depth); break;
+        case GenKind::Maze:   generateMaze(*this, rng, depth); break;
+        case GenKind::RoomsBsp:
+        default:
+            generateBspRooms(*this, rng);
+            break;
     }
 
-    // Create rooms in leaf nodes.
-    const int minRoomW = 4;
-    const int minRoomH = 4;
+    // Mark special rooms after stairs are placed so we can avoid start/end rooms when possible.
+    markSpecialRooms(*this, rng, depth);
 
-    for (auto& n : nodes) {
-        if (!isLeaf(n)) continue;
-
-        int maxRoomW = std::max(minRoomW, n.w - 2);
-        int maxRoomH = std::max(minRoomH, n.h - 2);
-
-        int rw = rng.range(minRoomW, maxRoomW);
-        int rh = rng.range(minRoomH, maxRoomH);
-
-        int rx = n.x + rng.range(1, std::max(1, n.w - rw - 1));
-        int ry = n.y + rng.range(1, std::max(1, n.h - rh - 1));
-
-        Room r;
-        r.x = rx;
-        r.y = ry;
-        r.w = rw;
-        r.h = rh;
-        r.type = RoomType::Normal;
-
-        int rIndex = static_cast<int>(rooms.size());
-        rooms.push_back(r);
-        n.roomIndex = rIndex;
-
-        carveRect(*this, rx, ry, rw, rh, TileType::Floor);
-    }
-
-    if (rooms.empty()) {
-        // Fallback: carve a simple central room.
-        Room r{ width / 4, height / 4, width / 2, height / 2, RoomType::Normal };
-        rooms.push_back(r);
-        carveRect(*this, r.x, r.y, r.w, r.h, TileType::Floor);
-    }
-
-    // Connect rooms following the BSP tree.
-    for (int i = 0; i < static_cast<int>(nodes.size()); ++i) {
-        Leaf& n = nodes[static_cast<size_t>(i)];
-        if (n.left < 0 || n.right < 0) continue;
-
-        int ra = pickRandomRoomInSubtree(nodes, n.left, rng);
-        int rb = pickRandomRoomInSubtree(nodes, n.right, rng);
-        if (ra >= 0 && rb >= 0 && ra != rb) {
-            connectRooms(*this, rooms[static_cast<size_t>(ra)], rooms[static_cast<size_t>(rb)], rng);
-        }
-    }
-
-    // Extra loops: connect random room pairs.
-    const int extra = std::max(1, static_cast<int>(rooms.size()) / 3);
-    for (int i = 0; i < extra; ++i) {
-        int a = rng.range(0, static_cast<int>(rooms.size()) - 1);
-        int b = rng.range(0, static_cast<int>(rooms.size()) - 1);
-        if (a == b) continue;
-        connectRooms(*this, rooms[static_cast<size_t>(a)], rooms[static_cast<size_t>(b)], rng);
-    }
-
-    // Mark some special rooms (if enough rooms exist).
-    if (rooms.size() >= 3) {
-        int treasure = rng.range(0, static_cast<int>(rooms.size()) - 1);
-        int lair = rng.range(0, static_cast<int>(rooms.size()) - 1);
-        int shrine = rng.range(0, static_cast<int>(rooms.size()) - 1);
-
-        // Ensure distinct
-        for (int guard = 0; guard < 50 && (lair == treasure); ++guard) lair = rng.range(0, static_cast<int>(rooms.size()) - 1);
-        for (int guard = 0; guard < 50 && (shrine == treasure || shrine == lair); ++guard) shrine = rng.range(0, static_cast<int>(rooms.size()) - 1);
-
-        rooms[static_cast<size_t>(treasure)].type = RoomType::Treasure;
-        rooms[static_cast<size_t>(lair)].type = RoomType::Lair;
-        rooms[static_cast<size_t>(shrine)].type = RoomType::Shrine;
-    }
-
-    // Precompute which tiles are inside rooms (for branch carving).
-    std::vector<uint8_t> inRoom(static_cast<size_t>(width * height), 0);
-    for (const auto& r : rooms) {
-        for (int y = r.y; y < r.y2(); ++y) {
-            for (int x = r.x; x < r.x2(); ++x) {
-                if (inBounds(x, y)) inRoom[static_cast<size_t>(y * width + x)] = 1;
-            }
-        }
-    }
-
-    // Branch corridors (dead ends)
-    int branches = std::max(2, static_cast<int>(rooms.size()));
-    for (int i = 0; i < branches; ++i) {
-        int x = rng.range(1, width - 2);
-        int y = rng.range(1, height - 2);
-
-        if (!inBounds(x, y)) continue;
-        if (at(x, y).type != TileType::Floor) continue;
-        if (inRoom[static_cast<size_t>(y * width + x)] != 0) continue; // prefer corridors
-
-        const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
-        int dIdx = rng.range(0, 3);
-        int dx = dirs[dIdx][0];
-        int dy = dirs[dIdx][1];
-
-        int nx = x + dx;
-        int ny = y + dy;
-        if (!inBounds(nx, ny)) continue;
-        if (at(nx, ny).type != TileType::Wall) continue; // needs to dig into wall
-
-        int len = rng.range(3, 8);
-        int cx = x;
-        int cy = y;
-        for (int step = 0; step < len; ++step) {
-            cx += dx;
-            cy += dy;
-            if (!inBounds(cx, cy)) break;
-            if (at(cx, cy).type != TileType::Wall) break;
-            carveFloor(*this, cx, cy);
-        }
-    }
-
-    // Place stairs: up in the first room, down in the farthest room by BFS.
-    const Room& startRoom = rooms.front();
-    stairsUp = { startRoom.cx(), startRoom.cy() };
-    if (inBounds(stairsUp.x, stairsUp.y)) {
-        at(stairsUp.x, stairsUp.y).type = TileType::StairsUp;
-    }
-
-    auto dist = bfsDistanceMap(*this, stairsUp);
-    int bestRoomIdx = 0;
-    int bestDist = -1;
-    for (int i = 0; i < static_cast<int>(rooms.size()); ++i) {
-        const Room& r = rooms[static_cast<size_t>(i)];
-        int cx = r.cx();
-        int cy = r.cy();
-        if (!inBounds(cx, cy)) continue;
-        int d0 = dist[static_cast<size_t>(cy * width + cx)];
-        if (d0 > bestDist) {
-            bestDist = d0;
-            bestRoomIdx = i;
-        }
-    }
-    const Room& endRoom = rooms[static_cast<size_t>(bestRoomIdx)];
-    stairsDown = { endRoom.cx(), endRoom.cy() };
-    if (inBounds(stairsDown.x, stairsDown.y)) {
-        at(stairsDown.x, stairsDown.y).type = TileType::StairsDown;
-    }
-
-    // ------------------------------------------------------------
-    // Optional secret rooms (post-stairs so we don't accidentally make stairs
-    // spawn behind a secret door).
-    // ------------------------------------------------------------
-    {
-        int want = 1;
-        if (rng.chance(0.50f)) want++;
-        // Keep tries bounded; not all maps have enough wall space.
-        int carved = 0;
-        for (int i = 0; i < want; ++i) {
-            if (tryCarveSecretRoom(*this, rng)) carved++;
-        }
-        (void)carved;
-    }
-
-    // ------------------------------------------------------------
-    // Optional vault rooms: visible but locked side rooms.
+    // Optional hidden/locked treasure side rooms.
     // These never affect critical connectivity (stairs already placed).
-    // ------------------------------------------------------------
-    {
-        int want = 0;
-        if (rng.chance(0.55f)) want = 1;
-        if (rng.chance(0.18f)) want++;
-
-        int carved = 0;
-        for (int i = 0; i < want; ++i) {
-            if (tryCarveVaultRoom(*this, rng)) carved++;
-        }
-        (void)carved;
-    }
+    if (rng.chance(0.30f)) (void)tryCarveSecretRoom(*this, rng);
+    if (rng.chance(0.22f)) (void)tryCarveVaultRoom(*this, rng);
 
     ensureBorders(*this);
 }
@@ -708,7 +1105,95 @@ bool Dungeon::hasLineOfSight(int x0, int y0, int x1, int y1) const {
     return lineOfSight(x0, y0, x1, y1);
 }
 
-void Dungeon::computeFov(int px, int py, int radius) {
+std::vector<int> Dungeon::computeSoundMap(int sx, int sy, int maxCost) const {
+    std::vector<int> dist(static_cast<size_t>(width * height), -1);
+    if (maxCost < 0) return dist;
+    if (!inBounds(sx, sy)) return dist;
+
+    auto soundPassable = [&](int x, int y) -> bool {
+        if (!inBounds(x, y)) return false;
+        const TileType t = at(x, y).type;
+        // Walls and secret doors completely block sound propagation.
+        return (t != TileType::Wall && t != TileType::DoorSecret);
+    };
+
+    auto tileCost = [&](int x, int y) -> int {
+        if (!inBounds(x, y)) return 1000000000;
+        const TileType t = at(x, y).type;
+        // Closed/locked doors muffle sound more than open spaces.
+        switch (t) {
+            case TileType::DoorClosed: return 2;
+            case TileType::DoorLocked: return 3;
+            default: return 1;
+        }
+    };
+
+    if (!soundPassable(sx, sy)) return dist;
+
+    auto idx = [&](int x, int y) -> int { return y * width + x; };
+
+    using Node = std::pair<int, int>; // (cost, index)
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> pq;
+
+    const int startI = idx(sx, sy);
+    dist[static_cast<size_t>(startI)] = 0;
+    pq.push({0, startI});
+
+    static const int DIRS8[8][2] = {
+        {1,0},{-1,0},{0,1},{0,-1},
+        {1,1},{1,-1},{-1,1},{-1,-1}
+    };
+
+    while (!pq.empty()) {
+        const Node cur = pq.top();
+        pq.pop();
+
+        const int costHere = cur.first;
+        const int i = cur.second;
+        if (costHere < 0) continue;
+        if (costHere > maxCost) continue;
+        if (dist[static_cast<size_t>(i)] != costHere) continue;
+
+        const int x = i % width;
+        const int y = i / width;
+
+        for (const auto& dv : DIRS8) {
+            const int nx = x + dv[0];
+            const int ny = y + dv[1];
+            if (!inBounds(nx, ny)) continue;
+            if (!soundPassable(nx, ny)) continue;
+
+            // Prevent diagonal "corner cutting" through two blocking tiles.
+            if (dv[0] != 0 && dv[1] != 0) {
+                const int ax = x + dv[0];
+                const int ay = y;
+                const int bx = x;
+                const int by = y + dv[1];
+                // For sound, use soundPassable (not walkable) because closed doors still transmit sound.
+                const bool aPass = soundPassable(ax, ay);
+                const bool bPass = soundPassable(bx, by);
+                if (!aPass && !bPass) continue;
+            }
+
+            const int step = tileCost(nx, ny);
+            if (step <= 0) continue;
+            const int ncost = costHere + step;
+            if (ncost > maxCost) continue;
+
+            const int ni = idx(nx, ny);
+            int& slot = dist[static_cast<size_t>(ni)];
+            if (slot < 0 || ncost < slot) {
+                slot = ncost;
+                pq.push({ncost, ni});
+            }
+        }
+    }
+
+    return dist;
+}
+
+
+void Dungeon::computeFov(int px, int py, int radius, bool markExplored) {
     // Reset visibility each frame
     for (auto& t : tiles) t.visible = false;
     if (!inBounds(px, py)) return;
@@ -723,7 +1208,7 @@ void Dungeon::computeFov(int px, int py, int radius) {
         if (!inBounds(x, y)) return;
         Tile& t = at(x, y);
         t.visible = true;
-        t.explored = true;
+        if (markExplored) t.explored = true;
     };
 
     // Always see your own tile
@@ -788,6 +1273,88 @@ void Dungeon::computeFov(int px, int py, int radius) {
     castLight(1, 1.0f, 0.0f, 0, 1, -1, 0);
     castLight(1, 1.0f, 0.0f, 1, 0, 0, -1);
 }
+
+
+void Dungeon::computeFovMask(int px, int py, int radius, std::vector<uint8_t>& outMask) const {
+    outMask.assign(static_cast<size_t>(width * height), 0);
+    if (!inBounds(px, py)) return;
+
+    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * width + x); };
+
+    auto isOpaqueTile = [&](int x, int y) {
+        if (!inBounds(x, y)) return true;
+        TileType tt = at(x, y).type;
+        return (tt == TileType::Wall || tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorSecret);
+    };
+
+    auto markVis = [&](int x, int y) {
+        if (!inBounds(x, y)) return;
+        outMask[idx(x, y)] = 1;
+    };
+
+    // Always see your own tile
+    markVis(px, py);
+
+    // Recursive shadowcasting for 8 octants.
+    // Reference: RogueBasin "Recursive Shadowcasting".
+    const int r2 = radius * radius;
+
+    std::function<void(int, float, float, int, int, int, int)> castLight;
+    castLight = [&](int row, float start, float end, int xx, int xy, int yx, int yy) {
+        if (start < end) return;
+        float newStart = start;
+        for (int dist = row; dist <= radius; ++dist) {
+            bool blocked = false;
+
+            for (int dx = -dist, dy = -dist; dx <= 0; ++dx) {
+                const float lSlope = (dx - 0.5f) / (dy + 0.5f);
+                const float rSlope = (dx + 0.5f) / (dy - 0.5f);
+                if (start < rSlope) continue;
+                if (end > lSlope) break;
+
+                const int sax = dx * xx + dy * xy;
+                const int say = dx * yx + dy * yy;
+                const int ax = px + sax;
+                const int ay = py + say;
+
+                if (!inBounds(ax, ay)) continue;
+                const int d2 = (ax - px) * (ax - px) + (ay - py) * (ay - py);
+                if (d2 <= r2) {
+                    markVis(ax, ay);
+                }
+
+                if (blocked) {
+                    if (isOpaqueTile(ax, ay)) {
+                        newStart = rSlope;
+                        continue;
+                    } else {
+                        blocked = false;
+                        start = newStart;
+                    }
+                } else {
+                    if (isOpaqueTile(ax, ay) && dist < radius) {
+                        blocked = true;
+                        castLight(dist + 1, start, lSlope, xx, xy, yx, yy);
+                        newStart = rSlope;
+                    }
+                }
+            }
+
+            if (blocked) break;
+        }
+    };
+
+    // Octant transforms
+    castLight(1, 1.0f, 0.0f, 1, 0, 0, 1);
+    castLight(1, 1.0f, 0.0f, 0, 1, 1, 0);
+    castLight(1, 1.0f, 0.0f, 0, -1, 1, 0);
+    castLight(1, 1.0f, 0.0f, -1, 0, 0, 1);
+    castLight(1, 1.0f, 0.0f, -1, 0, 0, -1);
+    castLight(1, 1.0f, 0.0f, 0, -1, -1, 0);
+    castLight(1, 1.0f, 0.0f, 0, 1, -1, 0);
+    castLight(1, 1.0f, 0.0f, 1, 0, 0, -1);
+}
+
 
 void Dungeon::revealAll() {
     for (auto& t : tiles) {

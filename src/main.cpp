@@ -218,6 +218,8 @@ int main(int argc, char** argv) {
     game.setAutoPickupMode(settings.autoPickup);
     game.setIdentificationEnabled(settings.identifyItems);
     game.setHungerEnabled(settings.hungerEnabled);
+    game.setEncumbranceEnabled(settings.encumbranceEnabled);
+    game.setLightingEnabled(settings.lightingEnabled);
     game.setConfirmQuitEnabled(settings.confirmQuit);
     game.setAutoMortemEnabled(settings.autoMortem);
     game.setSaveBackups(settings.saveBackups);
@@ -558,6 +560,7 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "auto_step_delay_ms", std::to_string(game.autoStepDelayMs()));
             ok &= updateIniKey(settingsPath, "identify_items", game.identificationEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "hunger_enabled", game.hungerEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "encumbrance_enabled", game.encumbranceEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "confirm_quit", game.confirmQuitEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "auto_mortem", game.autoMortemEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "autosave_every_turns", std::to_string(game.autosaveEveryTurns()));
@@ -602,6 +605,7 @@ ok &= updateIniKey(settingsPath, "ui_panels", game.uiPanelsTextured() ? "texture
             game.setSaveBackups(newSettings.saveBackups);
             game.setIdentificationEnabled(newSettings.identifyItems);
             game.setHungerEnabled(newSettings.hungerEnabled);
+            game.setEncumbranceEnabled(newSettings.encumbranceEnabled);
             game.setConfirmQuitEnabled(newSettings.confirmQuit);
             game.setAutoMortemEnabled(newSettings.autoMortem);
             game.setPlayerName(newSettings.playerName);

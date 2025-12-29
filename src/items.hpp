@@ -82,10 +82,20 @@ enum class ItemKind : uint8_t {
     Chest,
     // Decorative open chest left behind after looting.
     ChestOpen,
+
+    // --- Stealth / perception (append-only) ---
+    PotionInvisibility,
+
+    // --- Lighting (append-only) ---
+    Torch,
+    TorchLit,
+
+    // --- Curses / blessings (append-only) ---
+    ScrollRemoveCurse,
 };
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ChestOpen) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollRemoveCurse) + 1;
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;
@@ -100,6 +110,7 @@ inline bool isPotionKind(ItemKind k) {
         case ItemKind::PotionShielding:
         case ItemKind::PotionHaste:
         case ItemKind::PotionVision:
+        case ItemKind::PotionInvisibility:
             return true;
         default:
             return false;
@@ -115,6 +126,7 @@ inline bool isScrollKind(ItemKind k) {
         case ItemKind::ScrollIdentify:
         case ItemKind::ScrollDetectTraps:
         case ItemKind::ScrollDetectSecrets:
+        case ItemKind::ScrollRemoveCurse:
             return true;
         case ItemKind::ScrollKnock:
             return true;
@@ -153,15 +165,31 @@ struct ItemDef {
     // Consumable effects
     int healAmount = 0;
     int hungerRestore = 0; // 0 = no hunger effect
+
+    // Encumbrance / carrying
+    // Simple integer "weight" units used by the optional encumbrance system.
+    // 0 means weightless (e.g., gold by default).
+    int weight = 0;
+
+    // Economy / shops: base value in gold for one unit of this item.
+    // 0 means "not normally sold" (e.g., gold itself, quest items, decorative props).
+    int value = 0;
 };
 
 struct Item {
     int id = 0;
     ItemKind kind = ItemKind::Dagger;
     int count = 1;          // for stackables
-    int charges = 0;        // for wands
+    int charges = 0;        // for wands / torches (fuel)
     int enchant = 0;        // for weapons/armor (+/-), 0 = normal
+    int buc = 0;            // -1 = cursed, 0 = uncursed, +1 = blessed (primarily for gear)
     uint32_t spriteSeed = 0;
+
+    // Shops: if >0, this item is tagged with a shop price (per-unit) and ownership.
+    // shopDepth tracks which dungeon depth the shop belongs to.
+    // In inventory, nonzero shopPrice means the item is UNPAID (debt).
+    int shopPrice = 0;
+    int shopDepth = 0;
 };
 
 struct GroundItem {
@@ -182,6 +210,10 @@ inline bool isArmor(ItemKind k) { return equipSlot(k) == EquipSlot::Armor; }
 
 std::string itemDisplayName(const Item& it);
 std::string itemDisplayNameSingle(ItemKind k);
+
+// Encumbrance helpers
+int itemWeight(const Item& it);
+int totalWeight(const std::vector<Item>& items);
 
 // Inventory helpers
 int countGold(const std::vector<Item>& inv);

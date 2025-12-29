@@ -54,6 +54,8 @@ struct Settings {
     // If false, items always show their true names (more "arcade" / beginner-friendly).
     bool identifyItems = true;
     bool hungerEnabled = false; // Optional hunger system (adds food).
+    bool encumbranceEnabled = false; // Optional carrying capacity / burden system.
+    bool lightingEnabled = false; // Optional darkness/lighting system (requires torches on deeper floors).
     bool confirmQuit = true;   // Require ESC twice to quit (prevents accidental quits).
     bool autoMortem = true;   // Write a procrogue_mortem_*.txt dump automatically on win/death.
 };

@@ -214,6 +214,12 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "hunger_enabled") {
             bool b = false;
             if (parseBool(val, b)) s.hungerEnabled = b;
+        } else if (key == "encumbrance_enabled") {
+            bool b = false;
+            if (parseBool(val, b)) s.encumbranceEnabled = b;
+        } else if (key == "lighting_enabled") {
+            bool b = false;
+            if (parseBool(val, b)) s.lightingEnabled = b;
         } else if (key == "confirm_quit") {
             bool b = true;
             if (parseBool(val, b)) s.confirmQuit = b;
@@ -279,6 +285,14 @@ auto_mortem = true
 # Optional survival mechanic
 # hunger_enabled: true/false (adds food and starvation over time)
 hunger_enabled = false
+
+# Optional NetHack-style burden system
+# encumbrance_enabled: true/false (carrying capacity + movement penalties)
+encumbrance_enabled = false
+
+# Optional darkness / lighting
+# lighting_enabled: true/false (dark deeper floors; requires torches)
+lighting_enabled = false
 
 # Item identification
 # identify_items: true/false  (true = potions/scrolls start unidentified)

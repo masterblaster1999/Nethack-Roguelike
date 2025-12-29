@@ -1,11 +1,15 @@
 add_executable(procrogue_tests
     test_main.cpp
     ../src/dungeon.cpp
+    ../src/combat_rules.cpp
     ../src/items.cpp
+    ../src/shop.cpp
     ../src/scores.cpp
     ../src/settings.cpp
     ../src/game.cpp
-    ../src/spritegen.cpp
+    ../src/combat.cpp
+    # spritegen contains large static tables used only by the renderer;
+    # the test target is logic-only, so skipping it keeps test builds fast.
 )
 
 target_include_directories(procrogue_tests PRIVATE ../src)

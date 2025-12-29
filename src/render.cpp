@@ -389,6 +389,17 @@ void Renderer::render(const Game& game) {
 
     const Dungeon& d = game.dungeon();
 
+    auto lightMod = [&](int x, int y) -> uint8_t {
+        if (!game.darknessActive()) return 255;
+        const uint8_t L = game.tileLightLevel(x, y); // 0..255
+        constexpr int kMin = 40;
+        int mod = kMin + (static_cast<int>(L) * (255 - kMin)) / 255;
+        if (mod < kMin) mod = kMin;
+        if (mod > 255) mod = 255;
+        return static_cast<uint8_t>(mod);
+    };
+
+
     // Draw map tiles
     for (int y = 0; y < d.height; ++y) {
         for (int x = 0; x < d.width; ++x) {
@@ -405,10 +416,12 @@ void Renderer::render(const Game& game) {
             if (!tex) continue;
 
             if (t.visible) {
-                SDL_SetTextureColorMod(tex, 255, 255, 255);
+                const uint8_t m = lightMod(x, y);
+                SDL_SetTextureColorMod(tex, m, m, m);
                 SDL_SetTextureAlphaMod(tex, 255);
             } else {
-                SDL_SetTextureColorMod(tex, 80, 80, 80);
+                if (game.darknessActive()) SDL_SetTextureColorMod(tex, 30, 30, 30);
+                else SDL_SetTextureColorMod(tex, 80, 80, 80);
                 SDL_SetTextureAlphaMod(tex, 255);
             }
 
@@ -452,7 +465,10 @@ void Renderer::render(const Game& game) {
         if (!tex) continue;
 
         SDL_Rect dst{ gi.pos.x * tile, gi.pos.y * tile, tile, tile };
+        const uint8_t m = lightMod(gi.pos.x, gi.pos.y);
+        SDL_SetTextureColorMod(tex, m, m, m);
         SDL_RenderCopy(renderer, tex, nullptr, &dst);
+        SDL_SetTextureColorMod(tex, 255, 255, 255);
     }
 
     // Draw discovered traps (shown on explored tiles; bright when visible, dim when remembered)
@@ -493,7 +509,10 @@ void Renderer::render(const Game& game) {
         if (!tex) continue;
 
         SDL_Rect dst{ e.pos.x * tile, e.pos.y * tile, tile, tile };
+        const uint8_t m = lightMod(e.pos.x, e.pos.y);
+        SDL_SetTextureColorMod(tex, m, m, m);
         SDL_RenderCopy(renderer, tex, nullptr, &dst);
+        SDL_SetTextureColorMod(tex, 255, 255, 255);
 
         // Small HP pip for monsters
         if (e.id != game.playerId() && e.hp > 0) {
@@ -633,6 +652,14 @@ void Renderer::drawHud(const Game& game) {
     ss << " | LV: " << game.playerCharLevel();
     ss << " | XP: " << game.playerXp() << "/" << game.playerXpToNext();
     ss << " | GOLD: " << game.goldCount();
+    const int debtAll = game.shopDebtTotal();
+    if (debtAll > 0) {
+        const int debtThis = game.shopDebtThisDepth();
+        ss << " | DEBT: " << debtAll;
+        if (debtThis > 0 && debtThis != debtAll) {
+            ss << " (THIS: " << debtThis << ")";
+        }
+    }
     ss << " | KEYS: " << game.keyCount() << " | PICKS: " << game.lockpickCount();
     ss << " | DEPTH: " << game.depth();
     ss << " | MAX: " << game.maxDepthReached();
@@ -655,9 +682,17 @@ void Renderer::drawHud(const Game& game) {
     addStatus("SHIELD", p.shieldTurns);
     addStatus("HASTE", p.hasteTurns);
     addStatus("VISION", p.visionTurns);
+    addStatus("INVIS", p.invisTurns);
     {
         const std::string ht = game.hungerTag();
         if (!ht.empty()) ss << " | " << ht;
+    }
+    {
+        if (game.encumbranceEnabled()) {
+            ss << " | WT: " << game.inventoryWeight() << "/" << game.carryCapacity();
+            const std::string bt = game.burdenTag();
+            if (!bt.empty()) ss << " | " << bt;
+        }
     }
     if (game.autosaveEveryTurns() > 0) {
         ss << " | AS: " << game.autosaveEveryTurns();
@@ -734,7 +769,16 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 
     drawText5x7(renderer, x, y, scale, yellow, "INVENTORY");
     drawText5x7(renderer, x + 160, y, scale, gray, "(ENTER: use/equip, D: drop, ESC: close)");
-    y += 28;
+    if (game.encumbranceEnabled()) {
+        std::stringstream ws;
+        ws << "WT: " << game.inventoryWeight() << "/" << game.carryCapacity();
+        const std::string bt = game.burdenTag();
+        if (!bt.empty()) ws << " (" << bt << ")";
+        drawText5x7(renderer, x, y + 14, scale, gray, ws.str());
+        y += 44;
+    } else {
+        y += 28;
+    }
 
     const auto& inv = game.inventory();
     const int sel = game.inventorySelection();
@@ -899,6 +943,16 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 		} else if (it.kind == ItemKind::Lockpick) {
 			statLine("TYPE: LOCKPICK", white);
 			statLine("USED FOR: PICK LOCKS (CHANCE)", gray);
+		} else if (it.kind == ItemKind::Torch || it.kind == ItemKind::TorchLit) {
+			statLine("TYPE: LIGHT SOURCE", white);
+			if (it.kind == ItemKind::TorchLit) {
+				statLine("STATUS: LIT", gray);
+				statLine("FUEL: " + std::to_string(it.charges) + " TURNS", gray);
+				statLine("RADIUS: 8", gray);
+			} else {
+				statLine("STATUS: UNLIT", gray);
+				statLine("USE: LIGHT A TORCH", gray);
+			}
 		} else if (isFood) {
 			statLine("TYPE: FOOD", white);
 			if (game.hungerEnabled() && def.hungerRestore > 0) {
@@ -988,6 +1042,16 @@ void Renderer::drawOptionsOverlay(const Game& game) {
 
     auto yesNo = [](bool b) { return b ? "ON" : "OFF"; };
 
+    auto autoPickupLabel = [](AutoPickupMode m) -> const char* {
+        switch (m) {
+            case AutoPickupMode::Off:   return "OFF";
+            case AutoPickupMode::Gold:  return "GOLD";
+            case AutoPickupMode::Smart: return "SMART";
+            case AutoPickupMode::All:   return "ALL";
+        }
+        return "?";
+    };
+
     auto uiThemeLabel = [](UITheme t) -> const char* {
         switch (t) {
             case UITheme::DarkStone: return "DARKSTONE";
@@ -1009,18 +1073,19 @@ void Renderer::drawOptionsOverlay(const Game& game) {
         y += 18;
     };
 
-    drawOpt(0, "AUTO-PICKUP", yesNo(game.autoPickupMode() == AutoPickupMode::All));
+    drawOpt(0, "AUTO-PICKUP", autoPickupLabel(game.autoPickupMode()));
     drawOpt(1, "AUTO-STEP DELAY", std::to_string(game.autoStepDelayMs()) + "ms");
     drawOpt(2, "AUTOSAVE", (game.autosaveEveryTurns() > 0 ? ("EVERY " + std::to_string(game.autosaveEveryTurns()) + " TURNS") : "OFF"));
     drawOpt(3, "IDENTIFY ITEMS", yesNo(game.identificationEnabled()));
     drawOpt(4, "HUNGER SYSTEM", yesNo(game.hungerEnabled()));
-    drawOpt(5, "EFFECT TIMERS", yesNo(game.showEffectTimers()));
-    drawOpt(6, "CONFIRM QUIT", yesNo(game.confirmQuitEnabled()));
-    drawOpt(7, "AUTO MORTEM", yesNo(game.autoMortemEnabled()));
-    drawOpt(8, "SAVE BACKUPS", (game.saveBackups() > 0 ? std::to_string(game.saveBackups()) : "OFF"));
-    drawOpt(9, "UI THEME", uiThemeLabel(game.uiTheme()));
-    drawOpt(10, "UI PANELS", (game.uiPanelsTextured() ? "TEXTURED" : "SOLID"));
-    drawOpt(11, "CLOSE", "");
+    drawOpt(5, "ENCUMBRANCE", yesNo(game.encumbranceEnabled()));
+    drawOpt(6, "EFFECT TIMERS", yesNo(game.showEffectTimers()));
+    drawOpt(7, "CONFIRM QUIT", yesNo(game.confirmQuitEnabled()));
+    drawOpt(8, "AUTO MORTEM", yesNo(game.autoMortemEnabled()));
+    drawOpt(9, "SAVE BACKUPS", (game.saveBackups() > 0 ? std::to_string(game.saveBackups()) : "OFF"));
+    drawOpt(10, "UI THEME", uiThemeLabel(game.uiTheme()));
+    drawOpt(11, "UI PANELS", (game.uiPanelsTextured() ? "TEXTURED" : "SOLID"));
+    drawOpt(12, "CLOSE", "");
 
     y += 14;
     drawText5x7(renderer, x0 + 16, y, scale, gray,
@@ -1111,7 +1176,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("autopickup off/gold/all");
     lineGray("name <text>  scores [N]");
     lineGray("autosave <turns>  stepdelay <ms>  identify on/off  timers on/off");
-    lineGray("pray [heal|cure|identify|bless]");
+    lineGray("pray [heal|cure|identify|bless|uncurse]");
 
     y += 6;
     lineWhite("KEYBINDINGS:");

@@ -106,6 +106,7 @@ float densityFor(EntityKind k) {
         case EntityKind::Spider: return 0.46f;
         case EntityKind::Ogre: return 0.72f;
         case EntityKind::Mimic: return 0.74f;
+        case EntityKind::Shopkeeper: return 0.54f;
         default: return 0.55f;
     }
 }
@@ -126,6 +127,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::Spider: return add({ 80, 80, 95, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
         case EntityKind::Ogre: return add({ 150, 120, 70, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Mimic: return add({ 150, 110, 60, 255 }, rng.range(-18,18), rng.range(-18,18), rng.range(-18,18));
+        case EntityKind::Shopkeeper: return add({ 220, 200, 120, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
         default: return add({ 180, 180, 180, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
     }
 }
@@ -717,6 +719,59 @@ case ItemKind::Arrow: {
             if (frame % 2 == 1) {
                 setPx(s, 9, 8, {255,255,255,180});
                 setPx(s, 7, 9, {255,255,255,120});
+            }
+            break;
+        }
+        case ItemKind::PotionInvisibility: {
+            Color glass = {200,200,220,180};
+            Color fluid = {180,180,255,120};
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+            if (frame % 2 == 1) {
+                setPx(s, 9, 6, {255,255,255,120});
+                setPx(s, 8, 9, {255,255,255,120});
+            }
+            break;
+        }
+        case ItemKind::ScrollRemoveCurse: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+            // Spiral glyph
+            setPx(s, 7, 7, {80,50,30,255});
+            setPx(s, 8, 7, {80,50,30,255});
+            setPx(s, 9, 7, {80,50,30,255});
+            setPx(s, 9, 8, {80,50,30,255});
+            setPx(s, 9, 9, {80,50,30,255});
+            setPx(s, 8, 9, {80,50,30,255});
+            setPx(s, 7, 9, {80,50,30,255});
+            setPx(s, 7, 8, {80,50,30,255});
+            setPx(s, 8, 8, paper);
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+        case ItemKind::Torch: {
+            Color wood = add({130,90,45,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color tip = {60,40,25,255};
+            line(s, 8, 4, 8, 14, wood);
+            rect(s, 7, 11, 3, 3, mul(wood, 0.85f));
+            rect(s, 6, 3, 5, 2, tip);
+            if (frame % 2 == 1) setPx(s, 9, 5, {255,255,255,70});
+            break;
+        }
+        case ItemKind::TorchLit: {
+            Color wood = add({130,90,45,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color flame1 = {255,170,60,220};
+            Color flame2 = {255,255,180,200};
+            line(s, 8, 5, 8, 14, wood);
+            rect(s, 7, 11, 3, 3, mul(wood, 0.85f));
+            rect(s, 6, 4, 5, 2, mul(wood, 0.6f));
+            circle(s, 8, 3, 2, flame1);
+            circle(s, 8, 2, 1, flame2);
+            if (frame % 2 == 1) {
+                setPx(s, 9, 2, {255,255,255,180});
+                setPx(s, 7, 3, {255,255,255,100});
             }
             break;
         }

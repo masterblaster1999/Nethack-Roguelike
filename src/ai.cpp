@@ -580,6 +580,10 @@ void Game::monsterTurn() {
                     if (i >= 0 && inv[static_cast<size_t>(i)].buc >= 0) candIdx.push_back(i);
                     i = equippedRangedIndex();
                     if (i >= 0 && inv[static_cast<size_t>(i)].buc >= 0) candIdx.push_back(i);
+                    i = equippedRing1Index();
+                    if (i >= 0 && inv[static_cast<size_t>(i)].buc >= 0) candIdx.push_back(i);
+                    i = equippedRing2Index();
+                    if (i >= 0 && inv[static_cast<size_t>(i)].buc >= 0) candIdx.push_back(i);
 
                     if (!candIdx.empty()) {
                         // Saving throw: defense + shielding helps resist.

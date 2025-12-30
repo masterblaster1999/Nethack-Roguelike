@@ -397,26 +397,28 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
     bool isInventoryIdentifyMode() const { return invIdentifyMode; }
     int inventorySelection() const { return invSel; }
     bool isEquipped(int itemId) const;
-    std::string equippedTag(int itemId) const; // e.g. "M", "R", "A", "MR"
+    std::string equippedTag(int itemId) const; // e.g. "M", "R", "A", "1", "2"
     std::string equippedMeleeName() const;
     std::string equippedRangedName() const;
     std::string equippedArmorName() const;
+    std::string equippedRing1Name() const;
+    std::string equippedRing2Name() const;
     int playerAttack() const;
     int playerDefense() const;
 
     // Talents (earned on level-up). These provide build variety while keeping the
     // classic ATK/DEF progression intact.
-    int playerMight() const { return talentMight_; }      // melee power / carry capacity
-    int playerAgility() const { return talentAgility_; }  // ranged accuracy / evasion / locks & traps
-    int playerVigor() const { return talentVigor_; }      // max HP growth
-    int playerFocus() const { return talentFocus_; }      // wand power / searching
+    int playerMight() const { return talentMight_ + ringTalentBonusMight(); }      // melee power / carry capacity
+    int playerAgility() const { return talentAgility_ + ringTalentBonusAgility(); }  // ranged accuracy / evasion / locks & traps
+    int playerVigor() const { return talentVigor_ + ringTalentBonusVigor(); }      // max HP growth
+    int playerFocus() const { return talentFocus_ + ringTalentBonusFocus(); }      // wand power / searching
     int pendingTalentPoints() const { return talentPointsPending_; }
 
     // Derived core stats (used by combat rules / UI).
-    int playerMeleePower() const { return player().baseAtk + talentMight_; }
-    int playerRangedSkill() const { return player().baseAtk + talentAgility_; }
-    int playerWandPower() const { return talentFocus_; }
-    int playerEvasion() const { return player().baseDef + talentAgility_; }
+    int playerMeleePower() const { return player().baseAtk + playerMight(); }
+    int playerRangedSkill() const { return player().baseAtk + playerAgility(); }
+    int playerWandPower() const { return playerFocus(); }
+    int playerEvasion() const { return player().baseDef + playerAgility(); }
 
     // Level-up allocation overlay
     bool isLevelUpOpen() const { return levelUpOpen; }
@@ -655,6 +657,8 @@ private:
     int equipMeleeId = 0;
     int equipRangedId = 0;
     int equipArmorId = 0;
+    int equipRing1Id = 0;
+    int equipRing2Id = 0;
     bool invOpen = false;
     int invSel = 0;
     // Temporary inventory sub-mode (used for prompts like selecting an item to identify).
@@ -865,9 +869,20 @@ private:
     int equippedMeleeIndex() const;
     int equippedRangedIndex() const;
     int equippedArmorIndex() const;
+    int equippedRing1Index() const;
+    int equippedRing2Index() const;
     const Item* equippedMelee() const;
     const Item* equippedRanged() const;
     const Item* equippedArmor() const;
+    const Item* equippedRing1() const;
+    const Item* equippedRing2() const;
+
+    // Passive equipment bonuses (currently only rings).
+    int ringTalentBonusMight() const;
+    int ringTalentBonusAgility() const;
+    int ringTalentBonusVigor() const;
+    int ringTalentBonusFocus() const;
+    int ringDefenseBonus() const;
     int playerRangedRange() const;
     bool playerHasRangedReady(std::string* reasonOut) const;
 

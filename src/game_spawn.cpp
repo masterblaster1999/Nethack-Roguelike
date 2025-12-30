@@ -146,7 +146,7 @@ void Game::spawnMonsters() {
                 it.shopPrice = 0;
                 it.shopDepth = 0;
 
-                if (isWeapon(kind) || isArmor(kind)) {
+                if (isWearableGear(kind)) {
                     it.buc = rollBucForGear(rng, depth_, rt);
 
                     // A little bit of enchantment scaling with depth.
@@ -421,7 +421,7 @@ void Game::spawnItems() {
         if (d.maxCharges > 0) it.charges = d.maxCharges;
 
         // Roll BUC (blessed/uncursed/cursed) for gear; and light enchant chance on deeper floors.
-        if (isWeapon(k) || isArmor(k)) {
+        if (isWearableGear(k)) {
             const RoomType rt = roomTypeAt(dung, pos);
             it.buc = rollBucForGear(rng, depth_, rt);
 
@@ -463,7 +463,7 @@ void Game::spawnItems() {
 
         // Shops sell mostly "clean" gear.
         RoomType rt = RoomType::Shop;
-        if (isWeapon(k) || isArmor(k)) {
+        if (isWearableGear(k)) {
             it.buc = rollBucForGear(rng, depth_, rt);
             // A slightly higher chance of +1 items compared to the floor.
             float enchChance = (depth_ >= 2) ? 0.22f : 0.12f;
@@ -485,8 +485,8 @@ void Game::spawnItems() {
 
     auto dropGoodItem = [&](const Room& r) {
         // Treasure rooms are where you find the "spicy" gear.
-        // Slightly expanded table to accommodate new gear.
-        int roll = rng.range(0, 163);
+        // Expanded table to accommodate new gear (rings).
+        int roll = rng.range(0, 179);
 
         if (roll < 18) dropItemAt(ItemKind::Sword, randomFreeTileInRoom(r));
         else if (roll < 30) dropItemAt(ItemKind::Axe, randomFreeTileInRoom(r));
@@ -525,7 +525,11 @@ void Game::spawnItems() {
         else if (roll < 153) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
         else if (roll < 156) dropItemAt(ItemKind::ScrollRemoveCurse, randomFreeTileInRoom(r), 1);
         else if (roll < 159) dropItemAt(ItemKind::ScrollConfusion, randomFreeTileInRoom(r), 1);
-        else dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
+        else if (roll < 164) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
+        else if (roll < 170) dropItemAt(ItemKind::RingProtection, randomFreeTileInRoom(r), 1);
+        else if (roll < 174) dropItemAt(ItemKind::RingMight, randomFreeTileInRoom(r), 1);
+        else if (roll < 178) dropItemAt(ItemKind::RingAgility, randomFreeTileInRoom(r), 1);
+        else dropItemAt(ItemKind::RingFocus, randomFreeTileInRoom(r), 1);
     };
 
     int keysPlacedThisFloor = 0;
@@ -689,6 +693,14 @@ void Game::spawnItems() {
                     else if (roll < 76) { k = ItemKind::PotionStrength; }
                     else if (roll < 84) { k = ItemKind::PotionRegeneration; }
                     else if (roll < 91) { k = ItemKind::PotionHaste; }
+                    else if (roll < 96) {
+                        // A small chance of rings showing up in the magic shop.
+                        const int rr = rng.range(0, 99);
+                        if (rr < 40) k = ItemKind::RingProtection;
+                        else if (rr < 65) k = ItemKind::RingMight;
+                        else if (rr < 90) k = ItemKind::RingAgility;
+                        else k = ItemKind::RingFocus;
+                    }
                     else { k = (depth_ >= 5 ? ItemKind::PotionInvisibility : ItemKind::PotionVision); }
                 } else {
                     // Supplies
@@ -1496,12 +1508,12 @@ void Game::cleanupDead() {
             }
 
             // Roll BUC (blessed/uncursed/cursed) for dropped gear.
-            if (isWeapon(gi.item.kind) || isArmor(gi.item.kind)) {
+            if (isWearableGear(gi.item.kind)) {
                 gi.item.buc = rollBucForGear(rng, depth_, roomTypeAt(dung, gi.pos));
             }
 
             // Chance for dropped gear to be lightly enchanted on deeper floors.
-            if ((isWeapon(gi.item.kind) || isArmor(gi.item.kind)) && depth_ >= 3) {
+            if (isWearableGear(gi.item.kind) && depth_ >= 3) {
                 if (rng.chance(0.25f)) {
                     gi.item.enchant = 1;
                     if (depth_ >= 6 && rng.chance(0.10f)) {

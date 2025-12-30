@@ -42,7 +42,7 @@ void Game::sortInventory() {
         if (it.kind == ItemKind::AmuletYendor) return 0;
 
         // 1 = equipped gear
-        if (it.id == equipMeleeId || it.id == equipRangedId || it.id == equipArmorId) return 1;
+        if (it.id == equipMeleeId || it.id == equipRangedId || it.id == equipArmorId || it.id == equipRing1Id || it.id == equipRing2Id) return 1;
 
         // 2 = other equipment
         const ItemDef& d = itemDef(it.kind);
@@ -363,7 +363,7 @@ bool Game::openChestAtPlayer() {
         if (d.maxCharges > 0) it.charges = d.maxCharges;
 
         // Roll BUC (blessed/uncursed/cursed) for gear; and light enchant chance on deeper floors.
-        if (isWeapon(k) || isArmor(k)) {
+        if (isWearableGear(k)) {
             const RoomType rt = roomTypeAt(dung, pos);
             it.buc = rollBucForGear(rng, depth_, rt);
 
@@ -408,6 +408,16 @@ bool Game::openChestAtPlayer() {
             ItemKind ak = (roll < 26) ? ItemKind::ChainArmor : ItemKind::PlateArmor;
             int ench = (rng.chance(0.25f + 0.10f * tier)) ? rng.range(1, 1 + tier) : 0;
             dropItemHere(ak, 1, ench);
+        } else if (roll < 38) {
+            // Rings (rare)
+            int rr = rng.range(0, 99);
+            ItemKind rk = ItemKind::RingProtection;
+            if (rr < 40) rk = ItemKind::RingProtection;
+            else if (rr < 65) rk = ItemKind::RingMight;
+            else if (rr < 90) rk = ItemKind::RingAgility;
+            else rk = ItemKind::RingFocus;
+            int ench = (rng.chance(0.20f + 0.08f * tier)) ? rng.range(1, 1 + tier) : 0;
+            dropItemHere(rk, 1, ench);
         } else if (roll < 48) {
             ItemKind wk;
             if (depth_ >= 6 && tier >= 1 && rng.chance(0.12f)) {
@@ -560,10 +570,11 @@ bool Game::dropSelected() {
     Item& it = inv[static_cast<size_t>(invSel)];
 
     // Cursed equipped items can't be removed/dropped (NetHack-style "welded" gear).
-    if (it.buc < 0 && (it.id == equipMeleeId || it.id == equipRangedId || it.id == equipArmorId)) {
+    if (it.buc < 0 && (it.id == equipMeleeId || it.id == equipRangedId || it.id == equipArmorId || it.id == equipRing1Id || it.id == equipRing2Id)) {
         if (it.id == equipMeleeId) pushMsg("YOUR WEAPON IS CURSED AND WELDED TO YOUR HAND!", MessageKind::Warning, true);
         else if (it.id == equipRangedId) pushMsg("YOUR RANGED WEAPON IS CURSED AND WON'T LET GO!", MessageKind::Warning, true);
-        else pushMsg("YOUR ARMOR IS CURSED AND WON'T COME OFF!", MessageKind::Warning, true);
+        else if (it.id == equipArmorId) pushMsg("YOUR ARMOR IS CURSED AND WON'T COME OFF!", MessageKind::Warning, true);
+        else pushMsg("YOUR RING IS CURSED AND STUCK TO YOUR FINGER!", MessageKind::Warning, true);
         return false;
     }
 
@@ -571,6 +582,8 @@ bool Game::dropSelected() {
     if (it.id == equipMeleeId) equipMeleeId = 0;
     if (it.id == equipRangedId) equipRangedId = 0;
     if (it.id == equipArmorId) equipArmorId = 0;
+    if (it.id == equipRing1Id) equipRing1Id = 0;
+    if (it.id == equipRing2Id) equipRing2Id = 0;
 
     Item drop = it;
     if (isStackable(it.kind) && it.count > 1) {
@@ -628,10 +641,11 @@ bool Game::dropSelectedAll() {
     Item& it = inv[static_cast<size_t>(invSel)];
 
     // Cursed equipped items can't be removed/dropped (NetHack-style "welded" gear).
-    if (it.buc < 0 && (it.id == equipMeleeId || it.id == equipRangedId || it.id == equipArmorId)) {
+    if (it.buc < 0 && (it.id == equipMeleeId || it.id == equipRangedId || it.id == equipArmorId || it.id == equipRing1Id || it.id == equipRing2Id)) {
         if (it.id == equipMeleeId) pushMsg("YOUR WEAPON IS CURSED AND WELDED TO YOUR HAND!", MessageKind::Warning, true);
         else if (it.id == equipRangedId) pushMsg("YOUR RANGED WEAPON IS CURSED AND WON'T LET GO!", MessageKind::Warning, true);
-        else pushMsg("YOUR ARMOR IS CURSED AND WON'T COME OFF!", MessageKind::Warning, true);
+        else if (it.id == equipArmorId) pushMsg("YOUR ARMOR IS CURSED AND WON'T COME OFF!", MessageKind::Warning, true);
+        else pushMsg("YOUR RING IS CURSED AND STUCK TO YOUR FINGER!", MessageKind::Warning, true);
         return false;
     }
 
@@ -639,6 +653,8 @@ bool Game::dropSelectedAll() {
     if (it.id == equipMeleeId) equipMeleeId = 0;
     if (it.id == equipRangedId) equipRangedId = 0;
     if (it.id == equipArmorId) equipArmorId = 0;
+    if (it.id == equipRing1Id) equipRing1Id = 0;
+    if (it.id == equipRing2Id) equipRing2Id = 0;
 
     Item drop = it;
 
@@ -751,6 +767,69 @@ bool Game::equipSelected() {
             pushMsg("YOU WEAR " + displayItemName(it) + ".");
         }
         return true;
+    }
+
+    if (d.slot == EquipSlot::Ring) {
+        auto ringNameById = [&](int id) -> std::string {
+            if (id == 0) return std::string("(NONE)");
+            const int idx = findItemIndexById(inv, id);
+            if (idx < 0) return std::string("(MISSING)");
+            return displayItemName(inv[static_cast<size_t>(idx)]);
+        };
+
+        auto removeRing = [&](int& slotId) -> bool {
+            if (slotId == 0) return false;
+            const int idx = findItemIndexById(inv, slotId);
+            if (idx < 0) {
+                slotId = 0;
+                return true;
+            }
+            const Item& worn = inv[static_cast<size_t>(idx)];
+            if (worn.buc < 0) {
+                pushMsg("YOUR RING IS CURSED AND STUCK TO YOUR FINGER!", MessageKind::Warning, true);
+                return false;
+            }
+            slotId = 0;
+            pushMsg("YOU REMOVE " + displayItemName(worn) + ".");
+            return true;
+        };
+
+        // Toggle off if the selected ring is already worn.
+        if (equipRing1Id == it.id) {
+            return removeRing(equipRing1Id);
+        }
+        if (equipRing2Id == it.id) {
+            return removeRing(equipRing2Id);
+        }
+
+        // Prefer an empty slot.
+        if (equipRing1Id == 0) {
+            equipRing1Id = it.id;
+            pushMsg("YOU PUT ON " + displayItemName(it) + ".");
+            return true;
+        }
+        if (equipRing2Id == 0) {
+            equipRing2Id = it.id;
+            pushMsg("YOU PUT ON " + displayItemName(it) + ".");
+            return true;
+        }
+
+        // Both slots are filled: replace the first removable ring.
+        if (!equippedItemCursed(equipRing1Id)) {
+            std::string oldName = ringNameById(equipRing1Id);
+            equipRing1Id = it.id;
+            pushMsg("YOU SWAP " + oldName + " FOR " + displayItemName(it) + ".");
+            return true;
+        }
+        if (!equippedItemCursed(equipRing2Id)) {
+            std::string oldName = ringNameById(equipRing2Id);
+            equipRing2Id = it.id;
+            pushMsg("YOU SWAP " + oldName + " FOR " + displayItemName(it) + ".");
+            return true;
+        }
+
+        pushMsg("BOTH YOUR RINGS ARE CURSED AND WON'T BUDGE!", MessageKind::Warning, true);
+        return false;
     }
 
     pushMsg("YOU CAN'T EQUIP THAT.");
@@ -961,7 +1040,7 @@ bool Game::useSelected() {
 
         int uncursed = 0;
         for (auto& invIt : inv) {
-            if (!isWeapon(invIt.kind) && !isArmor(invIt.kind)) continue;
+            if (!isWearableGear(invIt.kind)) continue;
             if (invIt.buc < 0) {
                 invIt.buc = 0;
                 uncursed++;

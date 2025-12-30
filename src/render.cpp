@@ -1115,6 +1115,25 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			const bool ammoOk = (def.ammo == AmmoKind::None) || (ammoCount(inv, def.ammo) > 0);
 			const bool ready = (def.range > 0) && chargesOk && ammoOk;
 			statLine(std::string("READY: ") + (ready ? "YES" : "NO"), gray);
+		} else if (isRingKind(it.kind)) {
+			statLine("TYPE: RING", white);
+			const int bucBonus = (it.buc < 0 ? -1 : (it.buc > 0 ? 1 : 0));
+			auto fmtMod = [&](const char* label, int base) {
+				if (base == 0) return;
+				// Only apply ench/buc if the ring actually provides the stat.
+				const int v = base + it.enchant + bucBonus;
+				const std::string s = (v >= 0 ? "+" : "") + std::to_string(v);
+				statLine(std::string(label) + s, gray);
+			};
+			fmtMod("MIGHT: ", def.modMight);
+			fmtMod("AGILITY: ", def.modAgility);
+			fmtMod("VIGOR: ", def.modVigor);
+			fmtMod("FOCUS: ", def.modFocus);
+			if (def.defense != 0) {
+				const int v = def.defense + it.enchant + bucBonus;
+				const std::string s = (v >= 0 ? "+" : "") + std::to_string(v);
+				statLine("DEF BONUS: " + s, gray);
+			}
 		} else if (def.consumable) {
 			statLine(identifiable ? "TYPE: CONSUMABLE (IDENTIFIABLE)" : "TYPE: CONSUMABLE", white);
 			statLine(itemEffectDesc(it, identified), gray);
@@ -1135,6 +1154,8 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 		statLine("M: " + game.equippedMeleeName(), gray);
 		statLine("R: " + game.equippedRangedName(), gray);
 		statLine("A: " + game.equippedArmorName(), gray);
+		statLine("1: " + game.equippedRing1Name(), gray);
+		statLine("2: " + game.equippedRing2Name(), gray);
     }
 }
 

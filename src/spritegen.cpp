@@ -868,6 +868,41 @@ case ItemKind::Arrow: {
             break;
         }
 
+        // --- Rings (append-only) ---
+        case ItemKind::RingMight:
+        case ItemKind::RingAgility:
+        case ItemKind::RingFocus:
+        case ItemKind::RingProtection: {
+            // A small gold ring with a colored gem. Rings are tiny, so we use
+            // chunky pixels and strong contrast.
+            Color gold = add({235, 205, 85, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color goldDark = mul(gold, 0.70f);
+
+            // Ring band (donut)
+            circle(s, 8, 9, 4, gold);
+            circle(s, 8, 9, 3, goldDark);
+            circle(s, 8, 9, 2, {0,0,0,0});
+
+            // Gem color per ring type
+            Color gem{255, 255, 255, 235};
+            switch (kind) {
+                case ItemKind::RingMight:      gem = {220, 60, 50, 240}; break;
+                case ItemKind::RingAgility:    gem = {60, 200, 90, 240}; break;
+                case ItemKind::RingFocus:      gem = {90, 120, 255, 240}; break;
+                case ItemKind::RingProtection: gem = {180, 240, 255, 235}; break;
+                default: break;
+            }
+
+            // Gem on top of the ring
+            circle(s, 8, 5, 2, gem);
+            circle(s, 8, 5, 1, mul(gem, 0.85f));
+            if (frame % 2 == 1) {
+                setPx(s, 9, 4, {255,255,255,180});
+                setPx(s, 7, 5, {255,255,255,120});
+            }
+            break;
+        }
+
         // --- Corpses (append-only) ---
         case ItemKind::CorpseGoblin:
         case ItemKind::CorpseOrc:

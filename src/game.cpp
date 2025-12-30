@@ -106,6 +106,14 @@ int Game::equippedArmorIndex() const {
     return findItemIndexById(inv, equipArmorId);
 }
 
+int Game::equippedRing1Index() const {
+    return findItemIndexById(inv, equipRing1Id);
+}
+
+int Game::equippedRing2Index() const {
+    return findItemIndexById(inv, equipRing2Id);
+}
+
 const Item* Game::equippedMelee() const {
     int idx = equippedMeleeIndex();
     if (idx < 0) return nullptr;
@@ -124,8 +132,20 @@ const Item* Game::equippedArmor() const {
     return &inv[static_cast<size_t>(idx)];
 }
 
+const Item* Game::equippedRing1() const {
+    int idx = equippedRing1Index();
+    if (idx < 0) return nullptr;
+    return &inv[static_cast<size_t>(idx)];
+}
+
+const Item* Game::equippedRing2() const {
+    int idx = equippedRing2Index();
+    if (idx < 0) return nullptr;
+    return &inv[static_cast<size_t>(idx)];
+}
+
 bool Game::isEquipped(int itemId) const {
-    return itemId != 0 && (itemId == equipMeleeId || itemId == equipRangedId || itemId == equipArmorId);
+    return itemId != 0 && (itemId == equipMeleeId || itemId == equipRangedId || itemId == equipArmorId || itemId == equipRing1Id || itemId == equipRing2Id);
 }
 
 std::string Game::equippedTag(int itemId) const {
@@ -133,6 +153,8 @@ std::string Game::equippedTag(int itemId) const {
     if (itemId != 0 && itemId == equipMeleeId) t += "M";
     if (itemId != 0 && itemId == equipRangedId) t += "R";
     if (itemId != 0 && itemId == equipArmorId) t += "A";
+    if (itemId != 0 && itemId == equipRing1Id) t += "1";
+    if (itemId != 0 && itemId == equipRing2Id) t += "2";
     return t;
 }
 
@@ -149,6 +171,92 @@ std::string Game::equippedRangedName() const {
 std::string Game::equippedArmorName() const {
     const Item* a = equippedArmor();
     return a ? displayItemName(*a) : std::string("(NONE)");
+}
+
+std::string Game::equippedRing1Name() const {
+    const Item* r = equippedRing1();
+    return r ? displayItemName(*r) : std::string("(NONE)");
+}
+
+std::string Game::equippedRing2Name() const {
+    const Item* r = equippedRing2();
+    return r ? displayItemName(*r) : std::string("(NONE)");
+}
+
+namespace {
+inline int bucScalar(const Item& it) {
+    return (it.buc < 0 ? -1 : (it.buc > 0 ? 1 : 0));
+}
+
+inline int applyGearModIfNonZero(int base, const Item& it) {
+    if (base == 0) return 0;
+    return base + it.enchant + bucScalar(it);
+}
+}
+
+int Game::ringTalentBonusMight() const {
+    int b = 0;
+    if (const Item* r = equippedRing1()) {
+        const ItemDef& d = itemDef(r->kind);
+        b += applyGearModIfNonZero(d.modMight, *r);
+    }
+    if (const Item* r = equippedRing2()) {
+        const ItemDef& d = itemDef(r->kind);
+        b += applyGearModIfNonZero(d.modMight, *r);
+    }
+    return b;
+}
+
+int Game::ringTalentBonusAgility() const {
+    int b = 0;
+    if (const Item* r = equippedRing1()) {
+        const ItemDef& d = itemDef(r->kind);
+        b += applyGearModIfNonZero(d.modAgility, *r);
+    }
+    if (const Item* r = equippedRing2()) {
+        const ItemDef& d = itemDef(r->kind);
+        b += applyGearModIfNonZero(d.modAgility, *r);
+    }
+    return b;
+}
+
+int Game::ringTalentBonusVigor() const {
+    int b = 0;
+    if (const Item* r = equippedRing1()) {
+        const ItemDef& d = itemDef(r->kind);
+        b += applyGearModIfNonZero(d.modVigor, *r);
+    }
+    if (const Item* r = equippedRing2()) {
+        const ItemDef& d = itemDef(r->kind);
+        b += applyGearModIfNonZero(d.modVigor, *r);
+    }
+    return b;
+}
+
+int Game::ringTalentBonusFocus() const {
+    int b = 0;
+    if (const Item* r = equippedRing1()) {
+        const ItemDef& d = itemDef(r->kind);
+        b += applyGearModIfNonZero(d.modFocus, *r);
+    }
+    if (const Item* r = equippedRing2()) {
+        const ItemDef& d = itemDef(r->kind);
+        b += applyGearModIfNonZero(d.modFocus, *r);
+    }
+    return b;
+}
+
+int Game::ringDefenseBonus() const {
+    int b = 0;
+    if (const Item* r = equippedRing1()) {
+        const ItemDef& d = itemDef(r->kind);
+        b += applyGearModIfNonZero(d.defense, *r);
+    }
+    if (const Item* r = equippedRing2()) {
+        const ItemDef& d = itemDef(r->kind);
+        b += applyGearModIfNonZero(d.defense, *r);
+    }
+    return b;
 }
 
 int Game::playerAttack() const {
@@ -168,6 +276,9 @@ int Game::playerDefense() const {
         def += a->enchant;
         def += (a->buc < 0 ? -1 : (a->buc > 0 ? 1 : 0));
     }
+
+    // Rings can provide small passive defense (e.g., Ring of Protection).
+    def += ringDefenseBonus();
     // Temporary shielding buff
     if (player().effects.shieldTurns > 0) def += 2;
     return def;
@@ -498,6 +609,8 @@ void Game::newGame(uint32_t seed) {
     equipMeleeId = 0;
     equipRangedId = 0;
     equipArmorId = 0;
+    equipRing1Id = 0;
+    equipRing2Id = 0;
 
     invOpen = false;
     invIdentifyMode = false;

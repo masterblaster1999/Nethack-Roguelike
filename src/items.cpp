@@ -126,6 +126,13 @@ const ItemDef& itemDef(ItemKind k) {
         { ItemKind::CorpseOgre,       "OGRE CORPSE",       true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 3, 260, 22, 0 },
         { ItemKind::CorpseMimic,      "MIMIC REMAINS",     true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 1, 160, 14, 0 },
         { ItemKind::CorpseMinotaur,   "MINOTAUR CORPSE",   true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 4, 300, 26, 0 },
+
+        // Rings (append-only)
+        // Note: Rings use ItemDef::mod* stats and can also contribute to defense.
+        { ItemKind::RingMight,        "RING OF MIGHT",      false, false, false, EquipSlot::Ring,       0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0, 0, 1, 160, 2, 0, 0, 0 },
+        { ItemKind::RingAgility,      "RING OF AGILITY",    false, false, false, EquipSlot::Ring,       0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0, 0, 1, 160, 0, 2, 0, 0 },
+        { ItemKind::RingFocus,        "RING OF FOCUS",      false, false, false, EquipSlot::Ring,       0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0, 0, 1, 160, 0, 0, 0, 2 },
+        { ItemKind::RingProtection,   "RING OF PROTECTION", false, false, false, EquipSlot::Ring,       0, 0, 1, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0, 0, 1, 190, 0, 0, 0, 0 },
     };
 
     const size_t idx = static_cast<size_t>(k);
@@ -145,7 +152,7 @@ std::string itemDisplayName(const Item& it) {
 
     // Prefix BUC (blessed/uncursed/cursed) + enchantment for non-stackable equipment.
     // (We intentionally keep new ItemKind values appended to preserve old save compatibility.)
-    if (isWeapon(it.kind) || isArmor(it.kind)) {
+    if (isWearableGear(it.kind)) {
         if (it.buc < 0) ss << "CURSED ";
         else if (it.buc > 0) ss << "BLESSED ";
 

@@ -23,6 +23,8 @@ enum class EquipSlot : uint8_t {
     MeleeWeapon,
     RangedWeapon,
     Armor,
+    // New equipment types (append-only; NOT serialized)
+    Ring,
 };
 
 enum class ItemKind : uint8_t {
@@ -122,10 +124,16 @@ enum class ItemKind : uint8_t {
     CorpseOgre,
     CorpseMimic,
     CorpseMinotaur,
+
+    // --- Rings (append-only) ---
+    RingMight,
+    RingAgility,
+    RingFocus,
+    RingProtection,
 };
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::CorpseMinotaur) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::RingProtection) + 1;
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;
@@ -227,6 +235,13 @@ struct ItemDef {
     // Economy / shops: base value in gold for one unit of this item.
     // 0 means "not normally sold" (e.g., gold itself, quest items, decorative props).
     int value = 0;
+
+    // Talent/stat modifiers granted while equipped.
+    // These are primarily used by rings (and are append-only for future gear types).
+    int modMight = 0;
+    int modAgility = 0;
+    int modVigor = 0;
+    int modFocus = 0;
 };
 
 struct Item {
@@ -260,6 +275,10 @@ inline bool isMeleeWeapon(ItemKind k) { return equipSlot(k) == EquipSlot::MeleeW
 inline bool isRangedWeapon(ItemKind k) { return equipSlot(k) == EquipSlot::RangedWeapon; }
 inline bool isWeapon(ItemKind k) { return isMeleeWeapon(k) || isRangedWeapon(k); }
 inline bool isArmor(ItemKind k) { return equipSlot(k) == EquipSlot::Armor; }
+inline bool isRingKind(ItemKind k) { return equipSlot(k) == EquipSlot::Ring; }
+
+// Convenience: "gear" in ProcRogue means an equipable item subject to BUC / enchant rules.
+inline bool isWearableGear(ItemKind k) { return isWeapon(k) || isArmor(k) || isRingKind(k); }
 
 std::string itemDisplayName(const Item& it);
 std::string itemDisplayNameSingle(ItemKind k);

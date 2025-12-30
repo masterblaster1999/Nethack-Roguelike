@@ -382,7 +382,7 @@ int Game::carryCapacity() const {
     // We deliberately reuse baseAtk as a "strength-like" stat to avoid bloating the save format.
     const Entity& p = player();
 
-    const int strLike = std::max(1, p.baseAtk + talentMight_);
+    const int strLike = std::max(1, p.baseAtk + playerMight());
     int cap = 80 + (strLike * 18) + (std::max(1, charLevel) * 6);
     cap = clampi(cap, 60, 9999);
     return cap;
@@ -475,7 +475,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 18u;
+constexpr uint32_t SAVE_VERSION = 19u;
 
 
 // v13+: append CRC32 of the entire payload (all bytes up to but excluding the CRC field).
@@ -877,6 +877,14 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     writePod(mem, eqR);
     writePod(mem, eqA);
 
+    // v19+: ring slots (two fingers)
+    if (SAVE_VERSION >= 19u) {
+        int32_t eq1 = equipRing1Id;
+        int32_t eq2 = equipRing2Id;
+        writePod(mem, eq1);
+        writePod(mem, eq2);
+    }
+
     int32_t clvl = charLevel;
     int32_t xpNow = xp;
     int32_t xpNeed = xpNext;
@@ -1200,6 +1208,8 @@ bool Game::loadFromFile(const std::string& path) {
         int32_t eqM = 0;
         int32_t eqR = 0;
         int32_t eqA = 0;
+        int32_t eq1 = 0;
+        int32_t eq2 = 0;
         int32_t clvl = 1;
         int32_t xpNow = 0;
         int32_t xpNeed = 20;
@@ -1221,6 +1231,10 @@ bool Game::loadFromFile(const std::string& path) {
         if (!readPod(in, eqM)) return fail();
         if (!readPod(in, eqR)) return fail();
         if (!readPod(in, eqA)) return fail();
+        if (ver >= 19u) {
+            if (!readPod(in, eq1)) return fail();
+            if (!readPod(in, eq2)) return fail();
+        }
         if (!readPod(in, clvl)) return fail();
         if (!readPod(in, xpNow)) return fail();
         if (!readPod(in, xpNeed)) return fail();
@@ -1527,6 +1541,8 @@ bool Game::loadFromFile(const std::string& path) {
         equipMeleeId = eqM;
         equipRangedId = eqR;
         equipArmorId = eqA;
+        equipRing1Id = eq1;
+        equipRing2Id = eq2;
         charLevel = clvl;
         xp = xpNow;
         xpNext = xpNeed;

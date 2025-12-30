@@ -941,6 +941,10 @@ bool Game::prayAtShrine(const std::string& modeIn) {
         if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
         idx = equippedArmorIndex();
         if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
+        idx = equippedRing1Index();
+        if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
+        idx = equippedRing2Index();
+        if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
         return false;
     };
     // Must be standing inside a shrine room.
@@ -1027,7 +1031,7 @@ bool Game::prayAtShrine(const std::string& modeIn) {
     } else if (mode == "uncurse") {
         int uncursed = 0;
         for (auto& it : inv) {
-            if (!isWeapon(it.kind) && !isArmor(it.kind)) continue;
+            if (!isWearableGear(it.kind)) continue;
             if (it.buc < 0) { it.buc = 0; uncursed++; }
         }
 
@@ -1072,10 +1076,18 @@ bool Game::prayAtShrine(const std::string& modeIn) {
             else {
                 idx = equippedRangedIndex();
                 if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
+                else {
+                    idx = equippedRing1Index();
+                    if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
+                    else {
+                        idx = equippedRing2Index();
+                        if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
+                    }
+                }
             }
         }
 
-        if (target && (isWeapon(target->kind) || isArmor(target->kind))) {
+        if (target && isWearableGear(target->kind)) {
             const std::string nm = displayItemName(*target);
             if (target->buc < 0) {
                 target->buc = 0;

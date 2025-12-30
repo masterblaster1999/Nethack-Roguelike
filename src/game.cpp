@@ -392,6 +392,7 @@ int Game::xpFor(EntityKind k) const {
         case EntityKind::Mimic: return 22;
         case EntityKind::Minotaur: return 45;
         case EntityKind::Shopkeeper: return 0;
+        case EntityKind::Dog: return 0;
         default: return 10;
     }
 }
@@ -474,7 +475,7 @@ bool Game::playerHasAmulet() const {
 }
 
 // ------------------------------------------------------------
-// Identification (potions/scrolls start unknown; appearances randomized per run)
+// Identification (items start unknown; appearances randomized per run)
 // ------------------------------------------------------------
 
 void Game::initIdentificationTables() {
@@ -486,11 +487,17 @@ void Game::initIdentificationTables() {
         return;
     }
 
-    // Mark potions + scrolls as unknown by default.
+    // Mark identifiable kinds as unknown by default.
     for (ItemKind k : POTION_KINDS) {
         identKnown[static_cast<size_t>(k)] = 0;
     }
     for (ItemKind k : SCROLL_KINDS) {
+        identKnown[static_cast<size_t>(k)] = 0;
+    }
+    for (ItemKind k : RING_KINDS) {
+        identKnown[static_cast<size_t>(k)] = 0;
+    }
+    for (ItemKind k : WAND_KINDS) {
         identKnown[static_cast<size_t>(k)] = 0;
     }
 
@@ -508,13 +515,20 @@ void Game::initIdentificationTables() {
 
     const size_t potionN = sizeof(POTION_KINDS) / sizeof(POTION_KINDS[0]);
     const size_t scrollN = sizeof(SCROLL_KINDS) / sizeof(SCROLL_KINDS[0]);
+    const size_t ringN = sizeof(RING_KINDS) / sizeof(RING_KINDS[0]);
+    const size_t wandN = sizeof(WAND_KINDS) / sizeof(WAND_KINDS[0]);
+
     const size_t potionAppearN = sizeof(POTION_APPEARANCES) / sizeof(POTION_APPEARANCES[0]);
     const size_t scrollAppearN = sizeof(SCROLL_APPEARANCES) / sizeof(SCROLL_APPEARANCES[0]);
+    const size_t ringAppearN = sizeof(RING_APPEARANCES) / sizeof(RING_APPEARANCES[0]);
+    const size_t wandAppearN = sizeof(WAND_APPEARANCES) / sizeof(WAND_APPEARANCES[0]);
 
     std::vector<uint8_t> p = shuffledIndices(potionAppearN);
     std::vector<uint8_t> s = shuffledIndices(scrollAppearN);
+    std::vector<uint8_t> r = shuffledIndices(ringAppearN);
+    std::vector<uint8_t> w = shuffledIndices(wandAppearN);
 
-    // If someone later adds more potion/scroll kinds than appearances, we still function
+    // If someone later adds more kinds than appearances, we still function
     // (we'll reuse appearances), but keep the common case unique.
     for (size_t i = 0; i < potionN; ++i) {
         const uint8_t app = p[i % p.size()];
@@ -523,6 +537,14 @@ void Game::initIdentificationTables() {
     for (size_t i = 0; i < scrollN; ++i) {
         const uint8_t app = s[i % s.size()];
         identAppearance[static_cast<size_t>(SCROLL_KINDS[i])] = app;
+    }
+    for (size_t i = 0; i < ringN; ++i) {
+        const uint8_t app = r[i % r.size()];
+        identAppearance[static_cast<size_t>(RING_KINDS[i])] = app;
+    }
+    for (size_t i = 0; i < wandN; ++i) {
+        const uint8_t app = w[i % w.size()];
+        identAppearance[static_cast<size_t>(WAND_KINDS[i])] = app;
     }
 }
 
@@ -554,24 +576,68 @@ std::string Game::appearanceName(ItemKind k) const {
         if (a >= n) a = static_cast<uint8_t>(a % n);
         return SCROLL_APPEARANCES[a];
     }
+    if (isRingKind(k)) {
+        constexpr size_t n = sizeof(RING_APPEARANCES) / sizeof(RING_APPEARANCES[0]);
+        static_assert(n > 0, "RING_APPEARANCES must not be empty");
+        uint8_t a = appearanceFor(k);
+        if (a >= n) a = static_cast<uint8_t>(a % n);
+        return RING_APPEARANCES[a];
+    }
+    if (isWandKind(k)) {
+        constexpr size_t n = sizeof(WAND_APPEARANCES) / sizeof(WAND_APPEARANCES[0]);
+        static_assert(n > 0, "WAND_APPEARANCES must not be empty");
+        uint8_t a = appearanceFor(k);
+        if (a >= n) a = static_cast<uint8_t>(a % n);
+        return WAND_APPEARANCES[a];
+    }
     return "";
 }
 
 std::string Game::unknownDisplayName(const Item& it) const {
     std::ostringstream ss;
+
+    auto appendGearPrefix = [&]() {
+        if (!isWearableGear(it.kind)) return;
+
+        if (it.buc < 0) ss << "CURSED ";
+        else if (it.buc > 0) ss << "BLESSED ";
+
+        if (it.enchant != 0) {
+            if (it.enchant > 0) ss << "+";
+            ss << it.enchant << " ";
+        }
+    };
+
     if (isPotionKind(it.kind)) {
         const std::string app = appearanceName(it.kind);
         if (it.count > 1) ss << it.count << " " << app << " POTIONS";
         else ss << app << " POTION";
-        return ss.str();
-    }
-    if (isScrollKind(it.kind)) {
+    } else if (isScrollKind(it.kind)) {
         const std::string app = appearanceName(it.kind);
         if (it.count > 1) ss << it.count << " SCROLLS '" << app << "'";
         else ss << "SCROLL '" << app << "'";
-        return ss.str();
+    } else if (isRingKind(it.kind)) {
+        appendGearPrefix();
+        const std::string app = appearanceName(it.kind);
+        ss << app << " RING";
+    } else if (isWandKind(it.kind)) {
+        appendGearPrefix();
+        const std::string app = appearanceName(it.kind);
+        ss << app << " WAND";
+    } else {
+        // Non-identifiable kinds keep their normal names.
+        return itemDisplayName(it);
     }
-    return itemDisplayName(it);
+
+    // Preserve shop price tags even while unidentified.
+    if (it.shopPrice > 0 && it.shopDepth > 0) {
+        const ItemDef& d = itemDef(it.kind);
+        const int n = d.stackable ? std::max(1, it.count) : 1;
+        const int total = it.shopPrice * n;
+        ss << " [PRICE " << total << "G]";
+    }
+
+    return ss.str();
 }
 
 bool Game::markIdentified(ItemKind k, bool quiet) {
@@ -653,7 +719,7 @@ void Game::newGame(uint32_t seed) {
 
     sneakMode_ = false;
 
-    // Randomize potion/scroll appearances and reset identification knowledge.
+    // Randomize identifiable item appearances and reset identification knowledge.
     initIdentificationTables();
 
     autoMode = AutoMoveMode::None;
@@ -714,6 +780,48 @@ void Game::newGame(uint32_t seed) {
 
     ents.push_back(p);
 
+    // Starting companion: a friendly dog.
+    {
+        Entity d;
+        d.id = nextEntityId++;
+        d.kind = EntityKind::Dog;
+        d.hpMax = 10;
+        d.hp = d.hpMax;
+        d.baseAtk = 2;
+        d.baseDef = 0;
+        d.spriteSeed = rng.nextU32();
+        d.speed = baseSpeedFor(d.kind);
+        d.willFlee = false;
+        d.alerted = false;
+
+        // Spawn near the player (prefer adjacent, but fall back to a wider search).
+        Vec2i spawn{-1, -1};
+        const int dirs8[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
+        for (int i = 0; i < 8; ++i) {
+            Vec2i c{p.pos.x + dirs8[i][0], p.pos.y + dirs8[i][1]};
+            if (!dung.inBounds(c.x, c.y)) continue;
+            if (!dung.isWalkable(c.x, c.y)) continue;
+            if (entityAt(c.x, c.y)) continue;
+            spawn = c;
+            break;
+        }
+        if (spawn.x < 0) {
+            // Extremely rare: player started boxed-in. Find the first free walkable tile.
+            for (int y = 0; y < dung.height && spawn.x < 0; ++y) {
+                for (int x = 0; x < dung.width && spawn.x < 0; ++x) {
+                    if (!dung.isWalkable(x, y)) continue;
+                    if (entityAt(x, y)) continue;
+                    spawn = {x, y};
+                }
+            }
+        }
+
+        if (spawn.x >= 0) {
+            d.pos = spawn;
+            ents.push_back(d);
+        }
+    }
+
     // Starting gear
     auto give = [&](ItemKind k, int count = 1) {
         Item it;
@@ -761,6 +869,7 @@ void Game::newGame(uint32_t seed) {
     burdenPrev_ = burdenState();
 
     pushMsg("WELCOME TO PROCROGUE++.", MessageKind::System);
+    pushMsg("A DOG TROTS AT YOUR HEELS.", MessageKind::System);
     {
         std::ostringstream ss;
         ss << "GOAL: FIND THE AMULET OF YENDOR (DEPTH " << QUEST_DEPTH
@@ -851,6 +960,18 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         // Everything else can traverse stairs for now.
         return true;
     };
+
+    // Carry companions across floors (NetHack-style): they always follow the player.
+    std::vector<Entity> companions;
+    companions.reserve(2);
+    for (size_t i = 0; i < ents.size(); ) {
+        if (ents[i].kind == EntityKind::Dog && ents[i].hp > 0) {
+            companions.push_back(ents[i]);
+            ents.erase(ents.begin() + static_cast<std::vector<Entity>::difference_type>(i));
+            continue;
+        }
+        ++i;
+    }
 
     // Collect eligible followers (adjacent to the stairs tile the player is using).
     std::vector<size_t> followerIdx;
@@ -1019,6 +1140,29 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         // Place stair followers before spawning so spawns avoid them.
         followedCount = placeFollowersNear(p.pos);
 
+        // Place companions (allies) near the player on the new level.
+        size_t companionCount = 0;
+        for (auto& c : companions) {
+            // Reset hostile-tracking state for allies.
+            c.alerted = false;
+            c.lastKnownPlayerPos = {-1, -1};
+            c.lastKnownPlayerAge = 9999;
+            // Treat stair-travel as consuming their action budget.
+            c.energy = 0;
+
+            Vec2i spawn = findNearbyFreeTile(p.pos, 4, true, false);
+            if (!dung.inBounds(spawn.x, spawn.y) || entityAt(spawn.x, spawn.y) != nullptr || !dung.isWalkable(spawn.x, spawn.y)) {
+                continue;
+            }
+
+            c.pos = spawn;
+            ents.push_back(c);
+            ++companionCount;
+        }
+        if (companionCount > 0) {
+            pushMsg("YOUR DOG FOLLOWS YOU.", MessageKind::System, true);
+        }
+
         spawnMonsters();
         spawnItems();
         spawnTraps();
@@ -1044,6 +1188,29 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         p.alerted = false;
 
         followedCount = placeFollowersNear(p.pos);
+
+        // Place companions (allies) near the player on the new level.
+        size_t companionCount = 0;
+        for (auto& c : companions) {
+            // Reset hostile-tracking state for allies.
+            c.alerted = false;
+            c.lastKnownPlayerPos = {-1, -1};
+            c.lastKnownPlayerAge = 9999;
+            // Treat stair-travel as consuming their action budget.
+            c.energy = 0;
+
+            Vec2i spawn = findNearbyFreeTile(p.pos, 4, true, false);
+            if (!dung.inBounds(spawn.x, spawn.y) || entityAt(spawn.x, spawn.y) != nullptr || !dung.isWalkable(spawn.x, spawn.y)) {
+                continue;
+            }
+
+            c.pos = spawn;
+            ents.push_back(c);
+            ++companionCount;
+        }
+        if (companionCount > 0) {
+            pushMsg("YOUR DOG FOLLOWS YOU.", MessageKind::System, true);
+        }
 
         // Stair arrival is noisy on visited floors too.
         emitNoise(p.pos, 12);

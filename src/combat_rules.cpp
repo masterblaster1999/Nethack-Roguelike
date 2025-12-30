@@ -41,6 +41,7 @@ DiceExpr meleeDiceForMonster(EntityKind kind) {
         case EntityKind::SkeletonArcher: return {1, 4, 0};
         case EntityKind::KoboldSlinger:  return {1, 4, 0};
         case EntityKind::Wolf:           return {1, 6, 0};
+        case EntityKind::Dog:            return {1, 4, 0};
         case EntityKind::Troll:          return {2, 4, 0};
         case EntityKind::Wizard:         return {1, 4, 0};
         case EntityKind::Snake:          return {1, 3, 0};

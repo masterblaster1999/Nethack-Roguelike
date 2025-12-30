@@ -18,6 +18,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::SkeletonArcher: return "SKELETON";
         case EntityKind::KoboldSlinger: return "KOBOLD";
         case EntityKind::Wolf: return "WOLF";
+        case EntityKind::Dog: return "DOG";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";
@@ -92,7 +93,7 @@ int damageReduction(const Game& game, const Entity& e) {
 } // namespace
 
 
-void Game::attackMelee(Entity& attacker, Entity& defender) {
+void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
     if (attacker.hp <= 0 || defender.hp <= 0) return;
 
     const bool attackerWasInvisible = (attacker.kind == EntityKind::Player && attacker.effects.invisTurns > 0);
@@ -118,17 +119,18 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
     }
 
     int atkBonus = 0;
-if (attacker.kind == EntityKind::Player) {
-    atkBonus = playerAttack();
-} else {
-    atkBonus = attacker.baseAtk;
+    if (attacker.kind == EntityKind::Player) {
+        // Kick is deliberately unarmed: it ignores wielded weapon accuracy.
+        atkBonus = kick ? (playerMeleePower() - 1) : playerAttack();
+    } else {
+        atkBonus = attacker.baseAtk;
 
-    // Enchants and blessings/curse on a wielded weapon affect accuracy a bit.
-    if (monsterCanEquipWeapons(attacker.kind) && attacker.gearMelee.id != 0 && isMeleeWeapon(attacker.gearMelee.kind)) {
-        const int b = (attacker.gearMelee.buc < 0) ? -1 : (attacker.gearMelee.buc > 0 ? 1 : 0);
-        atkBonus += attacker.gearMelee.enchant + b;
+        // Enchants and blessings/curse on a wielded weapon affect accuracy a bit.
+        if (monsterCanEquipWeapons(attacker.kind) && attacker.gearMelee.id != 0 && isMeleeWeapon(attacker.gearMelee.kind)) {
+            const int b = (attacker.gearMelee.buc < 0) ? -1 : (attacker.gearMelee.buc > 0 ? 1 : 0);
+            atkBonus += attacker.gearMelee.enchant + b;
+        }
     }
-}
     bool ambush = false;
     bool backstab = false;
     if (attacker.kind == EntityKind::Player && defender.kind != EntityKind::Player && !defender.alerted) {
@@ -169,19 +171,22 @@ if (attacker.kind == EntityKind::Player) {
     int bonus = statDamageBonusFromAtk(atkStatForBonus);
 
     if (attacker.kind == EntityKind::Player) {
-    if (const Item* w = equippedMelee()) {
-        baseDice = meleeDiceForWeapon(w->kind);
-        bonus += w->enchant;
-    }
-} else {
-    baseDice = meleeDiceForMonster(attacker.kind);
+        if (kick) {
+            // Kick is unarmed (ignores wielded weapons) and slightly stronger than a punch.
+            baseDice = DiceExpr{1, 3, 0};
+        } else if (const Item* w = equippedMelee()) {
+            baseDice = meleeDiceForWeapon(w->kind);
+            bonus += w->enchant;
+        }
+    } else {
+        baseDice = meleeDiceForMonster(attacker.kind);
 
-    if (monsterCanEquipWeapons(attacker.kind) && attacker.gearMelee.id != 0 && isMeleeWeapon(attacker.gearMelee.kind)) {
-        baseDice = meleeDiceForWeapon(attacker.gearMelee.kind);
-        const int b = (attacker.gearMelee.buc < 0) ? -1 : (attacker.gearMelee.buc > 0 ? 1 : 0);
-        bonus += attacker.gearMelee.enchant + b;
+        if (monsterCanEquipWeapons(attacker.kind) && attacker.gearMelee.id != 0 && isMeleeWeapon(attacker.gearMelee.kind)) {
+            baseDice = meleeDiceForWeapon(attacker.gearMelee.kind);
+            const int b = (attacker.gearMelee.buc < 0) ? -1 : (attacker.gearMelee.buc > 0 ? 1 : 0);
+            bonus += attacker.gearMelee.enchant + b;
+        }
     }
-}
     const int dice1 = rollDice(rng, baseDice);
     const int dice2 = (hc.crit ? rollDice(rng, baseDice) : 0);
 
@@ -207,17 +212,18 @@ if (attacker.kind == EntityKind::Player) {
     std::ostringstream ss;
     if (attacker.kind == EntityKind::Player) {
         if (ambush) ss << (backstab ? "SNEAK ATTACK! " : "AMBUSH! ");
-        ss << "YOU " << (hc.crit ? "CRIT " : "") << "HIT " << kindName(defender.kind);
+        ss << "YOU " << (hc.crit ? "CRIT " : "") << (kick ? "KICK " : "HIT ") << kindName(defender.kind);
         if (dmg > 0) ss << " FOR " << dmg;
         else ss << " BUT DO NO DAMAGE";
         ss << ".";
     } else if (defender.kind == EntityKind::Player) {
-        ss << kindName(attacker.kind) << " " << (hc.crit ? "CRITS" : "HITS") << " YOU";
+        if (kick) ss << kindName(attacker.kind) << " " << (hc.crit ? "CRIT KICKS" : "KICKS") << " YOU";
+        else ss << kindName(attacker.kind) << " " << (hc.crit ? "CRITS" : "HITS") << " YOU";
         if (dmg > 0) ss << " FOR " << dmg;
         else ss << " BUT DOES NO DAMAGE";
         ss << ".";
     } else {
-        ss << kindName(attacker.kind) << " HITS " << kindName(defender.kind) << ".";
+        ss << kindName(attacker.kind) << (kick ? " KICKS " : " HITS ") << kindName(defender.kind) << ".";
     }
     pushMsg(ss.str(), MessageKind::Combat, msgFromPlayer);
 
@@ -253,15 +259,22 @@ if (attacker.kind == EntityKind::Player) {
             if (attacker.kind == EntityKind::Troll) return true;
             if (attacker.kind == EntityKind::Minotaur) return true;
             if (attacker.kind == EntityKind::Player) {
-                if (const Item* w = equippedMelee()) {
-                    return (w->kind == ItemKind::Axe);
+                // Kicks are unarmed: weapon weight doesn't matter.
+                if (!kick) {
+                    if (const Item* w = equippedMelee()) {
+                        return (w->kind == ItemKind::Axe);
+                    }
                 }
             }
             return false;
         };
 
         if (attacker.kind == EntityKind::Player) {
-            if (const Item* w = equippedMelee()) {
+            if (kick) {
+                // Kicks are a positioning tool: modest damage, higher shove chance.
+                chance = 0.40f;
+                kcfg.power = 2;
+            } else if (const Item* w = equippedMelee()) {
                 switch (w->kind) {
                     case ItemKind::Axe:    chance = 0.26f; kcfg.power = 3; break;
                     case ItemKind::Sword:  chance = 0.18f; kcfg.power = 2; break;
@@ -304,6 +317,8 @@ if (attacker.kind == EntityKind::Player) {
             // Distance: heavy crits can push 2 tiles.
             kcfg.distance = 1;
             if (hc.crit && isHeavyAttacker()) {
+                kcfg.distance = 2;
+            } else if (kick && attacker.kind == EntityKind::Player && hc.crit && rng.chance(0.25f)) {
                 kcfg.distance = 2;
             } else if (!hc.crit && kcfg.power >= 3 && rng.chance(0.25f)) {
                 kcfg.distance = 2;
@@ -423,7 +438,7 @@ if (attacker.kind == EntityKind::Player) {
                 pushMsg(ds.str(), MessageKind::Combat, msgFromPlayer);
             }
 
-            if (attacker.kind == EntityKind::Player) {
+            if ((attacker.kind == EntityKind::Player || attacker.kind == EntityKind::Dog) && defender.kind != EntityKind::Dog) {
                 ++killCount;
                 grantXp(xpFor(defender.kind));
             }
@@ -576,7 +591,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                 std::ostringstream ds;
                 ds << kindName(hit->kind) << " DIES.";
                 pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
-                if (fromPlayer) {
+                if (fromPlayer && hit->kind != EntityKind::Dog) {
                     ++killCount;
                     grantXp(xpFor(hit->kind));
                 }
@@ -764,7 +779,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                         ds << kindName(e->kind) << " DIES.";
                         pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
                     }
-                    if (fromPlayer) {
+                    if (fromPlayer && e->kind != EntityKind::Dog) {
                         ++killCount;
                         grantXp(xpFor(e->kind));
                     }

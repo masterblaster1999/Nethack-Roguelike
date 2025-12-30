@@ -100,6 +100,7 @@ float densityFor(EntityKind k) {
         case EntityKind::SkeletonArcher: return 0.52f;
         case EntityKind::KoboldSlinger: return 0.50f;
         case EntityKind::Wolf: return 0.55f;
+        case EntityKind::Dog: return 0.52f;
         case EntityKind::Troll: return 0.68f;
         case EntityKind::Wizard: return 0.50f;
         case EntityKind::Snake: return 0.48f;
@@ -122,6 +123,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::SkeletonArcher: return add({ 200, 200, 190, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
         case EntityKind::KoboldSlinger: return add({ 180, 120, 70, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
         case EntityKind::Wolf: return add({ 150, 150, 160, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
+        case EntityKind::Dog: return add({ 180, 140, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Troll: return add({ 90, 170, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Wizard: return add({ 140, 100, 200, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Snake: return add({ 80, 190, 100, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
@@ -211,6 +213,14 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
     if (kind == EntityKind::Wolf) {
         // Nose
         setPx(s, 8, 10, {30,30,30,255});
+    }
+    if (kind == EntityKind::Dog) {
+        // Nose + a tiny collar.
+        setPx(s, 8, 10, {30,30,30,255});
+        setPx(s, 7, 12, {220, 40, 40, 255});
+        setPx(s, 8, 12, {220, 40, 40, 255});
+        setPx(s, 9, 12, {220, 40, 40, 255});
+        setPx(s, 8, 13, {240, 200, 80, 255});
     }
 
     if (kind == EntityKind::Troll) {

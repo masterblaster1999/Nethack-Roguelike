@@ -32,6 +32,9 @@ enum class EntityKind : uint8_t {
     // --- Shops (appended to keep save compatibility) ---
     Shopkeeper,
     Minotaur,
+
+    // Companions / allies (append-only to keep save compatibility)
+    Dog,
 };
 
 
@@ -56,6 +59,7 @@ inline int baseSpeedFor(EntityKind k) {
         case EntityKind::Mimic: return 60;
         case EntityKind::Shopkeeper: return 100;
         case EntityKind::Minotaur: return 105;
+        case EntityKind::Dog: return 120;
         default: return 100;
     }
 }
@@ -134,6 +138,7 @@ enum class Action : uint8_t {
     Disarm,             // Attempt to disarm a discovered adjacent trap
     CloseDoor,          // Close an adjacent open door
     LockDoor,           // Lock an adjacent closed/open door (consumes a Key)
+    Kick,               // Kick in a chosen direction
     ToggleAutoPickup,   // Cycle auto-pickup mode (OFF/GOLD/ALL)
     AutoExplore,        // Auto-explore (walk to nearest unexplored frontier)
 
@@ -327,6 +332,7 @@ public:
     // Spend a turn to emit a loud noise (useful to lure monsters).
     // Available via extended command: #shout
     void shout();
+    void whistle();
 
     // Dig/tunnel using a pickaxe (adjacent tile). Used by extended command: #dig <dir>
     // Returns true if a turn was spent.
@@ -511,6 +517,9 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
     const std::vector<Vec2i>& targetingLine() const { return targetLine; }
     bool targetingIsValid() const { return targetValid; }
 
+    // Kick prompt (directional)
+    bool isKicking() const { return kicking; }
+
     // Help overlay
     bool isHelpOpen() const { return helpOpen; }
 
@@ -670,6 +679,9 @@ private:
     std::vector<Vec2i> targetLine;
     bool targetValid = false;
 
+    // Kick prompt mode (directional)
+    bool kicking = false;
+
     // Help overlay
     bool helpOpen = false;
 
@@ -827,7 +839,9 @@ private:
     const Entity* entityAt(int x, int y) const;
 
     bool tryMove(Entity& e, int dx, int dy);
-    void attackMelee(Entity& attacker, Entity& defender);
+    // If kick=true, perform an unarmed kick attack (ignores equipped melee weapon)
+    // with a stronger knockback profile.
+    void attackMelee(Entity& attacker, Entity& defender, bool kick = false);
     void attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer, const Item* projectileTemplate = nullptr);
 
     void monsterTurn();
@@ -909,6 +923,10 @@ private:
     bool openChestAtPlayer();
     bool consumeKeys(int n);
     bool consumeLockpicks(int n);
+
+    // Kick action (directional prompt)
+    void beginKick();
+    bool kickInDirection(int dx, int dy);
 
     // Auto-move helpers
     bool hasRangedWeaponForAmmo(AmmoKind ammo) const;

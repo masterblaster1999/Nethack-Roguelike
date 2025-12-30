@@ -404,6 +404,7 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
             case EntityKind::SkeletonArcher: return 'S';
             case EntityKind::KoboldSlinger:  return 'k';
             case EntityKind::Wolf:   return 'w';
+            case EntityKind::Dog:    return 'd';
             case EntityKind::Troll:  return 'T';
             case EntityKind::Wizard: return 'W';
             case EntityKind::Snake:  return 'n';
@@ -694,6 +695,9 @@ static std::vector<std::string> extendedCommandList() {
     // Keep these short and stable: they're user-facing and used for completion/prefix matching.
     return {
         "help",
+    "shout",
+    "yell",
+    "whistle",
         "options",
         "binds",
         "bind",
@@ -1608,6 +1612,11 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "whistle") {
+        game.whistle();
+        return;
+    }
+
     // Should be unreachable because we validated against the command list, but keep a fallback.
     game.pushSystemMessage("UNHANDLED COMMAND: " + cmd);
 }
@@ -1623,6 +1632,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::SkeletonArcher: return "SKELETON";
         case EntityKind::KoboldSlinger: return "KOBOLD";
         case EntityKind::Wolf: return "WOLF";
+        case EntityKind::Dog: return "DOG";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";
@@ -1636,7 +1646,7 @@ const char* kindName(EntityKind k) {
 }
 
 // ------------------------------------------------------------
-// Identification visuals (run-randomized potion colors / scroll glyphs)
+// Identification visuals (run-randomized appearances: potions / scrolls / rings / wands)
 // ------------------------------------------------------------
 
 constexpr const char* POTION_APPEARANCES[] = {
@@ -1648,6 +1658,17 @@ constexpr const char* SCROLL_APPEARANCES[] = {
     "ZELGO", "XANATH", "KERNOD", "ELBERR", "MAPIRO", "VORPAL", "KLAATU", "BARADA",
     "NIKTO", "RAGNAR", "YENDOR", "MORDOR", "AZATHO", "ALOHOM", "OROBO", "NYARLA",
 };
+
+constexpr const char* RING_APPEARANCES[] = {
+    "COPPER", "BRASS", "STEEL", "SILVER", "GOLD", "PLATINUM", "IRON", "TIN",
+    "OPAL", "ONYX", "JADE", "RUBY", "SAPPHIRE", "EMERALD", "TOPAZ", "GLASS",
+};
+
+constexpr const char* WAND_APPEARANCES[] = {
+    "OAK", "BONE", "IVORY", "ASH", "EBONY", "PINE", "BAMBOO", "YEW",
+    "MAPLE", "ELM", "BIRCH", "WILLOW", "CRYSTAL", "OBSIDIAN", "STONE", "COPPER",
+};
+
 
 // Fixed sets of identifiable kinds (append-only behavior is handled elsewhere).
 constexpr ItemKind POTION_KINDS[] = {
@@ -1674,6 +1695,20 @@ constexpr ItemKind SCROLL_KINDS[] = {
     ItemKind::ScrollRemoveCurse,
     ItemKind::ScrollConfusion,
 };
+
+constexpr ItemKind RING_KINDS[] = {
+    ItemKind::RingMight,
+    ItemKind::RingAgility,
+    ItemKind::RingFocus,
+    ItemKind::RingProtection,
+};
+
+constexpr ItemKind WAND_KINDS[] = {
+    ItemKind::WandSparks,
+    ItemKind::WandDigging,
+    ItemKind::WandFireball,
+};
+
 
 } // namespace
 

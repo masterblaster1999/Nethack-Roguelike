@@ -184,19 +184,47 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         return false;
     }
 
+    Vec2i prevPos = e.pos;
+    bool moved = false;
+
     if (Entity* other = entityAtMut(nx, ny)) {
         if (other->id == e.id) return false;
-        if (e.kind == EntityKind::Player && other->kind == EntityKind::Shopkeeper && !other->alerted) {
-            pushMsg("THE SHOPKEEPER SAYS: \"NO FIGHTING IN HERE!\"", MessageKind::Warning, true);
-            return false;
+
+        // Friendly swap: step into your dog (or let it step into you) to avoid getting stuck
+        // in tight corridors. This also makes auto-travel much smoother with a companion.
+        if (e.kind == EntityKind::Player && other->kind == EntityKind::Dog) {
+            if (other->effects.webTurns > 0) {
+                pushMsg("YOUR DOG IS STUCK IN WEBBING!", MessageKind::Warning, true);
+                return false;
+            }
+            other->pos = prevPos;
+            e.pos = {nx, ny};
+            moved = true;
+        } else if (e.kind == EntityKind::Dog && other->id == playerId_) {
+            if (other->effects.webTurns > 0) {
+                return false;
+            }
+            other->pos = prevPos;
+            e.pos = {nx, ny};
+            moved = true;
         }
-        attackMelee(e, *other);
-        return true;
+
+        if (!moved) {
+            if ((e.kind == EntityKind::Player || e.kind == EntityKind::Dog) && other->kind == EntityKind::Shopkeeper && !other->alerted) {
+                if (e.kind == EntityKind::Player) {
+                    pushMsg("THE SHOPKEEPER SAYS: \"NO FIGHTING IN HERE!\"", MessageKind::Warning, true);
+                }
+                return false;
+            }
+            attackMelee(e, *other);
+            return true;
+        }
+    } else {
+        e.pos = {nx, ny};
+        moved = true;
     }
 
-    Vec2i prevPos = e.pos;
-    e.pos.x = nx;
-    e.pos.y = ny;
+    if (!moved) return false;
 
     if (e.kind == EntityKind::Player) {
         const bool wasInShop = (roomTypeAt(dung, prevPos) == RoomType::Shop);
@@ -926,6 +954,311 @@ bool Game::lockDoor() {
     emitNoise({doorX, doorY}, 8);
 
     return true; // Locking costs a turn.
+}
+
+
+void Game::beginKick() {
+    if (gameOver || gameWon) return;
+
+    // Close other overlays/modes.
+    invOpen = false;
+    invIdentifyMode = false;
+    targeting = false;
+    looking = false;
+    helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
+    optionsOpen = false;
+
+    if (commandOpen) {
+        commandOpen = false;
+        commandBuf.clear();
+        commandDraft.clear();
+        commandHistoryPos = -1;
+    }
+
+    msgScroll = 0;
+
+    kicking = true;
+    pushMsg("KICK IN WHICH DIRECTION?", MessageKind::System, true);
+}
+
+bool Game::kickInDirection(int dx, int dy) {
+    if (gameOver || gameWon) return false;
+
+    Entity& p = playerMut();
+
+    dx = clampi(dx, -1, 1);
+    dy = clampi(dy, -1, 1);
+    if (dx == 0 && dy == 0) return false;
+
+    // Confusion can scramble the kick direction.
+    if (p.effects.confusionTurns > 0) {
+        static const int dirs[8][2] = { {0,-1},{0,1},{-1,0},{1,0},{-1,-1},{1,-1},{-1,1},{1,1} };
+        const int i = rng.range(0, 7);
+        dx = dirs[i][0];
+        dy = dirs[i][1];
+        pushMsg("YOU FLAIL IN CONFUSION!", MessageKind::Warning, true);
+    }
+
+    // Prevent kicking diagonally "through" a blocked corner.
+    if (dx != 0 && dy != 0 && !diagonalPassable(dung, p.pos, dx, dy)) {
+        pushMsg("YOU CAN'T REACH AROUND THE CORNER.", MessageKind::Info, true);
+        return false;
+    }
+
+    const Vec2i tgt{ p.pos.x + dx, p.pos.y + dy };
+    if (!dung.inBounds(tgt.x, tgt.y)) {
+        pushMsg("YOU KICK THE AIR.", MessageKind::Info, true);
+        emitNoise(p.pos, 6);
+        return true;
+    }
+
+    // Kicking is noisy even if it hits nothing useful.
+    auto baseNoise = [&]() {
+        emitNoise(tgt, 10);
+    };
+
+    // First, kicking a creature.
+    if (Entity* e = entityAtMut(tgt.x, tgt.y)) {
+        if (e->id == p.id) return false;
+        if (e->kind == EntityKind::Dog) {
+            pushMsg("YOU CAN'T BRING YOURSELF TO KICK YOUR DOG.", MessageKind::Info, true);
+            return false;
+        }
+        baseNoise();
+        attackMelee(p, *e, true);
+        return true;
+    }
+
+    // Next, kicking a chest on the ground.
+    GroundItem* chestGi = nullptr;
+    for (auto& gi : ground) {
+        if (gi.pos == tgt && gi.item.kind == ItemKind::Chest) { chestGi = &gi; break; }
+    }
+
+    if (chestGi) {
+        Item& chest = chestGi->item;
+
+        // Mimic reveal.
+        if (chestMimic(chest)) {
+            // Remove the chest.
+            const int chestId = chest.id;
+            ground.erase(std::remove_if(ground.begin(), ground.end(), [&](const GroundItem& gi) {
+                return gi.pos == tgt && gi.item.id == chestId;
+            }), ground.end());
+
+            pushMsg("THE CHEST WAS A MIMIC!", MessageKind::Warning, true);
+            emitNoise(tgt, 14);
+
+            Entity m;
+            m.id = nextEntityId++;
+            m.kind = EntityKind::Mimic;
+            m.speed = baseSpeedFor(m.kind);
+            m.energy = 0;
+            m.pos = tgt;
+            m.spriteSeed = rng.nextU32();
+            m.groupId = 0;
+            m.hpMax = 16;
+            m.baseAtk = 4;
+            m.baseDef = 2;
+            m.willFlee = false;
+
+            // Depth scaling.
+            int dd = std::max(0, depth_ - 1);
+            if (dd > 0) {
+                m.hpMax += dd;
+                m.baseAtk += dd / 3;
+                m.baseDef += dd / 4;
+            }
+            m.hp = m.hpMax;
+            m.alerted = true;
+            m.lastKnownPlayerPos = p.pos;
+            m.lastKnownPlayerAge = 0;
+
+            ents.push_back(m);
+            return true;
+        }
+
+        // Kick impact noise.
+        baseNoise();
+
+        // Trapped chest: kicking can set it off.
+        if (chestTrapped(chest)) {
+            // Reuse the chest trap logic used for opening.
+            // This consumes the trap but does not open the chest.
+            const TrapKind tk = chestTrapKind(chest);
+            setChestTrapped(chest, false);
+            setChestTrapKnown(chest, true);
+
+            switch (tk) {
+                case TrapKind::Spike: {
+                    int dmg = rng.range(2, 5) + std::min(3, depth_ / 2);
+                    p.hp -= dmg;
+                    std::ostringstream ss;
+                    ss << "A NEEDLE TRAP JABS YOU! YOU TAKE " << dmg << ".";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                    if (p.hp <= 0) {
+                        pushMsg("YOU DIE.", MessageKind::Combat, false);
+                        if (endCause_.empty()) endCause_ = "KILLED BY CHEST TRAP";
+                        gameOver = true;
+                        return true;
+                    }
+                    break;
+                }
+                case TrapKind::PoisonDart: {
+                    int dmg = rng.range(1, 2);
+                    p.hp -= dmg;
+                    p.effects.poisonTurns = std::max(p.effects.poisonTurns, rng.range(6, 12));
+                    std::ostringstream ss;
+                    ss << "POISON NEEDLES HIT YOU! YOU TAKE " << dmg << ".";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                    pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
+                    if (p.hp <= 0) {
+                        pushMsg("YOU DIE.", MessageKind::Combat, false);
+                        if (endCause_.empty()) endCause_ = "KILLED BY POISON CHEST TRAP";
+                        gameOver = true;
+                        return true;
+                    }
+                    break;
+                }
+                case TrapKind::Teleport: {
+                    pushMsg("A TELEPORT GLYPH FLARES FROM THE CHEST!", MessageKind::Warning, false);
+                    Vec2i dst = dung.randomFloor(rng, true);
+                    for (int tries = 0; tries < 200; ++tries) {
+                        dst = dung.randomFloor(rng, true);
+                        if (!entityAt(dst.x, dst.y) && dst != dung.stairsUp && dst != dung.stairsDown) break;
+                    }
+                    p.pos = dst;
+                    recomputeFov();
+                    break;
+                }
+                case TrapKind::Alarm: {
+                    pushMsg("AN ALARM BLARES FROM THE CHEST!", MessageKind::Warning, false);
+                    alertMonstersTo(tgt, 0);
+                    break;
+                }
+                case TrapKind::Web: {
+                    const int turns = rng.range(4, 7) + std::min(6, depth_ / 2);
+                    p.effects.webTurns = std::max(p.effects.webTurns, turns);
+                    pushMsg("STICKY WEBBING EXPLODES OUT OF THE CHEST!", MessageKind::Warning, true);
+                    break;
+                }
+                case TrapKind::ConfusionGas: {
+                    const int turns = rng.range(8, 14) + std::min(6, depth_ / 2);
+                    p.effects.confusionTurns = std::max(p.effects.confusionTurns, turns);
+                    pushMsg("A NOXIOUS GAS BURSTS FROM THE CHEST!", MessageKind::Warning, true);
+                    pushMsg("YOU FEEL CONFUSED!", MessageKind::Warning, true);
+                    emitNoise(tgt, 8);
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+
+        if (gameOver) return true;
+
+        // Bashing a lock: higher-tier chests are sturdier.
+        if (chestLocked(chest)) {
+            float chance = 0.18f + 0.04f * static_cast<float>(playerMight());
+            chance += 0.02f * static_cast<float>(charLevel);
+            chance -= 0.06f * static_cast<float>(chestTier(chest));
+            chance = std::clamp(chance, 0.03f, 0.75f);
+
+            if (rng.chance(chance)) {
+                setChestLocked(chest, false);
+                pushMsg("YOU BASH THE CHEST'S LOCK OPEN!", MessageKind::Success, true);
+            } else {
+                pushMsg("THE CHEST'S LOCK HOLDS.", MessageKind::Info, true);
+            }
+        }
+
+        // Try to slide the chest one tile.
+        const Vec2i dst{ tgt.x + dx, tgt.y + dy };
+        if (dung.inBounds(dst.x, dst.y) && dung.isWalkable(dst.x, dst.y) && !entityAt(dst.x, dst.y)
+            && dst != dung.stairsUp && dst != dung.stairsDown) {
+            chestGi->pos = dst;
+            pushMsg("YOU KICK THE CHEST. IT SLIDES!", MessageKind::Info, true);
+        } else {
+            pushMsg("THUD!", MessageKind::Info, true);
+        }
+
+        return true;
+    }
+
+    // Doors and secret doors.
+    Tile& t = dung.at(tgt.x, tgt.y);
+    if (t.type == TileType::DoorClosed) {
+        dung.openDoor(tgt.x, tgt.y);
+        pushMsg("YOU KICK OPEN THE DOOR.", MessageKind::Info, true);
+        emitNoise(tgt, 14);
+        return true;
+    }
+    if (t.type == TileType::DoorLocked) {
+        float chance = 0.20f + 0.05f * static_cast<float>(playerMight());
+        chance += 0.02f * static_cast<float>(charLevel);
+        chance = std::clamp(chance, 0.05f, 0.85f);
+
+        if (rng.chance(chance)) {
+            dung.unlockDoor(tgt.x, tgt.y);
+            dung.openDoor(tgt.x, tgt.y);
+            pushMsg("YOU SMASH THE LOCKED DOOR OPEN!", MessageKind::Success, true);
+        } else {
+            pushMsg("THE LOCKED DOOR HOLDS.", MessageKind::Warning, true);
+            // A hard kick can hurt.
+            if (rng.chance(0.35f)) {
+                p.hp -= 1;
+                pushMsg("OUCH! YOU HURT YOUR FOOT.", MessageKind::Warning, true);
+                if (p.hp <= 0) {
+                    pushMsg("YOU DIE.", MessageKind::Combat, false);
+                    if (endCause_.empty()) endCause_ = "KILLED BY A BROKEN TOE";
+                    gameOver = true;
+                }
+            }
+        }
+
+        emitNoise(tgt, 16);
+        return true;
+    }
+    if (t.type == TileType::DoorSecret) {
+        float chance = 0.25f + 0.05f * static_cast<float>(playerMight());
+        chance = std::clamp(chance, 0.05f, 0.80f);
+        if (rng.chance(chance)) {
+            t.type = TileType::DoorClosed;
+            t.explored = true;
+            pushMsg("YOU HEAR A HOLLOW SOUND.", MessageKind::Success, true);
+        } else {
+            pushMsg("THUD.", MessageKind::Info, true);
+        }
+        emitNoise(tgt, 10);
+        return true;
+    }
+    if (t.type == TileType::DoorOpen) {
+        pushMsg("IT'S ALREADY OPEN.", MessageKind::Info, true);
+        return false;
+    }
+
+    // Otherwise, just kick whatever is there.
+    if (!dung.isWalkable(tgt.x, tgt.y)) {
+        pushMsg("THUD!", MessageKind::Info, true);
+        emitNoise(tgt, 8);
+        // Small chance to hurt yourself when kicking solid stone.
+        if (rng.chance(0.20f)) {
+            p.hp -= 1;
+            pushMsg("OUCH!", MessageKind::Warning, true);
+            if (p.hp <= 0) {
+                pushMsg("YOU DIE.", MessageKind::Combat, false);
+                if (endCause_.empty()) endCause_ = "KILLED BY A BROKEN TOE";
+                gameOver = true;
+            }
+        }
+        return true;
+    }
+
+    pushMsg("YOU KICK THE GROUND.", MessageKind::Info, true);
+    emitNoise(tgt, 6);
+    return true;
 }
 
 

@@ -196,9 +196,6 @@ inline bool isScrollKind(ItemKind k) {
     }
 }
 
-inline bool isIdentifiableKind(ItemKind k) {
-    return isPotionKind(k) || isScrollKind(k);
-}
 
 struct ItemDef {
     ItemKind kind;
@@ -276,6 +273,18 @@ inline bool isRangedWeapon(ItemKind k) { return equipSlot(k) == EquipSlot::Range
 inline bool isWeapon(ItemKind k) { return isMeleeWeapon(k) || isRangedWeapon(k); }
 inline bool isArmor(ItemKind k) { return equipSlot(k) == EquipSlot::Armor; }
 inline bool isRingKind(ItemKind k) { return equipSlot(k) == EquipSlot::Ring; }
+
+// Wands are ranged weapons that use charges (maxCharges>0) and do not require ammo.
+inline bool isWandKind(ItemKind k) {
+    const ItemDef& d = itemDef(k);
+    return isRangedWeapon(k) && d.maxCharges > 0 && d.ammo == AmmoKind::None;
+}
+
+// Identifiable items start unknown each run and use randomized appearances.
+inline bool isIdentifiableKind(ItemKind k) {
+    return isPotionKind(k) || isScrollKind(k) || isRingKind(k) || isWandKind(k);
+}
+
 
 // Convenience: "gear" in ProcRogue means an equipable item subject to BUC / enchant rules.
 inline bool isWearableGear(ItemKind k) { return isWeapon(k) || isArmor(k) || isRingKind(k); }

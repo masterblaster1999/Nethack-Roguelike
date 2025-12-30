@@ -1311,8 +1311,12 @@ bool Game::loadFromFile(const std::string& path) {
             if (identifyItemsEnabled && kindCount < static_cast<uint32_t>(ITEM_KIND_COUNT)) {
                 constexpr size_t POTION_APP_COUNT = sizeof(POTION_APPEARANCES) / sizeof(POTION_APPEARANCES[0]);
                 constexpr size_t SCROLL_APP_COUNT = sizeof(SCROLL_APPEARANCES) / sizeof(SCROLL_APPEARANCES[0]);
+                constexpr size_t RING_APP_COUNT = sizeof(RING_APPEARANCES) / sizeof(RING_APPEARANCES[0]);
+                constexpr size_t WAND_APP_COUNT = sizeof(WAND_APPEARANCES) / sizeof(WAND_APPEARANCES[0]);
                 std::vector<bool> usedPotionApps(POTION_APP_COUNT, false);
                 std::vector<bool> usedScrollApps(SCROLL_APP_COUNT, false);
+                std::vector<bool> usedRingApps(RING_APP_COUNT, false);
+                std::vector<bool> usedWandApps(WAND_APP_COUNT, false);
 
                 auto markUsed = [&](ItemKind k, std::vector<bool>& used, size_t maxApps) {
                     const uint32_t idx = static_cast<uint32_t>(k);
@@ -1323,6 +1327,8 @@ bool Game::loadFromFile(const std::string& path) {
 
                 for (ItemKind k : POTION_KINDS) markUsed(k, usedPotionApps, usedPotionApps.size());
                 for (ItemKind k : SCROLL_KINDS) markUsed(k, usedScrollApps, usedScrollApps.size());
+                for (ItemKind k : RING_KINDS) markUsed(k, usedRingApps, usedRingApps.size());
+                for (ItemKind k : WAND_KINDS) markUsed(k, usedWandApps, usedWandApps.size());
 
                 auto takeUnused = [&](std::vector<bool>& used) -> uint8_t {
                     for (size_t j = 0; j < used.size(); ++j) {
@@ -1343,6 +1349,8 @@ bool Game::loadFromFile(const std::string& path) {
 
                     if (isPotionKind(k)) identAppTmp[static_cast<size_t>(i)] = takeUnused(usedPotionApps);
                     else if (isScrollKind(k)) identAppTmp[static_cast<size_t>(i)] = takeUnused(usedScrollApps);
+                    else if (isRingKind(k)) identAppTmp[static_cast<size_t>(i)] = takeUnused(usedRingApps);
+                    else if (isWandKind(k)) identAppTmp[static_cast<size_t>(i)] = takeUnused(usedWandApps);
                 }
             }
         }

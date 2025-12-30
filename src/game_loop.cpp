@@ -41,7 +41,7 @@ void Game::update(float dt) {
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
-        if (invOpen || targeting || helpOpen || looking || minimapOpen || statsOpen || levelUpOpen || optionsOpen || commandOpen || isFinished()) {
+        if (invOpen || targeting || kicking || helpOpen || looking || minimapOpen || statsOpen || levelUpOpen || optionsOpen || commandOpen || isFinished()) {
             stopAutoMove(true);
             return;
         }
@@ -80,6 +80,7 @@ void Game::handleAction(Action a) {
         invOpen = false;
         invIdentifyMode = false;
         targeting = false;
+        kicking = false;
         helpOpen = false;
         looking = false;
         minimapOpen = false;
@@ -638,6 +639,43 @@ if (optionsSel == 13) {
 
     bool acted = false;
 
+    // Kick prompt mode (directional).
+    // This is a lightweight two-step command: press KICK, then a direction key.
+    if (kicking) {
+        switch (a) {
+            case Action::Up:        acted = kickInDirection(0, -1); break;
+            case Action::Down:      acted = kickInDirection(0, 1); break;
+            case Action::Left:      acted = kickInDirection(-1, 0); break;
+            case Action::Right:     acted = kickInDirection(1, 0); break;
+            case Action::UpLeft:    acted = kickInDirection(-1, -1); break;
+            case Action::UpRight:   acted = kickInDirection(1, -1); break;
+            case Action::DownLeft:  acted = kickInDirection(-1, 1); break;
+            case Action::DownRight: acted = kickInDirection(1, 1); break;
+
+            case Action::Inventory:
+                kicking = false;
+                openInventory();
+                return;
+
+            case Action::Cancel:
+            case Action::Kick:
+                kicking = false;
+                pushMsg("NEVER MIND.", MessageKind::System, true);
+                return;
+
+            default:
+                // Ignore non-directional input while waiting for a direction.
+                return;
+        }
+
+        // Only exit the prompt if an action actually consumed time.
+        if (acted) {
+            kicking = false;
+            advanceAfterPlayerAction();
+        }
+        return;
+    }
+
     // Inventory mode.
     if (invOpen) {
         switch (a) {
@@ -739,6 +777,10 @@ if (optionsSel == 13) {
             break;
         case Action::LockDoor:
             acted = lockDoor();
+            break;
+        case Action::Kick:
+            beginKick();
+            acted = false;
             break;
         case Action::Pickup:
             acted = pickupAtPlayer();
@@ -875,6 +917,62 @@ void Game::shout() {
     advanceAfterPlayerAction();
 }
 
+void Game::whistle() {
+    if (isFinished()) return;
+
+    Entity& p = playerMut();
+    Entity* d = nullptr;
+    for (auto& e : ents) {
+        if (e.kind == EntityKind::Dog && e.hp > 0) { d = &e; break; }
+    }
+
+    pushMsg("YOU WHISTLE SHARPLY.", MessageKind::Info, true);
+    emitNoise(p.pos, 14);
+
+    if (!d) {
+        pushMsg("...BUT NOTHING ANSWERS.", MessageKind::Info, true);
+        advanceAfterPlayerAction();
+        return;
+    }
+
+    const int dist = chebyshev(d->pos, p.pos);
+    if (dist <= 2) {
+        pushMsg("YOUR DOG LOOKS UP AT YOU.", MessageKind::Info, true);
+        advanceAfterPlayerAction();
+        return;
+    }
+
+    // Try to call the dog to a nearby free tile.
+    Vec2i best = d->pos;
+    bool found = false;
+    for (int r = 1; r <= 3 && !found; ++r) {
+        for (int dy = -r; dy <= r && !found; ++dy) {
+            for (int dx = -r; dx <= r && !found; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                const int nx = p.pos.x + dx;
+                const int ny = p.pos.y + dy;
+                if (!dung.inBounds(nx, ny)) continue;
+                if (!dung.isWalkable(nx, ny)) continue;
+                if (entityAt(nx, ny)) continue;
+                // Avoid placing the dog directly on stairs when possible.
+                if ((nx == dung.stairsUp.x && ny == dung.stairsUp.y) || (nx == dung.stairsDown.x && ny == dung.stairsDown.y)) {
+                    continue;
+                }
+                best = {nx, ny};
+                found = true;
+            }
+        }
+    }
+
+    if (found) {
+        d->pos = best;
+        pushMsg("YOUR DOG COMES RUNNING.", MessageKind::Success, true);
+    }
+
+    advanceAfterPlayerAction();
+}
+
+
 void Game::advanceAfterPlayerAction() {
     // One "turn" = one player action that consumes time.
     // Haste gives the player an extra action every other turn by skipping the monster turn.
@@ -959,6 +1057,8 @@ void Game::advanceAfterPlayerAction() {
 bool Game::anyVisibleHostiles() const {
     for (const auto& e : ents) {
         if (e.id == playerId_) continue;
+        if (e.kind == EntityKind::Dog) continue;
+        if (e.kind == EntityKind::Shopkeeper && !e.alerted) continue;
         if (e.hp <= 0) continue;
         if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
         if (dung.at(e.pos.x, e.pos.y).visible) return true;

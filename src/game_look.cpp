@@ -92,7 +92,9 @@ std::string Game::describeAt(Vec2i p) const {
             if (e->id == playerId_) {
                 ss << " | YOU";
             } else {
-                ss << " | " << kindName(e->kind) << " " << e->hp << "/" << e->hpMax;
+                std::string label = kindName(e->kind);
+                if (e->kind == EntityKind::Dog) label = "DOG (ALLY)";
+                ss << " | " << label << " " << e->hp << "/" << e->hpMax;
 
                 if (e->gearMelee.id != 0 && isMeleeWeapon(e->gearMelee.kind)) {
                     ss << " | WPN: " << itemDisplayNameSingle(e->gearMelee.kind);

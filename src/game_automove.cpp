@@ -474,7 +474,7 @@ Vec2i Game::findNearestExploreFrontier() const {
             if (isKnownTrap(nx, ny)) continue;
 
             if (const Entity* occ = entityAt(nx, ny)) {
-                if (occ->id != playerId_) continue;
+                if (occ->id != playerId_ && occ->kind != EntityKind::Dog) continue;
             }
 
             visited[ii] = 1;
@@ -526,7 +526,7 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
 
         // Don't path through monsters.
         if (const Entity* occ = entityAt(x, y)) {
-            if (occ->id != playerId_) return false;
+            if (occ->id != playerId_ && occ->kind != EntityKind::Dog) return false;
         }
 
         return true;

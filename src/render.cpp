@@ -810,8 +810,13 @@ void Renderer::drawHud(const Game& game) {
 
     drawText5x7(renderer, 8, controlY1, 2, gray,
         "MOVE: WASD/ARROWS/NUMPAD | SPACE/. WAIT | R REST | N SNEAK | < > STAIRS");
-    drawText5x7(renderer, 8, controlY2, 2, gray,
-        "F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH (TRAPS/SECRETS)");
+    if (game.isKicking()) {
+        drawText5x7(renderer, 8, controlY2, 2, yellow,
+            "KICK: CHOOSE DIRECTION (ESC CANCEL)");
+    } else {
+        drawText5x7(renderer, 8, controlY2, 2, gray,
+            "B KICK | F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH (TRAPS/SECRETS)");
+    }
     drawText5x7(renderer, 8, controlY3, 2, gray,
         "F2 OPT | # CMD | M MAP | SHIFT+TAB STATS | F5 SAVE | F9 LOAD | PGUP/PGDN LOG | ? HELP");
 
@@ -1076,25 +1081,36 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 				statLine("(INCLUDES SHIELD +2)", gray);
 			}
 		} else if (isWand) {
-			statLine("TYPE: WAND", white);
+			statLine(identifiable ? "TYPE: WAND (IDENTIFIABLE)" : "TYPE: WAND", white);
 
-			auto wandEffect = [&]() -> std::string {
-				if (it.kind == ItemKind::WandDigging) return "DIGGING";
-				switch (def.projectile) {
-					case ProjectileKind::Spark: return "SPARKS";
-					case ProjectileKind::Fireball: return "FIREBALL";
-					default: return "MAGIC";
+			if (identifiable && !identified) {
+				statLine("EFFECT: UNKNOWN", gray);
+				statLine("RANGE: UNKNOWN", gray);
+				statLine("CHARGES: UNKNOWN", gray);
+				statLine("READY: UNKNOWN", gray);
+				statLine("IDENTIFIED: NO", gray);
+			} else {
+				auto wandEffect = [&]() -> std::string {
+					if (it.kind == ItemKind::WandDigging) return "DIGGING";
+					switch (def.projectile) {
+						case ProjectileKind::Spark: return "SPARKS";
+						case ProjectileKind::Fireball: return "FIREBALL";
+						default: return "MAGIC";
+					}
+				};
+
+				statLine("EFFECT: " + wandEffect(), gray);
+				statLine("RANGE: " + std::to_string(def.range), gray);
+				statLine("CHARGES: " + std::to_string(it.charges) + "/" + std::to_string(def.maxCharges), gray);
+				const int baseRAtk = std::max(1, baseAtk + def.rangedAtk + it.enchant + 2);
+				statLine("RATK (BASE): " + std::to_string(baseRAtk) + "+", gray);
+				statLine(std::string("READY: ") + (it.charges > 0 ? "YES" : "NO"), gray);
+				if (def.projectile == ProjectileKind::Fireball) {
+					statLine("AOE: RADIUS 1 (3x3)", gray);
 				}
-			};
-
-			statLine("EFFECT: " + wandEffect(), gray);
-			statLine("RANGE: " + std::to_string(def.range), gray);
-			statLine("CHARGES: " + std::to_string(it.charges) + "/" + std::to_string(def.maxCharges), gray);
-			const int baseRAtk = std::max(1, baseAtk + def.rangedAtk + it.enchant + 2);
-			statLine("RATK (BASE): " + std::to_string(baseRAtk) + "+", gray);
-			statLine(std::string("READY: ") + (it.charges > 0 ? "YES" : "NO"), gray);
-			if (def.projectile == ProjectileKind::Fireball) {
-				statLine("AOE: RADIUS 1 (3x3)", gray);
+				if (identifiable) {
+					statLine("IDENTIFIED: YES", gray);
+				}
 			}
 		} else if (isRangedWeapon(it.kind)) {
 			statLine("TYPE: RANGED WEAPON", white);
@@ -1116,23 +1132,32 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			const bool ready = (def.range > 0) && chargesOk && ammoOk;
 			statLine(std::string("READY: ") + (ready ? "YES" : "NO"), gray);
 		} else if (isRingKind(it.kind)) {
-			statLine("TYPE: RING", white);
-			const int bucBonus = (it.buc < 0 ? -1 : (it.buc > 0 ? 1 : 0));
-			auto fmtMod = [&](const char* label, int base) {
-				if (base == 0) return;
-				// Only apply ench/buc if the ring actually provides the stat.
-				const int v = base + it.enchant + bucBonus;
-				const std::string s = (v >= 0 ? "+" : "") + std::to_string(v);
-				statLine(std::string(label) + s, gray);
-			};
-			fmtMod("MIGHT: ", def.modMight);
-			fmtMod("AGILITY: ", def.modAgility);
-			fmtMod("VIGOR: ", def.modVigor);
-			fmtMod("FOCUS: ", def.modFocus);
-			if (def.defense != 0) {
-				const int v = def.defense + it.enchant + bucBonus;
-				const std::string s = (v >= 0 ? "+" : "") + std::to_string(v);
-				statLine("DEF BONUS: " + s, gray);
+			statLine(identifiable ? "TYPE: RING (IDENTIFIABLE)" : "TYPE: RING", white);
+
+			if (identifiable && !identified) {
+				statLine("EFFECT: UNKNOWN", gray);
+				statLine("IDENTIFIED: NO", gray);
+			} else {
+				const int bucBonus = (it.buc < 0 ? -1 : (it.buc > 0 ? 1 : 0));
+				auto fmtMod = [&](const char* label, int base) {
+					if (base == 0) return;
+					// Only apply ench/buc if the ring actually provides the stat.
+					const int v = base + it.enchant + bucBonus;
+					const std::string s = (v >= 0 ? "+" : "") + std::to_string(v);
+					statLine(std::string(label) + s, gray);
+				};
+				fmtMod("MIGHT: ", def.modMight);
+				fmtMod("AGILITY: ", def.modAgility);
+				fmtMod("VIGOR: ", def.modVigor);
+				fmtMod("FOCUS: ", def.modFocus);
+				if (def.defense != 0) {
+					const int v = def.defense + it.enchant + bucBonus;
+					const std::string s = (v >= 0 ? "+" : "") + std::to_string(v);
+					statLine("DEF BONUS: " + s, gray);
+				}
+				if (identifiable) {
+					statLine("IDENTIFIED: YES", gray);
+				}
 			}
 		} else if (def.consumable) {
 			statLine(identifiable ? "TYPE: CONSUMABLE (IDENTIFIABLE)" : "TYPE: CONSUMABLE", white);
@@ -1301,7 +1326,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("MOVE: WASD / ARROWS / NUMPAD (DIAGONALS OK)");
     lineGray("SPACE/. WAIT  R REST  < > STAIRS");
     lineGray("F FIRE  G PICKUP  I/TAB INVENTORY");
-    lineGray("L/V LOOK  C SEARCH  T DISARM  K CLOSE DOOR  SHIFT+K LOCK DOOR");
+    lineGray("B KICK  L/V LOOK  C SEARCH  T DISARM  K CLOSE DOOR  SHIFT+K LOCK DOOR");
     lineGray("O EXPLORE  P AUTOPICKUP  M MINIMAP  SHIFT+TAB STATS");
     lineGray("F2 OPTIONS  # EXTENDED COMMANDS  (TYPE + ENTER)");
     lineGray("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART");
@@ -1331,7 +1356,8 @@ void Renderer::drawHelpOverlay(const Game& game) {
     y += 6;
     lineWhite("TIPS:");
     lineGray("SEARCH CAN REVEAL TRAPS AND SECRET DOORS. EXT: #SEARCH N [ALL]");
-    lineGray("LOCKED DOORS: USE KEYS, LOCKPICKS, OR A SCROLL OF KNOCK.");
+    lineGray("LOCKED DOORS: USE KEYS, LOCKPICKS, A SCROLL OF KNOCK, OR KICK THEM IN (RISKY).");
+    lineGray("KICKING CHESTS MAY TRIGGER TRAPS AND CAN SLIDE THEM.");
     lineGray("SOME VAULT DOORS MAY BE TRAPPED.");
     lineGray("AUTO-EXPLORE STOPS IF YOU SEE AN ENEMY OR GET HURT/DEBUFFED.");
     lineGray("INVENTORY: E EQUIP  U USE  X DROP  SHIFT+X DROP ALL");

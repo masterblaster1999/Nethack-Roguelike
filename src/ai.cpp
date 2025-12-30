@@ -22,6 +22,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::SkeletonArcher: return "SKELETON";
         case EntityKind::KoboldSlinger: return "KOBOLD";
         case EntityKind::Wolf: return "WOLF";
+        case EntityKind::Dog: return "DOG";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";
@@ -40,6 +41,10 @@ void Game::monsterTurn() {
     if (isFinished()) return;
 
     const Entity& p = player();
+    Entity* dog = nullptr;
+    for (auto& e : ents) {
+        if (e.kind == EntityKind::Dog && e.hp > 0) { dog = &e; break; }
+    }
     const int W = dung.width;
     const int H = dung.height;
 
@@ -187,6 +192,54 @@ void Game::monsterTurn() {
 
         refreshPackAnchor();
 
+        // Starting companion AI (Dog): follows the player and fights nearby hostiles.
+        if (m.kind == EntityKind::Dog) {
+            // Look for the nearest hostile in line-of-sight.
+            Entity* best = nullptr;
+            int bestMan = 9999;
+            for (auto& e : ents) {
+                if (e.id == playerId_) continue;
+                if (e.hp <= 0) continue;
+                if (e.kind == EntityKind::Dog) continue;
+                if (e.kind == EntityKind::Shopkeeper && !e.alerted) continue;
+
+                const int man0 = manhattan(m.pos, e.pos);
+                if (man0 > LOS_MANHATTAN) continue;
+                if (!dung.hasLineOfSight(m.pos.x, m.pos.y, e.pos.x, e.pos.y)) continue;
+
+                if (man0 < bestMan) {
+                    bestMan = man0;
+                    best = &e;
+                }
+            }
+
+            if (best) {
+                if (isAdjacent8(m.pos, best->pos)) {
+                    attackMelee(m, *best);
+                    return;
+                }
+
+                const auto& costMap = getCostMap(best->pos, PathMode::Normal);
+                const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                if (step != m.pos) {
+                    tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
+                }
+                return;
+            }
+
+            // No visible hostiles: stick close to the player.
+            const int dist = chebyshev(m.pos, p.pos);
+            if (dist > 2) {
+                const auto& costMap = getCostMap(p.pos, PathMode::Normal);
+                const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                if (step != m.pos) {
+                    tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
+                }
+            }
+            return;
+        }
+
+
         // Peaceful shopkeepers don't hunt or wander.
         if (m.kind == EntityKind::Shopkeeper && !m.alerted) {
             // Don't allow "banked" energy while peaceful.
@@ -298,6 +351,11 @@ void Game::monsterTurn() {
         if (isAdjacent8(m.pos, p.pos)) {
             Entity& pm = playerMut();
             attackMelee(m, pm);
+            return;
+        }
+        // Monsters will also fight your companion if it blocks them.
+        if (dog && dog->hp > 0 && dog->id != m.id && isAdjacent8(m.pos, dog->pos)) {
+            attackMelee(m, *dog);
             return;
         }
 

@@ -102,6 +102,10 @@ void Game::endTargeting(bool fire) {
                         attackRanged(playerMut(), targetPos, d.range, atkBonus, dmgBonus, d.projectile, true, projPtr);
                     }
 
+                    if (isWand) {
+                        (void)markIdentified(wCopy.kind, false);
+                    }
+
                     if (d.maxCharges > 0 && sputtered) {
                         pushMsg("YOUR WAND SPUTTERS OUT.");
                     }

@@ -806,11 +806,13 @@ bool Game::equipSelected() {
         if (equipRing1Id == 0) {
             equipRing1Id = it.id;
             pushMsg("YOU PUT ON " + displayItemName(it) + ".");
+            (void)markIdentified(it.kind, false);
             return true;
         }
         if (equipRing2Id == 0) {
             equipRing2Id = it.id;
             pushMsg("YOU PUT ON " + displayItemName(it) + ".");
+            (void)markIdentified(it.kind, false);
             return true;
         }
 
@@ -819,12 +821,14 @@ bool Game::equipSelected() {
             std::string oldName = ringNameById(equipRing1Id);
             equipRing1Id = it.id;
             pushMsg("YOU SWAP " + oldName + " FOR " + displayItemName(it) + ".");
+            (void)markIdentified(it.kind, false);
             return true;
         }
         if (!equippedItemCursed(equipRing2Id)) {
             std::string oldName = ringNameById(equipRing2Id);
             equipRing2Id = it.id;
             pushMsg("YOU SWAP " + oldName + " FOR " + displayItemName(it) + ".");
+            (void)markIdentified(it.kind, false);
             return true;
         }
 

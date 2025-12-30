@@ -370,6 +370,15 @@ BurdenState burdenStateForWeights(int weight, int capacity) {
 
 void Game::setEncumbranceEnabled(bool enabled) {
     encumbranceEnabled_ = enabled;
+
+    // This setter is called during early boot (main.cpp) before a run is created/loaded.
+    // At that point there is no player entity yet, so computing burden would
+    // dereference an empty entity list (undefined behavior -> 0xC0000005 on Windows).
+    if (ents.empty() || playerId_ == 0) {
+        burdenPrev_ = BurdenState::Unburdened;
+        return;
+    }
+
     burdenPrev_ = burdenState();
 }
 
@@ -425,8 +434,16 @@ std::string Game::sneakTag() const {
 
 void Game::setLightingEnabled(bool enabled) {
     lightingEnabled_ = enabled;
+
+    // This setter is called during early boot (main.cpp) before a run is created/loaded.
+    // FOV/light-map recomputation requires a valid player position.
+    if (ents.empty() || playerId_ == 0) {
+        lightMap_.clear();
+        return;
+    }
+
     // Ensure cached lighting/FOV state matches the new mode.
-    recomputeLightMap();
+    // recomputeFov() calls recomputeLightMap() internally.
     recomputeFov();
 }
 

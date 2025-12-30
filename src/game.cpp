@@ -28,14 +28,36 @@ uint32_t dailySeedUtc(std::string* outDateIso) {
 
 Game::Game() : dung(MAP_W, MAP_H) {}
 
+namespace {
+// During early boot, main.cpp applies user settings before a run is created/loaded.
+// Some getters/setters (lighting/encumbrance) may consult the player entity. In that
+// phase, `ents` is still empty. Returning a stable dummy prevents UB (and Windows
+// access violations) while keeping the rest of the code simple.
+Entity& dummyPlayerEntity() {
+    static Entity dummy;
+    static bool init = false;
+    if (!init) {
+        dummy.id = 0;
+        dummy.kind = EntityKind::Player;
+        dummy.hpMax = 1;
+        dummy.hp = 1;
+        dummy.pos = {0, 0};
+        init = true;
+    }
+    return dummy;
+}
+}
+
 const Entity& Game::player() const {
     for (const auto& e : ents) if (e.id == playerId_) return e;
-    return ents.front();
+    if (!ents.empty()) return ents.front();
+    return dummyPlayerEntity();
 }
 
 Entity& Game::playerMut() {
     for (auto& e : ents) if (e.id == playerId_) return e;
-    return ents.front();
+    if (!ents.empty()) return ents.front();
+    return dummyPlayerEntity();
 }
 
 void Game::pushMsg(const std::string& s, MessageKind kind, bool fromPlayer) {

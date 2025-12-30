@@ -1320,7 +1320,8 @@ void generateLabyrinth(Dungeon& d, RNG& rng, int depth) {
     // Start chamber near the upper-left to encourage traversal.
     Vec2i prefer{2, 2};
     Vec2i best = { d.width / 2, d.height / 2 };
-    int bestDist = 1e9;
+    constexpr int kInfDist = 1000000000;
+    int bestDist = kInfDist;
     for (int y = 1; y < d.height - 1; ++y) {
         for (int x = 1; x < d.width - 1; ++x) {
             if (d.at(x, y).type != TileType::Floor) continue;
@@ -1332,7 +1333,7 @@ void generateLabyrinth(Dungeon& d, RNG& rng, int depth) {
             }
         }
     }
-    if (bestDist >= 1000000000) {
+    if (bestDist >= kInfDist) {
         best = d.randomFloor(rng, true);
     }
 
@@ -1428,6 +1429,7 @@ void generateLabyrinth(Dungeon& d, RNG& rng, int depth) {
 
 
 void generateSanctum(Dungeon& d, RNG& rng, int depth) {
+    (void)rng;
     (void)depth; // reserved for future per-depth theming
     fillWalls(d);
 

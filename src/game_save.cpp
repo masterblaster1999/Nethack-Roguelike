@@ -878,7 +878,7 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     writePod(mem, eqA);
 
     // v19+: ring slots (two fingers)
-    if (SAVE_VERSION >= 19u) {
+    if constexpr (SAVE_VERSION >= 19u) {
         int32_t eq1 = equipRing1Id;
         int32_t eq2 = equipRing2Id;
         writePod(mem, eq1);
@@ -893,7 +893,7 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     writePod(mem, xpNeed);
 
     // v16+: talent allocations
-    if (SAVE_VERSION >= 16u) {
+    if constexpr (SAVE_VERSION >= 16u) {
         writePod(mem, static_cast<int32_t>(talentMight_));
         writePod(mem, static_cast<int32_t>(talentAgility_));
         writePod(mem, static_cast<int32_t>(talentVigor_));
@@ -950,7 +950,7 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     writePod(mem, lightingEnabledTmp);
 
     // v18+: sneak mode (per-run)
-    if (SAVE_VERSION >= 18u) {
+    if constexpr (SAVE_VERSION >= 18u) {
         uint8_t sneakEnabledTmp = sneakMode_ ? 1u : 0u;
         writePod(mem, sneakEnabledTmp);
     }
@@ -1055,7 +1055,7 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
 
         // Confusion gas field (v15+)
         // Stored as a per-tile intensity map.
-        if (SAVE_VERSION >= 15u) {
+        if constexpr (SAVE_VERSION >= 15u) {
             const uint32_t expected = tileCount;
             uint32_t gasCount = static_cast<uint32_t>(st.confusionGas.size());
             if (gasCount != expected) gasCount = expected;
@@ -1071,7 +1071,7 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     std::string payload = mem.str();
 
     // v13+: integrity footer (CRC32 over the entire payload)
-    if (SAVE_VERSION >= 13u) {
+    if constexpr (SAVE_VERSION >= 13u) {
         const uint32_t c = crc32(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
         appendU32LE(payload, c);
     }

@@ -4,6 +4,11 @@
 // many internal helper functions in an unnamed namespace. Some translation units
 // won't reference every helper, so we suppress -Wunused-function in this file
 // to keep builds clean without changing global warning settings.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4505) // unreferenced function with internal linkage has been removed
+#endif
+
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -1674,4 +1679,8 @@ constexpr ItemKind SCROLL_KINDS[] = {
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
+#endif
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
 #endif

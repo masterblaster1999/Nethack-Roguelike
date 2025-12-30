@@ -152,7 +152,7 @@ std::string Game::equippedArmorName() const {
 }
 
 int Game::playerAttack() const {
-    int atk = player().baseAtk;
+    int atk = playerMeleePower();
     if (const Item* w = equippedMelee()) {
         atk += itemDef(w->kind).meleeAtk;
         atk += w->enchant;
@@ -162,7 +162,7 @@ int Game::playerAttack() const {
 }
 
 int Game::playerDefense() const {
-    int def = player().baseDef;
+    int def = playerEvasion();
     if (const Item* a = equippedArmor()) {
         def += itemDef(a->kind).defense;
         def += a->enchant;
@@ -282,7 +282,8 @@ void Game::grantXp(int amount) {
 
 void Game::onPlayerLevelUp() {
     Entity& p = playerMut();
-    int hpGain = 2 + rng.range(0, 2);
+
+    const int hpGain = 2 + rng.range(0, 2);
     p.hpMax += hpGain;
 
     bool atkUp = false;
@@ -309,6 +310,27 @@ void Game::onPlayerLevelUp() {
     if (defUp) ss2 << ", +1 DEF";
     ss2 << ".";
     pushMsg(ss2.str(), MessageKind::Success);
+
+    // Award a talent point and force the allocation overlay to open.
+    talentPointsPending_ += 1;
+    levelUpOpen = true;
+    levelUpSel = std::clamp(levelUpSel, 0, 3);
+
+    // Cancel other UI modes / automation so the player can make a choice.
+    invOpen = false;
+    invIdentifyMode = false;
+    targeting = false;
+    targetLine.clear();
+    targetValid = false;
+    helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
+    optionsOpen = false;
+    commandOpen = false;
+    looking = false;
+    stopAutoMove(true);
+
+    pushMsg("CHOOSE A TALENT: MIGHT / AGILITY / VIGOR / FOCUS (ARROWS + ENTER).", MessageKind::System, true);
 }
 
 bool Game::playerHasAmulet() const {
@@ -466,8 +488,10 @@ void Game::newGame(uint32_t seed) {
     ents.clear();
     ground.clear();
     trapsCur.clear();
+    confusionGas_.clear();
     inv.clear();
     fx.clear();
+    fxExpl.clear();
 
     nextEntityId = 1;
     nextItemId = 1;
@@ -484,11 +508,15 @@ void Game::newGame(uint32_t seed) {
     helpOpen = false;
     minimapOpen = false;
     statsOpen = false;
+    levelUpOpen = false;
+    levelUpSel = 0;
 
     msgs.clear();
     msgScroll = 0;
 
     // autoPickup is a user setting; do not reset it between runs.
+
+    sneakMode_ = false;
 
     // Randomize potion/scroll appearances and reset identification knowledge.
     initIdentificationTables();
@@ -522,12 +550,20 @@ void Game::newGame(uint32_t seed) {
     xp = 0;
     xpNext = 20;
 
+    talentMight_ = 0;
+    talentAgility_ = 0;
+    talentVigor_ = 0;
+    talentFocus_ = 0;
+    talentPointsPending_ = 0;
+
     // Hunger pacing (optional setting; stored per-run in save files).
     hungerMax = 800;
     hunger = hungerMax;
     hungerStatePrev = hungerStateFor(hunger, hungerMax);
 
     dung.generate(rng, depth_, DUNGEON_MAX_DEPTH);
+    // Environmental fields reset per floor (no lingering gas on a fresh level).
+    confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
     // Create player
     Entity p;
@@ -607,6 +643,7 @@ void Game::storeCurrentLevel() {
     st.dung = dung;
     st.ground = ground;
     st.traps = trapsCur;
+    st.confusionGas = confusionGas_;
     st.monsters.clear();
     for (const auto& e : ents) {
         if (e.id == playerId_) continue;
@@ -622,6 +659,10 @@ bool Game::restoreLevel(int depth) {
     dung = it->second.dung;
     ground = it->second.ground;
     trapsCur = it->second.traps;
+
+    confusionGas_ = it->second.confusionGas;
+    const size_t expect = static_cast<size_t>(dung.width * dung.height);
+    if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
 
     // Keep player, restore monsters.
     ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
@@ -651,10 +692,70 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         }
     }
 
+    // --- Stair travel now has teeth ---
+    // Using stairs is noisy, and monsters adjacent to the stairs may follow you between floors.
+    // This makes "stair-dancing" less of a guaranteed reset without making stairs unusable.
+
+    const Vec2i leavePos = player().pos;
+
+    // Alert nearby monsters before selecting followers (so "unaware" creatures standing next to the
+    // stairs can still react to you clomping up/down).
+    emitNoise(leavePos, 12);
+
+    auto canMonsterUseStairs = [&](const Entity& m) -> bool {
+        if (m.hp <= 0) return false;
+        if (m.id == playerId_) return false;
+
+        // Shopkeepers don't follow you between levels (keeps shops stable and prevents leaving the
+        // shop floor from turning into a cross-dungeon chase).
+        if (m.kind == EntityKind::Shopkeeper) return false;
+
+        // Webbed monsters are physically stuck.
+        if (m.effects.webTurns > 0) return false;
+
+        // Everything else can traverse stairs for now.
+        return true;
+    };
+
+    // Collect eligible followers (adjacent to the stairs tile the player is using).
+    std::vector<size_t> followerIdx;
+    followerIdx.reserve(8);
+
+    for (size_t i = 0; i < ents.size(); ++i) {
+        const Entity& m = ents[i];
+        if (!canMonsterUseStairs(m)) continue;
+        if (chebyshev(m.pos, leavePos) > 1) continue;
+        if (!m.alerted) continue;
+        followerIdx.push_back(i);
+    }
+
+    // Shuffle follower order for variety, then cap (prevents pathological surround-deaths).
+    for (int i = static_cast<int>(followerIdx.size()) - 1; i > 0; --i) {
+        const int j = rng.range(0, i);
+        std::swap(followerIdx[static_cast<size_t>(i)], followerIdx[static_cast<size_t>(j)]);
+    }
+
+    const size_t maxFollowers = 4;
+    if (followerIdx.size() > maxFollowers) followerIdx.resize(maxFollowers);
+
+    // Remove followers from the current level so the old level saves without them.
+    // Erase from high -> low indices so offsets stay valid.
+    std::sort(followerIdx.begin(), followerIdx.end(), [](size_t a, size_t b) { return a > b; });
+
+    std::vector<Entity> followers;
+    followers.reserve(followerIdx.size());
+
+    for (size_t idx : followerIdx) {
+        if (idx >= ents.size()) continue;
+        followers.push_back(ents[idx]);
+        ents.erase(ents.begin() + static_cast<std::vector<Entity>::difference_type>(idx));
+    }
+
     storeCurrentLevel();
 
     // Clear transient states.
     fx.clear();
+    fxExpl.clear();
     inputLock = false;
 
     autoMode = AutoMoveMode::None;
@@ -674,6 +775,94 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     bool restored = restoreLevel(depth_);
 
     Entity& p = playerMut();
+
+    // Helper: find a nearby free, walkable tile (used for safe stair arrival + follower placement).
+    auto isFreeTile = [&](int x, int y, bool ignorePlayer) -> bool {
+        if (!dung.inBounds(x, y)) return false;
+        if (!dung.isWalkable(x, y)) return false;
+
+        const Entity* e = entityAt(x, y);
+        if (!e) return true;
+        if (ignorePlayer && e->id == playerId_) return true;
+        return false;
+    };
+
+    auto findNearbyFreeTile = [&](Vec2i center, int maxRadius, bool avoidStairs, bool ignorePlayer) -> Vec2i {
+        // Search expanding rings (chebyshev distance).
+        std::vector<Vec2i> candidates;
+
+        auto isAvoided = [&](const Vec2i& v) -> bool {
+            if (!avoidStairs) return false;
+            if (v == dung.stairsUp) return true;
+            if (v == dung.stairsDown) return true;
+            return false;
+        };
+
+        for (int r = 1; r <= maxRadius; ++r) {
+            candidates.clear();
+            candidates.reserve(static_cast<size_t>(8 * r));
+
+            for (int dy = -r; dy <= r; ++dy) {
+                for (int dx = -r; dx <= r; ++dx) {
+                    const int d = std::max(std::abs(dx), std::abs(dy));
+                    if (d != r) continue;
+                    Vec2i v{center.x + dx, center.y + dy};
+                    if (!dung.inBounds(v.x, v.y)) continue;
+                    if (isAvoided(v)) continue;
+                    candidates.push_back(v);
+                }
+            }
+
+            // Randomize the ring for less predictable spawns.
+            for (int i = static_cast<int>(candidates.size()) - 1; i > 0; --i) {
+                const int j = rng.range(0, i);
+                std::swap(candidates[static_cast<size_t>(i)], candidates[static_cast<size_t>(j)]);
+            }
+
+            for (const Vec2i& v : candidates) {
+                if (isFreeTile(v.x, v.y, ignorePlayer)) return v;
+            }
+        }
+
+        // Fallback: brute scan.
+        for (int y = 0; y < dung.height; ++y) {
+            for (int x = 0; x < dung.width; ++x) {
+                Vec2i v{x, y};
+                if (isAvoided(v)) continue;
+                if (isFreeTile(x, y, ignorePlayer)) return v;
+            }
+        }
+
+        return center; // Worst-case (shouldn't happen).
+    };
+
+    auto placeFollowersNear = [&](Vec2i anchor) -> size_t {
+        size_t placed = 0;
+
+        for (auto& m : followers) {
+            // Followers arrive "ready": they know where you are and will act on their next turn.
+            m.alerted = true;
+            m.lastKnownPlayerPos = p.pos;
+            m.lastKnownPlayerAge = 0;
+            // Treat stair-travel as consuming their action budget.
+            m.energy = 0;
+
+            // Avoid spawning on stairs tiles to reduce accidental soft-locks.
+            Vec2i spawn = findNearbyFreeTile(anchor, 6, true, false);
+            if (!dung.inBounds(spawn.x, spawn.y) || entityAt(spawn.x, spawn.y) != nullptr || !dung.isWalkable(spawn.x, spawn.y)) {
+                continue;
+            }
+
+            m.pos = spawn;
+            ents.push_back(m);
+            ++placed;
+        }
+
+        return placed;
+    };
+
+    size_t followedCount = 0;
+
     if (!restored) {
         // New level: generate and populate.
         ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
@@ -681,23 +870,48 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         }), ents.end());
         ground.clear();
         trapsCur.clear();
+        confusionGas_.clear();
 
         dung.generate(rng, depth_, DUNGEON_MAX_DEPTH);
+        confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+
+        const Vec2i desiredArrival = goingDown ? dung.stairsUp : dung.stairsDown;
 
         // Place player before spawning so we never spawn on top of them.
-        p.pos = goingDown ? dung.stairsUp : dung.stairsDown;
+        p.pos = desiredArrival;
         p.alerted = false;
+
+        // Place stair followers before spawning so spawns avoid them.
+        followedCount = placeFollowersNear(p.pos);
 
         spawnMonsters();
         spawnItems();
         spawnTraps();
 
+        // Stair arrival is noisy: nearby monsters may wake and investigate.
+        emitNoise(p.pos, 12);
+
         // Save this freshly created level.
         storeCurrentLevel();
     } else {
         // Returning to a visited level.
-        p.pos = goingDown ? dung.stairsUp : dung.stairsDown;
+        const Vec2i desiredArrival = goingDown ? dung.stairsUp : dung.stairsDown;
+
+        // If a monster is camping the stairs, don't overlap: step off to the side.
+        const Entity* blocker = entityAt(desiredArrival.x, desiredArrival.y);
+        if (blocker && blocker->id != playerId_) {
+            p.pos = findNearbyFreeTile(desiredArrival, 6, true, true);
+            pushMsg("THE STAIRS ARE BLOCKED! YOU STUMBLE ASIDE.", MessageKind::Warning, true);
+        } else {
+            p.pos = desiredArrival;
+        }
+
         p.alerted = false;
+
+        followedCount = placeFollowersNear(p.pos);
+
+        // Stair arrival is noisy on visited floors too.
+        emitNoise(p.pos, 12);
     }
 
     // Small heal on travel.
@@ -708,10 +922,27 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     else ss << "YOU ASCEND TO DEPTH " << depth_ << ".";
     pushMsg(ss.str());
 
+    if (followedCount > 0) {
+        std::ostringstream ms;
+        if (goingDown) {
+            if (followedCount == 1) ms << "SOMETHING FOLLOWS YOU DOWN THE STAIRS...";
+            else ms << followedCount << " CREATURES FOLLOW YOU DOWN THE STAIRS...";
+        } else {
+            if (followedCount == 1) ms << "SOMETHING FOLLOWS YOU UP THE STAIRS...";
+            else ms << followedCount << " CREATURES FOLLOW YOU UP THE STAIRS...";
+        }
+        pushMsg(ms.str(), MessageKind::Warning, true);
+    }
+
     recomputeFov();
 
     if (goingDown && depth_ == MIDPOINT_DEPTH) {
         pushMsg("YOU HAVE REACHED THE MIDPOINT OF THE DUNGEON.", MessageKind::System, true);
+    }
+
+    if (goingDown && depth_ == QUEST_DEPTH - 1) {
+        pushMsg("THE PASSAGES TWIST AND TURN... YOU ENTER A LABYRINTH.", MessageKind::System, true);
+        pushMsg("IN THE DISTANCE, YOU HEAR THE DRUMMING OF HEAVY HOOVES...", MessageKind::Warning, true);
     }
     if (goingDown && depth_ == QUEST_DEPTH && !playerHasAmulet()) {
         pushMsg("A SINISTER PRESENCE LURKS AHEAD. THE AMULET MUST BE NEAR...", MessageKind::System, true);

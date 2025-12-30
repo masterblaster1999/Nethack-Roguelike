@@ -409,7 +409,12 @@ bool Game::openChestAtPlayer() {
             int ench = (rng.chance(0.25f + 0.10f * tier)) ? rng.range(1, 1 + tier) : 0;
             dropItemHere(ak, 1, ench);
         } else if (roll < 48) {
-            ItemKind wk = rng.chance(0.30f) ? ItemKind::WandDigging : ItemKind::WandSparks;
+            ItemKind wk;
+            if (depth_ >= 6 && tier >= 1 && rng.chance(0.12f)) {
+                wk = ItemKind::WandFireball;
+            } else {
+                wk = rng.chance(0.30f) ? ItemKind::WandDigging : ItemKind::WandSparks;
+            }
             dropItemHere(wk, 1);
         } else if (roll < 60) {
             dropItemHere(ItemKind::PotionStrength, rng.range(1, 2));
@@ -783,14 +788,27 @@ bool Game::useSelected() {
     }
 
     if (it.kind == ItemKind::PotionStrength) {
-        Entity& p = playerMut();        p.baseAtk += 1;
+        // Potions can be blessed/uncursed/cursed; reflect that in how many talent points are gained.
+        int delta = 1;
+        if (it.buc > 0) delta = 2;
+        else if (it.buc < 0) delta = -1;
+
+        talentMight_ = clampi(talentMight_ + delta, -5, 50);
+
         std::ostringstream ss;
-        ss << "YOU FEEL STRONGER! ATK IS NOW " << p.baseAtk << ".";
-        pushMsg(ss.str(), MessageKind::Success, true);
+        if (delta > 0) {
+            ss << "YOU FEEL STRONGER! MIGHT IS NOW " << talentMight_ << ".";
+            pushMsg(ss.str(), MessageKind::Success, true);
+        } else {
+            ss << "YOU FEEL WEAKER... MIGHT IS NOW " << talentMight_ << ".";
+            pushMsg(ss.str(), MessageKind::Warning, true);
+        }
+
         (void)markIdentified(it.kind, false);
         consumeOneStackable();
         return true;
     }
+
 
     if (it.kind == ItemKind::ScrollTeleport) {
         // Teleport to a random free floor.
@@ -1198,6 +1216,201 @@ bool Game::useSelected() {
         hungerStatePrev = hungerStateFor(hunger, hungerMax);
 
         pushMsg("YOU EAT A FOOD RATION.", MessageKind::Loot, true);
+        consumeOneStackable();
+        return true;
+    }
+
+    if (isCorpseKind(it.kind)) {
+        Entity& p = playerMut();
+        const ItemDef& d = itemDef(it.kind);
+
+        // Corpse decay state (charges = remaining freshness in turns).
+        const int ch = it.charges;
+        const bool rotten = (ch <= 60);
+        const bool stale = (ch <= 160);
+
+        const int beforeState = hungerStateFor(hunger, hungerMax);
+
+        if (ch <= 0) {
+            pushMsg("THE CORPSE CRUMBLES INTO ROT.", MessageKind::Warning, true);
+            consumeOneStackable();
+            return true;
+        }
+
+        // Base nourishment/heal from ItemDef, scaled by freshness.
+        int heal = d.healAmount;
+        int restore = d.hungerRestore;
+        if (rotten) {
+            heal = std::max(0, heal - 1);
+            restore = std::max(0, restore / 2);
+        } else if (stale) {
+            restore = std::max(0, (restore * 3) / 4);
+        }
+
+        // Apply the basic food effects.
+        if (heal > 0 && p.hp < p.hpMax) {
+            p.hp = std::min(p.hpMax, p.hp + heal);
+        }
+        if (hungerEnabled_) {
+            if (hungerMax <= 0) hungerMax = 800;
+            hunger = std::min(hungerMax, hunger + restore);
+        }
+
+        // Risk/bonus table.
+        float poisonChance = 0.0f;
+        int poisonTurns = 0;
+        float confuseChance = 0.0f;
+        int confuseTurns = 0;
+
+        enum class Bonus { None, Regen, Haste, Vision, Shield, Strength };
+        Bonus bonus = Bonus::None;
+        float bonusChance = 0.0f;
+        int bonusTurns = 0;
+        int strengthInc = 0;
+
+        switch (it.kind) {
+            case ItemKind::CorpseGoblin:
+                poisonChance = 0.10f; poisonTurns = 6;
+                break;
+            case ItemKind::CorpseOrc:
+                poisonChance = 0.15f; poisonTurns = 6;
+                break;
+            case ItemKind::CorpseBat:
+                poisonChance = 0.08f; poisonTurns = 5;
+                bonus = Bonus::Haste; bonusChance = 0.18f; bonusTurns = 10;
+                break;
+            case ItemKind::CorpseSlime:
+                poisonChance = 0.50f; poisonTurns = 10;
+                confuseChance = 0.25f; confuseTurns = 12;
+                break;
+            case ItemKind::CorpseKobold:
+                poisonChance = 0.12f; poisonTurns = 6;
+                break;
+            case ItemKind::CorpseWolf:
+                poisonChance = 0.08f; poisonTurns = 6;
+                bonus = Bonus::Regen; bonusChance = 0.20f; bonusTurns = 12;
+                break;
+            case ItemKind::CorpseTroll:
+                poisonChance = 0.12f; poisonTurns = 8;
+                bonus = Bonus::Regen; bonusChance = 1.00f; bonusTurns = 18;
+                break;
+            case ItemKind::CorpseWizard:
+                poisonChance = 0.06f; poisonTurns = 6;
+                confuseChance = 0.20f; confuseTurns = 12;
+                bonus = Bonus::Vision; bonusChance = 0.35f; bonusTurns = 18;
+                break;
+            case ItemKind::CorpseSnake:
+                poisonChance = 0.35f; poisonTurns = 10;
+                break;
+            case ItemKind::CorpseSpider:
+                poisonChance = 0.40f; poisonTurns = 11;
+                break;
+            case ItemKind::CorpseOgre:
+                poisonChance = 0.20f; poisonTurns = 8;
+                bonus = Bonus::Strength; bonusChance = 0.08f; strengthInc = 1;
+                break;
+            case ItemKind::CorpseMimic:
+                poisonChance = 0.22f; poisonTurns = 8;
+                confuseChance = 0.18f; confuseTurns = 10;
+                bonus = Bonus::Shield; bonusChance = 0.18f; bonusTurns = 14;
+                break;
+            case ItemKind::CorpseMinotaur:
+                poisonChance = 0.25f; poisonTurns = 9;
+                bonus = Bonus::Strength; bonusChance = 0.15f; strengthInc = 1;
+                break;
+            default:
+                poisonChance = 0.18f; poisonTurns = 7;
+                break;
+        }
+
+        // Freshness modifies risk/benefit.
+        if (rotten) {
+            poisonChance += 0.35f;
+            confuseChance += 0.20f;
+            bonusChance *= 0.25f;
+        } else if (stale) {
+            poisonChance += 0.15f;
+            bonusChance *= 0.75f;
+        }
+
+        poisonChance = std::min(0.95f, poisonChance);
+        confuseChance = std::min(0.80f, confuseChance);
+
+        // Messaging.
+        pushMsg("YOU EAT THE " + itemDisplayNameSingle(it.kind) + ".", MessageKind::Loot, true);
+        if (rotten) {
+            pushMsg("IT TASTES RANCID.", MessageKind::Warning, true);
+        }
+
+        // Apply negative effects.
+        bool poisoned = false;
+        if (poisonChance > 0.0f && rng.chance(poisonChance)) {
+            const int extra = rotten ? 4 : (stale ? 1 : 0);
+            const int turns = std::max(1, poisonTurns + extra);
+            p.effects.poisonTurns = std::max(p.effects.poisonTurns, turns);
+            poisoned = true;
+        }
+        if (confuseChance > 0.0f && rng.chance(confuseChance)) {
+            const int extra = rotten ? 4 : 0;
+            const int turns = std::max(1, confuseTurns + extra);
+            p.effects.confusionTurns = std::max(p.effects.confusionTurns, turns);
+            pushMsg("YOU FEEL CONFUSED!", MessageKind::Warning, true);
+        }
+
+        if (poisoned) {
+            pushMsg("UGH... YOU FEEL SICK.", MessageKind::Warning, true);
+        }
+
+        // Apply a possible positive bonus.
+        if (bonus != Bonus::None && bonusChance > 0.0f && rng.chance(bonusChance)) {
+            switch (bonus) {
+                case Bonus::Regen:
+                    p.effects.regenTurns = std::max(p.effects.regenTurns, bonusTurns);
+                    pushMsg("YOU FEEL A STRANGE VITALITY.", MessageKind::Success, true);
+                    break;
+                case Bonus::Haste:
+                    p.effects.hasteTurns = std::max(p.effects.hasteTurns, bonusTurns);
+                    pushMsg("YOUR BLOOD RUNS HOT.", MessageKind::Success, true);
+                    break;
+                case Bonus::Vision:
+                    p.effects.visionTurns = std::max(p.effects.visionTurns, bonusTurns);
+                    pushMsg("YOUR EYES SHARPEN.", MessageKind::Success, true);
+                    break;
+                case Bonus::Shield:
+                    p.effects.shieldTurns = std::max(p.effects.shieldTurns, bonusTurns);
+                    pushMsg("A PROTECTIVE AURA SURROUNDS YOU.", MessageKind::Success, true);
+                    break;
+                case Bonus::Strength:
+                    if (strengthInc != 0) {
+                        p.baseAtk += strengthInc;
+                        std::ostringstream ss;
+                        ss << "YOU FEEL STRONGER! ATK IS NOW " << p.baseAtk << ".";
+                        pushMsg(ss.str(), MessageKind::Success, true);
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        // Special: minotaur meat is powerful, but dangerous.
+        if (it.kind == ItemKind::CorpseMinotaur && !rotten) {
+            p.effects.shieldTurns = std::max(p.effects.shieldTurns, 16);
+        }
+
+        // Hunger feedback (mirrors Food Ration).
+        const int afterState = hungerStateFor(hunger, hungerMax);
+        if (hungerEnabled_) {
+            if (beforeState >= 2 && afterState < 2) {
+                pushMsg("YOU FEEL LESS STARVED.", MessageKind::System, true);
+            } else if (beforeState >= 1 && afterState == 0) {
+                pushMsg("YOU FEEL SATIATED.", MessageKind::System, true);
+            }
+        }
+
+        // Sync the throttling state so we don't immediately re-announce hunger next tick.
+        hungerStatePrev = hungerStateFor(hunger, hungerMax);
+
         consumeOneStackable();
         return true;
     }

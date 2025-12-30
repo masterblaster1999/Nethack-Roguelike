@@ -60,27 +60,43 @@ HitCheck rollToHit(RNG& rng, int attackBonus, int targetAC) {
 }
 
 int targetAC(const Game& game, const Entity& e) {
+    // Note: for monsters, "armor" currently increases damage reduction but does not
+    // make them harder to hit (AC still comes from baseDef). This keeps fights readable
+    // while still letting gear matter.
     const int def = (e.kind == EntityKind::Player) ? game.playerDefense() : e.baseDef;
     return 10 + def;
 }
 
+
 int damageReduction(const Game& game, const Entity& e) {
-    // Monsters use their base DEF as "hide/armor" (small values, 0-2 typically).
+    // Monsters: base DEF represents hide/toughness. Equipped armor (if any) adds DR.
     if (e.kind != EntityKind::Player) {
-        return std::max(0, e.baseDef);
+        int dr = std::max(0, e.baseDef);
+
+        if (monsterCanEquipArmor(e.kind) && e.gearArmor.id != 0 && isArmor(e.gearArmor.kind)) {
+            const Item& a = e.gearArmor;
+            const int b = (a.buc < 0) ? -1 : (a.buc > 0 ? 1 : 0);
+            dr += itemDef(a.kind).defense + a.enchant + b;
+        }
+
+        return std::max(0, dr);
     }
 
     // Player DR is based on worn armor (and temporary shielding).
     // We don't want baseDef (dodge) to reduce damage, only to avoid getting hit.
-    const int evasion = game.player().baseDef;
+    const int evasion = game.playerEvasion();
     return std::max(0, game.playerDefense() - evasion);
 }
+
 
 } // namespace
 
 
 void Game::attackMelee(Entity& attacker, Entity& defender) {
     if (attacker.hp <= 0 || defender.hp <= 0) return;
+
+    const bool attackerWasInvisible = (attacker.kind == EntityKind::Player && attacker.effects.invisTurns > 0);
+    const bool attackerWasSneaking = (attacker.kind == EntityKind::Player && isSneaking());
 
     // Attacking breaks invisibility (balance + clarity).
     if (attacker.kind == EntityKind::Player) {
@@ -101,7 +117,27 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
         }
     }
 
-    const int atkBonus = (attacker.kind == EntityKind::Player) ? playerAttack() : attacker.baseAtk;
+    int atkBonus = 0;
+if (attacker.kind == EntityKind::Player) {
+    atkBonus = playerAttack();
+} else {
+    atkBonus = attacker.baseAtk;
+
+    // Enchants and blessings/curse on a wielded weapon affect accuracy a bit.
+    if (monsterCanEquipWeapons(attacker.kind) && attacker.gearMelee.id != 0 && isMeleeWeapon(attacker.gearMelee.kind)) {
+        const int b = (attacker.gearMelee.buc < 0) ? -1 : (attacker.gearMelee.buc > 0 ? 1 : 0);
+        atkBonus += attacker.gearMelee.enchant + b;
+    }
+}
+    bool ambush = false;
+    bool backstab = false;
+    if (attacker.kind == EntityKind::Player && defender.kind != EntityKind::Player && !defender.alerted) {
+        ambush = true;
+        const int agi = playerAgility();
+        atkBonus += 2 + std::min(3, agi / 4);
+        backstab = (attackerWasSneaking || attackerWasInvisible);
+    }
+
     const int ac = targetAC(*this, defender);
     const HitCheck hc = rollToHit(rng, atkBonus, ac);
 
@@ -117,25 +153,48 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
             ss << kindName(attacker.kind) << " MISSES " << kindName(defender.kind) << ".";
         }
         pushMsg(ss.str(), MessageKind::Combat, msgFromPlayer);
+        if (attacker.kind == EntityKind::Player) {
+            // Even a miss makes noise.
+            emitNoise(attacker.pos, 7);
+        }
         return;
     }
 
     // Roll damage.
     DiceExpr baseDice{1, 2, 0};
-    int bonus = statDamageBonusFromAtk(attacker.baseAtk);
+    int atkStatForBonus = attacker.baseAtk;
+    if (attacker.kind == EntityKind::Player) {
+        atkStatForBonus += playerMight();
+    }
+    int bonus = statDamageBonusFromAtk(atkStatForBonus);
 
     if (attacker.kind == EntityKind::Player) {
-        if (const Item* w = equippedMelee()) {
-            baseDice = meleeDiceForWeapon(w->kind);
-            bonus += w->enchant;
-        }
-    } else {
-        baseDice = meleeDiceForMonster(attacker.kind);
+    if (const Item* w = equippedMelee()) {
+        baseDice = meleeDiceForWeapon(w->kind);
+        bonus += w->enchant;
     }
+} else {
+    baseDice = meleeDiceForMonster(attacker.kind);
+
+    if (monsterCanEquipWeapons(attacker.kind) && attacker.gearMelee.id != 0 && isMeleeWeapon(attacker.gearMelee.kind)) {
+        baseDice = meleeDiceForWeapon(attacker.gearMelee.kind);
+        const int b = (attacker.gearMelee.buc < 0) ? -1 : (attacker.gearMelee.buc > 0 ? 1 : 0);
+        bonus += attacker.gearMelee.enchant + b;
+    }
+}
     const int dice1 = rollDice(rng, baseDice);
     const int dice2 = (hc.crit ? rollDice(rng, baseDice) : 0);
 
     int dmg = dice1 + dice2 + bonus;
+
+    // Ambush/backstab: reward catching monsters unaware (typically via sneak mode).
+    if (ambush) {
+        dmg += 1 + std::min(3, playerAgility() / 4);
+        if (backstab) {
+            // Add an extra weapon dice roll (roughly doubles dice damage).
+            dmg += rollDice(rng, baseDice);
+        }
+    }
 
     // Damage reduction (armor/hide). Criticals punch through a bit.
     int dr = damageReduction(*this, defender);
@@ -147,6 +206,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
 
     std::ostringstream ss;
     if (attacker.kind == EntityKind::Player) {
+        if (ambush) ss << (backstab ? "SNEAK ATTACK! " : "AMBUSH! ");
         ss << "YOU " << (hc.crit ? "CRIT " : "") << "HIT " << kindName(defender.kind);
         if (dmg > 0) ss << " FOR " << dmg;
         else ss << " BUT DO NO DAMAGE";
@@ -228,7 +288,11 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
         }
 
         // Defender resistance: agile/armored targets are harder to shove around.
-        chance -= 0.04f * static_cast<float>(std::max(0, defender.baseDef));
+        int defEvasion = defender.baseDef;
+        if (defender.kind == EntityKind::Player) {
+            defEvasion = playerEvasion();
+        }
+        chance -= 0.04f * static_cast<float>(std::max(0, defEvasion));
         if (defender.kind == EntityKind::Player) {
             const int drNow = damageReduction(*this, defender);
             chance -= 0.03f * static_cast<float>(std::max(0, drNow));
@@ -248,7 +312,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
             // If the defender is the player, compute chance to catch the edge of a chasm.
             if (defender.kind == EntityKind::Player) {
                 float catchP = 0.65f;
-                catchP += 0.02f * static_cast<float>(std::max(0, defender.baseDef));
+                catchP += 0.02f * static_cast<float>(std::max(0, playerEvasion()));
                 if (encumbranceEnabled_) {
                     switch (burdenState()) {
                         case BurdenState::Unburdened: break;
@@ -368,7 +432,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender) {
 }
 
 
-void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer) {
+void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer, const Item* projectileTemplate) {
     // Confusion: shots drift and accuracy suffers.
     if (attacker.effects.confusionTurns > 0) {
         atkBonus -= 3;
@@ -414,6 +478,9 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
     bool hitAny = false;
     Entity* hit = nullptr;
     size_t stopIdx = line.size() - 1;
+
+    // "Powered" ranged magic (wands) get slightly beefier dice.
+    const bool wandPowered = fromPlayer && (projKind == ProjectileKind::Spark || projKind == ProjectileKind::Fireball);
 
     // Projectiles travel the full line. If they miss a creature, they keep going.
     for (size_t i = 1; i < line.size(); ++i) {
@@ -464,7 +531,11 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
             pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
         }
 
-        const bool wandPowered = (projKind == ProjectileKind::Spark) && fromPlayer;
+        if (projKind == ProjectileKind::Fireball) {
+            // Fireball damage is applied by the AoE explosion at impact.
+            break;
+        }
+
         const DiceExpr baseDice = rangedDiceForProjectile(projKind, wandPowered);
         const int dice1 = rollDice(rng, baseDice);
         const int dice2 = (hc.crit ? rollDice(rng, baseDice) : 0);
@@ -514,6 +585,197 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
         break;
     }
 
+    // --- Fireball special-case ---
+    // Fireballs always explode at their final impact point, dealing AoE damage.
+    if (projKind == ProjectileKind::Fireball) {
+        // If we hit a wall/closed door, explode on the last reachable tile to avoid "blasting through".
+        size_t impactIdx = stopIdx;
+        if (hitWall && stopIdx > 1) {
+            impactIdx = stopIdx - 1;
+        }
+        if (impactIdx >= line.size()) impactIdx = line.size() - 1;
+
+        const Vec2i center = line[impactIdx];
+
+        // Minimal feedback when the bolt doesn't connect with a creature.
+        if (!hitAny) {
+            if (hitWall) {
+                if (fromPlayer) pushMsg("THE FIREBALL HITS A WALL.", MessageKind::Warning, true);
+            } else {
+                if (fromPlayer) pushMsg("YOU LAUNCH A FIREBALL.", MessageKind::Combat, true);
+            }
+        }
+
+        // Blast radius (chebyshev): 1 tile => 3x3.
+        const int radius = 1;
+
+        // Compute a small FOV mask from the impact point so walls/closed doors block the blast.
+        std::vector<uint8_t> blastMask;
+        dung.computeFovMask(center.x, center.y, radius, blastMask);
+        auto maskIdx = [&](int x, int y) -> int {
+            return y * dung.width + x;
+        };
+
+        std::vector<Vec2i> blastTiles;
+        blastTiles.reserve(static_cast<size_t>((2 * radius + 1) * (2 * radius + 1)));
+        for (int y = center.y - radius; y <= center.y + radius; ++y) {
+            for (int x = center.x - radius; x <= center.x + radius; ++x) {
+                if (!dung.inBounds(x, y)) continue;
+                const int ii = maskIdx(x, y);
+                if (ii < 0 || ii >= static_cast<int>(blastMask.size())) continue;
+                if (blastMask[ii] == 0) continue;
+                blastTiles.push_back({x, y});
+            }
+        }
+        if (blastTiles.empty() && dung.inBounds(center.x, center.y)) {
+            blastTiles.push_back(center);
+        }
+
+        // FX projectile path (truncate to impact)
+        std::vector<Vec2i> fxPath;
+        fxPath.reserve(impactIdx + 1);
+        for (size_t i = 0; i <= impactIdx && i < line.size(); ++i) fxPath.push_back(line[i]);
+
+        FXProjectile fxp;
+        fxp.kind = projKind;
+        fxp.path = std::move(fxPath);
+        fxp.pathIndex = (fxp.path.size() > 1) ? 1 : 0;
+        fxp.stepTimer = 0.0f;
+        fxp.stepTime = 0.03f;
+        const float travelDelay = fxp.stepTime * static_cast<float>((fxp.path.size() > 0) ? (fxp.path.size() - 1) : 0);
+        fx.push_back(std::move(fxp));
+
+        FXExplosion ex;
+        ex.tiles = blastTiles;
+        ex.delay = travelDelay;
+        ex.timer = 0.0f;
+        ex.duration = 0.18f;
+        fxExpl.push_back(std::move(ex));
+
+        // Explosion noise (louder than a normal shot).
+        emitNoise(center, 18);
+
+        // System-level blast interactions: burn webs and sometimes blow doors open.
+        int websBurnedSeen = 0;
+        for (size_t ti = 0; ti < trapsCur.size(); ) {
+            Trap& tr = trapsCur[ti];
+            if (tr.kind == TrapKind::Web) {
+                bool inBlast = false;
+                for (const Vec2i& bt : blastTiles) {
+                    if (bt.x == tr.pos.x && bt.y == tr.pos.y) { inBlast = true; break; }
+                }
+                if (inBlast) {
+                    if (dung.inBounds(tr.pos.x, tr.pos.y) && dung.at(tr.pos.x, tr.pos.y).visible) {
+                        ++websBurnedSeen;
+                    }
+                    trapsCur.erase(trapsCur.begin() + static_cast<std::vector<Trap>::difference_type>(ti));
+                    continue;
+                }
+            }
+            ++ti;
+        }
+        if (websBurnedSeen > 0 && fromPlayer) {
+            pushMsg(websBurnedSeen == 1 ? "A WEB BURNS AWAY." : "WEBS BURN AWAY.", MessageKind::System, true);
+        }
+
+        int doorsBlownSeen = 0;
+        for (const Vec2i& bt : blastTiles) {
+            if (!dung.inBounds(bt.x, bt.y)) continue;
+            Tile& tt = dung.at(bt.x, bt.y);
+            if (tt.type == TileType::DoorClosed) {
+                if (rng.chance(0.35f)) {
+                    tt.type = TileType::DoorOpen;
+                    if (tt.visible) ++doorsBlownSeen;
+                }
+            } else if (tt.type == TileType::DoorLocked) {
+                if (rng.chance(0.15f)) {
+                    tt.type = TileType::DoorOpen;
+                    if (tt.visible) ++doorsBlownSeen;
+                }
+            }
+        }
+        if (doorsBlownSeen > 0 && fromPlayer) {
+            pushMsg(doorsBlownSeen == 1 ? "A DOOR IS BLOWN OPEN." : "SOME DOORS ARE BLOWN OPEN.", MessageKind::System, true);
+        }
+
+        // Explosion message (shown immediately; visual flash plays after the projectile).
+        if (fromPlayer) {
+            pushMsg("THE FIREBALL EXPLODES!", MessageKind::Combat, true);
+        } else if (dung.inBounds(center.x, center.y) && dung.at(center.x, center.y).visible) {
+            pushMsg("A FIREBALL EXPLODES!", MessageKind::Combat, false);
+        }
+
+        // Damage entities in the blast.
+        const DiceExpr baseDice = rangedDiceForProjectile(projKind, wandPowered);
+        for (const Vec2i& bt : blastTiles) {
+            Entity* e = entityAtMut(bt.x, bt.y);
+            if (!e || e->hp <= 0) continue;
+
+            // Distance falloff is very mild (radius 1).
+            const int dist = std::max(std::abs(bt.x - center.x), std::abs(bt.y - center.y));
+
+            int dmg = rollDice(rng, baseDice);
+            dmg += dmgBonus;
+            dmg += statDamageBonusFromAtk(attacker.baseAtk);
+
+            const int dr = damageReduction(*this, *e);
+            const int absorbed = (dr > 0) ? rng.range(0, dr) : 0;
+            dmg = std::max(0, dmg - absorbed);
+            dmg = std::max(0, dmg - dist);
+
+            if (fromPlayer && e->kind == EntityKind::Shopkeeper && !e->alerted) {
+                e->alerted = true;
+                e->lastKnownPlayerPos = attacker.pos;
+                e->lastKnownPlayerAge = 0;
+                pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+            }
+
+            if (dmg > 0) e->hp -= dmg;
+
+            const bool tileVisible = dung.inBounds(bt.x, bt.y) && dung.at(bt.x, bt.y).visible;
+            if (e->kind == EntityKind::Player) {
+                std::ostringstream ss;
+                ss << "YOU ARE CAUGHT IN THE BLAST";
+                if (dmg > 0) ss << " FOR " << dmg;
+                else ss << " BUT TAKE NO DAMAGE";
+                ss << ".";
+                pushMsg(ss.str(), MessageKind::Combat, false);
+            } else if (fromPlayer || tileVisible) {
+                std::ostringstream ss;
+                ss << kindName(e->kind) << " IS HIT";
+                if (dmg > 0) ss << " FOR " << dmg;
+                else ss << " BUT TAKES NO DAMAGE";
+                ss << ".";
+                pushMsg(ss.str(), MessageKind::Combat, fromPlayer);
+            }
+
+            if (e->hp <= 0) {
+                if (e->kind == EntityKind::Player) {
+                    pushMsg("YOU DIE.", MessageKind::Combat, false);
+                    if (endCause_.empty()) {
+                        endCause_ = fromPlayer ? "KILLED BY YOUR OWN FIREBALL" : (std::string("KILLED BY ") + kindName(attacker.kind));
+                    }
+                    gameOver = true;
+                    break;
+                } else {
+                    const bool vis = dung.inBounds(e->pos.x, e->pos.y) && dung.at(e->pos.x, e->pos.y).visible;
+                    if (fromPlayer || vis) {
+                        std::ostringstream ds;
+                        ds << kindName(e->kind) << " DIES.";
+                        pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
+                    }
+                    if (fromPlayer) {
+                        ++killCount;
+                        grantXp(xpFor(e->kind));
+                    }
+                }
+            }
+        }
+
+        inputLock = true;
+        return;
+    }
+
     if (!hitAny) {
         if (hitWall) {
             if (fromPlayer) pushMsg("THE SHOT HITS A WALL.", MessageKind::Warning, true);
@@ -521,25 +783,63 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
             if (fromPlayer) pushMsg("YOU FIRE.", MessageKind::Combat, true);
         }
     }
-
     // Recoverable ammo: arrows/rocks may remain on the ground after firing.
+    // We treat this as "breakage/loss" rather than a raw drop chance, and we preserve the projectile's
+    // metadata (shopPrice/shopDepth, etc.) when a template is provided (player ammo).
     if (projKind == ProjectileKind::Arrow || projKind == ProjectileKind::Rock) {
-        ItemKind dropK = (projKind == ProjectileKind::Arrow) ? ItemKind::Arrow : ItemKind::Rock;
+        const ItemKind ammoKind = (projKind == ProjectileKind::Arrow) ? ItemKind::Arrow : ItemKind::Rock;
 
         // Default landing tile is the last tile the projectile reached.
         Vec2i land = line[stopIdx];
-        // If we hit a wall/closed door, the projectile can't occupy that tile; land on the last open tile instead.
+
+        // If we hit a wall/closed door, the projectile can't occupy that tile; land on the last reachable tile instead.
         if (hitWall && stopIdx > 0) {
             land = line[stopIdx - 1];
         }
 
         if (dung.inBounds(land.x, land.y) && !dung.isOpaque(land.x, land.y)) {
-            float dropChance = (projKind == ProjectileKind::Arrow) ? 0.60f : 0.75f;
-            if (hitWall) dropChance -= 0.20f;
-            if (!fromPlayer) dropChance -= 0.15f;
-            dropChance = std::clamp(dropChance, 0.10f, 0.95f);
-            if (rng.chance(dropChance)) {
-                dropGroundItem(land, dropK, 1);
+            const TileType tt = dung.at(land.x, land.y).type;
+
+            // Chasms eat physical projectiles.
+            if (tt == TileType::Chasm) {
+                if (fromPlayer && dung.at(land.x, land.y).visible) {
+                    if (projKind == ProjectileKind::Arrow) pushMsg("YOUR ARROW PLUMMETS INTO THE CHASM.", MessageKind::Warning, true);
+                    else pushMsg("YOUR ROCK PLUMMETS INTO THE CHASM.", MessageKind::Warning, true);
+                }
+            } else {
+                // Break chance depends on what we struck.
+                float breakChance = 0.0f;
+                if (projKind == ProjectileKind::Arrow) {
+                    breakChance = hitAny ? 0.35f : (hitWall ? 0.25f : 0.15f);
+                } else { // Rock
+                    breakChance = hitAny ? 0.10f : (hitWall ? 0.08f : 0.05f);
+                }
+
+                // Slightly higher loss rate for monster-fired ammo to reduce clutter.
+                if (!fromPlayer) breakChance = std::min(0.95f, breakChance + 0.10f);
+
+                if (rng.chance(breakChance)) {
+                    if (fromPlayer && dung.at(land.x, land.y).visible) {
+                        if (projKind == ProjectileKind::Arrow) pushMsg("YOUR ARROW SHATTERS.", MessageKind::System, true);
+                        else pushMsg("YOUR ROCK SHATTERS.", MessageKind::System, true);
+                    }
+                } else {
+                    Item drop;
+                    if (projectileTemplate && projectileTemplate->kind == ammoKind) {
+                        drop = *projectileTemplate;
+                    } else {
+                        drop.kind = ammoKind;
+                        drop.count = 1;
+                        drop.enchant = 0;
+                        drop.charges = 0;
+                        drop.buc = 0;
+                        drop.shopPrice = 0;
+                        drop.shopDepth = 0;
+                    }
+                    drop.count = 1;
+
+                    dropGroundItemItem(land, drop);
+                }
             }
         }
     }

@@ -501,6 +501,36 @@ void Renderer::render(const Game& game) {
         SDL_SetTextureColorMod(tex, 255, 255, 255);
     }
 
+
+
+    // Draw confusion gas (visible tiles only). This is a persistent, tile-based field
+    // spawned by Confusion Gas traps.
+    {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                const Tile& t = d.at(x, y);
+                if (!t.visible) continue;
+
+                const uint8_t g = game.confusionGasAt(x, y);
+                if (g == 0u) continue;
+
+                const uint8_t m = lightMod(x, y);
+                int a = 18 + static_cast<int>(g) * 12;
+                a = (a * static_cast<int>(m)) / 255;
+                a = std::max(12, std::min(190, a));
+
+                // Slight frame shimmer so the cloud feels alive.
+                a = std::max(12, std::min(190, a + (static_cast<int>((frame + x * 3 + y * 7) % 9) - 4)));
+
+                SDL_SetRenderDrawColor(renderer, 190, 90, 255, static_cast<uint8_t>(a));
+                SDL_Rect r{ x * tile, y * tile, tile, tile };
+                SDL_RenderFillRect(renderer, &r);
+            }
+        }
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    }
+
     // Draw discovered traps (shown on explored tiles; bright when visible, dim when remembered)
     for (const auto& tr : game.traps()) {
         if (!tr.discovered) continue;
@@ -515,6 +545,7 @@ void Renderer::render(const Game& game) {
             case TrapKind::Teleport: r = 170; g = 110; b = 230; break;
             case TrapKind::Alarm:    r = 220; g = 220; b = 80;  break;
             case TrapKind::Web:       r = 140; g = 180; b = 255; break;
+            case TrapKind::ConfusionGas: r = 200; g = 120; b = 255; break;
         }
 
         const uint8_t a = t.visible ? 220 : 120;
@@ -568,6 +599,35 @@ void Renderer::render(const Game& game) {
         SDL_RenderCopy(renderer, tex, nullptr, &dst);
     }
 
+    // FX explosions (visual-only flashes; gameplay already applied)
+    if (!game.fxExplosions().empty()) {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+        for (const auto& ex : game.fxExplosions()) {
+            if (ex.delay > 0.0f) continue;
+            if (ex.tiles.empty()) continue;
+
+            const float dur = std::max(0.001f, ex.duration);
+            const float t01 = std::min(1.0f, std::max(0.0f, ex.timer / dur));
+            // Fade out over time.
+            const uint8_t a = static_cast<uint8_t>(std::max(0.0f, 210.0f * (1.0f - t01)));
+            if (a == 0) continue;
+
+            // Warm fireball-like tint.
+            SDL_SetRenderDrawColor(renderer, 255, 150, 70, a);
+
+            for (const Vec2i& p : ex.tiles) {
+                if (!d.inBounds(p.x, p.y)) continue;
+                const Tile& t = d.at(p.x, p.y);
+                if (!t.explored) continue;
+                SDL_Rect r{ p.x * tile + 2, p.y * tile + 2, tile - 4, tile - 4 };
+                SDL_RenderFillRect(renderer, &r);
+            }
+        }
+
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    }
+
     // Overlays
     if (game.isLooking()) {
         drawLookOverlay(game);
@@ -579,6 +639,11 @@ void Renderer::render(const Game& game) {
 
     // HUD (messages, stats)
     drawHud(game);
+
+    // Level-up talent allocation overlay (forced while points are pending)
+    if (game.isLevelUpOpen()) {
+        drawLevelUpOverlay(game);
+    }
 
     if (game.isMinimapOpen()) {
         drawMinimapOverlay(game);
@@ -691,6 +756,11 @@ void Renderer::drawHud(const Game& game) {
         }
     }
     ss << " | KEYS: " << game.keyCount() << " | PICKS: " << game.lockpickCount();
+
+    const int arrows = ammoCount(game.inventory(), AmmoKind::Arrow);
+    const int rocks  = ammoCount(game.inventory(), AmmoKind::Rock);
+    if (arrows > 0) ss << " | ARROWS: " << arrows;
+    if (rocks > 0)  ss << " | ROCKS: " << rocks;
     ss << " | DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth();
     ss << " | DEEPEST: " << game.maxDepthReached();
     ss << " | TURNS: " << game.turns();
@@ -724,6 +794,10 @@ void Renderer::drawHud(const Game& game) {
             if (!bt.empty()) ss << " | " << bt;
         }
     }
+    {
+        const std::string st = game.sneakTag();
+        if (!st.empty()) ss << " | " << st;
+    }
     if (game.autosaveEveryTurns() > 0) {
         ss << " | AS: " << game.autosaveEveryTurns();
     }
@@ -735,7 +809,7 @@ void Renderer::drawHud(const Game& game) {
     const int controlY3 = winH - 16;
 
     drawText5x7(renderer, 8, controlY1, 2, gray,
-        "MOVE: WASD/ARROWS/NUMPAD | SPACE/. WAIT | R REST | < > STAIRS");
+        "MOVE: WASD/ARROWS/NUMPAD | SPACE/. WAIT | R REST | N SNEAK | < > STAIRS");
     drawText5x7(renderer, 8, controlY2, 2, gray,
         "F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH (TRAPS/SECRETS)");
     drawText5x7(renderer, 8, controlY3, 2, gray,
@@ -961,7 +1035,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 		(void)eqA;
 
 		const bool identifiable = isIdentifiableKind(it.kind);
-		const bool isWand = (it.kind == ItemKind::WandSparks) || (def.maxCharges > 0 && def.projectile == ProjectileKind::Spark);
+		const bool isWand = isRangedWeapon(it.kind) && def.maxCharges > 0 && def.ammo == AmmoKind::None;
 		const bool isFood = (def.hungerRestore > 0) || (it.kind == ItemKind::FoodRation);
 
 		if (isGold(it.kind)) {
@@ -1003,12 +1077,25 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			}
 		} else if (isWand) {
 			statLine("TYPE: WAND", white);
-			statLine("EFFECT: SPARKS", gray);
+
+			auto wandEffect = [&]() -> std::string {
+				if (it.kind == ItemKind::WandDigging) return "DIGGING";
+				switch (def.projectile) {
+					case ProjectileKind::Spark: return "SPARKS";
+					case ProjectileKind::Fireball: return "FIREBALL";
+					default: return "MAGIC";
+				}
+			};
+
+			statLine("EFFECT: " + wandEffect(), gray);
 			statLine("RANGE: " + std::to_string(def.range), gray);
 			statLine("CHARGES: " + std::to_string(it.charges) + "/" + std::to_string(def.maxCharges), gray);
 			const int baseRAtk = std::max(1, baseAtk + def.rangedAtk + it.enchant + 2);
 			statLine("RATK (BASE): " + std::to_string(baseRAtk) + "+", gray);
 			statLine(std::string("READY: ") + (it.charges > 0 ? "YES" : "NO"), gray);
+			if (def.projectile == ProjectileKind::Fireball) {
+				statLine("AOE: RADIUS 1 (3x3)", gray);
+			}
 		} else if (isRangedWeapon(it.kind)) {
 			statLine("TYPE: RANGED WEAPON", white);
 			const int thisRAtk = std::max(1, baseAtk + def.rangedAtk + it.enchant);
@@ -1393,6 +1480,16 @@ void Renderer::drawStatsOverlay(const Game& game) {
     }
     {
         std::stringstream ss;
+        ss << "TALENTS: M" << game.playerMight()
+           << " A" << game.playerAgility()
+           << " V" << game.playerVigor()
+           << " F" << game.playerFocus();
+        if (game.pendingTalentPoints() > 0) ss << "  (PENDING: " << game.pendingTalentPoints() << ")";
+        drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
+        y += 18;
+    }
+    {
+        std::stringstream ss;
         if (game.autosaveEveryTurns() > 0) {
             ss << "AUTOSAVE: every " << game.autosaveEveryTurns() << " turns (" << game.defaultAutosavePath() << ")";
         } else {
@@ -1449,6 +1546,68 @@ void Renderer::drawStatsOverlay(const Game& game) {
 
     // Footer
     drawText5x7(renderer, x0 + pad, y0 + panelH - 20, 2, white, "ESC to close");
+}
+
+void Renderer::drawLevelUpOverlay(const Game& game) {
+    // A focused, compact overlay that forces the player to spend talent points.
+    const int points = game.pendingTalentPoints();
+    if (points <= 0) return;
+
+    const int panelW = std::min(winW - 80, 620);
+    const int panelH = 260;
+    const int x0 = (winW - panelW) / 2;
+    const int y0 = (winH - hudH - panelH) / 2;
+
+    SDL_Rect bg{x0, y0, panelW, panelH};
+    drawPanel(game, bg, 220, lastFrame);
+
+    const Color white{240,240,240,255};
+    const Color gray{160,160,160,255};
+    const Color yellow{255,230,120,255};
+
+    const int scale = 2;
+    int y = y0 + 14;
+
+    drawText5x7(renderer, x0 + 16, y, scale, yellow, "LEVEL UP!  CHOOSE A TALENT");
+    y += 22;
+
+    {
+        std::stringstream ss;
+        ss << "TALENT POINTS: " << points
+           << "   MIGHT:" << game.playerMight()
+           << "  AGI:" << game.playerAgility()
+           << "  VIG:" << game.playerVigor()
+           << "  FOC:" << game.playerFocus();
+        drawText5x7(renderer, x0 + 16, y, scale, white, ss.str());
+        y += 20;
+    }
+
+    {
+        std::stringstream ss;
+        ss << "MELEE POWER: " << game.playerMeleePower()
+           << "   EVASION: " << game.playerEvasion()
+           << "   WAND PWR: " << game.playerWandPower();
+        drawText5x7(renderer, x0 + 16, y, scale, gray, ss.str());
+        y += 22;
+    }
+
+    const int sel = game.levelUpSelection();
+
+    auto drawChoice = [&](int idx, const char* label, const char* desc) {
+        const Color c = (idx == sel) ? white : gray;
+        std::stringstream ss;
+        ss << (idx == sel ? "> " : "  ") << label << ": " << desc;
+        drawText5x7(renderer, x0 + 16, y, scale, c, ss.str());
+        y += 18;
+    };
+
+    drawChoice(0, "MIGHT",   "+1 melee power, +carry, +melee dmg bonus");
+    drawChoice(1, "AGILITY", "+1 ranged skill, +evasion, better locks/traps");
+    drawChoice(2, "VIGOR",   "+2 max HP now, tougher natural regen");
+    drawChoice(3, "FOCUS",   "+1 wand power, better searching");
+
+    y += 14;
+    drawText5x7(renderer, x0 + 16, y, scale, gray, "UP/DOWN: select  ENTER: spend  ESC: spend all");
 }
 
 void Renderer::drawTargetingOverlay(const Game& game) {

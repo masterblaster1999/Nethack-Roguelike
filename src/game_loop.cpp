@@ -3,7 +3,6 @@
 void Game::update(float dt) {
     // Animate FX projectiles.
     if (!fx.empty()) {
-        inputLock = true;
         for (auto& p : fx) {
             p.stepTimer += dt;
             while (p.stepTimer >= p.stepTime) {
@@ -21,15 +20,28 @@ void Game::update(float dt) {
         }), fx.end());
     }
 
-    if (fx.empty()) {
-        inputLock = false;
+    // Animate explosion flashes.
+    if (!fxExpl.empty()) {
+        for (auto& ex : fxExpl) {
+            if (ex.delay > 0.0f) {
+                ex.delay = std::max(0.0f, ex.delay - dt);
+            } else {
+                ex.timer += dt;
+            }
+        }
+        fxExpl.erase(std::remove_if(fxExpl.begin(), fxExpl.end(), [](const FXExplosion& ex) {
+            return ex.delay <= 0.0f && ex.timer >= ex.duration;
+        }), fxExpl.end());
     }
+
+    // Lock input while any FX are active.
+    inputLock = (!fx.empty() || !fxExpl.empty());
 
     // Auto-move (travel / explore) steps are processed here to keep the game turn-based
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
-        if (invOpen || targeting || helpOpen || looking || minimapOpen || statsOpen || optionsOpen || commandOpen || isFinished()) {
+        if (invOpen || targeting || helpOpen || looking || minimapOpen || statsOpen || levelUpOpen || optionsOpen || commandOpen || isFinished()) {
             stopAutoMove(true);
             return;
         }
@@ -154,6 +166,73 @@ void Game::handleAction(Action a) {
                 break;
         }
         return;
+    }
+
+    // ------------------------------------------------------------
+    // Level-up talent allocation overlay (forced while points are pending)
+    // ------------------------------------------------------------
+    if (levelUpOpen && talentPointsPending_ > 0) {
+        // Allow save/load even while allocation is pending.
+        if (a == Action::Save) { (void)saveToFile(defaultSavePath()); return; }
+        if (a == Action::Load) { (void)loadFromFile(defaultSavePath()); return; }
+        if (a == Action::LoadAuto) { (void)loadFromFile(defaultAutosavePath()); return; }
+
+        auto spendOne = [&]() {
+            if (talentPointsPending_ <= 0) return;
+
+            Entity& p = playerMut();
+
+            switch (levelUpSel) {
+                case 0: // Might
+                    talentMight_ += 1;
+                    pushMsg("MIGHT INCREASES.", MessageKind::Success, true);
+                    break;
+                case 1: // Agility
+                    talentAgility_ += 1;
+                    pushMsg("AGILITY INCREASES.", MessageKind::Success, true);
+                    break;
+                case 2: // Vigor
+                    talentVigor_ += 1;
+                    p.hpMax += 2;
+                    p.hp = std::min(p.hpMax, p.hp + 2);
+                    pushMsg("VIGOR INCREASES. +2 MAX HP.", MessageKind::Success, true);
+                    break;
+                case 3: // Focus
+                default:
+                    talentFocus_ += 1;
+                    pushMsg("FOCUS INCREASES.", MessageKind::Success, true);
+                    break;
+            }
+
+            talentPointsPending_ -= 1;
+            if (talentPointsPending_ <= 0) {
+                talentPointsPending_ = 0;
+                levelUpOpen = false;
+                pushMsg("TALENT CHOSEN.", MessageKind::System, true);
+            }
+        };
+
+        switch (a) {
+            case Action::Up:
+                levelUpSel = (levelUpSel + 3) % 4;
+                break;
+            case Action::Down:
+                levelUpSel = (levelUpSel + 1) % 4;
+                break;
+            case Action::Confirm:
+                spendOne();
+                break;
+            case Action::Cancel:
+                // Convenience: ESC spends all remaining points on the highlighted talent.
+                while (talentPointsPending_ > 0) spendOne();
+                break;
+            default:
+                // Ignore other inputs while allocation is pending.
+                break;
+        }
+        return;
+    } else if (levelUpOpen && talentPointsPending_ <= 0) {
+        levelUpOpen = false;
     }
 
     // Global hotkeys (available even while dead/won).
@@ -676,6 +755,10 @@ if (optionsSel == 13) {
             break;
         case Action::Rest:
             restUntilSafe();
+            acted = false;
+            break;
+        case Action::ToggleSneak:
+            toggleSneakMode();
             acted = false;
             break;
         case Action::Confirm: {

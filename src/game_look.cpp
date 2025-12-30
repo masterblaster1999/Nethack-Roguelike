@@ -93,6 +93,14 @@ std::string Game::describeAt(Vec2i p) const {
                 ss << " | YOU";
             } else {
                 ss << " | " << kindName(e->kind) << " " << e->hp << "/" << e->hpMax;
+
+                if (e->gearMelee.id != 0 && isMeleeWeapon(e->gearMelee.kind)) {
+                    ss << " | WPN: " << itemDisplayNameSingle(e->gearMelee.kind);
+                }
+                if (e->gearArmor.id != 0 && isArmor(e->gearArmor.kind)) {
+                    ss << " | ARM: " << itemDisplayNameSingle(e->gearArmor.kind);
+                }
+
             }
         }
 
@@ -120,6 +128,16 @@ std::string Game::describeAt(Vec2i p) const {
     Vec2i pp = player().pos;
     int dist = std::abs(p.x - pp.x) + std::abs(p.y - pp.y);
     ss << " | DIST " << dist;
+
+
+
+    // Environmental fields
+    if (dung.inBounds(p.x, p.y) && dung.at(p.x, p.y).visible) {
+        const uint8_t g = confusionGasAt(p.x, p.y);
+        if (g > 0u) {
+            ss << " | GAS (CONFUSION)";
+        }
+    }
 
     return ss.str();
 }

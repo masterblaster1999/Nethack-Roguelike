@@ -725,6 +725,7 @@ static std::vector<std::string> extendedCommandList() {
         "explore",
         "search",
         "rest",
+        "sneak",
         "dig",
         "pray",
         "pay",
@@ -830,6 +831,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         if (a == "cancel" || a == "escape" || a == "esc") { outKey = "bind_cancel"; return true; }
         if (a == "wait") { outKey = "bind_wait"; return true; }
         if (a == "rest") { outKey = "bind_rest"; return true; }
+        if (a == "sneak" || a == "toggle_sneak" || a == "togglesneak") { outKey = "bind_sneak"; return true; }
         if (a == "pickup" || a == "pick_up" || a == "pick") { outKey = "bind_pickup"; return true; }
         if (a == "inventory" || a == "inv") { outKey = "bind_inventory"; return true; }
         if (a == "fire") { outKey = "bind_fire"; return true; }
@@ -1180,6 +1182,26 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.handleAction(Action::Rest);
         return;
     }
+
+    if (cmd == "sneak") {
+        const std::string v = arg(1);
+        if (v.empty()) {
+            game.toggleSneakMode();
+            return;
+        }
+
+        bool enabled = game.isSneaking();
+        if (v == "on" || v == "1" || v == "true") enabled = true;
+        else if (v == "off" || v == "0" || v == "false") enabled = false;
+        else {
+            game.pushSystemMessage("USAGE: sneak [on|off]");
+            return;
+        }
+
+        game.setSneakMode(enabled);
+        return;
+    }
+
 
     if (cmd == "dig") {
         if (toks.size() < 2) {

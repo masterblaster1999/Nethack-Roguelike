@@ -415,6 +415,22 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
             break;
         }
 
+        case ItemKind::WandFireball: {
+            Color stick = add({110,75,45,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color gem   = add({255,120,60,255}, rng.range(-20,20), rng.range(-10,10), rng.range(-10,10));
+            // Diagonal wand with a fiery head.
+            line(s, 4, 12, 12, 4, stick);
+            rect(s, 11, 3, 3, 3, gem);
+
+            // Flicker highlight.
+            if (frame % 2 == 1) {
+                setPx(s, 13, 3, {255,230,170,220});
+                setPx(s, 12, 2, {255,255,255,200});
+            }
+            sparkle();
+            break;
+        }
+
         case ItemKind::LeatherArmor: {
             Color leather = add({140,90,55,255}, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
             outlineRect(s, 4, 4, 8, 10, mul(leather, 0.8f));
@@ -851,6 +867,132 @@ case ItemKind::Arrow: {
             }
             break;
         }
+
+        // --- Corpses (append-only) ---
+        case ItemKind::CorpseGoblin:
+        case ItemKind::CorpseOrc:
+        case ItemKind::CorpseBat:
+        case ItemKind::CorpseSlime:
+        case ItemKind::CorpseKobold:
+        case ItemKind::CorpseWolf:
+        case ItemKind::CorpseTroll:
+        case ItemKind::CorpseWizard:
+        case ItemKind::CorpseSnake:
+        case ItemKind::CorpseSpider:
+        case ItemKind::CorpseOgre:
+        case ItemKind::CorpseMimic:
+        case ItemKind::CorpseMinotaur: {
+            // A small, simple corpse/remains icon. We vary the palette and silhouette
+            // a bit by monster to help readability.
+            Color blood = {140, 20, 20, 200};
+
+            auto drawCorpseBlob = [&](Color body, Color shade, bool big) {
+                // Blood pool
+                rect(s, 4, 12, 8, 2, blood);
+                setPx(s, 6, 11, blood);
+                setPx(s, 10, 11, blood);
+
+                const int r = big ? 4 : 3;
+                circle(s, 8, 10, r, body);
+                circle(s, 6, 8, r - 1, body);
+
+                // Shading
+                setPx(s, 9, 10, shade);
+                setPx(s, 7, 9, shade);
+                setPx(s, 6, 8, shade);
+
+                // A tiny "eye" / detail
+                setPx(s, 5, 8, {0, 0, 0, 180});
+                if (frame % 2 == 1) setPx(s, 7, 8, {255, 255, 255, 90});
+            };
+
+            auto drawSnake = [&](Color body, Color shade) {
+                // No blood pool for snakes: smaller splatter.
+                rect(s, 5, 12, 6, 2, blood);
+                // Body
+                for (int i = 0; i < 9; ++i) {
+                    const int x = 3 + i;
+                    const int y = 9 + ((i % 3) == 0 ? 0 : ((i % 3) == 1 ? 1 : -1));
+                    setPx(s, x, y, body);
+                    if (i % 2 == 0) setPx(s, x, y + 1, mul(body, 0.85f));
+                }
+                // Head
+                circle(s, 12, 9, 2, body);
+                setPx(s, 13, 9, shade);
+                setPx(s, 12, 8, {0, 0, 0, 180});
+            };
+
+            auto drawSpider = [&](Color body, Color mark) {
+                rect(s, 5, 12, 6, 2, blood);
+                circle(s, 8, 10, 3, body);
+                circle(s, 7, 7, 2, body);
+                // legs
+                line(s, 5, 9, 2, 7, mul(body, 0.9f));
+                line(s, 11, 9, 14, 7, mul(body, 0.9f));
+                line(s, 5, 11, 2, 13, mul(body, 0.85f));
+                line(s, 11, 11, 14, 13, mul(body, 0.85f));
+                setPx(s, 8, 10, mark);
+                setPx(s, 7, 7, {0, 0, 0, 180});
+            };
+
+            switch (kind) {
+                case ItemKind::CorpseGoblin:
+                    drawCorpseBlob({70, 155, 80, 255}, {35, 95, 45, 255}, false);
+                    break;
+                case ItemKind::CorpseOrc:
+                    drawCorpseBlob({85, 135, 75, 255}, {45, 80, 40, 255}, false);
+                    break;
+                case ItemKind::CorpseBat:
+                    drawCorpseBlob({90, 65, 110, 255}, {55, 35, 70, 255}, false);
+                    break;
+                case ItemKind::CorpseSlime: {
+                    // Slime: no blood, just a goo puddle.
+                    blood = {70, 170, 70, 180};
+                    drawCorpseBlob({80, 190, 90, 210}, {50, 120, 55, 210}, false);
+                    break;
+                }
+                case ItemKind::CorpseKobold:
+                    drawCorpseBlob({160, 120, 90, 255}, {110, 80, 55, 255}, false);
+                    break;
+                case ItemKind::CorpseWolf:
+                    drawCorpseBlob({165, 165, 175, 255}, {105, 105, 115, 255}, true);
+                    break;
+                case ItemKind::CorpseTroll:
+                    drawCorpseBlob({95, 170, 85, 255}, {50, 105, 45, 255}, true);
+                    break;
+                case ItemKind::CorpseWizard: {
+                    // Wizard: pale body + robe accent.
+                    drawCorpseBlob({200, 175, 155, 255}, {130, 110, 95, 255}, false);
+                    rect(s, 7, 9, 5, 3, {70, 95, 180, 220});
+                    break;
+                }
+                case ItemKind::CorpseSnake:
+                    drawSnake({95, 175, 70, 255}, {45, 110, 35, 255});
+                    break;
+                case ItemKind::CorpseSpider:
+                    drawSpider({55, 55, 65, 255}, {140, 30, 30, 230});
+                    break;
+                case ItemKind::CorpseOgre:
+                    drawCorpseBlob({175, 150, 125, 255}, {105, 90, 75, 255}, true);
+                    break;
+                case ItemKind::CorpseMimic:
+                    drawCorpseBlob({150, 110, 70, 255}, {105, 75, 45, 255}, false);
+                    break;
+                case ItemKind::CorpseMinotaur: {
+                    drawCorpseBlob({175, 125, 80, 255}, {105, 70, 45, 255}, true);
+                    // small horns
+                    setPx(s, 4, 6, {200, 200, 200, 200});
+                    setPx(s, 5, 6, {200, 200, 200, 200});
+                    setPx(s, 5, 5, {200, 200, 200, 200});
+                    break;
+                }
+                default:
+                    drawCorpseBlob({150, 150, 150, 255}, {90, 90, 90, 255}, false);
+                    break;
+            }
+
+            break;
+        }
         default:
             rect(s, 5, 5, 6, 6, {255,0,255,255});
             break;
@@ -886,6 +1028,27 @@ SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int fr
                 setPx(s, 12, 4, s2);
                 setPx(s, 4, 12, s2);
                 setPx(s, 10, 6, s2);
+            }
+            break;
+        }
+        case ProjectileKind::Fireball: {
+            // Small fiery blob with a bright core.
+            Color outer = {200, 70, 30, 220};
+            Color mid   = {255, 140, 60, 255};
+            Color core  = {255, 230, 160, 255};
+
+            circle(s, 8, 8, 3, outer);
+            circle(s, 8, 8, 2, mid);
+            circle(s, 8, 8, 1, core);
+
+            // Flicker/sparks
+            if (frame % 2 == 1) {
+                setPx(s, 11, 6, {255,255,255,160});
+                setPx(s, 6, 11, {255,220,180,140});
+                setPx(s, 10, 10, {255,180,120,140});
+            } else {
+                setPx(s, 6, 6, {255,210,150,120});
+                setPx(s, 10, 5, {255,200,120,110});
             }
             break;
         }

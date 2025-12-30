@@ -67,8 +67,49 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     // Locked door: keys open it instantly; lockpicks can work as a fallback.
     if (dung.isDoorLocked(nx, ny)) {
         if (e.kind != EntityKind::Player) {
-            // Monsters can't open locked doors (for now).
-            return false;
+            // Monsters generally can't open locked doors.
+            // However, a few heavy bruisers can bash them down while hunting.
+            // This prevents "perfect safety" behind vault doors and makes
+            // late-game chases more exciting.
+            const bool canBash = (e.kind == EntityKind::Ogre || e.kind == EntityKind::Troll || e.kind == EntityKind::Minotaur);
+            if (!canBash || !e.alerted) {
+                return false;
+            }
+
+            float p = 0.0f;
+            switch (e.kind) {
+                case EntityKind::Ogre:     p = 0.30f; break;
+                case EntityKind::Troll:    p = 0.25f; break;
+                case EntityKind::Minotaur: p = 0.55f; break;
+                default: p = 0.0f; break;
+            }
+
+            // Slight scaling with strength/depth so endgame bruisers feel scarier.
+            p += 0.02f * static_cast<float>(std::max(0, e.baseAtk - 5));
+            p = std::clamp(p, 0.05f, 0.85f);
+
+            const bool vis = dung.inBounds(nx, ny) && dung.at(nx, ny).visible;
+            if (rng.chance(p)) {
+                // Smash -> door becomes open in one action.
+                dung.unlockDoor(nx, ny);
+                dung.openDoor(nx, ny);
+
+                if (vis) {
+                    std::ostringstream ss;
+                    ss << kindName(e.kind) << " SMASHES OPEN THE LOCKED DOOR!";
+                    pushMsg(ss.str(), MessageKind::Warning, false);
+                }
+            } else {
+                if (vis) {
+                    std::ostringstream ss;
+                    ss << kindName(e.kind) << " RAMS THE LOCKED DOOR!";
+                    pushMsg(ss.str(), MessageKind::Warning, false);
+                }
+            }
+
+            // Bashing is loud, regardless of success.
+            emitNoise({nx, ny}, 14);
+            return true;
         }
 
         // Prefer keys (guaranteed).
@@ -84,7 +125,9 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         if (lockpickCount() > 0) {
             // Success chance scales a bit with character level.
             float p = 0.55f + 0.03f * static_cast<float>(charLevel);
-            p = std::min(0.85f, p);
+            // Talents: Agility helps with lockpicking.
+            p += 0.02f * static_cast<float>(playerAgility());
+            p = std::min(0.90f, p);
 
             if (rng.chance(p)) {
                 dung.unlockDoor(nx, ny);
@@ -181,8 +224,36 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
             if (a->kind == ItemKind::ChainArmor) vol += 1;
             if (a->kind == ItemKind::PlateArmor) vol += 2;
         }
-        vol = clampi(vol, 2, 14);
-        emitNoise(e.pos, vol);
+
+        if (isSneaking()) {
+            // Sneaking can reduce footstep noise to near-silent levels, but
+            // heavy armor / encumbrance still makes at least some noise.
+            int reduce = 4 + std::min(2, playerAgility() / 4);
+            vol -= reduce;
+
+            int minVol = 0;
+            if (encumbranceEnabled_) {
+                switch (burdenState()) {
+                    case BurdenState::Unburdened: break;
+                    case BurdenState::Burdened:   minVol = std::max(minVol, 1); break;
+                    case BurdenState::Stressed:   minVol = std::max(minVol, 1); break;
+                    case BurdenState::Strained:   minVol = std::max(minVol, 1); break;
+                    case BurdenState::Overloaded: minVol = std::max(minVol, 2); break;
+                }
+            }
+            if (const Item* a = equippedArmor()) {
+                if (a->kind == ItemKind::ChainArmor) minVol = std::max(minVol, 1);
+                if (a->kind == ItemKind::PlateArmor) minVol = std::max(minVol, 2);
+            }
+
+            vol = clampi(vol, minVol, 14);
+        } else {
+            vol = clampi(vol, 2, 14);
+        }
+
+        if (vol > 0) {
+            emitNoise(e.pos, vol);
+        }
 
         // Convenience / QoL: auto-pickup when stepping on items.
         if (autoPickup != AutoPickupMode::Off) {
@@ -335,9 +406,45 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
             break;
         }
         case TrapKind::ConfusionGas: {
-            const int turns = rng.range(8, 14) + std::min(6, depth_ / 2);
+            // Lingering confusion gas cloud. This trap creates a persistent, tile-based hazard
+            // that slowly diffuses and dissipates over time.
+            const size_t expect = static_cast<size_t>(dung.width * dung.height);
+            if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
 
+            // Apply an immediate confusion hit to the victim (the cloud will keep it topped up).
+            const int turns = rng.range(4, 7) + std::min(4, depth_ / 3);
             victim.effects.confusionTurns = std::max(victim.effects.confusionTurns, turns);
+
+            // Seed the gas intensity in a small radius around the trap.
+            const uint8_t baseStrength = static_cast<uint8_t>(clampi(8 + depth_ / 3, 8, 12));
+            constexpr int radius = 2;
+
+            std::vector<uint8_t> mask;
+            dung.computeFovMask(pos.x, pos.y, radius, mask);
+
+            const int minX = std::max(0, pos.x - radius);
+            const int maxX = std::min(dung.width - 1, pos.x + radius);
+            const int minY = std::max(0, pos.y - radius);
+            const int maxY = std::min(dung.height - 1, pos.y + radius);
+
+            for (int y = minY; y <= maxY; ++y) {
+                for (int x = minX; x <= maxX; ++x) {
+                    const int dx = std::abs(x - pos.x);
+                    const int dy = std::abs(y - pos.y);
+                    const int dist = std::max(dx, dy);
+                    if (dist > radius) continue;
+
+                    const size_t i = static_cast<size_t>(y * dung.width + x);
+                    if (i >= mask.size()) continue;
+                    if (mask[i] == 0u) continue;
+                    if (!dung.isWalkable(x, y)) continue;
+
+                    const int s = static_cast<int>(baseStrength) - dist * 2;
+                    if (s <= 0) continue;
+                    const uint8_t ss = static_cast<uint8_t>(s);
+                    if (confusionGas_[i] < ss) confusionGas_[i] = ss;
+                }
+            }
 
             if (isPlayer) {
                 pushMsg("A NOXIOUS GAS SWIRLS AROUND YOU!", MessageKind::Warning, true);
@@ -349,7 +456,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
             }
 
             // Gas traps are loud enough to draw attention.
-            emitNoise(pos, 6);
+            emitNoise(pos, 8);
             break;
         }
         default:
@@ -366,7 +473,9 @@ bool Game::searchForTraps(bool verbose, int* foundTrapsOut, int* foundSecretsOut
     int foundTraps = 0;
     int foundSecrets = 0;
     float baseChance = 0.35f + 0.05f * static_cast<float>(charLevel);
-    baseChance = std::min(0.85f, baseChance);
+    // Talents: Focus improves careful searching.
+    baseChance += 0.02f * static_cast<float>(playerFocus());
+    baseChance = std::min(0.90f, baseChance);
 
     for (auto& t : trapsCur) {
         if (t.discovered) continue;
@@ -514,7 +623,9 @@ bool Game::disarmTrap() {
 
         // Slightly harder than floor traps; higher-tier chests are also tougher.
         float chance = 0.25f + 0.04f * static_cast<float>(charLevel);
-        chance = std::min(0.80f, chance);
+        // Talents: Agility improves delicate work.
+        chance += 0.02f * static_cast<float>(playerAgility());
+        chance = std::min(0.85f, chance);
         chance -= 0.05f * static_cast<float>(tier);
         if (hasPicks) chance = std::min(0.95f, chance + 0.20f);
 
@@ -636,7 +747,9 @@ bool Game::disarmTrap() {
 
     // Base chance scales with level. Tools help a lot, but magical traps are still tricky.
     float chance = 0.33f + 0.04f * static_cast<float>(charLevel);
-    chance = std::min(0.85f, chance);
+    // Talents: Agility improves disarming.
+    chance += 0.02f * static_cast<float>(playerAgility());
+    chance = std::min(0.90f, chance);
     if (hasPicks) chance = std::min(0.95f, chance + 0.15f);
 
     if (tr.kind == TrapKind::Teleport) chance *= 0.85f;

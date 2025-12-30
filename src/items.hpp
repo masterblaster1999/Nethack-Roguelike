@@ -8,6 +8,8 @@ enum class ProjectileKind : uint8_t {
     Arrow = 0,
     Rock,
     Spark,
+    // New projectile kinds (append-only)
+    Fireball,
 };
 
 enum class AmmoKind : uint8_t {
@@ -100,13 +102,54 @@ enum class ItemKind : uint8_t {
     // --- Terrain / digging (append-only) ---
     Pickaxe,
     WandDigging,
+
+    // --- Explosives / magic (append-only) ---
+    WandFireball,
+
+    // --- Corpses (append-only) ---
+    // Dropped by slain monsters. Corpses rot away over time, and can be eaten
+    // (at some risk) for hunger and sometimes temporary buffs.
+    CorpseGoblin,
+    CorpseOrc,
+    CorpseBat,
+    CorpseSlime,
+    CorpseKobold,
+    CorpseWolf,
+    CorpseTroll,
+    CorpseWizard,
+    CorpseSnake,
+    CorpseSpider,
+    CorpseOgre,
+    CorpseMimic,
+    CorpseMinotaur,
 };
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::WandDigging) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::CorpseMinotaur) + 1;
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;
+}
+
+inline bool isCorpseKind(ItemKind k) {
+    switch (k) {
+        case ItemKind::CorpseGoblin:
+        case ItemKind::CorpseOrc:
+        case ItemKind::CorpseBat:
+        case ItemKind::CorpseSlime:
+        case ItemKind::CorpseKobold:
+        case ItemKind::CorpseWolf:
+        case ItemKind::CorpseTroll:
+        case ItemKind::CorpseWizard:
+        case ItemKind::CorpseSnake:
+        case ItemKind::CorpseSpider:
+        case ItemKind::CorpseOgre:
+        case ItemKind::CorpseMimic:
+        case ItemKind::CorpseMinotaur:
+            return true;
+        default:
+            return false;
+    }
 }
 
 inline bool isPotionKind(ItemKind k) {
@@ -233,6 +276,10 @@ int ammoCount(const std::vector<Item>& inv, AmmoKind ammo);
 
 // Consumes up to `amount` ammo from matching stacks. Returns true if fully consumed.
 bool consumeAmmo(std::vector<Item>& inv, AmmoKind ammo, int amount);
+
+// Consumes exactly 1 ammo and optionally returns a template Item (count=1) preserving metadata
+// like shopPrice/shopDepth so projectiles can be recovered without laundering shop debt.
+bool consumeOneAmmo(std::vector<Item>& inv, AmmoKind ammo, Item* outConsumed = nullptr);
 
 // Stacking: tries to merge `incoming` into existing stack in `inv` if possible.
 // Returns true if merged; false if caller should push as new entry.

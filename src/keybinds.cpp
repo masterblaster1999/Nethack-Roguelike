@@ -180,6 +180,7 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     if (name == "sort_inventory" || name == "sortinventory") return Action::SortInventory;
     if (name == "wait") return Action::Wait;
     if (name == "rest") return Action::Rest;
+    if (name == "sneak" || name == "toggle_sneak" || name == "togglesneak") return Action::ToggleSneak;
     if (name == "pickup" || name == "pick_up") return Action::Pickup;
     if (name == "inventory" || name == "inv") return Action::Inventory;
     if (name == "fire") return Action::Fire;
@@ -267,6 +268,7 @@ KeyBinds KeyBinds::defaults() {
     add(Action::Wait, SDLK_SPACE);
     add(Action::Wait, SDLK_PERIOD);
     add(Action::Rest, SDLK_r);
+    add(Action::ToggleSneak, SDLK_n);
 
     add(Action::Pickup, SDLK_g);
     add(Action::Pickup, SDLK_COMMA);
@@ -414,6 +416,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::ToggleAutoPickup,
         Action::Pickup,
         Action::Rest,
+        Action::ToggleSneak,
         Action::Wait,
 
         Action::Confirm,
@@ -450,6 +453,7 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
     {Action::Cancel, "cancel"},
     {Action::Wait, "wait"},
     {Action::Rest, "rest"},
+    {Action::ToggleSneak, "sneak"},
     {Action::Pickup, "pickup"},
     {Action::Inventory, "inventory"},
     {Action::Fire, "fire"},

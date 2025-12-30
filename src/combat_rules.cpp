@@ -62,6 +62,10 @@ DiceExpr rangedDiceForProjectile(ProjectileKind proj, bool wandPowered) {
         case ProjectileKind::Spark:
             // Wands are a bit spicier than wizard zaps.
             return wandPowered ? DiceExpr{1, 6, 2} : DiceExpr{1, 6, 0};
+        case ProjectileKind::Fireball:
+            // Explosive AoE: tuned a bit lower per-target than a direct bolt.
+            // (The explosion falloff is handled by the caller.)
+            return wandPowered ? DiceExpr{2, 4, 2} : DiceExpr{2, 4, 0};
         default: return {1, 4, 0};
     }
 }

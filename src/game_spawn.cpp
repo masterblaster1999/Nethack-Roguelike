@@ -50,24 +50,41 @@ void Game::spawnMonsters() {
                 e.hpMax = 9; e.baseAtk = 2; e.baseDef = 1;
                 e.willFlee = false;
                 e.canRanged = true;
+                // Ranged stats are stored per-entity (saved/loaded), so set them here on spawn.
+                e.rangedRange = 8;
+                e.rangedAtk = 6;
+                e.rangedProjectile = ProjectileKind::Arrow;
+                e.rangedAmmo = AmmoKind::Arrow;
                 break;
             case EntityKind::KoboldSlinger:
                 e.hpMax = 8; e.baseAtk = 2; e.baseDef = 0;
                 e.willFlee = true;
                 e.canRanged = true;
+                e.rangedRange = 6;
+                e.rangedAtk = 5;
+                e.rangedProjectile = ProjectileKind::Rock;
+                e.rangedAmmo = AmmoKind::Rock;
                 break;
             case EntityKind::Wolf:
                 e.hpMax = 6; e.baseAtk = 2; e.baseDef = 0;
                 e.willFlee = false;
+                e.packAI = true;
                 break;
             case EntityKind::Troll:
                 e.hpMax = 16; e.baseAtk = 4; e.baseDef = 2;
                 e.willFlee = false;
+                // Trolls regenerate slowly; makes them scary if you can't finish them quickly.
+                e.regenChancePct = 25;
+                e.regenAmount = 1;
                 break;
             case EntityKind::Wizard:
                 e.hpMax = 12; e.baseAtk = 3; e.baseDef = 1;
                 e.willFlee = false;
                 e.canRanged = true;
+                e.rangedRange = 7;
+                e.rangedAtk = 7;
+                e.rangedProjectile = ProjectileKind::Spark;
+                e.rangedAmmo = AmmoKind::None;
                 break;
             case EntityKind::Snake:
                 e.hpMax = 7; e.baseAtk = 2; e.baseDef = 0;
@@ -113,6 +130,81 @@ void Game::spawnMonsters() {
         e.hp = e.hpMax;
         e.baseAtk += (d / 3);
         e.baseDef += (d / 4);
+
+        // Spawn with basic gear for humanoid-ish monsters.
+        // This makes loot feel more "earned" (you can take what they were using),
+        // and creates emergent difficulty when monsters pick up better weapons/armor.
+        if (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k)) {
+            const RoomType rt = roomTypeAt(dung, pos);
+
+            auto makeGear = [&](ItemKind kind) -> Item {
+                Item it;
+                it.id = 1; // non-zero => present
+                it.kind = kind;
+                it.count = 1;
+                it.spriteSeed = rng.nextU32();
+                it.shopPrice = 0;
+                it.shopDepth = 0;
+
+                if (isWeapon(kind) || isArmor(kind)) {
+                    it.buc = rollBucForGear(rng, depth_, rt);
+
+                    // A little bit of enchantment scaling with depth.
+                    if (depth_ >= 4 && rng.chance(0.18f)) {
+                        it.enchant = 1;
+                        if (depth_ >= 7 && rng.chance(0.07f)) it.enchant = 2;
+                    }
+                }
+
+                return it;
+            };
+
+            switch (k) {
+                case EntityKind::Goblin:
+                    if (rng.chance(0.60f)) {
+                        e.gearMelee = makeGear(ItemKind::Dagger);
+                    }
+                    break;
+
+                case EntityKind::Orc:
+                    if (rng.chance(0.80f)) {
+                        const ItemKind wk = (depth_ >= 4 && rng.chance(0.25f)) ? ItemKind::Axe : ItemKind::Sword;
+                        e.gearMelee = makeGear(wk);
+                    }
+                    if (rng.chance(0.30f)) {
+                        const ItemKind ak = (depth_ >= 6 && rng.chance(0.20f)) ? ItemKind::ChainArmor : ItemKind::LeatherArmor;
+                        e.gearArmor = makeGear(ak);
+                    }
+                    break;
+
+                case EntityKind::SkeletonArcher:
+                    if (rng.chance(0.55f)) {
+                        e.gearMelee = makeGear(ItemKind::Dagger);
+                    }
+                    if (rng.chance(0.20f)) {
+                        e.gearArmor = makeGear(ItemKind::ChainArmor);
+                    }
+                    break;
+
+                case EntityKind::KoboldSlinger:
+                    if (rng.chance(0.55f)) {
+                        e.gearMelee = makeGear(ItemKind::Dagger);
+                    }
+                    break;
+
+                case EntityKind::Wizard:
+                    if (rng.chance(0.50f)) {
+                        e.gearMelee = makeGear(ItemKind::Dagger);
+                    }
+                    if (depth_ >= 5 && rng.chance(0.15f)) {
+                        e.gearArmor = makeGear(ItemKind::LeatherArmor);
+                    }
+                    break;
+
+                default:
+                    break;
+            }
+        }
 
         ents.push_back(e);
     };
@@ -234,7 +326,10 @@ void Game::spawnMonsters() {
                     else if (roll < 50) k = EntityKind::Troll;
                     else if (roll < 65) k = EntityKind::Mimic;
                     else if (roll < 72) k = EntityKind::Spider;
-                    else if (roll < 75) k = EntityKind::Minotaur;
+                    else if (roll < 75) {
+                        // Keep Minotaurs off the final floor; the endgame boss is different now.
+                        k = (depth_ == QUEST_DEPTH) ? EntityKind::Troll : EntityKind::Minotaur;
+                    }
                     else k = EntityKind::SkeletonArcher;
                 } else if (depth_ >= 4) {
                     if (roll < 25) k = EntityKind::Wizard;
@@ -286,10 +381,28 @@ void Game::spawnMonsters() {
             }
         }
 
-        // Final floor: the Minotaur guards the Amulet.
-        if (depth_ == QUEST_DEPTH) {
+        // Penultimate floor: the Minotaur guards the central hoard.
+        if (depth_ == QUEST_DEPTH - 1) {
             Vec2i p = randomFreeTileInRoom(*treasure);
             addMonster(EntityKind::Minotaur, p, 0);
+        }
+
+        // Final floor: a hostile archwizard guards the Amulet.
+        if (depth_ == QUEST_DEPTH) {
+            Vec2i p = randomFreeTileInRoom(*treasure);
+            addMonster(EntityKind::Wizard, p, 0);
+
+            // Upgrade into an "archwizard" (stronger ranged profile).
+            if (!ents.empty()) {
+                Entity& w = ents.back();
+                if (w.kind == EntityKind::Wizard) {
+                    w.rangedProjectile = ProjectileKind::Fireball;
+                    w.rangedRange = std::max(w.rangedRange, 6);
+                    w.rangedAtk += 2;
+                    w.hpMax += 6;
+                    w.hp = std::min(w.hpMax, w.hp + 6);
+                }
+            }
         }
     }
 }
@@ -372,7 +485,8 @@ void Game::spawnItems() {
 
     auto dropGoodItem = [&](const Room& r) {
         // Treasure rooms are where you find the "spicy" gear.
-        int roll = rng.range(0, 159);
+        // Slightly expanded table to accommodate new gear.
+        int roll = rng.range(0, 163);
 
         if (roll < 18) dropItemAt(ItemKind::Sword, randomFreeTileInRoom(r));
         else if (roll < 30) dropItemAt(ItemKind::Axe, randomFreeTileInRoom(r));
@@ -381,20 +495,25 @@ void Game::spawnItems() {
         else if (roll < 58) dropItemAt(ItemKind::PlateArmor, randomFreeTileInRoom(r));
         else if (roll < 70) dropItemAt(ItemKind::WandSparks, randomFreeTileInRoom(r));
         else if (roll < 78) dropItemAt(ItemKind::WandDigging, randomFreeTileInRoom(r));
-        else if (roll < 88) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r));
-        else if (roll < 100) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), rng.range(1, 2));
-        else if (roll < 112) dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), rng.range(1, 2));
-        else if (roll < 122) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), rng.range(1, 2));
-        else if (roll < 126) dropItemAt(ItemKind::PotionClarity, randomFreeTileInRoom(r), 1);
-        else if (roll < 128) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
-        else if (roll < 132) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
-        else if (roll < 136) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
-        else if (roll < 140) {
+        else if (roll < 82) {
+            // Fireball wand is a mid/deep treasure find.
+            ItemKind wk = (depth_ >= 5) ? ItemKind::WandFireball : ItemKind::WandSparks;
+            dropItemAt(wk, randomFreeTileInRoom(r));
+        }
+        else if (roll < 92) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r));
+        else if (roll < 104) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), rng.range(1, 2));
+        else if (roll < 116) dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), rng.range(1, 2));
+        else if (roll < 126) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), rng.range(1, 2));
+        else if (roll < 130) dropItemAt(ItemKind::PotionClarity, randomFreeTileInRoom(r), 1);
+        else if (roll < 132) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
+        else if (roll < 136) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
+        else if (roll < 140) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
+        else if (roll < 144) {
             const ItemKind pk = rng.chance(0.25f) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
             dropItemAt(pk, randomFreeTileInRoom(r), 1);
         }
-        else if (roll < 143) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
-        else if (roll < 145) {
+        else if (roll < 147) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
+        else if (roll < 149) {
             int pick = rng.range(0, 3);
             ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
                                       : (pick == 1) ? ItemKind::ScrollDetectTraps
@@ -402,10 +521,10 @@ void Game::spawnItems() {
                                                     : ItemKind::ScrollKnock;
             dropItemAt(sk, randomFreeTileInRoom(r), 1);
         }
-        else if (roll < 147) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
-        else if (roll < 149) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
-        else if (roll < 152) dropItemAt(ItemKind::ScrollRemoveCurse, randomFreeTileInRoom(r), 1);
-        else if (roll < 155) dropItemAt(ItemKind::ScrollConfusion, randomFreeTileInRoom(r), 1);
+        else if (roll < 151) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
+        else if (roll < 153) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
+        else if (roll < 156) dropItemAt(ItemKind::ScrollRemoveCurse, randomFreeTileInRoom(r), 1);
+        else if (roll < 159) dropItemAt(ItemKind::ScrollConfusion, randomFreeTileInRoom(r), 1);
         else dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
     };
 
@@ -562,6 +681,7 @@ void Game::spawnItems() {
                     // Magic shop
                     if (roll < 14) { k = ItemKind::WandSparks; }
                     else if (roll < 22) { k = ItemKind::WandDigging; }
+                    else if (roll < 26) { k = (depth_ >= 6 ? ItemKind::WandFireball : ItemKind::WandDigging); }
                     else if (roll < 33) { k = ItemKind::ScrollTeleport; }
                     else if (roll < 45) { k = ItemKind::ScrollMapping; }
                     else if (roll < 60) { k = ItemKind::ScrollIdentify; }
@@ -783,7 +903,12 @@ void Game::spawnTraps() {
     // A small number of traps per floor, scaling gently with depth.
     const int base = 2;
     const int depthBonus = std::min(6, depth_ / 2);
-    const int targetCount = base + depthBonus + rng.range(0, 2);
+    int targetCount = base + depthBonus + rng.range(0, 2);
+
+    // Penultimate floor (the labyrinth) is intentionally trap-heavy.
+    if (depth_ == QUEST_DEPTH - 1) {
+        targetCount += 4;
+    }
 
     auto isBadPos = [&](Vec2i p) {
         if (!dung.inBounds(p.x, p.y)) return true;
@@ -811,7 +936,15 @@ void Game::spawnTraps() {
         // Choose trap type (deeper floors skew deadlier).
         int roll = rng.range(0, 99);
         TrapKind tk = TrapKind::Spike;
-        if (depth_ <= 1) {
+        if (depth_ == QUEST_DEPTH - 1) {
+            // Labyrinth: more "tactical" traps than raw damage.
+            if (roll < 25) tk = TrapKind::Spike;
+            else if (roll < 50) tk = TrapKind::PoisonDart;
+            else if (roll < 72) tk = TrapKind::Alarm;
+            else if (roll < 88) tk = TrapKind::Web;
+            else if (roll < 96) tk = TrapKind::ConfusionGas;
+            else tk = TrapKind::Teleport;
+        } else if (depth_ <= 1) {
             tk = (roll < 70) ? TrapKind::Spike : TrapKind::PoisonDart;
         } else if (depth_ <= 3) {
             if (roll < 45) tk = TrapKind::Spike;
@@ -868,6 +1001,58 @@ void Game::applyEndOfTurnEffects() {
     if (gameOver) return;
 
     Entity& p = playerMut();
+
+
+    // ------------------------------------------------------------
+    // Environmental fields: Confusion Gas (persistent, tile-based)
+    //
+    // The gas itself is stored as an intensity map (0..255). Entities standing
+    // in gas have their confusion duration "topped up" each turn.
+    // ------------------------------------------------------------
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+
+        auto gasIdx = [&](int x, int y) -> size_t {
+            return static_cast<size_t>(y * dung.width + x);
+        };
+        auto gasAt = [&](int x, int y) -> uint8_t {
+            if (!dung.inBounds(x, y)) return 0u;
+            const size_t i = gasIdx(x, y);
+            if (i >= confusionGas_.size()) return 0u;
+            return confusionGas_[i];
+        };
+
+        auto applyGasTo = [&](Entity& e, bool isPlayer) {
+            const uint8_t g = gasAt(e.pos.x, e.pos.y);
+            if (g == 0u) return;
+
+            // Scale confusion severity with gas intensity.
+            int minTurns = 2 + static_cast<int>(g) / 2;
+            minTurns = clampi(minTurns, 2, 10);
+
+            const int before = e.effects.confusionTurns;
+            if (before < minTurns) e.effects.confusionTurns = minTurns;
+
+            // Message only on first exposure (avoids log spam while standing in gas).
+            if (before == 0 && e.effects.confusionTurns > 0) {
+                if (isPlayer) {
+                    pushMsg("YOU INHALE NOXIOUS GAS!", MessageKind::Warning, true);
+                } else if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(e.kind) << " INHALES NOXIOUS GAS!";
+                    pushMsg(ss.str(), MessageKind::Info, false);
+                }
+            }
+        };
+
+        applyGasTo(p, true);
+        for (auto& m : ents) {
+            if (m.id == playerId_) continue;
+            if (m.hp <= 0) continue;
+            applyGasTo(m, false);
+        }
+    }
     // Timed poison: hurts once per full turn.
     if (p.effects.poisonTurns > 0) {
         p.effects.poisonTurns = std::max(0, p.effects.poisonTurns - 1);
@@ -941,7 +1126,8 @@ void Game::applyEndOfTurnEffects() {
         naturalRegenCounter = 0;
     } else if (p.effects.regenTurns <= 0) {
         // Faster natural regen as you level.
-        const int interval = std::max(6, 14 - charLevel); // L1:13, L5:9, L10+:6
+        const int vigorBonus = std::min(4, talentVigor_);
+        const int interval = std::max(6, 14 - charLevel - vigorBonus); // L1:13, L5:9, L10+:6 (vigor speeds this up)
         naturalRegenCounter++;
         if (naturalRegenCounter >= interval) {
             p.hp = std::min(p.hpMax, p.hp + 1);
@@ -1019,6 +1205,47 @@ void Game::applyEndOfTurnEffects() {
     }
 
 
+    // Corpses rot away (carried and dropped).
+    // We reuse the Item::charges field as a simple "freshness" timer in turns.
+    {
+        int rottedInv = 0;
+        for (size_t i = 0; i < inv.size();) {
+            Item& it = inv[i];
+            if (isCorpseKind(it.kind)) {
+                if (it.charges > 0) it.charges -= 1;
+                if (it.charges <= 0) {
+                    ++rottedInv;
+                    inv.erase(inv.begin() + static_cast<std::vector<Item>::difference_type>(i));
+                    continue;
+                }
+            }
+            ++i;
+        }
+        if (rottedInv > 0) {
+            pushMsg(rottedInv == 1 ? "A CORPSE ROTS AWAY IN YOUR PACK." : "CORPSES ROT AWAY IN YOUR PACK.", MessageKind::System, true);
+        }
+
+        int rottedGroundVis = 0;
+        for (size_t i = 0; i < ground.size();) {
+            auto& gi = ground[i];
+            if (isCorpseKind(gi.item.kind)) {
+                if (gi.item.charges > 0) gi.item.charges -= 1;
+                if (gi.item.charges <= 0) {
+                    if (dung.inBounds(gi.pos.x, gi.pos.y) && dung.at(gi.pos.x, gi.pos.y).visible) {
+                        ++rottedGroundVis;
+                    }
+                    ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(i));
+                    continue;
+                }
+            }
+            ++i;
+        }
+        if (rottedGroundVis > 0) {
+            pushMsg(rottedGroundVis == 1 ? "A CORPSE ROTS AWAY." : "SOME CORPSES ROT AWAY.", MessageKind::System, true);
+        }
+    }
+
+
     // Timed effects for monsters (poison, web). These tick with time just like the player.
     for (auto& m : ents) {
         if (m.id == playerId_) continue;
@@ -1056,6 +1283,70 @@ void Game::applyEndOfTurnEffects() {
                 }
             }
         }
+
+        // Timed confusion: wears off with time (just like the player).
+        if (m.effects.confusionTurns > 0) {
+            m.effects.confusionTurns = std::max(0, m.effects.confusionTurns - 1);
+            if (m.effects.confusionTurns == 0) {
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(m.kind) << " SEEMS LESS CONFUSED.";
+                    pushMsg(ss.str(), MessageKind::System, false);
+                }
+            }
+        }
+    }
+
+    // Update confusion gas cloud diffusion/decay.
+    // This is a cheap per-turn diffusion on the small map grid.
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (expect > 0 && confusionGas_.size() != expect) {
+            confusionGas_.assign(expect, 0u);
+        }
+
+        if (!confusionGas_.empty()) {
+            const int w = dung.width;
+            const int h = dung.height;
+            const size_t n = static_cast<size_t>(w * h);
+
+            std::vector<uint8_t> next(n, 0u);
+            auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
+            auto passable = [&](int x, int y) -> bool {
+                if (!dung.inBounds(x, y)) return false;
+                // Keep gas on walkable tiles (floors, open doors, stairs).
+                return dung.isWalkable(x, y);
+            };
+
+            constexpr Vec2i kDirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const size_t i = idx2(x, y);
+                    const uint8_t s = confusionGas_[i];
+                    if (s == 0u) continue;
+                    if (!passable(x, y)) continue;
+
+                    // Always decay in place.
+                    const uint8_t self = (s > 0u) ? static_cast<uint8_t>(s - 1u) : 0u;
+                    if (next[i] < self) next[i] = self;
+
+                    // Spread to neighbors with extra decay.
+                    if (s >= 3u) {
+                        const uint8_t spread = static_cast<uint8_t>(s - 2u);
+                        for (const Vec2i& d : kDirs) {
+                            const int nx = x + d.x;
+                            const int ny = y + d.y;
+                            if (!passable(nx, ny)) continue;
+                            const size_t j = idx2(nx, ny);
+                            if (next[j] < spread) next[j] = spread;
+                        }
+                    }
+                }
+            }
+
+            confusionGas_.swap(next);
+        }
     }
 
 }
@@ -1092,6 +1383,81 @@ void Game::cleanupDead() {
     for (const auto& e : ents) {
         if (e.id == playerId_) continue;
         if (e.hp > 0) continue;
+
+        // Corpse drops (organic remains).
+        // These are heavy, rot away over time, and can be eaten.
+        {
+            ItemKind corpseKind = ItemKind::Dagger;
+            float chance = 0.0f;
+            bool ok = true;
+
+            switch (e.kind) {
+                case EntityKind::Goblin:        corpseKind = ItemKind::CorpseGoblin;   chance = 0.75f; break;
+                case EntityKind::Orc:           corpseKind = ItemKind::CorpseOrc;      chance = 0.75f; break;
+                case EntityKind::Bat:           corpseKind = ItemKind::CorpseBat;      chance = 0.65f; break;
+                case EntityKind::Slime:         corpseKind = ItemKind::CorpseSlime;    chance = 0.50f; break;
+                case EntityKind::KoboldSlinger: corpseKind = ItemKind::CorpseKobold;   chance = 0.70f; break;
+                case EntityKind::Wolf:          corpseKind = ItemKind::CorpseWolf;     chance = 0.75f; break;
+                case EntityKind::Troll:         corpseKind = ItemKind::CorpseTroll;    chance = 0.85f; break;
+                case EntityKind::Wizard:        corpseKind = ItemKind::CorpseWizard;   chance = 0.70f; break;
+                case EntityKind::Snake:         corpseKind = ItemKind::CorpseSnake;    chance = 0.70f; break;
+                case EntityKind::Spider:        corpseKind = ItemKind::CorpseSpider;   chance = 0.70f; break;
+                case EntityKind::Ogre:          corpseKind = ItemKind::CorpseOgre;     chance = 0.85f; break;
+                case EntityKind::Mimic:         corpseKind = ItemKind::CorpseMimic;    chance = 0.60f; break;
+                case EntityKind::Minotaur:      corpseKind = ItemKind::CorpseMinotaur; chance = 0.90f; break;
+                default:
+                    ok = false;
+                    break;
+            }
+
+            if (ok && chance > 0.0f && rng.chance(chance)) {
+                GroundItem ci;
+                ci.pos = e.pos;
+                ci.item.id = nextItemId++;
+                ci.item.spriteSeed = rng.nextU32();
+                ci.item.kind = corpseKind;
+                ci.item.count = 1;
+
+                // Freshness timer scales with "mass" so bigger corpses last longer.
+                const int w = std::max(1, itemDef(corpseKind).weight);
+                const int base = 180 + w * 6;
+                const int var = rng.range(-20, 25);
+                ci.item.charges = std::max(120, std::min(380, base + var));
+
+                ground.push_back(ci);
+            }
+        }
+
+        // Drop equipped monster gear (weapon/armor) before the generic loot roll.
+        // (Monsters can also pick up better gear during play.)
+        if (e.gearMelee.id != 0 && isWeapon(e.gearMelee.kind)) {
+            Item it = e.gearMelee;
+            it.count = 1;
+            it.shopPrice = 0;
+            it.shopDepth = 0;
+            dropGroundItemItem(e.pos, it);
+        }
+        if (e.gearArmor.id != 0 && isArmor(e.gearArmor.kind)) {
+            Item it = e.gearArmor;
+            it.count = 1;
+            it.shopPrice = 0;
+            it.shopDepth = 0;
+            dropGroundItemItem(e.pos, it);
+        }
+
+        // Ammo drop: ammo-based ranged monsters can have leftover ammo; drop it on death.
+        if (e.rangedAmmo != AmmoKind::None && e.rangedAmmoCount > 0) {
+            const ItemKind ammoK = (e.rangedAmmo == AmmoKind::Arrow) ? ItemKind::Arrow : ItemKind::Rock;
+
+            // Lose a few to breakage or being scattered during the fight.
+            int n = e.rangedAmmoCount;
+            if (n > 1) {
+                n -= rng.range(0, std::max(0, n / 5));
+            }
+            if (n > 0) {
+                dropGroundItem(e.pos, ammoK, n);
+            }
+        }
 
         // Simple drops
         if (rng.chance(0.55f)) {

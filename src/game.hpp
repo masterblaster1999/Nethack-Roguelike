@@ -60,6 +60,35 @@ inline int baseSpeedFor(EntityKind k) {
     }
 }
 
+
+// Monsters that can intelligently wield weapons / wear armor.
+// Keep this conservative to avoid weirdness with beasts (wolves, bats, etc.).
+inline bool monsterCanEquipWeapons(EntityKind k) {
+    switch (k) {
+        case EntityKind::Goblin:
+        case EntityKind::Orc:
+        case EntityKind::SkeletonArcher:
+        case EntityKind::KoboldSlinger:
+        case EntityKind::Wizard:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool monsterCanEquipArmor(EntityKind k) {
+    switch (k) {
+        case EntityKind::Goblin:
+        case EntityKind::Orc:
+        case EntityKind::SkeletonArcher:
+        case EntityKind::KoboldSlinger:
+        case EntityKind::Wizard:
+            return true;
+        default:
+            return false;
+    }
+}
+
 enum class Action : uint8_t {
     None = 0,
 
@@ -111,6 +140,8 @@ enum class Action : uint8_t {
     // UI / QoL
     Look,               // Examine tiles without taking a turn
     Rest,               // Rest (auto-wait) until healed or interrupted
+
+    ToggleSneak,         // Toggle sneak mode (quiet movement / ambushes)
 
     ToggleMinimap,
     ToggleStats,
@@ -205,12 +236,19 @@ struct Entity {
     int baseAtk = 1;
     int baseDef = 0;
 
+    // Monster equipment (optional). The player uses inventory equip IDs instead.
+    // For monsters, id==0 means the slot is empty.
+    // Gear affects combat stats and is dropped on death.
+    Item gearMelee; // melee weapon (optional)
+    Item gearArmor; // armor (optional)
+
     // Monster behavior flags
     bool canRanged = false;
     int rangedRange = 0;
     int rangedAtk = 0;
     ProjectileKind rangedProjectile = ProjectileKind::Arrow;
     AmmoKind rangedAmmo = AmmoKind::None; // mostly for future use
+    int rangedAmmoCount = 0; // used by ammo-based ranged monsters (0 = empty)
 
     bool willFlee = false;
     bool packAI = false;
@@ -248,12 +286,25 @@ struct FXProjectile {
     float stepTime = 0.03f; // seconds per tile
 };
 
+// Simple AoE "flash" effect (used by Fireball explosions, etc.).
+// This is purely visual; gameplay is applied instantly.
+struct FXExplosion {
+    std::vector<Vec2i> tiles;
+    float delay = 0.0f;     // seconds before the flash starts
+    float timer = 0.0f;     // seconds elapsed since start
+    float duration = 0.18f; // total flash duration
+};
+
 struct LevelState {
     int depth = 1;
     Dungeon dung;
     std::vector<Entity> monsters;
     std::vector<GroundItem> ground;
     std::vector<Trap> traps;
+
+    // Environmental fields (per-tile intensities).
+    // Currently used for persistent Confusion Gas clouds.
+    std::vector<uint8_t> confusionGas;
 };
 
 class Game {
@@ -296,6 +347,11 @@ public:
     const std::vector<Entity>& entities() const { return ents; }
     const std::vector<GroundItem>& groundItems() const { return ground; }
     const std::vector<Trap>& traps() const { return trapsCur; }
+
+
+    // Persistent environmental gas on the current level (0..255 intensity).
+    // 0 means no gas. Only meaningful on in-bounds tiles.
+    uint8_t confusionGasAt(int x, int y) const;
 
     const Entity& player() const;
     Entity& playerMut();
@@ -347,6 +403,25 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
     std::string equippedArmorName() const;
     int playerAttack() const;
     int playerDefense() const;
+
+    // Talents (earned on level-up). These provide build variety while keeping the
+    // classic ATK/DEF progression intact.
+    int playerMight() const { return talentMight_; }      // melee power / carry capacity
+    int playerAgility() const { return talentAgility_; }  // ranged accuracy / evasion / locks & traps
+    int playerVigor() const { return talentVigor_; }      // max HP growth
+    int playerFocus() const { return talentFocus_; }      // wand power / searching
+    int pendingTalentPoints() const { return talentPointsPending_; }
+
+    // Derived core stats (used by combat rules / UI).
+    int playerMeleePower() const { return player().baseAtk + talentMight_; }
+    int playerRangedSkill() const { return player().baseAtk + talentAgility_; }
+    int playerWandPower() const { return talentFocus_; }
+    int playerEvasion() const { return player().baseDef + talentAgility_; }
+
+    // Level-up allocation overlay
+    bool isLevelUpOpen() const { return levelUpOpen; }
+    int levelUpSelection() const { return levelUpSel; }
+
 
     // Progression
     int playerCharLevel() const { return charLevel; }
@@ -401,6 +476,12 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
     BurdenState burdenState() const;
     // A short HUD-friendly label for current burden state ("BURDENED", "STRESSED", ...).
     std::string burdenTag() const;
+
+    // Sneak / stealth mode (reduces movement noise).
+    void setSneakMode(bool enabled, bool quiet = false);
+    void toggleSneakMode(bool quiet = false);
+    bool isSneaking() const { return sneakMode_; }
+    std::string sneakTag() const;
 
     // Lighting / darkness system (optional). When enabled, deeper levels can contain dark tiles
     // that require light sources (torches, lit rooms) to see beyond a short range.
@@ -493,6 +574,7 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
 
     // FX
     const std::vector<FXProjectile>& fxProjectiles() const { return fx; }
+    const std::vector<FXExplosion>& fxExplosions() const { return fxExpl; }
     bool inputLocked() const { return inputLock; }
 
     // Save/load helpers
@@ -543,6 +625,7 @@ private:
     // Drop an item on the ground, merging into an existing stack when possible.
     // This reduces clutter for stackable items (ammo, gold, potions, scrolls, etc.).
     void dropGroundItem(Vec2i pos, ItemKind k, int count = 1, int enchant = 0);
+    void dropGroundItemItem(Vec2i pos, Item it);
 
     Dungeon dung;
     RNG rng;
@@ -560,6 +643,11 @@ private:
     std::vector<GroundItem> ground;
     // Traps on current level
     std::vector<Trap> trapsCur;
+
+    // Environmental fields (current level).
+    // Stored as per-tile intensities (0..255).
+    std::vector<uint8_t> confusionGas_;
+
     int nextItemId = 1;
 
     // Player inventory & equipment
@@ -588,6 +676,12 @@ private:
     // Minimap / stats overlays
     bool minimapOpen = false;
     bool statsOpen = false;
+
+
+    // Level-up talent allocation overlay (forced while points are pending)
+    bool levelUpOpen = false;
+    int levelUpSel = 0;
+
 
     // Options / command overlays
     bool optionsOpen = false;
@@ -618,6 +712,9 @@ private:
 
     // Options / quality-of-life
     AutoPickupMode autoPickup = AutoPickupMode::Gold;
+
+    // Sneak mode (quiet movement; affects footstep noise).
+    bool sneakMode_ = false;
 
     bool confirmQuitEnabled_ = true;
     bool autoMortemEnabled_ = true;
@@ -673,6 +770,7 @@ private:
 
     // Visual FX
     std::vector<FXProjectile> fx;
+    std::vector<FXExplosion> fxExpl;
     bool inputLock = false;
 
     bool gameOver = false;
@@ -682,6 +780,14 @@ private:
     int charLevel = 1;
     int xp = 0;
     int xpNext = 20;
+
+    // Talent allocations (earned on level-up). Saved per-run.
+    int talentMight_ = 0;
+    int talentAgility_ = 0;
+    int talentVigor_ = 0;
+    int talentFocus_ = 0;
+    int talentPointsPending_ = 0;
+
 
     // Run meta / stats
     uint32_t seed_ = 0;
@@ -718,7 +824,7 @@ private:
 
     bool tryMove(Entity& e, int dx, int dy);
     void attackMelee(Entity& attacker, Entity& defender);
-    void attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer);
+    void attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer, const Item* projectileTemplate = nullptr);
 
     void monsterTurn();
     void cleanupDead();

@@ -13,6 +13,8 @@ void Game::dropGroundItem(Vec2i pos, ItemKind k, int count, int enchant) {
             if (gi.item.enchant != enchant) continue;
             if (gi.item.charges != 0) continue;
             if (gi.item.buc != 0) continue;
+            if (gi.item.shopPrice != 0) continue;
+            if (gi.item.shopDepth != 0) continue;
             gi.item.count += count;
             return;
         }
@@ -26,6 +28,35 @@ void Game::dropGroundItem(Vec2i pos, ItemKind k, int count, int enchant) {
     it.spriteSeed = rng.nextU32();
     const ItemDef& d = itemDef(k);
     if (d.maxCharges > 0) it.charges = d.maxCharges;
+
+    GroundItem gi;
+    gi.item = it;
+    gi.pos = pos;
+    ground.push_back(gi);
+}
+
+void Game::dropGroundItemItem(Vec2i pos, Item it) {
+    if (isStackable(it.kind)) it.count = std::max(1, it.count);
+    else it.count = 1;
+
+    // Merge into an existing matching stack on the same tile when possible.
+    if (isStackable(it.kind)) {
+        for (auto& gi : ground) {
+            if (gi.pos != pos) continue;
+            if (gi.item.kind != it.kind) continue;
+            if (gi.item.enchant != it.enchant) continue;
+            if (gi.item.charges != it.charges) continue;
+            if (gi.item.buc != it.buc) continue;
+            if (gi.item.shopPrice != it.shopPrice) continue;
+            if (gi.item.shopDepth != it.shopDepth) continue;
+
+            gi.item.count += it.count;
+            return;
+        }
+    }
+
+    it.id = nextItemId++;
+    it.spriteSeed = rng.nextU32();
 
     GroundItem gi;
     gi.item = it;
@@ -188,3 +219,9 @@ void Game::recomputeFov() {
     }
 }
 
+uint8_t Game::confusionGasAt(int x, int y) const {
+    if (!dung.inBounds(x, y)) return 0u;
+    const size_t i = static_cast<size_t>(y * dung.width + x);
+    if (i >= confusionGas_.size()) return 0u;
+    return confusionGas_[i];
+}

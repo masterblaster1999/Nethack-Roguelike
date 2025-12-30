@@ -108,6 +108,24 @@ const ItemDef& itemDef(ItemKind k) {
         // Terrain / digging (append-only)
         { ItemKind::Pickaxe,          "PICKAXE",           false, false, false, EquipSlot::MeleeWeapon,  1, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 9, 55 },
         { ItemKind::WandDigging,      "WAND OF DIGGING",   false, false, false, EquipSlot::RangedWeapon, 0, 0, 0, 7, AmmoKind::None,  ProjectileKind::Spark, 8, 0, 0, 5, 90 },
+
+        // Explosives / magic (append-only)
+        { ItemKind::WandFireball,     "WAND OF FIREBALL",  false, false, false, EquipSlot::RangedWeapon, 0, 2, 0, 6, AmmoKind::None,  ProjectileKind::Fireball, 6, 0, 0, 5, 140 },
+
+        // Corpses (append-only)
+        { ItemKind::CorpseGoblin,     "GOBLIN CORPSE",     true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 1, 120,  9, 0 },
+        { ItemKind::CorpseOrc,        "ORC CORPSE",        true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 1, 140, 10, 0 },
+        { ItemKind::CorpseBat,        "BAT CORPSE",        true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0,  70,  6, 0 },
+        { ItemKind::CorpseSlime,      "SLIME GLOB",        true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0,  45,  8, 0 },
+        { ItemKind::CorpseKobold,     "KOBOLD CORPSE",     true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 1, 110,  9, 0 },
+        { ItemKind::CorpseWolf,       "WOLF CORPSE",       true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 2, 200, 14, 0 },
+        { ItemKind::CorpseTroll,      "TROLL CORPSE",      true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 2, 230, 18, 0 },
+        { ItemKind::CorpseWizard,     "WIZARD CORPSE",     true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 1, 130, 10, 0 },
+        { ItemKind::CorpseSnake,      "SNAKE CORPSE",      true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 1,  90,  8, 0 },
+        { ItemKind::CorpseSpider,     "SPIDER CORPSE",     true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 1,  90,  9, 0 },
+        { ItemKind::CorpseOgre,       "OGRE CORPSE",       true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 3, 260, 22, 0 },
+        { ItemKind::CorpseMimic,      "MIMIC REMAINS",     true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 1, 160, 14, 0 },
+        { ItemKind::CorpseMinotaur,   "MINOTAUR CORPSE",   true, true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 4, 300, 26, 0 },
     };
 
     const size_t idx = static_cast<size_t>(k);
@@ -145,6 +163,14 @@ std::string itemDisplayName(const Item& it) {
 
     if (it.kind == ItemKind::TorchLit) {
         ss << " (" << it.charges << "T)";
+    } else if (isCorpseKind(it.kind)) {
+        // Corpses decay (charges = remaining freshness in turns).
+        // We display a coarse stage rather than the exact timer.
+        const int ch = it.charges;
+        if (ch <= 0) ss << " (ROTTEN)";
+        else if (ch <= 60) ss << " (ROTTEN)";
+        else if (ch <= 160) ss << " (STALE)";
+        else ss << " (FRESH)";
     } else if (d.maxCharges > 0) {
         ss << " (" << it.charges << "/" << d.maxCharges << ")";
     }
@@ -232,6 +258,35 @@ bool consumeAmmo(std::vector<Item>& inv, AmmoKind ammo, int amount) {
     }), inv.end());
 
     return need <= 0;
+}
+
+
+bool consumeOneAmmo(std::vector<Item>& inv, AmmoKind ammo, Item* outConsumed) {
+    if (ammo == AmmoKind::None) return true;
+
+    const ItemKind k = (ammo == AmmoKind::Arrow) ? ItemKind::Arrow : ItemKind::Rock;
+
+    for (size_t i = 0; i < inv.size(); ++i) {
+        Item& it = inv[i];
+        if (it.kind != k) continue;
+        if (it.count <= 0) continue;
+
+        if (outConsumed) {
+            *outConsumed = it;
+            outConsumed->count = 1;
+        }
+
+        it.count -= 1;
+
+        // Remove emptied stackables (ammo, gold, potions, scrolls, ...)
+        inv.erase(std::remove_if(inv.begin(), inv.end(), [](const Item& v) {
+            return isStackable(v.kind) && v.count <= 0;
+        }), inv.end());
+
+        return true;
+    }
+
+    return false;
 }
 
 bool tryStackItem(std::vector<Item>& inv, const Item& incoming) {

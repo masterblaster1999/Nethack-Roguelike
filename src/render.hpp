@@ -98,4 +98,5 @@ std::array<SDL_Texture*, FRAMES> uiOrnamentTex{};
     // New overlays
     void drawMinimapOverlay(const Game& game);
     void drawStatsOverlay(const Game& game);
+    void drawLevelUpOverlay(const Game& game);
 };

@@ -54,34 +54,55 @@ void Game::endTargeting(bool fire) {
             // First choice: fire the equipped ranged weapon if it is ready.
             int wIdx = equippedRangedIndex();
             if (wIdx >= 0) {
-                Item& w = inv[static_cast<size_t>(wIdx)];
-                const ItemDef& d = itemDef(w.kind);
+                // Copy weapon data up front so later inventory edits (ammo consumption) can't invalidate references.
+                const Item wCopy = inv[static_cast<size_t>(wIdx)];
+                const ItemDef& d = itemDef(wCopy.kind);
 
                 const bool weaponReady =
                     (d.range > 0) &&
-                    ((d.maxCharges <= 0) || (w.charges > 0)) &&
+                    ((d.maxCharges <= 0) || (wCopy.charges > 0)) &&
                     ((d.ammo == AmmoKind::None) || (ammoCount(inv, d.ammo) > 0));
 
                 if (weaponReady) {
-                    // Consume charge/ammo.
+                    Item projectile;
+                    const Item* projPtr = nullptr;
+
+                    // Consume charge (on the actual inventory item, not the copy).
+                    // Do this before consuming ammo, since ammo consumption can erase stacks and shift indices.
+                    bool sputtered = false;
                     if (d.maxCharges > 0) {
-                        w.charges -= 1;
+                        Item& wMut = inv[static_cast<size_t>(wIdx)];
+                        wMut.charges = std::max(0, wMut.charges - 1);
+                        sputtered = (wMut.charges <= 0);
                     }
+
+                    // Consume ammo and capture a 1-count template so recovered projectiles preserve metadata
+                    // (shopPrice/shopDepth, etc.).
                     if (d.ammo != AmmoKind::None) {
-                        consumeAmmo(inv, d.ammo, 1);
+                        if (consumeOneAmmo(inv, d.ammo, &projectile)) {
+                            projPtr = &projectile;
+                        }
                     }
 
                     // d20 to-hit + dice damage handled in attackRanged().
-                    const int bucBonus = (w.buc < 0 ? -1 : (w.buc > 0 ? 1 : 0));
-                    const int atkBonus = player().baseAtk + d.rangedAtk + w.enchant + bucBonus;
-                    const int dmgBonus = w.enchant + bucBonus;
-                    if (w.kind == ItemKind::WandDigging) {
+                    const int bucBonus = (wCopy.buc < 0 ? -1 : (wCopy.buc > 0 ? 1 : 0));
+
+                    const bool isWand = isRangedWeapon(wCopy.kind) && d.maxCharges > 0 && d.ammo == AmmoKind::None;
+
+                    // Talents: Agility improves physical ranged weapons; Focus empowers wands.
+                    int dmgBonus = wCopy.enchant + bucBonus;
+                    if (isWand) dmgBonus += playerFocus();
+
+                    const int baseSkill = player().baseAtk + (isWand ? playerFocus() : playerAgility());
+                    const int atkBonus = baseSkill + d.rangedAtk + wCopy.enchant + bucBonus;
+
+                    if (wCopy.kind == ItemKind::WandDigging) {
                         zapDiggingWand(d.range);
                     } else {
-                        attackRanged(playerMut(), targetPos, d.range, atkBonus, dmgBonus, d.projectile, true);
+                        attackRanged(playerMut(), targetPos, d.range, atkBonus, dmgBonus, d.projectile, true, projPtr);
                     }
 
-                    if (d.maxCharges > 0 && w.charges <= 0) {
+                    if (d.maxCharges > 0 && sputtered) {
                         pushMsg("YOUR WAND SPUTTERS OUT.");
                     }
 
@@ -89,17 +110,27 @@ void Game::endTargeting(bool fire) {
                 }
             }
 
+
+
+
+
             // Fallback: if no ranged weapon is ready, allow throwing ammo by hand.
             if (!didAttack) {
                 ThrowAmmoSpec spec;
                 if (choosePlayerThrowAmmo(inv, spec)) {
-                    // Consume one projectile from the inventory.
-                    consumeAmmo(inv, spec.ammo, 1);
+                    // Consume one projectile from the inventory and keep a 1-count template so recovered ammo
+                    // preserves metadata (shopPrice/shopDepth, etc.).
+                    Item projectile;
+                    const Item* projPtr = nullptr;
+                    if (consumeOneAmmo(inv, spec.ammo, &projectile)) {
+                        projPtr = &projectile;
+                    }
+
 
                     const int range = throwRangeFor(player(), spec.ammo);
-                    const int atkBonus = player().baseAtk - 1;
+                    const int atkBonus = player().baseAtk - 1 + playerAgility();
                     const int dmgBonus = 0;
-                    attackRanged(playerMut(), targetPos, range, atkBonus, dmgBonus, spec.proj, true);
+                    attackRanged(playerMut(), targetPos, range, atkBonus, dmgBonus, spec.proj, true, projPtr);
                     didAttack = true;
                 }
             }

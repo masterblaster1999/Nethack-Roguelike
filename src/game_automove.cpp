@@ -42,6 +42,9 @@ bool Game::autoPickupWouldPick(ItemKind k) const {
             if (k == ItemKind::Key || k == ItemKind::Lockpick) return true;
             if (k == ItemKind::AmuletYendor) return true;
 
+            // Corpses are heavy and decay; don't auto-grab them in Smart mode.
+            if (isCorpseKind(k)) return false;
+
             // Ammo only if we have a matching ranged weapon.
             if (k == ItemKind::Arrow) return hasRangedWeaponForAmmo(AmmoKind::Arrow);
             if (k == ItemKind::Rock)  return hasRangedWeaponForAmmo(AmmoKind::Rock);
@@ -59,6 +62,9 @@ bool Game::autoPickupWouldPick(ItemKind k) const {
 bool Game::autoExploreWantsLoot(ItemKind k) const {
     // Gold never stops explore (it's either auto-picked or easy to pick later).
     if (k == ItemKind::Gold) return false;
+
+    // Corpses are intentionally treated as "noise" for auto-explore.
+    if (isCorpseKind(k)) return false;
 
     // Only unopened chests are "interesting".
     if (k == ItemKind::Chest) return true;

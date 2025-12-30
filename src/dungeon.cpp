@@ -1055,7 +1055,7 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
 
     // Carve a start chamber on top of an existing corridor near the center.
     Vec2i best = { d.width / 2, d.height / 2 };
-    int bestDist = 1e9;
+    int bestDist = 1000000000;
     for (int y = 1; y < d.height - 1; ++y) {
         for (int x = 1; x < d.width - 1; ++x) {
             if (d.at(x, y).type != TileType::Floor) continue;
@@ -1143,6 +1143,288 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
     }
 }
 
+
+// A bespoke late-game floor: a maze-like labyrinth with a central treasure lair.
+// This is meant to be a spike in navigation + trap/door play right before the final floor.
+void generateLabyrinth(Dungeon& d, RNG& rng, int depth) {
+    (void)depth;
+
+    fillWalls(d);
+
+    // Perfect maze (recursive backtracker) carved on odd coordinates.
+    const int cellW = (d.width - 1) / 2;
+    const int cellH = (d.height - 1) / 2;
+    if (cellW <= 1 || cellH <= 1) {
+        generateBspRooms(d, rng);
+        return;
+    }
+
+    auto cellToPos = [&](int cx, int cy) -> Vec2i {
+        return { 1 + cx * 2, 1 + cy * 2 };
+    };
+    auto cidx = [&](int cx, int cy) { return static_cast<size_t>(cy * cellW + cx); };
+
+    std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), 0);
+    std::vector<Vec2i> stack;
+    stack.reserve(static_cast<size_t>(cellW * cellH));
+
+    // Start carving from a slightly random central-ish cell so runs differ, while keeping
+    // the "lair" region likely to be reachable from the carved graph.
+    const int startCx = clampi(cellW / 2 + rng.range(-2, 2), 0, cellW - 1);
+    const int startCy = clampi(cellH / 2 + rng.range(-2, 2), 0, cellH - 1);
+    stack.push_back({startCx, startCy});
+    vis[cidx(startCx, startCy)] = 1;
+    Vec2i sp = cellToPos(startCx, startCy);
+    d.at(sp.x, sp.y).type = TileType::Floor;
+
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    while (!stack.empty()) {
+        Vec2i cur = stack.back();
+
+        std::vector<Vec2i> neigh;
+        neigh.reserve(4);
+        for (auto& dv : dirs) {
+            int nx = cur.x + dv[0];
+            int ny = cur.y + dv[1];
+            if (nx < 0 || ny < 0 || nx >= cellW || ny >= cellH) continue;
+            if (vis[cidx(nx, ny)] != 0) continue;
+            neigh.push_back({nx, ny});
+        }
+
+        if (neigh.empty()) {
+            stack.pop_back();
+            continue;
+        }
+
+        Vec2i nxt = neigh[static_cast<size_t>(rng.range(0, static_cast<int>(neigh.size()) - 1))];
+        Vec2i a = cellToPos(cur.x, cur.y);
+        Vec2i b = cellToPos(nxt.x, nxt.y);
+        Vec2i mid{ (a.x + b.x) / 2, (a.y + b.y) / 2 };
+        d.at(mid.x, mid.y).type = TileType::Floor;
+        d.at(b.x, b.y).type = TileType::Floor;
+        vis[cidx(nxt.x, nxt.y)] = 1;
+        stack.push_back(nxt);
+    }
+
+    // Add lots of loops: the labyrinth should feel less like a tree and more like a twisting
+    // "real" maze, especially under pressure.
+    const int breaks = std::max(12, (cellW * cellH) / 3);
+    for (int i = 0; i < breaks; ++i) {
+        int x = rng.range(2, d.width - 3);
+        int y = rng.range(2, d.height - 3);
+        if (d.at(x, y).type != TileType::Wall) continue;
+
+        bool horiz = (d.at(x - 1, y).type == TileType::Floor && d.at(x + 1, y).type == TileType::Floor);
+        bool vert  = (d.at(x, y - 1).type == TileType::Floor && d.at(x, y + 1).type == TileType::Floor);
+        if (!(horiz || vert)) continue;
+        d.at(x, y).type = TileType::Floor;
+    }
+
+    // ---------------------------
+    // Central lair with moat
+    // ---------------------------
+    // Dimensions: keep odd-ish and within bounds.
+    int wallW = 15;
+    int wallH = 11;
+    wallW = std::min(wallW, d.width - 6);
+    wallH = std::min(wallH, d.height - 6);
+    wallW = std::max(11, wallW | 1);
+    wallH = std::max(9,  wallH | 1);
+
+    const int cx = d.width / 2;
+    const int cy = d.height / 2;
+    int wallX = clampi(cx - wallW / 2, 2, d.width - wallW - 3);
+    int wallY = clampi(cy - wallH / 2, 2, d.height - wallH - 3);
+
+    // Hard-wall the ring (overwrites parts of the maze), then carve the interior.
+    carveRect(d, wallX, wallY, wallW, wallH, TileType::Wall);
+    carveRect(d, wallX + 1, wallY + 1, wallW - 2, wallH - 2, TileType::Floor);
+
+    // A few pillars inside for tactical cover.
+    for (int y = wallY + 2; y < wallY + wallH - 2; y += 3) {
+        for (int x = wallX + 2; x < wallX + wallW - 2; x += 4) {
+            if (!rng.chance(0.35f)) continue;
+            if (d.inBounds(x, y)) d.at(x, y).type = TileType::Pillar;
+        }
+    }
+
+    // Entrances: locked doors on all 4 sides.
+    const int doorN_x = wallX + wallW / 2;
+    const int doorN_y = wallY;
+    const int doorS_x = wallX + wallW / 2;
+    const int doorS_y = wallY + wallH - 1;
+    const int doorW_x = wallX;
+    const int doorW_y = wallY + wallH / 2;
+    const int doorE_x = wallX + wallW - 1;
+    const int doorE_y = wallY + wallH / 2;
+
+    d.at(doorN_x, doorN_y).type = TileType::DoorLocked;
+    d.at(doorS_x, doorS_y).type = TileType::DoorLocked;
+    d.at(doorW_x, doorW_y).type = TileType::DoorLocked;
+    d.at(doorE_x, doorE_y).type = TileType::DoorLocked;
+
+    // Moat ring (chasm) one tile around the lair walls. This doesn't block LOS but does block
+    // movement, forcing you to approach via bridges.
+    const int moatX = wallX - 1;
+    const int moatY = wallY - 1;
+    const int moatW = wallW + 2;
+    const int moatH = wallH + 2;
+    for (int y = moatY; y < moatY + moatH; ++y) {
+        for (int x = moatX; x < moatX + moatW; ++x) {
+            if (!d.inBounds(x, y)) continue;
+            const bool border = (x == moatX || x == moatX + moatW - 1 || y == moatY || y == moatY + moatH - 1);
+            if (!border) continue;
+            // Don't overwrite the lair walls or doors.
+            if (x >= wallX && x < wallX + wallW && y >= wallY && y < wallY + wallH) continue;
+            d.at(x, y).type = TileType::Chasm;
+        }
+    }
+
+    auto setBridge = [&](int x, int y) {
+        if (!d.inBounds(x, y)) return;
+        d.at(x, y).type = TileType::Floor;
+    };
+
+    // Bridges aligned with each door.
+    setBridge(doorN_x, doorN_y - 1);
+    setBridge(doorS_x, doorS_y + 1);
+    setBridge(doorW_x - 1, doorW_y);
+    setBridge(doorE_x + 1, doorE_y);
+
+    auto tunnelOut = [&](Vec2i start, Vec2i dir) {
+        Vec2i p = start;
+        for (int i = 0; i < 24; ++i) {
+            p.x += dir.x;
+            p.y += dir.y;
+            if (!d.inBounds(p.x, p.y)) break;
+            if (d.at(p.x, p.y).type == TileType::Floor) break;
+            // Don't tunnel through the lair walls.
+            if (p.x >= wallX && p.x < wallX + wallW && p.y >= wallY && p.y < wallY + wallH) break;
+            d.at(p.x, p.y).type = TileType::Floor;
+        }
+    };
+
+    tunnelOut({doorN_x, doorN_y - 1}, {0, -1});
+    tunnelOut({doorS_x, doorS_y + 1}, {0, 1});
+    tunnelOut({doorW_x - 1, doorW_y}, {-1, 0});
+    tunnelOut({doorE_x + 1, doorE_y}, {1, 0});
+
+    // ---------------------------
+    // Start / exit rooms + shrine
+    // ---------------------------
+    auto inMoatBounds = [&](int x, int y) {
+        return x >= moatX && x < moatX + moatW && y >= moatY && y < moatY + moatH;
+    };
+
+    // Start chamber near the upper-left to encourage traversal.
+    Vec2i prefer{2, 2};
+    Vec2i best = { d.width / 2, d.height / 2 };
+    int bestDist = 1e9;
+    for (int y = 1; y < d.height - 1; ++y) {
+        for (int x = 1; x < d.width - 1; ++x) {
+            if (d.at(x, y).type != TileType::Floor) continue;
+            if (inMoatBounds(x, y)) continue;
+            int md = std::abs(x - prefer.x) + std::abs(y - prefer.y);
+            if (md < bestDist) {
+                bestDist = md;
+                best = {x, y};
+            }
+        }
+    }
+    if (bestDist >= 1000000000) {
+        best = d.randomFloor(rng, true);
+    }
+
+    const int sw = rng.range(6, 8);
+    const int sh = rng.range(5, 7);
+    int sx = clampi(best.x - sw / 2, 1, d.width - sw - 1);
+    int sy = clampi(best.y - sh / 2, 1, d.height - sh - 1);
+    carveRect(d, sx, sy, sw, sh, TileType::Floor);
+    d.stairsUp = { best.x, best.y };
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
+    d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+
+    auto dist = bfsDistanceMap(d, d.stairsUp);
+    d.stairsDown = farthestPassableTile(d, dist, rng);
+    if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) d.stairsDown = {d.width - 2, d.height - 2};
+
+    // Exit chamber around stairsDown.
+    const int ew = rng.range(6, 9);
+    const int eh = rng.range(5, 8);
+    int ex = clampi(d.stairsDown.x - ew / 2, 1, d.width - ew - 1);
+    int ey = clampi(d.stairsDown.y - eh / 2, 1, d.height - eh - 1);
+    carveRect(d, ex, ey, ew, eh, TileType::Floor);
+    d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
+
+    // Shrine chamber somewhere mid-far from the start.
+    Room shrine;
+    bool haveShrine = false;
+    for (int tries = 0; tries < 120; ++tries) {
+        Vec2i p = d.randomFloor(rng, true);
+        if (inMoatBounds(p.x, p.y)) continue;
+        const int di = dist.empty() ? 0 : dist[static_cast<size_t>(p.y * d.width + p.x)];
+        if (di < 10) continue;
+        const int rw = rng.range(5, 8);
+        const int rh = rng.range(5, 7);
+        int rx = clampi(p.x - rw / 2, 1, d.width - rw - 1);
+        int ry = clampi(p.y - rh / 2, 1, d.height - rh - 1);
+        // Avoid overlapping the lair/moat.
+        if (rx < moatX + moatW && rx + rw > moatX && ry < moatY + moatH && ry + rh > moatY) continue;
+        carveRect(d, rx, ry, rw, rh, TileType::Floor);
+        shrine = {rx, ry, rw, rh, RoomType::Shrine};
+        haveShrine = true;
+        break;
+    }
+
+    // Build room list.
+    d.rooms.clear();
+    d.rooms.push_back({sx, sy, sw, sh, RoomType::Normal});
+    d.rooms.push_back({ex, ey, ew, eh, RoomType::Normal});
+    if (haveShrine) d.rooms.push_back(shrine);
+
+    // Lair interior as treasure room.
+    d.rooms.push_back({wallX + 1, wallY + 1, wallW - 2, wallH - 2, RoomType::Treasure});
+
+    // Sprinkle some doors in corridor chokepoints.
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    for (const auto& r : d.rooms) {
+        for (int y = r.y; y < r.y2(); ++y) {
+            for (int x = r.x; x < r.x2(); ++x) {
+                if (d.inBounds(x, y)) inRoom[static_cast<size_t>(y * d.width + x)] = 1;
+            }
+        }
+    }
+
+    auto nearStairs = [&](int x, int y) {
+        return (std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y) <= 2)
+            || (std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y) <= 2);
+    };
+
+    for (int y = 1; y < d.height - 1; ++y) {
+        for (int x = 1; x < d.width - 1; ++x) {
+            if (d.at(x, y).type != TileType::Floor) continue;
+            if (inRoom[static_cast<size_t>(y * d.width + x)] != 0) continue;
+            if (nearStairs(x, y)) continue;
+            if (inMoatBounds(x, y)) continue;
+            if (!rng.chance(0.055f)) continue;
+
+            const TileType n = d.at(x, y - 1).type;
+            const TileType s = d.at(x, y + 1).type;
+            const TileType w = d.at(x - 1, y).type;
+            const TileType e = d.at(x + 1, y).type;
+
+            const bool nsOpen = (n == TileType::Floor && s == TileType::Floor);
+            const bool weOpen = (w == TileType::Floor && e == TileType::Floor);
+            const bool nsWall = (w == TileType::Wall && e == TileType::Wall);
+            const bool weWall = (n == TileType::Wall && s == TileType::Wall);
+
+            if ((nsOpen && nsWall) || (weOpen && weWall)) {
+                d.at(x, y).type = TileType::DoorClosed;
+            }
+        }
+    }
+}
 
 
 void generateSanctum(Dungeon& d, RNG& rng, int depth) {
@@ -1360,12 +1642,29 @@ bool Dungeon::dig(int x, int y) {
 }
 
 void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
+    // A default-constructed Dungeon starts at 0x0. Ensure we have a valid grid
+    // allocated before generation begins (especially for special layouts that return early).
+    if (width <= 0 || height <= 0) {
+        width = 30;
+        height = 20;
+    }
+    const size_t expect = static_cast<size_t>(width * height);
+    if (tiles.size() != expect) tiles.assign(expect, Tile{});
+
     // Sanity clamp.
     if (maxDepth < 1) maxDepth = 1;
 
     // Final floor: a bespoke arena-like sanctum that caps the run.
     if (depth >= maxDepth) {
         generateSanctum(*this, rng, depth);
+        ensureBorders(*this);
+        return;
+    }
+
+    // Penultimate floor: a bespoke labyrinth that ramps tension before the sanctum.
+    // (Hard-coded so the run has a consistent "final approach" feel.)
+    if (maxDepth >= 2 && depth == maxDepth - 1) {
+        generateLabyrinth(*this, rng, depth);
         ensureBorders(*this);
         return;
     }

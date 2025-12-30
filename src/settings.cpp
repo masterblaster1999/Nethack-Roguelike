@@ -337,6 +337,7 @@ bind_confirm = enter, kp_enter
 bind_cancel = escape, backspace
 bind_wait = space, period
 bind_rest = r
+bind_sneak = n
 bind_pickup = g, comma, kp_0
 bind_inventory = i, tab
 bind_fire = f

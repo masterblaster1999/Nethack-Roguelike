@@ -56,7 +56,7 @@ void Game::dropGroundItemItem(Vec2i pos, Item it) {
     }
 
     it.id = nextItemId++;
-    it.spriteSeed = rng.nextU32();
+    if (it.spriteSeed == 0) it.spriteSeed = rng.nextU32();
 
     GroundItem gi;
     gi.item = it;
@@ -219,6 +219,43 @@ void Game::recomputeLightMap() {
         }
     }
 
+    // Fire field (tile-based hazard) as a dynamic warm light source.
+    // We keep this bounded for performance: if there are many burning tiles, only the
+    // strongest few contribute as LOS-aware sources (the renderer still draws all flames).
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (fireField_.size() == expect && expect > 0) {
+            struct FireSrc { int x; int y; uint8_t s; };
+            std::vector<FireSrc> fires;
+            fires.reserve(24);
+
+            for (int y = 0; y < dung.height; ++y) {
+                for (int x = 0; x < dung.width; ++x) {
+                    const uint8_t f = fireField_[static_cast<size_t>(y * dung.width + x)];
+                    if (f == 0u) continue;
+                    if (!dung.isWalkable(x, y)) continue;
+                    fires.push_back({ x, y, f });
+                }
+            }
+
+            constexpr size_t MAX_FIRE_SOURCES = 24;
+            if (fires.size() > MAX_FIRE_SOURCES) {
+                std::nth_element(fires.begin(), fires.begin() + static_cast<std::ptrdiff_t>(MAX_FIRE_SOURCES), fires.end(),
+                                 [](const FireSrc& a, const FireSrc& b) { return a.s > b.s; });
+                fires.resize(MAX_FIRE_SOURCES);
+            }
+
+            for (const auto& f : fires) {
+                int radius = 2;
+                if (f.s >= 8u) radius = 3;
+                if (f.s >= 12u) radius = 4;
+
+                const int b = std::min(255, 110 + static_cast<int>(f.s) * 14);
+                sources.push_back({ Vec2i{f.x, f.y}, radius, static_cast<uint8_t>(b), Color{ 255, 170, 110, 255 } });
+            }
+        }
+    }
+
     // Apply each source using shadowcasting LOS from the source.
     std::vector<uint8_t> mask;
     for (const auto& s : sources) {
@@ -312,4 +349,88 @@ uint8_t Game::confusionGasAt(int x, int y) const {
     const size_t i = static_cast<size_t>(y * dung.width + x);
     if (i >= confusionGas_.size()) return 0u;
     return confusionGas_[i];
+}
+
+uint8_t Game::fireAt(int x, int y) const {
+    if (!dung.inBounds(x, y)) return 0u;
+    const size_t i = static_cast<size_t>(y * dung.width + x);
+    if (i >= fireField_.size()) return 0u;
+    return fireField_[i];
+}
+void Game::updateScentMap() {
+    const int W = dung.width;
+    const int H = dung.height;
+    const size_t n = static_cast<size_t>(W * H);
+    if (n == 0) return;
+
+    if (scentField_.size() != n) {
+        scentField_.assign(n, 0u);
+    }
+
+    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * W + x); };
+
+    // --- Tunables ---
+    // How fast scent fades everywhere each player turn.
+    constexpr uint8_t DECAY = 2u;
+    // How much scent is lost when it spreads across one tile of distance.
+    constexpr uint8_t SPREAD_DROP = 14u;
+    // How strong a fresh scent deposit is at the player position.
+    constexpr uint8_t DEPOSIT = 255u;
+
+    // Global decay.
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t v = scentField_[i];
+        scentField_[i] = (v > DECAY) ? static_cast<uint8_t>(v - DECAY) : 0u;
+    }
+
+    // Deposit at the player's current tile (even if the player didn't move this turn).
+    const Entity& p = player();
+    if (dung.inBounds(p.pos.x, p.pos.y)) {
+        scentField_[idx(p.pos.x, p.pos.y)] = std::max(scentField_[idx(p.pos.x, p.pos.y)], DEPOSIT);
+    }
+
+    // Spread along walkable tiles so the "trail" forms a gradient that can be followed around corners.
+    // This is intentionally cheap: one relaxation pass per player turn.
+    std::vector<uint8_t> next = scentField_;
+
+    auto passableForScent = [&](int x, int y) -> bool {
+        if (!dung.inBounds(x, y)) return false;
+        // Scent travels through walkable terrain (floors, open doors, stairs).
+        // Closed/locked/secret doors and walls block it.
+        return dung.isWalkable(x, y);
+    };
+
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const size_t i = idx(x, y);
+
+            if (!passableForScent(x, y)) {
+                // Keep non-walkable tiles scent-free so it can't "leak" through walls.
+                next[i] = 0u;
+                continue;
+            }
+
+            uint8_t bestN = 0u;
+            const int dirs4[4][2] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+            for (const auto& d : dirs4) {
+                const int nx = x + d[0];
+                const int ny = y + d[1];
+                if (!passableForScent(nx, ny)) continue;
+                const uint8_t nv = scentField_[idx(nx, ny)];
+                if (nv > bestN) bestN = nv;
+            }
+
+            const uint8_t spread = (bestN > SPREAD_DROP) ? static_cast<uint8_t>(bestN - SPREAD_DROP) : 0u;
+            if (spread > next[i]) next[i] = spread;
+        }
+    }
+
+    scentField_.swap(next);
+}
+
+uint8_t Game::scentAt(int x, int y) const {
+    if (!dung.inBounds(x, y)) return 0u;
+    const size_t i = static_cast<size_t>(y * dung.width + x);
+    if (i >= scentField_.size()) return 0u;
+    return scentField_[i];
 }

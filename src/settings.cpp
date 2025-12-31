@@ -145,7 +145,9 @@ Settings loadSettings(const std::string& path) {
 
         if (key == "tile_size") {
             int v = 0;
-            if (parseInt(val, v)) s.tileSize = std::clamp(v, 16, 96);
+            // Allow large tiles for high-DPI / 4K+ displays.
+            // Note: very large tiles will increase the window size (MAP_W*tile_size).
+            if (parseInt(val, v)) s.tileSize = std::clamp(v, 16, 256);
         } else if (key == "hud_height") {
             int v = 0;
             if (parseInt(val, v)) s.hudHeight = std::clamp(v, 120, 240);
@@ -176,6 +178,15 @@ Settings loadSettings(const std::string& path) {
             if (parseBool(val, b)) s.uiPanelsTextured = b;
             else if (v == "textured" || v == "tiles" || v == "tile") s.uiPanelsTextured = true;
             else if (v == "solid" || v == "flat") s.uiPanelsTextured = false;
+        } else if (key == "voxel_sprites") {
+            bool b = true;
+            if (parseBool(val, b)) s.voxelSprites = b;
+        } else if (key == "texture_cache_mb") {
+            int v = 0;
+            if (parseInt(val, v)) {
+                if (v <= 0) s.textureCacheMB = 0;
+                else s.textureCacheMB = std::clamp(v, 16, 2048);
+            }
         } else if (key == "vsync") {
             bool b = true;
             if (parseBool(val, b)) s.vsync = b;
@@ -188,6 +199,9 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "controller_enabled") {
             bool b = true;
             if (parseBool(val, b)) s.controllerEnabled = b;
+        } else if (key == "control_preset") {
+            ControlPreset cp = ControlPreset::Modern;
+            if (parseControlPreset(val, cp)) s.controlPreset = cp;
         } else if (key == "auto_step_delay_ms") {
             int v = 0;
             if (parseInt(val, v)) s.autoStepDelayMs = std::clamp(v, 10, 500);
@@ -233,6 +247,10 @@ Settings loadSettings(const std::string& path) {
             bool b = true;
             if (parseBool(val, b)) s.autoMortem = b;
         }
+        else if (key == "bones_enabled") {
+            bool b = true;
+            if (parseBool(val, b)) s.bonesEnabled = b;
+        }
     }
 
     return s;
@@ -248,6 +266,7 @@ bool writeDefaultSettings(const std::string& path) {
 # This file is auto-created on first run. Edit it and restart the game.
 
 # Rendering / UI
+# tile_size: 16..256  (larger = bigger tiles + larger window)
 tile_size = 32
 hud_height = 160
 start_fullscreen = false
@@ -269,6 +288,14 @@ ui_theme = darkstone
 # ui_panels: textured | solid
 ui_panels = textured
 
+# voxel_sprites: true/false (true = render entities/items/projectiles as tiny 3D voxel sprites)
+voxel_sprites = true
+
+# texture_cache_mb: 0 or 16..2048
+# Approximate VRAM budget for cached entity/item/projectile textures.
+# 0 disables eviction (unlimited). If you use huge tile sizes, consider lowering this.
+texture_cache_mb = 256
+
 # Rendering / performance
 # vsync: true/false  (true = lower CPU usage, smoother rendering)
 vsync = true
@@ -278,6 +305,8 @@ max_fps = 0
 # Input
 # controller_enabled: true/false  (enables SDL2 game controller support)
 controller_enabled = true
+# control_preset: modern | nethack  (convenience: applies a cohesive bind_* scheme)
+control_preset = modern
 
 # Gameplay QoL
 # auto_pickup: off | gold | smart | all
@@ -290,6 +319,8 @@ auto_step_delay_ms = 45
 confirm_quit = true
 # auto_mortem: true/false (true = write a mortem dump on win/death)
 auto_mortem = true
+# bones_enabled: true/false (true = previous runs can leave "bones" behind)
+bones_enabled = true
 
 
 # Optional survival mechanic
@@ -355,9 +386,11 @@ bind_sneak = n
 bind_pickup = g, comma, kp_0
 bind_inventory = i, tab
 bind_fire = f
-bind_search = c
+bind_search = shift+c
 bind_disarm = t
 bind_close_door = k
+bind_lock_door = shift+k
+bind_kick = b
 bind_look = l, v
 bind_stairs_up = shift+comma, less
 bind_stairs_down = shift+period, greater
@@ -377,6 +410,7 @@ bind_options = f2
 bind_command = shift+3
 bind_toggle_minimap = m
 bind_toggle_stats = shift+tab
+bind_message_history = f3, shift+m
 bind_fullscreen = f11
 bind_screenshot = f12
 bind_save = f5

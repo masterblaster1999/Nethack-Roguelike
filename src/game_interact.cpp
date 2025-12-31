@@ -192,15 +192,15 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
 
         // Friendly swap: step into your dog (or let it step into you) to avoid getting stuck
         // in tight corridors. This also makes auto-travel much smoother with a companion.
-        if (e.kind == EntityKind::Player && other->kind == EntityKind::Dog) {
+        if (e.kind == EntityKind::Player && other->friendly) {
             if (other->effects.webTurns > 0) {
-                pushMsg("YOUR DOG IS STUCK IN WEBBING!", MessageKind::Warning, true);
+                pushMsg((other->kind == EntityKind::Dog) ? "YOUR DOG IS STUCK IN WEBBING!" : "YOUR COMPANION IS STUCK IN WEBBING!", MessageKind::Warning, true);
                 return false;
             }
             other->pos = prevPos;
             e.pos = {nx, ny};
             moved = true;
-        } else if (e.kind == EntityKind::Dog && other->id == playerId_) {
+        } else if (e.friendly && other->id == playerId_) {
             if (other->effects.webTurns > 0) {
                 return false;
             }
@@ -210,7 +210,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         }
 
         if (!moved) {
-            if ((e.kind == EntityKind::Player || e.kind == EntityKind::Dog) && other->kind == EntityKind::Shopkeeper && !other->alerted) {
+            if ((e.kind == EntityKind::Player || e.friendly) && other->kind == EntityKind::Shopkeeper && !other->alerted) {
                 if (e.kind == EntityKind::Player) {
                     pushMsg("THE SHOPKEEPER SAYS: \"NO FIGHTING IN HERE!\"", MessageKind::Warning, true);
                 }
@@ -1022,8 +1022,9 @@ bool Game::kickInDirection(int dx, int dy) {
     // First, kicking a creature.
     if (Entity* e = entityAtMut(tgt.x, tgt.y)) {
         if (e->id == p.id) return false;
-        if (e->kind == EntityKind::Dog) {
-            pushMsg("YOU CAN'T BRING YOURSELF TO KICK YOUR DOG.", MessageKind::Info, true);
+        if (e->friendly) {
+            if (e->kind == EntityKind::Dog) pushMsg("YOU CAN'T BRING YOURSELF TO KICK YOUR DOG.", MessageKind::Info, true);
+            else pushMsg("YOU CAN'T BRING YOURSELF TO KICK YOUR COMPANION.", MessageKind::Info, true);
             return false;
         }
         baseNoise();
@@ -1356,10 +1357,12 @@ bool Game::prayAtShrine(const std::string& modeIn) {
         const bool hadPoison = (p.effects.poisonTurns > 0);
         const bool hadWeb = (p.effects.webTurns > 0);
         const bool hadConf = (p.effects.confusionTurns > 0);
+        const bool hadBurn = (p.effects.burnTurns > 0);
         p.effects.poisonTurns = 0;
         p.effects.webTurns = 0;
         p.effects.confusionTurns = 0;
-        if (hadPoison || hadWeb || hadConf) pushMsg("YOU FEEL PURIFIED.", MessageKind::Success, true);
+        p.effects.burnTurns = 0;
+        if (hadPoison || hadWeb || hadConf || hadBurn) pushMsg("YOU FEEL PURIFIED.", MessageKind::Success, true);
         else pushMsg("NOTHING SEEMS AMISS.", MessageKind::Info, true);
     } else if (mode == "uncurse") {
         int uncursed = 0;

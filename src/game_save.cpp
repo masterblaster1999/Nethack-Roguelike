@@ -523,7 +523,10 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 21u;
+constexpr uint32_t SAVE_VERSION = 25u;
+
+constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
+constexpr uint32_t BONES_VERSION = 1u;
 
 
 // v13+: append CRC32 of the entire payload (all bytes up to but excluding the CRC field).
@@ -721,6 +724,10 @@ void writeEntity(std::ostream& out, const Entity& e) {
     int32_t confusionTurns = e.effects.confusionTurns;
     writePod(out, confusionTurns);
 
+    // v22+: burning
+    int32_t burnTurns = e.effects.burnTurns;
+    writePod(out, burnTurns);
+
     // v14+: ranged ammo count (ammo-based ranged monsters)
     int32_t ammoCount = e.rangedAmmoCount;
     writePod(out, ammoCount);
@@ -729,6 +736,12 @@ void writeEntity(std::ostream& out, const Entity& e) {
     // v17+: monster gear (melee weapon + armor). Player ignores these fields.
     writeItem(out, e.gearMelee);
     writeItem(out, e.gearArmor);
+
+    // v23+: companion flags (friendly + ally order)
+    uint8_t friendly = e.friendly ? 1 : 0;
+    uint8_t order = static_cast<uint8_t>(e.allyOrder);
+    writePod(out, friendly);
+    writePod(out, order);
 }
 
 bool readEntity(std::istream& in, Entity& e, uint32_t version) {
@@ -762,6 +775,7 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     int32_t webTurns = 0;
     int32_t invisTurns = 0;
     int32_t confusionTurns = 0;
+    int32_t burnTurns = 0;
 
 
     Item gearMelee;
@@ -812,6 +826,10 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         if (version >= 12u) {
             if (!readPod(in, confusionTurns)) return false;
         }
+
+        if (version >= 22u) {
+            if (!readPod(in, burnTurns)) return false;
+        }
     }
 
     if (version >= 14u) {
@@ -822,6 +840,13 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     if (version >= 17u) {
         if (!readItem(in, gearMelee, version)) return false;
         if (!readItem(in, gearArmor, version)) return false;
+    }
+
+    uint8_t friendly = 0;
+    uint8_t order = 0;
+    if (version >= 23u) {
+        if (!readPod(in, friendly)) return false;
+        if (!readPod(in, order)) return false;
     }
 
     e.id = id;
@@ -866,6 +891,7 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     e.effects.webTurns = webTurns;
     e.effects.invisTurns = invisTurns;
     e.effects.confusionTurns = confusionTurns;
+    e.effects.burnTurns = burnTurns;
 
 
     if (version >= 17u) {
@@ -876,8 +902,17 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         e.gearMelee.id = 0;
         e.gearArmor.id = 0;
     }
+    // v23+: companion flags
+    if (version >= 23u) {
+        e.friendly = (friendly != 0);
+        e.allyOrder = static_cast<AllyOrder>(order);
+    } else {
+        // Older saves: only the starting dog was friendly.
+        e.friendly = (e.kind == EntityKind::Dog);
+        e.allyOrder = AllyOrder::Follow;
+    }
 
-    // Monster speed scheduling fields aren't serialized (derived from kind).
+    // Monster speed scheduling fields aren't serialized (derived from kind). fields aren't serialized (derived from kind).
     e.speed = baseSpeedFor(e.kind);
     e.energy = 0;
 
@@ -1041,8 +1076,16 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     for (const auto& m : msgs) {
         uint8_t mk = static_cast<uint8_t>(m.kind);
         uint8_t fp = m.fromPlayer ? 1 : 0;
+        uint32_t rep = static_cast<uint32_t>(m.repeat);
+        uint32_t turn = m.turn;
+        uint32_t depth = static_cast<uint32_t>(m.depth);
         writePod(mem, mk);
         writePod(mem, fp);
+        if constexpr (SAVE_VERSION >= 24u) {
+            writePod(mem, rep);
+            writePod(mem, turn);
+            writePod(mem, depth);
+        }
         writeString(mem, m.text);
     }
 
@@ -1136,6 +1179,35 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
                 writePod(mem, v);
             }
         }
+
+        // Fire field (v22+)
+        // Stored as a per-tile intensity map.
+        if constexpr (SAVE_VERSION >= 22u) {
+            const uint32_t expected = tileCount;
+            uint32_t fireCount = static_cast<uint32_t>(st.fireField.size());
+            if (fireCount != expected) fireCount = expected;
+            writePod(mem, fireCount);
+            for (uint32_t fi = 0; fi < fireCount; ++fi) {
+                uint8_t v = 0u;
+                if (fi < st.fireField.size()) v = st.fireField[static_cast<size_t>(fi)];
+                writePod(mem, v);
+            }
+        }
+
+        // Scent field (v25+)
+        // Stored as a per-tile intensity map.
+        if constexpr (SAVE_VERSION >= 25u) {
+            const uint32_t expected = tileCount;
+            uint32_t scentCount = static_cast<uint32_t>(st.scentField.size());
+            if (scentCount != expected) scentCount = expected;
+            writePod(mem, scentCount);
+            for (uint32_t si = 0; si < scentCount; ++si) {
+                uint8_t v = 0u;
+                if (si < st.scentField.size()) v = st.scentField[static_cast<size_t>(si)];
+                writePod(mem, v);
+            }
+        }
+
     }
 
     std::string payload = mem.str();
@@ -1484,19 +1556,36 @@ bool Game::loadFromFile(const std::string& path) {
             if (ver >= 2u) {
                 uint8_t mk = 0;
                 uint8_t fp = 1;
+                uint32_t rep = 1;
+                uint32_t turn = 0;
+                uint32_t depth = 0;
                 std::string s;
+
                 if (!readPod(in, mk)) return fail();
                 if (!readPod(in, fp)) return fail();
+                if (ver >= 24u) {
+                    if (!readPod(in, rep)) return fail();
+                    if (!readPod(in, turn)) return fail();
+                    if (!readPod(in, depth)) return fail();
+                }
                 if (!readString(in, s)) return fail();
+
                 Message m;
                 m.text = std::move(s);
                 m.kind = static_cast<MessageKind>(mk);
                 m.fromPlayer = fp != 0;
+                m.repeat = static_cast<int>(rep);
+                m.turn = turn;
+                m.depth = static_cast<int>(depth);
                 msgsTmp.push_back(std::move(m));
             } else {
                 std::string s;
                 if (!readString(in, s)) return fail();
-                msgsTmp.push_back({std::move(s), MessageKind::Info, true});
+                Message m;
+                m.text = std::move(s);
+                m.kind = MessageKind::Info;
+                m.fromPlayer = true;
+                msgsTmp.push_back(std::move(m));
             }
         }
 
@@ -1628,6 +1717,58 @@ bool Game::loadFromFile(const std::string& path) {
                     st.confusionGas = std::move(gasTmp);
                 }
             }
+
+            // Fire field (v22+)
+            st.fireField.clear();
+            if (ver >= 22u) {
+                uint32_t fireCount = 0;
+                if (!readPod(in, fireCount)) return fail();
+
+                std::vector<uint8_t> fireTmp;
+                fireTmp.assign(fireCount, 0u);
+                for (uint32_t fi = 0; fi < fireCount; ++fi) {
+                    uint8_t fv = 0;
+                    if (!readPod(in, fv)) return fail();
+                    fireTmp[fi] = fv;
+                }
+
+                if (tileCount > 0) {
+                    st.fireField.assign(tileCount, 0u);
+                    const uint32_t copyN = std::min(fireCount, tileCount);
+                    for (uint32_t i = 0; i < copyN; ++i) {
+                        st.fireField[static_cast<size_t>(i)] = fireTmp[static_cast<size_t>(i)];
+                    }
+                } else {
+                    st.fireField = std::move(fireTmp);
+                }
+            }
+
+            // Scent field (v25+)
+            st.scentField.clear();
+            if (ver >= 25u) {
+                uint32_t scentCount = 0;
+                if (!readPod(in, scentCount)) return fail();
+
+                std::vector<uint8_t> scentTmp;
+                scentTmp.assign(scentCount, 0u);
+                for (uint32_t si = 0; si < scentCount; ++si) {
+                    uint8_t sv = 0;
+                    if (!readPod(in, sv)) return fail();
+                    scentTmp[si] = sv;
+                }
+
+                // Normalize size to the dungeon tile count when possible (defensive against older/partial saves).
+                if (tileCount > 0) {
+                    st.scentField.assign(tileCount, 0u);
+                    const uint32_t copyN = std::min(scentCount, tileCount);
+                    for (uint32_t i = 0; i < copyN; ++i) {
+                        st.scentField[static_cast<size_t>(i)] = scentTmp[static_cast<size_t>(i)];
+                    }
+                } else {
+                    st.scentField = std::move(scentTmp);
+                }
+            }
+
 
             levelsTmp[d32] = std::move(st);
         }
@@ -1804,4 +1945,267 @@ bool Game::loadFromFile(const std::string& path) {
     }
 
     return tryParse(true, true);
+}
+
+
+// ====================================
+// Bones files (persistent death remnants)
+// ====================================
+
+bool Game::writeBonesFile() {
+    if (!bonesEnabled_) return false;
+    if (!gameOver || gameWon) return false;
+    if (player().hp > 0) return false;
+    if (bonesWritten_) return false;
+    if (depth_ < 2) return false;
+
+    const std::filesystem::path baseDir = exportBaseDir(*this);
+    if (baseDir.empty()) return false;
+
+    // One bones file per depth. New deaths overwrite old ones.
+    const std::filesystem::path path = baseDir / (std::string("procrogue_bones_d") + std::to_string(depth_) + ".dat");
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+
+    writePod(out, BONES_MAGIC);
+    writePod(out, BONES_VERSION);
+
+    // Depth + intended placement.
+    writePod(out, depth_);
+    writePod(out, player().pos.x);
+    writePod(out, player().pos.y);
+
+    // Player name (for flavor only).
+    std::string nm = playerName_;
+    if (nm.size() > 32) nm.resize(32);
+    writeString(out, nm);
+
+    // Equipped gear becomes the ghost's gear (if the ghost spawns).
+    const Item* melee = equippedMelee();
+    const Item* armor = equippedArmor();
+
+    const uint8_t hasMelee = melee ? 1u : 0u;
+    const uint8_t hasArmor = armor ? 1u : 0u;
+    writePod(out, hasMelee);
+    if (hasMelee) {
+        Item it = *melee;
+        it.id = 0;
+        it.shopPrice = 0;
+        it.shopDepth = 0;
+        writeItem(out, it);
+    }
+    writePod(out, hasArmor);
+    if (hasArmor) {
+        Item it = *armor;
+        it.id = 0;
+        it.shopPrice = 0;
+        it.shopDepth = 0;
+        writeItem(out, it);
+    }
+
+    // Remaining inventory becomes ground loot. (No gold/Yendor.)
+    std::vector<Item> loot;
+    loot.reserve(inv.size());
+    for (const Item& it0 : inv) {
+        if (it0.kind == ItemKind::Gold) continue;
+        if (it0.kind == ItemKind::AmuletYendor) continue;
+        if (melee && it0.id == melee->id) continue;
+        if (armor && it0.id == armor->id) continue;
+
+        Item it = it0;
+        it.id = 0;
+        it.shopPrice = 0;
+        it.shopDepth = 0;
+        loot.push_back(it);
+    }
+
+    const uint32_t lootN = static_cast<uint32_t>(loot.size());
+    writePod(out, lootN);
+    for (const Item& it : loot) writeItem(out, it);
+
+    out.flush();
+    if (!out.good()) return false;
+
+    bonesWritten_ = true;
+    return true;
+}
+
+bool Game::tryApplyBones() {
+    if (!bonesEnabled_) return false;
+    if (depth_ < 2) return false;
+
+    const std::filesystem::path baseDir = exportBaseDir(*this);
+    if (baseDir.empty()) return false;
+
+    const std::filesystem::path path = baseDir / (std::string("procrogue_bones_d") + std::to_string(depth_) + ".dat");
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec) return false;
+
+    // Chance to apply, so bones don't appear every single time.
+    const float depthBonus = std::min(10, std::max(0, depth_ - 2));
+    const float chance = std::clamp(0.55f + 0.03f * depthBonus, 0.55f, 0.85f);
+    if (!rng.chance(chance)) return false;
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+
+    uint32_t magic = 0;
+    uint32_t ver = 0;
+    if (!readPod(in, magic) || !readPod(in, ver)) return false;
+    if (magic != BONES_MAGIC || ver != BONES_VERSION) {
+        std::filesystem::remove(path, ec);
+        return false;
+    }
+
+    int fileDepth = 0;
+    int px = 0;
+    int py = 0;
+    if (!readPod(in, fileDepth)) return false;
+    if (fileDepth != depth_) {
+        std::filesystem::remove(path, ec);
+        return false;
+    }
+    if (!readPod(in, px) || !readPod(in, py)) return false;
+
+    std::string nm;
+    {
+        uint32_t len = 0;
+        if (!readPod(in, len)) return false;
+        // Sanity-check: bones files should never contain huge strings.
+        if (len > 1024) {
+            std::filesystem::remove(path, ec);
+            return false;
+        }
+
+        const uint32_t keep = std::min<uint32_t>(len, 32u);
+        nm.resize(keep);
+        if (keep > 0) in.read(nm.data(), keep);
+        if (!in.good()) return false;
+        if (len > keep) {
+            in.ignore(static_cast<std::streamsize>(len - keep));
+            if (!in.good()) return false;
+        }
+    }
+
+    uint8_t hasMelee = 0;
+    uint8_t hasArmor = 0;
+    if (!readPod(in, hasMelee)) return false;
+
+    Item melee{};
+    Item armor{};
+    if (hasMelee) {
+        if (!readItem(in, melee, SAVE_VERSION)) return false;
+        melee.id = 1;
+        melee.shopPrice = 0;
+        melee.shopDepth = 0;
+        melee.count = 1;
+    }
+
+    if (!readPod(in, hasArmor)) return false;
+    if (hasArmor) {
+        if (!readItem(in, armor, SAVE_VERSION)) return false;
+        armor.id = 1;
+        armor.shopPrice = 0;
+        armor.shopDepth = 0;
+        armor.count = 1;
+    }
+
+    uint32_t lootN = 0;
+    if (!readPod(in, lootN)) return false;
+    if (lootN > 512) {
+        std::filesystem::remove(path, ec);
+        return false;
+    }
+
+    std::vector<Item> loot;
+    loot.reserve(lootN);
+    for (uint32_t i = 0; i < lootN; ++i) {
+        Item it{};
+        if (!readItem(in, it, SAVE_VERSION)) return false;
+        it.id = 0;
+        it.shopPrice = 0;
+        it.shopDepth = 0;
+        loot.push_back(it);
+    }
+
+    // Pick a spawn tile near the stored (x,y).
+    auto isBadTile = [&](Vec2i p) -> bool {
+        if (!dung.inBounds(p.x, p.y)) return true;
+        if (!dung.isWalkable(p.x, p.y)) return true;
+        const TileType t = dung.at(p.x, p.y).type;
+        if (t == TileType::StairsDown || t == TileType::StairsUp) return true;
+        if (entityAt(p.x, p.y) != nullptr) return true;
+        return false;
+    };
+
+    Vec2i spawn{px, py};
+    if (isBadTile(spawn)) {
+        bool found = false;
+        for (int r = 1; r <= 12 && !found; ++r) {
+            for (int dy = -r; dy <= r && !found; ++dy) {
+                for (int dx = -r; dx <= r && !found; ++dx) {
+                    if (std::abs(dx) != r && std::abs(dy) != r) continue;
+                    Vec2i p{px + dx, py + dy};
+                    if (!isBadTile(p)) { spawn = p; found = true; }
+                }
+            }
+        }
+
+        if (!found) {
+            // Fall back to a random floor tile.
+            for (int tries = 0; tries < 500; ++tries) {
+                Vec2i p = dung.randomFloor(rng, true);
+                if (!isBadTile(p)) { spawn = p; found = true; break; }
+            }
+        }
+
+        if (!found) return false;
+    }
+
+    // Spawn the ghost and its loot.
+    Entity& g = spawnMonster(EntityKind::Ghost, spawn, /*roomId*/ 0, /*allowGear*/ false);
+    g.alerted = true;
+    g.lastKnownPlayerPos = player().pos;
+    g.lastKnownPlayerAge = 0;
+    g.willFlee = false;
+
+    if (hasMelee) g.gearMelee = melee;
+    if (hasArmor) g.gearArmor = armor;
+
+    // Scatter loot around the spawn point a bit.
+    std::vector<Vec2i> spots;
+    spots.reserve(25);
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            Vec2i p{spawn.x + dx, spawn.y + dy};
+            if (isBadTile(p)) continue;
+            spots.push_back(p);
+        }
+    }
+    if (spots.empty()) spots.push_back(spawn);
+
+    // Shuffle spots using the game's RNG.
+    for (int i = static_cast<int>(spots.size()) - 1; i > 0; --i) {
+        int j = rng.range(0, i);
+        std::swap(spots[i], spots[j]);
+    }
+
+    for (size_t i = 0; i < loot.size(); ++i) {
+        Item it = loot[i];
+        // Extra safety: never duplicate the Amulet.
+        if (it.kind == ItemKind::AmuletYendor) continue;
+        Vec2i p = spots[i % spots.size()];
+        dropGroundItemItem(p, it);
+    }
+
+    if (!nm.empty()) {
+        pushMsg("YOU FEEL A CHILL. THE BONES OF " + toUpper(nm) + " LIE HERE...", MessageKind::Warning);
+    } else {
+        pushMsg("YOU FEEL A CHILL. SOMEONE'S BONES LIE HERE...", MessageKind::Warning);
+    }
+
+    // Consume the bones file so it can't repeat forever.
+    std::filesystem::remove(path, ec);
+    return true;
 }

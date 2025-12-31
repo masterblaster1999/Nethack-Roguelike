@@ -41,7 +41,7 @@ void Game::update(float dt) {
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
-        if (invOpen || targeting || kicking || helpOpen || looking || minimapOpen || statsOpen || levelUpOpen || optionsOpen || commandOpen || isFinished()) {
+        if (invOpen || targeting || kicking || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || levelUpOpen || optionsOpen || commandOpen || isFinished()) {
             stopAutoMove(true);
             return;
         }
@@ -65,14 +65,37 @@ void Game::handleAction(Action a) {
     }
 
     // Message log scroll works in any mode.
-    if (a == Action::LogUp) {
-        int maxScroll = std::max(0, static_cast<int>(msgs.size()) - 1);
-        msgScroll = clampi(msgScroll + 1, 0, maxScroll);
-        return;
-    }
-    if (a == Action::LogDown) {
-        int maxScroll = std::max(0, static_cast<int>(msgs.size()) - 1);
-        msgScroll = clampi(msgScroll - 1, 0, maxScroll);
+    // If the message history overlay is open, scrolling applies to that overlay.
+    if (a == Action::LogUp || a == Action::LogDown) {
+        auto historyFilteredCount = [&]() -> int {
+            const std::string needle = toLower(msgHistorySearch);
+            int c = 0;
+            for (const auto& m : msgs) {
+                if (!messageFilterMatches(msgHistoryFilter, m.kind)) continue;
+                if (!needle.empty()) {
+                    const std::string hay = toLower(m.text);
+                    if (hay.find(needle) == std::string::npos) continue;
+                }
+                ++c;
+            }
+            return c;
+        };
+
+        if (msgHistoryOpen) {
+            const int maxScroll = std::max(0, historyFilteredCount() - 1);
+            if (a == Action::LogUp) {
+                msgHistoryScroll = clampi(msgHistoryScroll + 1, 0, maxScroll);
+            } else {
+                msgHistoryScroll = clampi(msgHistoryScroll - 1, 0, maxScroll);
+            }
+        } else {
+            const int maxScroll = std::max(0, static_cast<int>(msgs.size()) - 1);
+            if (a == Action::LogUp) {
+                msgScroll = clampi(msgScroll + 1, 0, maxScroll);
+            } else {
+                msgScroll = clampi(msgScroll - 1, 0, maxScroll);
+            }
+        }
         return;
     }
 
@@ -86,6 +109,12 @@ void Game::handleAction(Action a) {
         minimapOpen = false;
         statsOpen = false;
         optionsOpen = false;
+
+        msgHistoryOpen = false;
+        msgHistorySearchMode = false;
+        msgHistoryFilter = MessageFilter::All;
+        msgHistorySearch.clear();
+        msgHistoryScroll = 0;
 
         if (commandOpen) {
             commandOpen = false;
@@ -255,6 +284,22 @@ void Game::handleAction(Action a) {
                 helpOpen = true;
             }
             return;
+        case Action::MessageHistory:
+            if (msgHistoryOpen) {
+                msgHistoryOpen = false;
+                msgHistorySearchMode = false;
+                msgHistoryFilter = MessageFilter::All;
+                msgHistorySearch.clear();
+                msgHistoryScroll = 0;
+            } else {
+                closeOverlays();
+                msgHistoryOpen = true;
+                msgHistorySearchMode = false;
+                msgHistoryFilter = MessageFilter::All;
+                msgHistorySearch.clear();
+                msgHistoryScroll = 0;
+            }
+            return;
         case Action::ToggleMinimap:
             if (minimapOpen) {
                 minimapOpen = false;
@@ -389,7 +434,7 @@ void Game::handleAction(Action a) {
 
     // Overlay: options menu (does not consume turns)
     if (optionsOpen) {
-        constexpr int kOptionCount = 15;
+        constexpr int kOptionCount = 18;
 
         if (a == Action::Cancel || a == Action::Options) {
             optionsOpen = false;
@@ -524,8 +569,17 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 11) Save backups (0..10)
+        // 11) Bones files (persistent death remnants)
         if (optionsSel == 11) {
+            if (left || right || confirm) {
+                bonesEnabled_ = !bonesEnabled_;
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // 12) Save backups (0..10)
+        if (optionsSel == 12) {
             if (left || right) {
                 int n = saveBackups_;
                 n += left ? -1 : +1;
@@ -535,8 +589,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-// 12) UI Theme (cycle)
-if (optionsSel == 12) {
+// 13) UI Theme (cycle)
+if (optionsSel == 13) {
     if (left || right || confirm) {
         int dir = right ? 1 : -1;
         if (confirm && !left && !right) dir = 1;
@@ -549,8 +603,8 @@ if (optionsSel == 12) {
     return;
 }
 
-// 13) UI Panels (textured / solid)
-if (optionsSel == 13) {
+// 14) UI Panels (textured / solid)
+if (optionsSel == 14) {
     if (left || right || confirm) {
         uiPanelsTextured_ = !uiPanelsTextured_;
         settingsDirtyFlag = true;
@@ -558,8 +612,27 @@ if (optionsSel == 13) {
     return;
 }
 
-// 14) Close
-if (optionsSel == 14) {
+// 15) 3D voxel sprites (entities/items/projectiles)
+if (optionsSel == 15) {
+    if (left || right || confirm) {
+        voxelSpritesEnabled_ = !voxelSpritesEnabled_;
+        settingsDirtyFlag = true;
+    }
+    return;
+}
+
+// 16) Control preset (Modern / NetHack)
+if (optionsSel == 16) {
+    if (left || right || confirm) {
+        ControlPreset next = (controlPreset_ == ControlPreset::Modern) ? ControlPreset::Nethack : ControlPreset::Modern;
+        setControlPreset(next);
+        applyControlPreset(*this, next);
+    }
+    return;
+}
+
+// 17) Close
+if (optionsSel == 17) {
     if (left || right || confirm) optionsOpen = false;
     return;
 }
@@ -592,6 +665,70 @@ if (optionsSel == 14) {
     // Overlay: stats
     if (statsOpen) {
         if (a == Action::Cancel) statsOpen = false;
+        return;
+    }
+
+    // Overlay: message history (full log viewer)
+    if (msgHistoryOpen) {
+        auto historyFilteredCount = [&]() -> int {
+            const std::string needle = toLower(msgHistorySearch);
+            int c = 0;
+            for (const auto& m : msgs) {
+                if (!messageFilterMatches(msgHistoryFilter, m.kind)) continue;
+                if (!needle.empty()) {
+                    const std::string hay = toLower(m.text);
+                    if (hay.find(needle) == std::string::npos) continue;
+                }
+                ++c;
+            }
+            return c;
+        };
+
+        const int maxScroll = std::max(0, historyFilteredCount() - 1);
+        switch (a) {
+            case Action::Cancel:
+                if (msgHistorySearchMode) {
+                    msgHistorySearchMode = false;
+                } else {
+                    closeOverlays();
+                }
+                return;
+            case Action::Confirm:
+                // Enter: exit search mode if active, otherwise jump to newest.
+                if (msgHistorySearchMode) {
+                    msgHistorySearchMode = false;
+                } else {
+                    msgHistoryScroll = 0;
+                }
+                return;
+            case Action::Inventory:
+                // Convenient: Tab cycles filters.
+                if (!msgHistorySearchMode) messageHistoryCycleFilter(+1);
+                return;
+            case Action::Left:
+                if (!msgHistorySearchMode) messageHistoryCycleFilter(-1);
+                return;
+            case Action::Right:
+                if (!msgHistorySearchMode) messageHistoryCycleFilter(+1);
+                return;
+            case Action::Up:
+                if (!msgHistorySearchMode) msgHistoryScroll = clampi(msgHistoryScroll + 1, 0, maxScroll);
+                return;
+            case Action::Down:
+                if (!msgHistorySearchMode) msgHistoryScroll = clampi(msgHistoryScroll - 1, 0, maxScroll);
+                return;
+            case Action::Wait:
+                // Space: clear search (only when not actively typing).
+                if (!msgHistorySearchMode && !msgHistorySearch.empty()) {
+                    msgHistorySearch.clear();
+                    msgHistoryScroll = 0;
+                }
+                return;
+            default:
+                break;
+        }
+
+        // Ignore all other actions while the overlay is open.
         return;
     }
 
@@ -981,6 +1118,137 @@ void Game::whistle() {
     advanceAfterPlayerAction();
 }
 
+void Game::setAlliesOrder(AllyOrder order, bool verbose) {
+    int n = 0;
+    for (auto& e : ents) {
+        if (e.id == playerId_) continue;
+        if (e.hp <= 0) continue;
+        if (!e.friendly) continue;
+        e.allyOrder = order;
+        ++n;
+    }
+
+    if (!verbose) return;
+
+    if (n <= 0) {
+        pushMsg("YOU HAVE NO COMPANIONS.", MessageKind::Info, true);
+        return;
+    }
+
+    const char* oname = "FOLLOW";
+    switch (order) {
+        case AllyOrder::Stay:  oname = "STAY"; break;
+        case AllyOrder::Fetch: oname = "FETCH"; break;
+        case AllyOrder::Guard: oname = "GUARD"; break;
+        case AllyOrder::Follow:
+        default: break;
+    }
+
+    std::ostringstream ss;
+    ss << "COMPANIONS ORDERED: " << oname << ".";
+    pushMsg(ss.str(), MessageKind::System, true);
+}
+
+void Game::tame() {
+    if (isFinished()) return;
+
+    // Require a food ration to offer.
+    int foodIdx = -1;
+    for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+        if (inv[static_cast<size_t>(i)].kind == ItemKind::FoodRation && inv[static_cast<size_t>(i)].count > 0) {
+            foodIdx = i;
+            break;
+        }
+    }
+    if (foodIdx < 0) {
+        pushMsg("YOU HAVE NO FOOD TO OFFER.", MessageKind::Info, true);
+        return;
+    }
+
+    // Find an adjacent tameable creature.
+    auto tameable = [&](EntityKind k) -> bool {
+        switch (k) {
+            case EntityKind::Wolf:
+            case EntityKind::Snake:
+            case EntityKind::Spider:
+            case EntityKind::Bat:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    Entity* target = nullptr;
+    const int dirs8[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
+    for (int i = 0; i < 8; ++i) {
+        const int nx = player().pos.x + dirs8[i][0];
+        const int ny = player().pos.y + dirs8[i][1];
+        Entity* e = entityAtMut(nx, ny);
+        if (!e) continue;
+        if (e->id == playerId_) continue;
+        if (e->hp <= 0) continue;
+        if (e->friendly) continue;
+        if (!tameable(e->kind)) continue;
+        if (e->kind == EntityKind::Shopkeeper) continue;
+        target = e;
+        break;
+    }
+
+    // Offering food costs a turn even if it fails.
+    pushMsg("YOU OFFER SOME FOOD.", MessageKind::Info, true);
+
+    // Consume one ration.
+    {
+        Item& it = inv[static_cast<size_t>(foodIdx)];
+        it.count = std::max(0, it.count - 1);
+        if (isStackable(it.kind) && it.count <= 0) {
+            inv.erase(inv.begin() + foodIdx);
+        }
+    }
+
+    if (!target) {
+        pushMsg("...BUT NOTHING SEEMS INTERESTED.", MessageKind::Info, true);
+        advanceAfterPlayerAction();
+        return;
+    }
+
+    // Taming chance: scales with Focus/Agility, and gets harder deeper down.
+    int chance = 40;
+    chance += playerFocus() * 4;
+    chance += playerAgility() * 2;
+    chance -= depth_ * 3;
+
+    // Wolves are more receptive (classic starter pet vibe).
+    if (target->kind == EntityKind::Wolf) chance += 8;
+
+    chance = clampi(chance, 10, 85);
+    const int roll = rng.range(1, 100);
+
+    if (roll <= chance) {
+        target->friendly = true;
+        target->allyOrder = AllyOrder::Follow;
+        target->alerted = false;
+        target->lastKnownPlayerPos = {-1, -1};
+        target->lastKnownPlayerAge = 9999;
+
+        std::ostringstream ss;
+        ss << "THE " << kindName(target->kind) << " SEEMS FRIENDLY!";
+        pushMsg(ss.str(), MessageKind::Success, true);
+    } else {
+        // Failure can make it more aggressive.
+        target->alerted = true;
+        target->lastKnownPlayerPos = player().pos;
+        target->lastKnownPlayerAge = 0;
+
+        std::ostringstream ss;
+        ss << "THE " << kindName(target->kind) << " REFUSES YOUR OFFERING.";
+        pushMsg(ss.str(), MessageKind::Warning, true);
+    }
+
+    advanceAfterPlayerAction();
+}
+
+
 
 void Game::advanceAfterPlayerAction() {
     // One "turn" = one player action that consumes time.
@@ -994,6 +1262,10 @@ void Game::advanceAfterPlayerAction() {
         maybeRecordRun();
         return;
     }
+
+
+    // Update per-level scent trail (used by smell-capable monsters).
+    updateScentMap();
 
     Entity& p = playerMut();
     bool runMonsters = true;
@@ -1071,7 +1343,7 @@ void Game::advanceAfterPlayerAction() {
 bool Game::anyVisibleHostiles() const {
     for (const auto& e : ents) {
         if (e.id == playerId_) continue;
-        if (e.kind == EntityKind::Dog) continue;
+        if (e.friendly) continue;
         if (e.kind == EntityKind::Shopkeeper && !e.alerted) continue;
         if (e.hp <= 0) continue;
         if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
@@ -1140,6 +1412,14 @@ void Game::maybeRecordRun() {
         const bool ok = scores.append(scorePath, e);
         if (ok) {
             pushMsg("RUN RECORDED.", MessageKind::System);
+        }
+    }
+
+    if (bonesEnabled_ && gameOver && !gameWon && !bonesWritten_ && player().hp <= 0) {
+        if (writeBonesFile()) {
+            pushMsg("YOUR BONES MAY HAUNT THIS DUNGEON...", MessageKind::System);
+        } else {
+            pushMsg("FAILED TO WRITE BONES FILE.", MessageKind::Warning);
         }
     }
 

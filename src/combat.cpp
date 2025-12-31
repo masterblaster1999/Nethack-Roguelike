@@ -19,6 +19,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::KoboldSlinger: return "KOBOLD";
         case EntityKind::Wolf: return "WOLF";
         case EntityKind::Dog: return "DOG";
+        case EntityKind::Ghost: return "GHOST";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";
@@ -434,11 +435,15 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
         } else {
             if (!skipDeathMsg) {
                 std::ostringstream ds;
-                ds << kindName(defender.kind) << " DIES.";
+                if (defender.friendly) {
+                    ds << "YOUR " << kindName(defender.kind) << " DIES.";
+                } else {
+                    ds << kindName(defender.kind) << " DIES.";
+                }
                 pushMsg(ds.str(), MessageKind::Combat, msgFromPlayer);
             }
 
-            if ((attacker.kind == EntityKind::Player || attacker.kind == EntityKind::Dog) && defender.kind != EntityKind::Dog) {
+            if ((attacker.kind == EntityKind::Player || attacker.friendly) && !defender.friendly) {
                 ++killCount;
                 grantXp(xpFor(defender.kind));
             }
@@ -589,9 +594,10 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                 gameOver = true;
             } else {
                 std::ostringstream ds;
-                ds << kindName(hit->kind) << " DIES.";
+                if (hit->friendly) ds << "YOUR " << kindName(hit->kind) << " DIES.";
+                else ds << kindName(hit->kind) << " DIES.";
                 pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
-                if (fromPlayer && hit->kind != EntityKind::Dog) {
+                if (fromPlayer && !hit->friendly) {
                     ++killCount;
                     grantXp(xpFor(hit->kind));
                 }
@@ -713,6 +719,39 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
             pushMsg(doorsBlownSeen == 1 ? "A DOOR IS BLOWN OPEN." : "SOME DOORS ARE BLOWN OPEN.", MessageKind::System, true);
         }
 
+        // Lingering flames: leave a temporary fire field on walkable tiles in the blast.
+        // This creates tactical area denial (and doubles as a light source in darkness mode).
+        {
+            const size_t expect = static_cast<size_t>(dung.width * dung.height);
+            if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+
+            const int baseStrength = clampi(6 + depth_ / 3, 6, 12);
+            int ignitedVisible = 0;
+
+            for (const Vec2i& bt : blastTiles) {
+                if (!dung.inBounds(bt.x, bt.y)) continue;
+                if (!dung.isWalkable(bt.x, bt.y)) continue;
+
+                const int dist = std::max(std::abs(bt.x - center.x), std::abs(bt.y - center.y));
+                const int s = baseStrength - dist * 2;
+                if (s <= 0) continue;
+
+                const size_t i = static_cast<size_t>(bt.y * dung.width + bt.x);
+                if (i >= fireField_.size()) continue;
+
+                const uint8_t prev = fireField_[i];
+                const uint8_t next = static_cast<uint8_t>(clampi(s, 0, 255));
+                if (next > prev) {
+                    fireField_[i] = next;
+                    if (prev == 0u && dung.at(bt.x, bt.y).visible) ++ignitedVisible;
+                }
+            }
+
+            if (ignitedVisible > 0 && fromPlayer) {
+                pushMsg("FLAMES LINGER ON THE GROUND.", MessageKind::System, true);
+            }
+        }
+
         // Explosion message (shown immediately; visual flash plays after the projectile).
         if (fromPlayer) {
             pushMsg("THE FIREBALL EXPLODES!", MessageKind::Combat, true);
@@ -776,10 +815,11 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                     const bool vis = dung.inBounds(e->pos.x, e->pos.y) && dung.at(e->pos.x, e->pos.y).visible;
                     if (fromPlayer || vis) {
                         std::ostringstream ds;
-                        ds << kindName(e->kind) << " DIES.";
+                        if (e->friendly) ds << "YOUR " << kindName(e->kind) << " DIES.";
+                        else ds << kindName(e->kind) << " DIES.";
                         pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
                     }
-                    if (fromPlayer && e->kind != EntityKind::Dog) {
+                    if (fromPlayer && !e->friendly) {
                         ++killCount;
                         grantXp(xpFor(e->kind));
                     }

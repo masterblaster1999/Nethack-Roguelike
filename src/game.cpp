@@ -60,6 +60,45 @@ Entity& Game::playerMut() {
     return dummyPlayerEntity();
 }
 
+namespace {
+
+static bool icontainsAscii(const std::string& haystack, const std::string& needle) {
+    if (needle.empty()) return true;
+    // ASCII-only case-insensitive substring search (good enough for our message text).
+    auto lower = [](unsigned char c) -> unsigned char {
+        if (c >= 'A' && c <= 'Z') return static_cast<unsigned char>(c - 'A' + 'a');
+        return c;
+    };
+
+    const size_t n = needle.size();
+    const size_t m = haystack.size();
+    if (n > m) return false;
+
+    for (size_t i = 0; i + n <= m; ++i) {
+        bool ok = true;
+        for (size_t j = 0; j < n; ++j) {
+            if (lower(static_cast<unsigned char>(haystack[i + j])) != lower(static_cast<unsigned char>(needle[j]))) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
+
+static void utf8PopBack(std::string& s) {
+    if (s.empty()) return;
+    size_t i = s.size() - 1;
+    // Walk back over UTF-8 continuation bytes (10xxxxxx).
+    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0u) == 0x80u) {
+        --i;
+    }
+    s.erase(i);
+}
+
+} // namespace
+
 void Game::pushMsg(const std::string& s, MessageKind kind, bool fromPlayer) {
     // Coalesce consecutive identical messages to reduce spam in combat / auto-move.
     // This preserves the original text and adds a repeat counter for the renderer.
@@ -69,16 +108,44 @@ void Game::pushMsg(const std::string& s, MessageKind kind, bool fromPlayer) {
             if (last.repeat < 9999) {
                 ++last.repeat;
             }
+            // Treat the compacted line as "latest occurrence".
+            last.turn = turnCount;
+            last.depth = depth_;
             return;
         }
     }
+
+    auto historyMatches = [&](const Message& m) -> bool {
+        if (!messageFilterMatches(msgHistoryFilter, m.kind)) return false;
+        if (!msgHistorySearch.empty() && !icontainsAscii(m.text, msgHistorySearch)) return false;
+        return true;
+    };
+
+    auto historyFilteredCount = [&]() -> int {
+        int c = 0;
+        for (const auto& m : msgs) if (historyMatches(m)) ++c;
+        return c;
+    };
 
     // Keep some scrollback
     if (msgs.size() > 400) {
         msgs.erase(msgs.begin(), msgs.begin() + 100);
         msgScroll = std::min(msgScroll, static_cast<int>(msgs.size()));
+
+        // Also clamp the history overlay scroll.
+        if (msgHistoryScroll > 0) {
+            msgHistoryScroll = std::min(msgHistoryScroll, std::max(0, historyFilteredCount() - 1));
+        }
     }
-    msgs.push_back({s, kind, fromPlayer});
+
+    Message m;
+    m.text = s;
+    m.kind = kind;
+    m.fromPlayer = fromPlayer;
+    m.turn = turnCount;
+    m.depth = depth_;
+    msgs.push_back(m);
+
     // If not scrolled up, stay pinned to newest.
     if (msgScroll == 0) {
         // pinned
@@ -86,10 +153,57 @@ void Game::pushMsg(const std::string& s, MessageKind kind, bool fromPlayer) {
         // keep viewing older lines; new messages increase effective scroll
         msgScroll = std::min(msgScroll + 1, static_cast<int>(msgs.size()));
     }
+
+    // Keep message-history viewport stable while scrolled up.
+    if (msgHistoryOpen && msgHistoryScroll > 0) {
+        if (historyMatches(m)) {
+            ++msgHistoryScroll;
+        }
+        msgHistoryScroll = std::min(msgHistoryScroll, std::max(0, historyFilteredCount() - 1));
+    }
 }
 
 void Game::pushSystemMessage(const std::string& msg) {
     pushMsg(msg, MessageKind::System, false);
+}
+
+void Game::messageHistoryTextInput(const char* utf8) {
+    if (!msgHistoryOpen || !msgHistorySearchMode) return;
+    if (!utf8) return;
+    // Basic cap so the overlay stays sane.
+    if (msgHistorySearch.size() > 120) return;
+    msgHistorySearch += utf8;
+    // New search terms: jump back to newest matches.
+    msgHistoryScroll = 0;
+}
+
+void Game::messageHistoryBackspace() {
+    if (!msgHistoryOpen) return;
+    if (msgHistorySearch.empty()) return;
+    utf8PopBack(msgHistorySearch);
+    msgHistoryScroll = 0;
+}
+
+void Game::messageHistoryToggleSearchMode() {
+    if (!msgHistoryOpen) return;
+    msgHistorySearchMode = !msgHistorySearchMode;
+}
+
+void Game::messageHistoryClearSearch() {
+    if (!msgHistoryOpen) return;
+    msgHistorySearch.clear();
+    msgHistoryScroll = 0;
+}
+
+void Game::messageHistoryCycleFilter(int dir) {
+    if (!msgHistoryOpen) return;
+    const int maxFilter = static_cast<int>(MessageFilter::Info);
+    int v = static_cast<int>(msgHistoryFilter);
+    v += dir;
+    if (v < 0) v = maxFilter;
+    if (v > maxFilter) v = 0;
+    msgHistoryFilter = static_cast<MessageFilter>(v);
+    msgHistoryScroll = 0;
 }
 
 Entity* Game::entityById(int id) {
@@ -389,6 +503,7 @@ int Game::xpFor(EntityKind k) const {
         case EntityKind::Troll: return 28;
         case EntityKind::Ogre: return 30;
         case EntityKind::Wizard: return 32;
+        case EntityKind::Ghost: return 34;
         case EntityKind::Mimic: return 22;
         case EntityKind::Minotaur: return 45;
         case EntityKind::Shopkeeper: return 0;
@@ -897,6 +1012,8 @@ void Game::newGame(uint32_t seed) {
     ground.clear();
     trapsCur.clear();
     confusionGas_.clear();
+    fireField_.clear();
+    scentField_.clear();
     inv.clear();
     fx.clear();
     fxExpl.clear();
@@ -932,6 +1049,12 @@ void Game::newGame(uint32_t seed) {
     msgs.clear();
     msgScroll = 0;
 
+    msgHistoryOpen = false;
+    msgHistorySearchMode = false;
+    msgHistoryFilter = MessageFilter::All;
+    msgHistorySearch.clear();
+    msgHistoryScroll = 0;
+
     // autoPickup is a user setting; do not reset it between runs.
 
     sneakMode_ = false;
@@ -954,6 +1077,7 @@ void Game::newGame(uint32_t seed) {
     maxDepth = 1;
     runRecorded = false;
     mortemWritten_ = false;
+    bonesWritten_ = false;
     hastePhase = false;
     looking = false;
     lookPos = {0,0};
@@ -1004,6 +1128,8 @@ void Game::newGame(uint32_t seed) {
     dung.generate(rng, depth_, DUNGEON_MAX_DEPTH);
     // Environmental fields reset per floor (no lingering gas on a fresh level).
     confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+    fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
     // Create player
     Entity p;
@@ -1062,6 +1188,8 @@ void Game::newGame(uint32_t seed) {
         d.speed = baseSpeedFor(d.kind);
         d.willFlee = false;
         d.alerted = false;
+        d.friendly = true;
+        d.allyOrder = AllyOrder::Follow;
 
         // Spawn near the player (prefer adjacent, but fall back to a wider search).
         Vec2i spawn{-1, -1};
@@ -1181,6 +1309,8 @@ void Game::newGame(uint32_t seed) {
     spawnItems();
     spawnTraps();
 
+    tryApplyBones();
+
     storeCurrentLevel();
     recomputeFov();
 
@@ -1198,7 +1328,11 @@ void Game::newGame(uint32_t seed) {
         pushMsg(ss.str(), MessageKind::System);
     }
     pushMsg("PRESS ? FOR HELP. I INVENTORY. F TARGET/FIRE. M MINIMAP. TAB STATS. F12 SCREENSHOT.", MessageKind::System);
-    pushMsg("MOVE: WASD/ARROWS + Y/U/B/N DIAGONALS. TIP: C SEARCH. T DISARM TRAPS. O AUTO-EXPLORE. P AUTO-PICKUP.", MessageKind::System);
+    if (controlPreset_ == ControlPreset::Nethack) {
+        pushMsg("MOVE: HJKL + YUBN DIAGONALS (ALSO ARROWS/NUMPAD). TIP: S SEARCH. : LOOK. CTRL+D KICK. C CLOSE DOOR. SHIFT+C LOCK DOOR.", MessageKind::System);
+    } else {
+        pushMsg("MOVE: WASD/ARROWS/NUMPAD + Q/E/Z/C DIAGONALS. TIP: SHIFT+C SEARCH. T DISARM TRAPS. O AUTO-EXPLORE. P AUTO-PICKUP.", MessageKind::System);
+    }
     pushMsg("SAVE: F5   LOAD: F9   LOAD AUTO: F10", MessageKind::System);
 }
 
@@ -1209,6 +1343,8 @@ void Game::storeCurrentLevel() {
     st.ground = ground;
     st.traps = trapsCur;
     st.confusionGas = confusionGas_;
+    st.fireField = fireField_;
+    st.scentField = scentField_;
     st.monsters.clear();
     for (const auto& e : ents) {
         if (e.id == playerId_) continue;
@@ -1228,6 +1364,12 @@ bool Game::restoreLevel(int depth) {
     confusionGas_ = it->second.confusionGas;
     const size_t expect = static_cast<size_t>(dung.width * dung.height);
     if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+
+    fireField_ = it->second.fireField;
+    if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+
+    scentField_ = it->second.scentField;
+    if (scentField_.size() != expect) scentField_.assign(expect, 0u);
 
     // Keep player, restore monsters.
     ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
@@ -1283,18 +1425,27 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     };
 
     // Carry companions across floors (NetHack-style): they always follow the player.
+    int leftBehindCompanions = 0;
     std::vector<Entity> companions;
-    companions.reserve(2);
+    companions.reserve(8);
     for (size_t i = 0; i < ents.size(); ) {
-        if (ents[i].kind == EntityKind::Dog && ents[i].hp > 0) {
+        if (ents[i].friendly && ents[i].hp > 0 && (ents[i].allyOrder == AllyOrder::Follow || ents[i].allyOrder == AllyOrder::Fetch)) {
             companions.push_back(ents[i]);
             ents.erase(ents.begin() + static_cast<std::vector<Entity>::difference_type>(i));
             continue;
         }
+        if (ents[i].friendly && ents[i].hp > 0) {
+            // STAY/GUARD companions remain on this floor.
+            leftBehindCompanions += 1;
+        }
         ++i;
     }
 
-    // Collect eligible followers (adjacent to the stairs tile the player is using).
+    if (leftBehindCompanions > 0) {
+        pushMsg("YOU LEAVE A COMPANION BEHIND.", MessageKind::System, true);
+    }
+
+        // Collect eligible followers (adjacent to the stairs tile the player is using).
     std::vector<size_t> followerIdx;
     followerIdx.reserve(8);
 
@@ -1448,9 +1599,13 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         ground.clear();
         trapsCur.clear();
         confusionGas_.clear();
+        fireField_.clear();
+        scentField_.clear();
 
         dung.generate(rng, depth_, DUNGEON_MAX_DEPTH);
         confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
         const Vec2i desiredArrival = goingDown ? dung.stairsUp : dung.stairsDown;
 
@@ -1481,12 +1636,18 @@ void Game::changeLevel(int newDepth, bool goingDown) {
             ++companionCount;
         }
         if (companionCount > 0) {
-            pushMsg("YOUR DOG FOLLOWS YOU.", MessageKind::System, true);
+            if (companionCount == 1 && companions.size() == 1 && companions[0].kind == EntityKind::Dog) {
+                pushMsg("YOUR DOG FOLLOWS YOU.", MessageKind::System, true);
+            } else {
+                pushMsg("YOUR COMPANIONS FOLLOW YOU.", MessageKind::System, true);
+            }
         }
 
         spawnMonsters();
         spawnItems();
         spawnTraps();
+
+        tryApplyBones();
 
         // Stair arrival is noisy: nearby monsters may wake and investigate.
         emitNoise(p.pos, 12);
@@ -1530,7 +1691,11 @@ void Game::changeLevel(int newDepth, bool goingDown) {
             ++companionCount;
         }
         if (companionCount > 0) {
-            pushMsg("YOUR DOG FOLLOWS YOU.", MessageKind::System, true);
+            if (companionCount == 1 && companions.size() == 1 && companions[0].kind == EntityKind::Dog) {
+                pushMsg("YOUR DOG FOLLOWS YOU.", MessageKind::System, true);
+            } else {
+                pushMsg("YOUR COMPANIONS FOLLOW YOU.", MessageKind::System, true);
+            }
         }
 
         // Stair arrival is noisy on visited floors too.

@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
     const int winW = Game::MAP_W * tileSize;
     const int winH = Game::MAP_H * tileSize + hudHeight;
 
-    Renderer renderer(winW, winH, tileSize, hudHeight, settings.vsync);
+    Renderer renderer(winW, winH, tileSize, hudHeight, settings.vsync, settings.textureCacheMB);
     if (!renderer.init()) {
         SDL_Quit();
         return 1;
@@ -225,6 +225,8 @@ int main(int argc, char** argv) {
     game.setYendorDoomEnabled(settings.yendorDoomEnabled);
     game.setConfirmQuitEnabled(settings.confirmQuit);
     game.setAutoMortemEnabled(settings.autoMortem);
+    game.setBonesEnabled(settings.bonesEnabled);
+    game.setVoxelSpritesEnabled(settings.voxelSprites);
     game.setSaveBackups(settings.saveBackups);
 
     game.setPlayerName(settings.playerName);
@@ -244,6 +246,7 @@ int main(int argc, char** argv) {
     game.setShowEffectTimers(settings.showEffectTimers);
     game.setUITheme(settings.uiTheme);
     game.setUIPanelsTextured(settings.uiPanelsTextured);
+    game.setControlPreset(settings.controlPreset);
     game.setSettingsPath(settingsPath);
 
     KeyBinds keyBinds = KeyBinds::defaults();
@@ -419,6 +422,8 @@ int main(int argc, char** argv) {
                 case SDL_TEXTINPUT:
                     if (game.isCommandOpen()) {
                         game.commandTextInput(ev.text.text);
+                    } else if (game.isMessageHistoryOpen() && game.isMessageHistorySearchMode()) {
+                        game.messageHistoryTextInput(ev.text.text);
                     }
                     break;
 
@@ -447,10 +452,27 @@ int main(int argc, char** argv) {
                             break;
                         }
 
+                        // Message history overlay: intercept a few text/navigation keys so they
+                        // don't get interpreted as gameplay actions (especially Backspace).
+                        if (game.isMessageHistoryOpen()) {
+                            if (!game.isMessageHistorySearchMode() && key == SDLK_SLASH && (mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) == 0 && (mod & KMOD_SHIFT) == 0) {
+                                game.messageHistoryToggleSearchMode();
+                                break;
+                            }
+                            if (key == SDLK_BACKSPACE) {
+                                game.messageHistoryBackspace();
+                                break;
+                            }
+                            if ((mod & KMOD_CTRL) != 0 && (key == SDLK_l || key == SDLK_L)) {
+                                game.messageHistoryClearSearch();
+                                break;
+                            }
+                        }
+
                         if (key == SDLK_ESCAPE) {
                             // ESC cancels UI modes; cancels auto-move; otherwise quit (optionally double-press).
                             if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen() || game.isLooking() ||
-                                game.isMinimapOpen() || game.isStatsOpen() || game.isOptionsOpen() || game.isCommandOpen() ||
+                                game.isMinimapOpen() || game.isStatsOpen() || game.isMessageHistoryOpen() || game.isOptionsOpen() || game.isCommandOpen() ||
                                 game.isAutoActive()) {
                                 game.handleAction(Action::Cancel);
                                 lastEscPressMs = 0;
@@ -511,7 +533,7 @@ int main(int argc, char** argv) {
                     {
                         // Ignore mouse when menus are open.
                         if (game.isInventoryOpen() || game.isHelpOpen() || game.isMinimapOpen() || game.isStatsOpen() ||
-                            game.isOptionsOpen() || game.isCommandOpen())
+                            game.isMessageHistoryOpen() || game.isOptionsOpen() || game.isCommandOpen())
                             break;
 
                         int tx = 0, ty = 0;
@@ -550,11 +572,12 @@ int main(int argc, char** argv) {
             if (!running) break;
         }
 
-        // Toggle SDL text input for the extended command prompt.
-        if (game.isCommandOpen() && !textInputOn) {
+        // Toggle SDL text input for command prompt / message-history search.
+        const bool wantTextInput = game.isCommandOpen() || (game.isMessageHistoryOpen() && game.isMessageHistorySearchMode());
+        if (wantTextInput && !textInputOn) {
             SDL_StartTextInput();
             textInputOn = true;
-        } else if (!game.isCommandOpen() && textInputOn) {
+        } else if (!wantTextInput && textInputOn) {
             SDL_StopTextInput();
             textInputOn = false;
         }
@@ -581,6 +604,8 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "yendor_doom_enabled", game.yendorDoomEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "confirm_quit", game.confirmQuitEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "auto_mortem", game.autoMortemEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "bones_enabled", game.bonesEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "voxel_sprites", game.voxelSpritesEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "autosave_every_turns", std::to_string(game.autosaveEveryTurns()));
             ok &= updateIniKey(settingsPath, "save_backups", std::to_string(game.saveBackups()));
 
@@ -603,6 +628,7 @@ auto uiThemeToString = [](UITheme t) -> const char* {
 };
 ok &= updateIniKey(settingsPath, "ui_theme", uiThemeToString(game.uiTheme()));
 ok &= updateIniKey(settingsPath, "ui_panels", game.uiPanelsTextured() ? "textured" : "solid");
+ok &= updateIniKey(settingsPath, "control_preset", controlPresetId(game.controlPreset()));
 
             if (!ok) game.pushSystemMessage("FAILED TO SAVE SETTINGS.");
 
@@ -629,10 +655,12 @@ ok &= updateIniKey(settingsPath, "ui_panels", game.uiPanelsTextured() ? "texture
             game.setYendorDoomEnabled(newSettings.yendorDoomEnabled);
             game.setConfirmQuitEnabled(newSettings.confirmQuit);
             game.setAutoMortemEnabled(newSettings.autoMortem);
+            game.setBonesEnabled(newSettings.bonesEnabled);
             game.setPlayerName(newSettings.playerName);
             game.setShowEffectTimers(newSettings.showEffectTimers);
             game.setUITheme(newSettings.uiTheme);
             game.setUIPanelsTextured(newSettings.uiPanelsTextured);
+            game.setControlPreset(newSettings.controlPreset);
 
             // Keep the local copy up-to-date for any later use.
             settings = newSettings;

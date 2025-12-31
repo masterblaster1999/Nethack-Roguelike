@@ -1,4 +1,5 @@
 #include "spritegen.hpp"
+#include "spritegen3d.hpp"
 #include "game.hpp"      // EntityKind
 #include "items.hpp"     // ItemKind, ProjectileKind
 #include <algorithm>
@@ -32,12 +33,17 @@ SpritePixels makeSprite(int w, int h, Color fill) {
     SpritePixels s;
     s.w = w; s.h = h;
     s.px.assign(static_cast<size_t>(w * h), fill);
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
 void setPx(SpritePixels& s, int x, int y, Color c) {
     if (x < 0 || y < 0 || x >= s.w || y >= s.h) return;
     s.at(x, y) = c;
+}
+
+Color getPx(const SpritePixels& s, int x, int y) {
+    if (x < 0 || y < 0 || x >= s.w || y >= s.h) return {0,0,0,0};
+    return s.at(x, y);
 }
 
 [[maybe_unused]] void blendPx(SpritePixels& s, int x, int y, Color c) {
@@ -88,6 +94,95 @@ void circle(SpritePixels& s, int cx, int cy, int r, Color c) {
             if (dx*dx + dy*dy <= r*r) setPx(s, x, y, c);
         }
     }
+}
+
+// --- Resampling helpers -----------------------------------------------------
+
+inline bool sameColor(const Color& a, const Color& b) {
+    return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+}
+
+inline int clampSpriteSize(int pxSize) {
+    // Keep sprites in a sane range; large sizes are supported for high-DPI displays.
+    return std::clamp(pxSize, 16, 256);
+}
+
+SpritePixels resizeNearest(const SpritePixels& src, int outW, int outH) {
+    if (src.w <= 0 || src.h <= 0 || outW <= 0 || outH <= 0) {
+        return makeSprite(std::max(0, outW), std::max(0, outH), {0,0,0,0});
+    }
+
+    SpritePixels dst = makeSprite(outW, outH, {0,0,0,0});
+    for (int y = 0; y < outH; ++y) {
+        const int sy = (y * src.h) / outH;
+        for (int x = 0; x < outW; ++x) {
+            const int sx = (x * src.w) / outW;
+            dst.at(x, y) = src.at(sx, sy);
+        }
+    }
+    return dst;
+}
+
+// Scale2x pixel-art upscaling algorithm (edge-aware). This preserves crisp
+// silhouettes much better than nearest-neighbor when scaling to 32/64/128/256.
+SpritePixels scale2x(const SpritePixels& src) {
+    if (src.w <= 0 || src.h <= 0) return src;
+    SpritePixels dst = makeSprite(src.w * 2, src.h * 2, {0,0,0,0});
+
+    for (int y = 0; y < src.h; ++y) {
+        for (int x = 0; x < src.w; ++x) {
+            const Color A = getPx(src, x - 1, y - 1);
+            const Color B = getPx(src, x,     y - 1);
+            const Color C = getPx(src, x + 1, y - 1);
+            const Color D = getPx(src, x - 1, y);
+            const Color E = getPx(src, x,     y);
+            const Color F = getPx(src, x + 1, y);
+            const Color G = getPx(src, x - 1, y + 1);
+            const Color H = getPx(src, x,     y + 1);
+            const Color I = getPx(src, x + 1, y + 1);
+            (void)A; (void)C; (void)G; (void)I;
+
+            Color E0 = E, E1 = E, E2 = E, E3 = E;
+            if (!sameColor(B, H) && !sameColor(D, F)) {
+                E0 = sameColor(D, B) ? D : E;
+                E1 = sameColor(B, F) ? F : E;
+                E2 = sameColor(D, H) ? D : E;
+                E3 = sameColor(H, F) ? F : E;
+            }
+
+            dst.at(2 * x,     2 * y)     = E0;
+            dst.at(2 * x + 1, 2 * y)     = E1;
+            dst.at(2 * x,     2 * y + 1) = E2;
+            dst.at(2 * x + 1, 2 * y + 1) = E3;
+        }
+    }
+    return dst;
+}
+
+inline bool isPow2(int v) {
+    return v > 0 && (v & (v - 1)) == 0;
+}
+
+inline bool isPow2Multiple(int base, int target) {
+    if (base <= 0 || target <= 0) return false;
+    if (target < base) return false;
+    if (target % base != 0) return false;
+    return isPow2(target / base);
+}
+
+SpritePixels resampleSpriteToSize(const SpritePixels& src, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    if (src.w == pxSize && src.h == pxSize) return src;
+
+    // Fast path: edge-aware Scale2x chain for powers-of-two scaling.
+    if (src.w == src.h && isPow2Multiple(src.w, pxSize)) {
+        SpritePixels cur = src;
+        while (cur.w < pxSize) cur = scale2x(cur);
+        return cur;
+    }
+
+    // Fallback: nearest-neighbor resize.
+    return resizeNearest(src, pxSize, pxSize);
 }
 
 // --- Pixel-art helpers (ordered dithering, outlines, shadows) ---
@@ -303,6 +398,7 @@ float densityFor(EntityKind k) {
         case EntityKind::Dog: return 0.52f;
         case EntityKind::Troll: return 0.68f;
         case EntityKind::Wizard: return 0.50f;
+        case EntityKind::Ghost: return 0.42f;
         case EntityKind::Snake: return 0.48f;
         case EntityKind::Spider: return 0.46f;
         case EntityKind::Ogre: return 0.72f;
@@ -326,6 +422,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::Dog: return add({ 180, 140, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Troll: return add({ 90, 170, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Wizard: return add({ 140, 100, 200, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
+        case EntityKind::Ghost: return add({ 210, 230, 255, 190 }, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
         case EntityKind::Snake: return add({ 80, 190, 100, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Spider: return add({ 80, 80, 95, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
         case EntityKind::Ogre: return add({ 150, 120, 70, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
@@ -339,7 +436,8 @@ Color baseColorFor(EntityKind k, RNG& rng) {
 } // namespace
 
 
-SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
+SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, bool use3d, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     // Base shape from seed (stable), subtle variation from frame.
     RNG rngBase(hash32(seed));
     RNG rngVar(hashCombine(seed, static_cast<uint32_t>(0xA5F00Du + frame * 1337u)));
@@ -809,12 +907,29 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
         }
     }
 
-    finalizeSprite(s, seed, frame, /*outlineAlpha=*/255, /*shadowAlpha=*/90);
-    return s;
+    if (kind == EntityKind::Ghost) {
+        // Make ghosts more ethereal: fade out toward the bottom.
+        for (int y = 0; y < 16; ++y) {
+            const float t = y / 15.0f;
+            const float fade = 1.0f - 0.55f * t;
+            for (int x = 0; x < 16; ++x) {
+                Color c = getPx(s, x, y);
+                if (c.a == 0) continue;
+                c.a = static_cast<uint8_t>(static_cast<float>(c.a) * fade);
+                setPx(s, x, y, c);
+            }
+        }
+        finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/55);
+    } else {
+        finalizeSprite(s, seed, frame, /*outlineAlpha=*/255, /*shadowAlpha=*/90);
+    }
+    return use3d ? renderSprite3DEntity(kind, s, seed, frame, pxSize)
+                 : resampleSpriteToSize(s, pxSize);
 }
 
 
-SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
+SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool use3d, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     RNG rng(hash32(seed));
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
 
@@ -1536,10 +1651,12 @@ case ItemKind::Arrow: {
     // Post-process: subtle outline + shadow for readability on noisy floors.
     finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
 
-    return s;
+    return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
+                 : resampleSpriteToSize(s, pxSize);
 }
 
-SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int frame) {
+SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int frame, bool use3d, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     (void)seed;
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
 
@@ -1597,11 +1714,13 @@ SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int fr
     // Post-process: a crisp outline keeps fast projectiles readable.
     finalizeSprite(s, seed, frame, /*outlineAlpha=*/200, /*shadowAlpha=*/55);
 
-    return s;
+    return use3d ? renderSprite3DProjectile(kind, s, seed, frame, pxSize)
+                 : resampleSpriteToSize(s, pxSize);
 }
 
 
-SpritePixels generateFloorTile(uint32_t seed, int frame) {
+SpritePixels generateFloorTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});
     RNG rng(hash32(seed));
 
@@ -1668,7 +1787,7 @@ SpritePixels generateFloorTile(uint32_t seed, int frame) {
         setPx(s, sx + 1, sy, add(s.at(sx + 1, sy), 14, 14, 14));
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
 
@@ -1677,9 +1796,10 @@ SpritePixels generateFloorTile(uint32_t seed, int frame) {
 // special rooms stand out instantly.
 // style mapping:
 //  0 = Normal, 1 = Treasure, 2 = Lair, 3 = Shrine, 4 = Secret, 5 = Vault, 6 = Shop
-SpritePixels generateThemedFloorTile(uint32_t seed, uint8_t style, int frame) {
+SpritePixels generateThemedFloorTile(uint32_t seed, uint8_t style, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     if (style == 0u) {
-        return generateFloorTile(seed, frame);
+        return generateFloorTile(seed, frame, pxSize);
     }
 
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});
@@ -1795,7 +1915,7 @@ SpritePixels generateThemedFloorTile(uint32_t seed, uint8_t style, int frame) {
             }
         }
 
-        return s;
+        return resampleSpriteToSize(s, pxSize);
     }
 
     // Stone-like base fill (used by all other themed floors).
@@ -1958,12 +2078,13 @@ SpritePixels generateThemedFloorTile(uint32_t seed, uint8_t style, int frame) {
         }
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
 
 
-SpritePixels generateWallTile(uint32_t seed, int frame) {
+SpritePixels generateWallTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});
     RNG rng(hash32(seed));
 
@@ -2030,11 +2151,12 @@ SpritePixels generateWallTile(uint32_t seed, int frame) {
         }
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
 
-SpritePixels generateChasmTile(uint32_t seed, int frame) {
+SpritePixels generateChasmTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});
     RNG rng(hash32(seed));
 
@@ -2074,10 +2196,11 @@ SpritePixels generateChasmTile(uint32_t seed, int frame) {
         s.at(x, y) = c;
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
-SpritePixels generatePillarTile(uint32_t seed, int frame) {
+SpritePixels generatePillarTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     RNG rng(hash32(seed));
 
     // Pillars are rendered as a transparent overlay layered on top of the
@@ -2125,10 +2248,11 @@ SpritePixels generatePillarTile(uint32_t seed, int frame) {
         setPx(s, 9, 7, add(s.at(9, 7), 14, 14, 16));
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
-SpritePixels generateStairsTile(uint32_t seed, bool up, int frame) {
+SpritePixels generateStairsTile(uint32_t seed, bool up, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     RNG rng(hash32(seed));
     // Stairs are rendered as a transparent overlay layered on top of the
     // underlying themed floor (handled by the renderer).
@@ -2179,10 +2303,11 @@ SpritePixels generateStairsTile(uint32_t seed, bool up, int frame) {
         setPx(s, 6, 4, Color{255, 255, 255, 120});
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
-SpritePixels generateDoorTile(uint32_t seed, bool open, int frame) {
+SpritePixels generateDoorTile(uint32_t seed, bool open, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     RNG rng(hash32(seed));
     // Doors are rendered as transparent overlays layered on top of the
     // underlying themed floor (handled by the renderer).
@@ -2237,12 +2362,13 @@ SpritePixels generateDoorTile(uint32_t seed, bool open, int frame) {
         if (frame % 2 == 1) setPx(s, 11, 7, {255,255,255,110});
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
-SpritePixels generateLockedDoorTile(uint32_t seed, int frame) {
+SpritePixels generateLockedDoorTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     // Base: closed door sprite, with a small lock overlay for readability.
-    SpritePixels s = generateDoorTile(seed, /*open=*/false, frame);
+    SpritePixels s = generateDoorTile(seed, /*open=*/false, frame, /*pxSize=*/16);
 
     // Lock colors: warm metal with dark outline.
     const Color lockBody { 210, 185, 70, 255 };
@@ -2270,10 +2396,11 @@ SpritePixels generateLockedDoorTile(uint32_t seed, int frame) {
         setPx(s, x0 + 2, y0 + 4, Color{ 245, 235, 130, 255 });
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
-SpritePixels generateUIPanelTile(UITheme theme, uint32_t seed, int frame) {
+SpritePixels generateUIPanelTile(UITheme theme, uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});
 
     // Theme palette (kept fairly dark so HUD/overlay text stays readable).
@@ -2361,10 +2488,11 @@ SpritePixels generateUIPanelTile(UITheme theme, uint32_t seed, int frame) {
         }
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
-SpritePixels generateUIOrnamentTile(UITheme theme, uint32_t seed, int frame) {
+SpritePixels generateUIOrnamentTile(UITheme theme, uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     (void)seed;
 
     // Transparent sprite; drawn on top of panel backgrounds.
@@ -2399,7 +2527,7 @@ SpritePixels generateUIOrnamentTile(UITheme theme, uint32_t seed, int frame) {
         setPx(s, 3, 2, {255,255,255,60});
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
 
@@ -2410,7 +2538,8 @@ SpritePixels generateUIOrnamentTile(UITheme theme, uint32_t seed, int frame) {
 //  0 = Generic, 1 = Treasure, 2 = Lair, 3 = Shrine, 4 = Secret, 5 = Vault, 6 = Shop
 // -----------------------------------------------------------------------------
 
-SpritePixels generateFloorDecalTile(uint32_t seed, uint8_t style, int frame) {
+SpritePixels generateFloorDecalTile(uint32_t seed, uint8_t style, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
     RNG rng(hash32(seed ^ (static_cast<uint32_t>(style) * 0x9E3779B9u)));
 
@@ -2621,10 +2750,11 @@ SpritePixels generateFloorDecalTile(uint32_t seed, uint8_t style, int frame) {
         }
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
-SpritePixels generateWallDecalTile(uint32_t seed, uint8_t style, int frame) {
+SpritePixels generateWallDecalTile(uint32_t seed, uint8_t style, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
     RNG rng(hash32(seed ^ (static_cast<uint32_t>(style) * 0xA341316Cu)));
 
@@ -2675,7 +2805,7 @@ SpritePixels generateWallDecalTile(uint32_t seed, uint8_t style, int frame) {
         setPx(s, cx, cy, Color{255,255,255,70});
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
 
@@ -2692,11 +2822,12 @@ static inline void setPxAlpha(SpritePixels& s, int x, int y, Color c, uint8_t a)
     setPx(s, x, y, c);
 }
 
-SpritePixels generateWallEdgeOverlay(uint32_t seed, uint8_t openMask, int variant, int frame) {
+SpritePixels generateWallEdgeOverlay(uint32_t seed, uint8_t openMask, int variant, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     (void)frame;
 
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
-    if (openMask == 0u) return s;
+    if (openMask == 0u) return resampleSpriteToSize(s, pxSize);
 
     RNG rng(hash32(seed ^ (static_cast<uint32_t>(openMask) * 0x9E3779B9u) ^ (static_cast<uint32_t>(variant) * 0x85EBCA6Bu)));
 
@@ -2773,12 +2904,13 @@ SpritePixels generateWallEdgeOverlay(uint32_t seed, uint8_t openMask, int varian
         if (rng.chance(0.45f)) setPxAlpha(s, x, y + 1, shadow, 70);
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
-SpritePixels generateChasmRimOverlay(uint32_t seed, uint8_t openMask, int variant, int frame) {
+SpritePixels generateChasmRimOverlay(uint32_t seed, uint8_t openMask, int variant, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
-    if (openMask == 0u) return s;
+    if (openMask == 0u) return resampleSpriteToSize(s, pxSize);
 
     RNG rng(hash32(seed ^ 0xA11CEu ^ (static_cast<uint32_t>(openMask) * 131u) ^ (static_cast<uint32_t>(variant) * 977u)));
 
@@ -2844,12 +2976,13 @@ SpritePixels generateChasmRimOverlay(uint32_t seed, uint8_t openMask, int varian
         }
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 
 // Procedural confusion-gas tile: grayscale translucent cloud.
 // Color/tint is applied in the renderer (so lighting affects it naturally).
-SpritePixels generateConfusionGasTile(uint32_t seed, int frame) {
+SpritePixels generateConfusionGasTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
     RNG rng(hash32(seed ^ 0xC0FF1151u));
 
@@ -2943,7 +3076,89 @@ SpritePixels generateConfusionGasTile(uint32_t seed, int frame) {
         }
     }
 
-    return s;
+    return resampleSpriteToSize(s, pxSize);
+}
+
+SpritePixels generateFireTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    // A small, animated flame overlay. The renderer tints this sprite, so we keep
+    // it mostly grayscale with alpha.
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+
+    const uint32_t base = hash32(seed ^ 0xF17ECAFEu);
+
+    auto rand01 = [&](uint32_t v) -> float {
+        return static_cast<float>(v & 0xFFFFu) / 65535.0f;
+    };
+
+    // Three flame "tongues" with slightly different phases.
+    const float cx1 = 4.0f  + rand01(hash32(base ^ 0xA1u)) * 8.0f;
+    const float cx2 = 4.0f  + rand01(hash32(base ^ 0xB2u)) * 8.0f;
+    const float cx3 = 4.0f  + rand01(hash32(base ^ 0xC3u)) * 8.0f;
+
+    const float w1  = 1.6f + rand01(hash32(base ^ 0x11u)) * 2.2f;
+    const float w2  = 1.4f + rand01(hash32(base ^ 0x22u)) * 2.4f;
+    const float w3  = 1.8f + rand01(hash32(base ^ 0x33u)) * 2.0f;
+
+    const float ph1 = rand01(hash32(base ^ 0x91u)) * 6.2831853f;
+    const float ph2 = rand01(hash32(base ^ 0x92u)) * 6.2831853f;
+    const float ph3 = rand01(hash32(base ^ 0x93u)) * 6.2831853f;
+
+    for (int y = 0; y < 16; ++y) {
+        // y=0 top, y=15 bottom
+        const float yy = static_cast<float>(y) / 15.0f;
+
+        // Flames are stronger toward the bottom, but still flicker above.
+        float baseV = std::pow(std::max(yy, 0.02f), 0.38f);
+        baseV *= (0.45f + 0.55f * yy);
+
+        for (int x = 0; x < 16; ++x) {
+            const float xx = static_cast<float>(x);
+
+            auto tongue = [&](float cx, float w, float ph) -> float {
+                // More lateral wobble near the top.
+                const float wobAmp = (1.0f - yy) * 1.6f;
+                const float wob = std::sin(ph + yy * 3.4f + static_cast<float>(frame) * 0.7f) * wobAmp;
+                const float c = cx + wob;
+
+                // Wider at the bottom.
+                const float ww = w * (0.55f + 0.95f * yy);
+                const float dx = (xx - c) / std::max(0.35f, ww);
+                const float g = std::exp(-dx * dx * 2.3f);
+                return g;
+            };
+
+            float v = 0.0f;
+            v = std::max(v, tongue(cx1, w1, ph1));
+            v = std::max(v, tongue(cx2, w2, ph2));
+            v = std::max(v, tongue(cx3, w3, ph3));
+
+            // Vertical envelope.
+            v *= baseV;
+
+            // Noisy flicker.
+            const uint32_t h = hash32(base ^ static_cast<uint32_t>(x * 374761393) ^ static_cast<uint32_t>(y * 668265263) ^ static_cast<uint32_t>(frame * 1447));
+            const float n = (static_cast<float>(h & 0xFFu) / 255.0f - 0.5f) * 0.35f;
+            v += n;
+
+            v = std::clamp(v, 0.0f, 1.0f);
+
+            // Ordered dithering keeps the overlay from looking like a solid blob.
+            const float thr = bayer4Threshold(x + frame * 2, y + frame * 3);
+            if (v < thr * 0.95f) continue;
+
+            if (v < 0.10f) continue;
+
+            const float t = (v - 0.10f) / 0.90f;
+            const int a = static_cast<int>(90 + t * 165);
+            const int g = static_cast<int>(180 + t * 75);
+            setPx(s, x, y, Color{ clamp8(g), clamp8(g), clamp8(g), clamp8(a) });
+        }
+    }
+
+    // A little dark outline helps flames read in bright rooms.
+    finalizeSprite(s, hash32(base ^ 0xF17Eu), frame, /*outlineAlpha=*/90, /*shadowAlpha=*/0);
+    return resampleSpriteToSize(s, pxSize);
 }
 
 
@@ -2951,7 +3166,8 @@ SpritePixels generateConfusionGasTile(uint32_t seed, int frame) {
 // HUD/status icons (transparent 16x16 sprites)
 // -----------------------------------------------------------------------------
 
-SpritePixels generateEffectIcon(EffectKind kind, int frame) {
+SpritePixels generateEffectIcon(EffectKind kind, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
 
     auto pulse = [&](Color c, int addv) {
@@ -3081,12 +3297,39 @@ SpritePixels generateEffectIcon(EffectKind kind, int frame) {
             }
             break;
         }
+        case EffectKind::Burn: {
+            Color hot  = pulse(Color{255, 170, 90, 255}, 12);
+            Color core = pulse(Color{255, 235, 160, 255}, 8);
+            Color dk{70, 25, 10, 255};
+
+            // Flame base
+            circle(s, 8, 11, 3, mul(hot, 0.90f));
+            circle(s, 8, 10, 2, hot);
+
+            // Rising tongue
+            line(s, 8, 4, 8, 10, hot);
+            circle(s, 8, 6, 2, mul(core, 0.95f));
+            setPx(s, 8, 5, core);
+            setPx(s, 7, 6, core);
+            setPx(s, 9, 6, core);
+
+            // Ember/spark
+            if (frame % 2 == 1) {
+                setPx(s, 5, 6, Color{255, 255, 255, 120});
+                setPx(s, 11, 4, Color{255, 255, 255, 90});
+            }
+
+            // A couple dark pixels to add contrast
+            setPx(s, 7, 12, dk);
+            setPx(s, 9, 12, dk);
+            break;
+        }
         default:
             break;
     }
 
     // A crisp outline helps tiny HUD icons read against textured panels.
     finalizeSprite(s, hash32(static_cast<uint32_t>(kind) ^ 0x51A11u), frame, /*outlineAlpha=*/220, /*shadowAlpha=*/0);
-    return s;
+    return resampleSpriteToSize(s, pxSize);
 }
 

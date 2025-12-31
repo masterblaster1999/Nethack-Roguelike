@@ -201,6 +201,7 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     if (name == "toggle_fullscreen" || name == "fullscreen") return Action::ToggleFullscreen;
     if (name == "screenshot" || name == "take_screenshot") return Action::Screenshot;
     if (name == "help") return Action::Help;
+    if (name == "message_history" || name == "messagehistory" || name == "messages" || name == "msghistory" || name == "msglog") return Action::MessageHistory;
     if (name == "options") return Action::Options;
     if (name == "command" || name == "extcmd") return Action::Command;
 
@@ -279,7 +280,7 @@ KeyBinds KeyBinds::defaults() {
     add(Action::Inventory, SDLK_TAB);
 
     add(Action::Fire, SDLK_f);
-    add(Action::Search, SDLK_c);
+    add(Action::Search, SDLK_c, KMOD_SHIFT);
     add(Action::Disarm, SDLK_t);
     add(Action::CloseDoor, SDLK_k);
     add(Action::LockDoor, SDLK_k, KMOD_SHIFT);
@@ -305,6 +306,8 @@ KeyBinds KeyBinds::defaults() {
     add(Action::Command, SDLK_3, KMOD_SHIFT);
 
     add(Action::ToggleMinimap, SDLK_m);
+    add(Action::MessageHistory, SDLK_F3);
+    add(Action::MessageHistory, SDLK_m, KMOD_SHIFT);
     add(Action::ToggleStats, SDLK_TAB, KMOD_SHIFT);
 
     add(Action::ToggleFullscreen, SDLK_F11);
@@ -343,6 +346,39 @@ void KeyBinds::loadOverridesFromIni(const std::string& settingsPath) {
         if (!act.has_value()) continue;
 
         binds[*act] = parseChordList(val);
+    }
+
+    // Back-compat: older default settings files wrote `bind_search = c`, which
+    // conflicts with the modern diagonal move `bind_down_right = c`.
+    // If we detect that specific conflict, automatically shift Search to `C`.
+    {
+        const KeyChord legacy{SDLK_c, 0};
+        const KeyChord fixed{SDLK_c, KMOD_SHIFT};
+
+        auto hasChord = [](const std::vector<KeyChord>& v, const KeyChord& c) {
+            for (const auto& it : v) {
+                if (it.key == c.key && it.mods == c.mods) return true;
+            }
+            return false;
+        };
+
+        auto itSearch = binds.find(Action::Search);
+        auto itDR = binds.find(Action::DownRight);
+        if (itSearch != binds.end() && itDR != binds.end()) {
+            const bool searchHasLegacy = hasChord(itSearch->second, legacy);
+            const bool downRightHasLegacy = hasChord(itDR->second, legacy);
+            if (searchHasLegacy && downRightHasLegacy) {
+                auto& chords = itSearch->second;
+                chords.erase(
+                    std::remove_if(chords.begin(), chords.end(), [&](const KeyChord& c) {
+                        return c.key == legacy.key && c.mods == legacy.mods;
+                    }),
+                    chords.end());
+                if (!hasChord(chords, fixed)) {
+                    chords.push_back(fixed);
+                }
+            }
+        }
     }
 }
 
@@ -478,6 +514,7 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
     {Action::SortInventory, "sort_inventory"},
 
     {Action::Help, "help"},
+    {Action::MessageHistory, "message_history"},
     {Action::Options, "options"},
     {Action::Command, "command"},
     {Action::ToggleMinimap, "toggle_minimap"},

@@ -49,6 +49,7 @@ set(PROCROGUE_SOURCES
     src/dungeon.cpp
     src/render.cpp
     src/spritegen.cpp
+    src/spritegen3d.cpp
     src/items.cpp
     src/shop.cpp
     src/scores.cpp

@@ -11,8 +11,8 @@
 #include <ctime>
 #include <iomanip>
 
-Renderer::Renderer(int windowW, int windowH, int tileSize, int hudHeight, bool vsync)
-    : winW(windowW), winH(windowH), tile(tileSize), hudH(hudHeight), vsyncEnabled(vsync) {}
+Renderer::Renderer(int windowW, int windowH, int tileSize, int hudHeight, bool vsync, int textureCacheMB_)
+    : winW(windowW), winH(windowH), tile(tileSize), hudH(hudHeight), vsyncEnabled(vsync), textureCacheMB(textureCacheMB_) {}
 
 Renderer::~Renderer() {
     shutdown();
@@ -55,7 +55,37 @@ bool Renderer::init() {
     }
 
     // Pre-generate tile variants (with animation frames)
-    const int tileVars = 18; // more variants reduces visible repetition
+    // Procedural sprite generation now supports higher-res output (up to 256x256).
+    // We generate map sprites at (tile) resolution to avoid renderer scaling artifacts.
+    const int spritePx = std::clamp(tile, 16, 256);
+
+    // Sprite cache sizing:
+    // - Each cached entry stores FRAMES textures of size spritePx*spritePx RGBA.
+    // - This is an approximation, but it's stable and lets us cap VRAM usage.
+    spriteEntryBytes = static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx) * sizeof(uint32_t) * static_cast<size_t>(FRAMES);
+
+    // Scale some overlay variant counts down for huge tile sizes (keeps VRAM in check).
+    decalsPerStyleUsed = (spritePx <= 48) ? 6 : (spritePx <= 96 ? 5 : (spritePx <= 160 ? 4 : 3));
+    decalsPerStyleUsed = std::clamp(decalsPerStyleUsed, 1, DECALS_PER_STYLE);
+
+    autoVarsUsed = (spritePx <= 96) ? 4 : (spritePx <= 160 ? 3 : 2);
+    autoVarsUsed = std::clamp(autoVarsUsed, 1, AUTO_VARS);
+
+    // Configure the sprite texture cache budget.
+    // 0 => unlimited (no eviction).
+    size_t budgetBytes = 0;
+    if (textureCacheMB > 0) {
+        budgetBytes = static_cast<size_t>(textureCacheMB) * 1024ull * 1024ull;
+        // Ensure the budget can hold at least a small working set (prevents thrash).
+        const size_t minBudget = spriteEntryBytes * 12ull; // ~12 sprites worth
+        if (budgetBytes < minBudget) budgetBytes = minBudget;
+    }
+    spriteTex.setBudgetBytes(budgetBytes);
+    spriteTex.resetStats();
+
+    // More variants reduce visible repetition, but large tile sizes can become
+    // expensive in VRAM. Scale the variant count down as tile size increases.
+    const int tileVars = (spritePx <= 48) ? 18 : (spritePx <= 96 ? 14 : (spritePx <= 160 ? 10 : 8));
 
     for (auto& v : floorThemeVar) v.clear();
     wallVar.clear();
@@ -73,7 +103,7 @@ bool Renderer::init() {
             const uint32_t fSeed = hashCombine(hashCombine(0xF1000u, static_cast<uint32_t>(st)), static_cast<uint32_t>(i));
             for (int f = 0; f < FRAMES; ++f) {
                 floorThemeVar[static_cast<size_t>(st)][static_cast<size_t>(i)][static_cast<size_t>(f)] =
-                    textureFromSprite(generateThemedFloorTile(fSeed, static_cast<uint8_t>(st), f));
+                    textureFromSprite(generateThemedFloorTile(fSeed, static_cast<uint8_t>(st), f, spritePx));
             }
         }
 
@@ -82,44 +112,44 @@ bool Renderer::init() {
         const uint32_t cSeed = hashCombine(0xC1A500u, static_cast<uint32_t>(i));
         const uint32_t pSeed = hashCombine(0x9111A0u, static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
-            wallVar[static_cast<size_t>(i)][static_cast<size_t>(f)]  = textureFromSprite(generateWallTile(wSeed, f));
-            chasmVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateChasmTile(cSeed, f));
+            wallVar[static_cast<size_t>(i)][static_cast<size_t>(f)]  = textureFromSprite(generateWallTile(wSeed, f, spritePx));
+            chasmVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateChasmTile(cSeed, f, spritePx));
             // Pillar is generated as a transparent overlay; it will be layered over the
             // underlying themed floor at render-time.
-            pillarOverlayVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generatePillarTile(pSeed, f));
+            pillarOverlayVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generatePillarTile(pSeed, f, spritePx));
         }
     }
 
     for (int f = 0; f < FRAMES; ++f) {
         // Doors and stairs are rendered as overlays layered over the underlying themed floor.
-        stairsUpOverlayTex[static_cast<size_t>(f)]   = textureFromSprite(generateStairsTile(0x515A1u, true, f));
-        stairsDownOverlayTex[static_cast<size_t>(f)] = textureFromSprite(generateStairsTile(0x515A2u, false, f));
-        doorClosedOverlayTex[static_cast<size_t>(f)] = textureFromSprite(generateDoorTile(0xD00Du, false, f));
-        doorLockedOverlayTex[static_cast<size_t>(f)] = textureFromSprite(generateLockedDoorTile(0xD00Du, f));
-        doorOpenOverlayTex[static_cast<size_t>(f)]   = textureFromSprite(generateDoorTile(0xD00Du, true, f));
+        stairsUpOverlayTex[static_cast<size_t>(f)]   = textureFromSprite(generateStairsTile(0x515A1u, true, f, spritePx));
+        stairsDownOverlayTex[static_cast<size_t>(f)] = textureFromSprite(generateStairsTile(0x515A2u, false, f, spritePx));
+        doorClosedOverlayTex[static_cast<size_t>(f)] = textureFromSprite(generateDoorTile(0xD00Du, false, f, spritePx));
+        doorLockedOverlayTex[static_cast<size_t>(f)] = textureFromSprite(generateLockedDoorTile(0xD00Du, f, spritePx));
+        doorOpenOverlayTex[static_cast<size_t>(f)]   = textureFromSprite(generateDoorTile(0xD00Du, true, f, spritePx));
     }
 
 // Default UI skin assets (will refresh if theme changes at runtime).
 uiThemeCached = UITheme::DarkStone;
 uiAssetsValid = true;
 for (int f = 0; f < FRAMES; ++f) {
-    uiPanelTileTex[static_cast<size_t>(f)] = textureFromSprite(generateUIPanelTile(uiThemeCached, 0x51A11u, f));
-    uiOrnamentTex[static_cast<size_t>(f)]  = textureFromSprite(generateUIOrnamentTile(uiThemeCached, 0x0ABCDu, f));
+    uiPanelTileTex[static_cast<size_t>(f)] = textureFromSprite(generateUIPanelTile(uiThemeCached, 0x51A11u, f, 16));
+    uiOrnamentTex[static_cast<size_t>(f)]  = textureFromSprite(generateUIOrnamentTile(uiThemeCached, 0x0ABCDu, f, 16));
 }
 
 // Pre-generate decal overlays (small transparent patterns blended onto tiles).
 floorDecalVar.clear();
 wallDecalVar.clear();
-floorDecalVar.resize(static_cast<size_t>(DECAL_STYLES * DECALS_PER_STYLE));
-wallDecalVar.resize(static_cast<size_t>(DECAL_STYLES * DECALS_PER_STYLE));
+floorDecalVar.resize(static_cast<size_t>(DECAL_STYLES * static_cast<size_t>(decalsPerStyleUsed)));
+wallDecalVar.resize(static_cast<size_t>(DECAL_STYLES * static_cast<size_t>(decalsPerStyleUsed)));
 for (int st = 0; st < DECAL_STYLES; ++st) {
-    for (int i = 0; i < DECALS_PER_STYLE; ++i) {
+    for (int i = 0; i < decalsPerStyleUsed; ++i) {
         const uint32_t fSeed = hashCombine(0xD3CA10u + static_cast<uint32_t>(st) * 131u, static_cast<uint32_t>(i));
         const uint32_t wSeed = hashCombine(0xBADC0DEu + static_cast<uint32_t>(st) * 191u, static_cast<uint32_t>(i));
-        const size_t idx = static_cast<size_t>(st * DECALS_PER_STYLE + i);
+        const size_t idx = static_cast<size_t>(st * decalsPerStyleUsed + i);
         for (int f = 0; f < FRAMES; ++f) {
-            floorDecalVar[idx][static_cast<size_t>(f)] = textureFromSprite(generateFloorDecalTile(fSeed, static_cast<uint8_t>(st), f));
-            wallDecalVar[idx][static_cast<size_t>(f)]  = textureFromSprite(generateWallDecalTile(wSeed, static_cast<uint8_t>(st), f));
+            floorDecalVar[idx][static_cast<size_t>(f)] = textureFromSprite(generateFloorDecalTile(fSeed, static_cast<uint8_t>(st), f, spritePx));
+            wallDecalVar[idx][static_cast<size_t>(f)]  = textureFromSprite(generateWallDecalTile(wSeed, static_cast<uint8_t>(st), f, spritePx));
         }
     }
 }
@@ -127,14 +157,14 @@ for (int st = 0; st < DECAL_STYLES; ++st) {
 
 // Pre-generate autotile overlays (edge/corner shaping for walls and chasm rims).
 for (int mask = 0; mask < AUTO_MASKS; ++mask) {
-    for (int v = 0; v < AUTO_VARS; ++v) {
+    for (int v = 0; v < autoVarsUsed; ++v) {
         const uint32_t wSeed = hashCombine(0xE0D6E00u + static_cast<uint32_t>(mask) * 131u, static_cast<uint32_t>(v));
         const uint32_t cSeed = hashCombine(0xC0A5E00u + static_cast<uint32_t>(mask) * 191u, static_cast<uint32_t>(v));
         for (int f = 0; f < FRAMES; ++f) {
             wallEdgeVar[static_cast<size_t>(mask)][static_cast<size_t>(v)][static_cast<size_t>(f)] =
-                (mask == 0) ? nullptr : textureFromSprite(generateWallEdgeOverlay(wSeed, static_cast<uint8_t>(mask), v, f));
+                (mask == 0) ? nullptr : textureFromSprite(generateWallEdgeOverlay(wSeed, static_cast<uint8_t>(mask), v, f, spritePx));
             chasmRimVar[static_cast<size_t>(mask)][static_cast<size_t>(v)][static_cast<size_t>(f)] =
-                (mask == 0) ? nullptr : textureFromSprite(generateChasmRimOverlay(cSeed, static_cast<uint8_t>(mask), v, f));
+                (mask == 0) ? nullptr : textureFromSprite(generateChasmRimOverlay(cSeed, static_cast<uint8_t>(mask), v, f, spritePx));
         }
     }
 }
@@ -143,7 +173,15 @@ for (int mask = 0; mask < AUTO_MASKS; ++mask) {
 for (int i = 0; i < GAS_VARS; ++i) {
     const uint32_t gSeed = hashCombine(0x6A5u, static_cast<uint32_t>(i));
     for (int f = 0; f < FRAMES; ++f) {
-        gasVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateConfusionGasTile(gSeed, f));
+        gasVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateConfusionGasTile(gSeed, f, spritePx));
+    }
+}
+
+// Pre-generate fire overlay tiles.
+for (int i = 0; i < FIRE_VARS; ++i) {
+    const uint32_t fSeed = hashCombine(0xF17Eu, static_cast<uint32_t>(i));
+    for (int f = 0; f < FRAMES; ++f) {
+        fireVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateFireTile(fSeed, f, spritePx));
     }
 }
 
@@ -151,7 +189,7 @@ for (int i = 0; i < GAS_VARS; ++i) {
 for (int k = 0; k < EFFECT_KIND_COUNT; ++k) {
     const EffectKind ek = static_cast<EffectKind>(k);
     for (int f = 0; f < FRAMES; ++f) {
-        effectIconTex[static_cast<size_t>(k)][static_cast<size_t>(f)] = textureFromSprite(generateEffectIcon(ek, f));
+        effectIconTex[static_cast<size_t>(k)][static_cast<size_t>(f)] = textureFromSprite(generateEffectIcon(ek, f, 16));
     }
 }
 
@@ -243,6 +281,14 @@ for (auto& anim : gasVar) {
     }
 }
 
+// Fire overlays
+for (auto& anim : fireVar) {
+    for (SDL_Texture*& t : anim) {
+        if (t) SDL_DestroyTexture(t);
+        t = nullptr;
+    }
+}
+
 // Status effect icons
 for (auto& arr : effectIconTex) {
     for (SDL_Texture*& t : arr) {
@@ -276,20 +322,8 @@ uiAssetsValid = false;
     doorLockedOverlayTex.fill(nullptr);
     doorOpenOverlayTex.fill(nullptr);
 
-    for (auto& kv : entityTex) {
-        for (SDL_Texture*& t : kv.second) if (t) SDL_DestroyTexture(t);
-    }
-    entityTex.clear();
-
-    for (auto& kv : itemTex) {
-        for (SDL_Texture*& t : kv.second) if (t) SDL_DestroyTexture(t);
-    }
-    itemTex.clear();
-
-    for (auto& kv : projTex) {
-        for (SDL_Texture*& t : kv.second) if (t) SDL_DestroyTexture(t);
-    }
-    projTex.clear();
+    // Entity/item/projectile textures are budget-cached in spriteTex.
+    spriteTex.clear();
 
     if (pixfmt) { SDL_FreeFormat(pixfmt); pixfmt = nullptr; }
     if (renderer) { SDL_DestroyRenderer(renderer); renderer = nullptr; }
@@ -396,46 +430,86 @@ SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int fram
     }
 }
 
-SDL_Texture* Renderer::entityTexture(const Entity& e, int frame) {
-    uint64_t key = (static_cast<uint64_t>(e.kind) << 32) | static_cast<uint64_t>(e.spriteSeed);
-    auto it = entityTex.find(key);
-    if (it == entityTex.end()) {
-        std::array<SDL_Texture*, FRAMES> arr{};
-        arr.fill(nullptr);
-        for (int f = 0; f < FRAMES; ++f) {
-            arr[static_cast<size_t>(f)] = textureFromSprite(generateEntitySprite(e.kind, e.spriteSeed, f));
-        }
-        it = entityTex.emplace(key, arr).first;
+namespace {
+    // Sprite cache categories (packed into the high byte of the cache key).
+    constexpr uint8_t CAT_ENTITY = 1;
+    constexpr uint8_t CAT_ITEM = 2;
+    constexpr uint8_t CAT_PROJECTILE = 3;
+
+    // Key layout (uint64): [cat:8][kind:8][seed:32][unused:16]
+    inline uint64_t makeSpriteKey(uint8_t cat, uint8_t kind, uint32_t seed) {
+        return (static_cast<uint64_t>(cat) << 56) |
+               (static_cast<uint64_t>(kind) << 48) |
+               (static_cast<uint64_t>(seed) << 16);
     }
-    return it->second[static_cast<size_t>(frame % FRAMES)];
+}
+
+SDL_Texture* Renderer::entityTexture(const Entity& e, int frame) {
+    const int spritePx = std::clamp(tile, 16, 256);
+    const uint64_t key = makeSpriteKey(CAT_ENTITY, static_cast<uint8_t>(e.kind), e.spriteSeed);
+
+    auto arr = spriteTex.get(key);
+    if (!arr) {
+        std::array<SDL_Texture*, FRAMES> tex{};
+        tex.fill(nullptr);
+        for (int f = 0; f < FRAMES; ++f) {
+            tex[static_cast<size_t>(f)] = textureFromSprite(generateEntitySprite(e.kind, e.spriteSeed, f, voxelSpritesCached, spritePx));
+        }
+        const size_t bytes = (spriteEntryBytes != 0)
+            ? spriteEntryBytes
+            : (static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx) * sizeof(uint32_t) * static_cast<size_t>(FRAMES));
+
+        spriteTex.put(key, tex, bytes);
+        arr = spriteTex.get(key);
+        if (!arr) return nullptr;
+    }
+    return (*arr)[static_cast<size_t>(frame % FRAMES)];
 }
 
 SDL_Texture* Renderer::itemTexture(const Item& it, int frame) {
-    uint64_t key = (static_cast<uint64_t>(it.kind) << 32) | static_cast<uint64_t>(it.spriteSeed);
-    auto itex = itemTex.find(key);
-    if (itex == itemTex.end()) {
-        std::array<SDL_Texture*, FRAMES> arr{};
-        arr.fill(nullptr);
+    const int spritePx = std::clamp(tile, 16, 256);
+    const uint64_t key = makeSpriteKey(CAT_ITEM, static_cast<uint8_t>(it.kind), it.spriteSeed);
+
+    auto arr = spriteTex.get(key);
+    if (!arr) {
+        std::array<SDL_Texture*, FRAMES> tex{};
+        tex.fill(nullptr);
         for (int f = 0; f < FRAMES; ++f) {
-            arr[static_cast<size_t>(f)] = textureFromSprite(generateItemSprite(it.kind, it.spriteSeed, f));
+            tex[static_cast<size_t>(f)] = textureFromSprite(generateItemSprite(it.kind, it.spriteSeed, f, voxelSpritesCached, spritePx));
         }
-        itex = itemTex.emplace(key, arr).first;
+
+        const size_t bytes = (spriteEntryBytes != 0)
+            ? spriteEntryBytes
+            : (static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx) * sizeof(uint32_t) * static_cast<size_t>(FRAMES));
+
+        spriteTex.put(key, tex, bytes);
+        arr = spriteTex.get(key);
+        if (!arr) return nullptr;
     }
-    return itex->second[static_cast<size_t>(frame % FRAMES)];
+    return (*arr)[static_cast<size_t>(frame % FRAMES)];
 }
 
 SDL_Texture* Renderer::projectileTexture(ProjectileKind k, int frame) {
-    uint64_t key = static_cast<uint64_t>(k);
-    auto it = projTex.find(key);
-    if (it == projTex.end()) {
-        std::array<SDL_Texture*, FRAMES> arr{};
-        arr.fill(nullptr);
+    const int spritePx = std::clamp(tile, 16, 256);
+    const uint64_t key = makeSpriteKey(CAT_PROJECTILE, static_cast<uint8_t>(k), 0u);
+
+    auto arr = spriteTex.get(key);
+    if (!arr) {
+        std::array<SDL_Texture*, FRAMES> tex{};
+        tex.fill(nullptr);
         for (int f = 0; f < FRAMES; ++f) {
-            arr[static_cast<size_t>(f)] = textureFromSprite(generateProjectileSprite(k, 0u, f));
+            tex[static_cast<size_t>(f)] = textureFromSprite(generateProjectileSprite(k, 0u, f, voxelSpritesCached, spritePx));
         }
-        it = projTex.emplace(key, arr).first;
+
+        const size_t bytes = (spriteEntryBytes != 0)
+            ? spriteEntryBytes
+            : (static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx) * sizeof(uint32_t) * static_cast<size_t>(FRAMES));
+
+        spriteTex.put(key, tex, bytes);
+        arr = spriteTex.get(key);
+        if (!arr) return nullptr;
     }
-    return it->second[static_cast<size_t>(frame % FRAMES)];
+    return (*arr)[static_cast<size_t>(frame % FRAMES)];
 }
 
 void Renderer::ensureUIAssets(const Game& game) {
@@ -456,8 +530,8 @@ void Renderer::ensureUIAssets(const Game& game) {
     uiThemeCached = want;
 
     for (int f = 0; f < FRAMES; ++f) {
-        uiPanelTileTex[static_cast<size_t>(f)] = textureFromSprite(generateUIPanelTile(uiThemeCached, 0x51A11u, f));
-        uiOrnamentTex[static_cast<size_t>(f)]  = textureFromSprite(generateUIOrnamentTile(uiThemeCached, 0x0ABCDu, f));
+        uiPanelTileTex[static_cast<size_t>(f)] = textureFromSprite(generateUIPanelTile(uiThemeCached, 0x51A11u, f, 16));
+        uiOrnamentTex[static_cast<size_t>(f)]  = textureFromSprite(generateUIOrnamentTile(uiThemeCached, 0x0ABCDu, f, 16));
     }
 
     uiAssetsValid = true;
@@ -620,6 +694,15 @@ void Renderer::render(const Game& game) {
     const uint32_t ticks = SDL_GetTicks();
     const int frame = static_cast<int>((ticks / 220u) % FRAMES);
     lastFrame = frame;
+
+    // If the user toggled 3D voxel sprites, invalidate cached textures so they regenerate.
+    const bool wantVoxelSprites = game.voxelSpritesEnabled();
+    if (wantVoxelSprites != voxelSpritesCached) {
+        // Entity/item/projectile textures are budget-cached in spriteTex.
+        spriteTex.clear();
+        spriteTex.resetStats();
+        voxelSpritesCached = wantVoxelSprites;
+    }
 
     // Background clear
     SDL_SetRenderDrawColor(renderer, 8, 8, 12, 255);
@@ -950,8 +1033,8 @@ void Renderer::render(const Game& game) {
                 const uint8_t roll = static_cast<uint8_t>(r & 0xFFu);
 
                 if (roll < decalChance[static_cast<size_t>(style)]) {
-                    const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(DECALS_PER_STYLE));
-                    const size_t di = static_cast<size_t>(style * DECALS_PER_STYLE + var);
+                    const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(decalsPerStyleUsed));
+                    const size_t di = static_cast<size_t>(style * decalsPerStyleUsed + var);
 
                     if (di < floorDecalVar.size()) {
                         SDL_Texture* dtex = floorDecalVar[di][static_cast<size_t>(frame % FRAMES)];
@@ -988,8 +1071,8 @@ void Renderer::render(const Game& game) {
                         if (s2 != 0) { style = s2; break; }
                     }
 
-                    const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(DECALS_PER_STYLE));
-                    const size_t di = static_cast<size_t>(style * DECALS_PER_STYLE + var);
+                    const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(decalsPerStyleUsed));
+                    const size_t di = static_cast<size_t>(style * decalsPerStyleUsed + var);
                     if (di < wallDecalVar.size()) {
                         SDL_Texture* dtex = wallDecalVar[di][static_cast<size_t>(frame % FRAMES)];
                         if (dtex) {
@@ -1011,7 +1094,7 @@ void Renderer::render(const Game& game) {
                     const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xED6E7u ^ static_cast<uint32_t>(mask);
                     const uint32_t r = hash32(h);
-                    const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(AUTO_VARS));
+                    const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(autoVarsUsed));
 
                     SDL_Texture* etex = wallEdgeVar[static_cast<size_t>(mask)][v][static_cast<size_t>(frame % FRAMES)];
                     if (etex) {
@@ -1029,7 +1112,7 @@ void Renderer::render(const Game& game) {
                     const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xC11A5u ^ static_cast<uint32_t>(mask);
                     const uint32_t r = hash32(h);
-                    const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(AUTO_VARS));
+                    const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(autoVarsUsed));
 
                     SDL_Texture* rtex = chasmRimVar[static_cast<size_t>(mask)][v][static_cast<size_t>(frame % FRAMES)];
                     if (rtex) {
@@ -1349,6 +1432,69 @@ void Renderer::render(const Game& game) {
     }
 
 
+    // Draw fire field (visible tiles only). This is a persistent, tile-based hazard
+    // spawned primarily by Fireball explosions.
+    {
+        // Additive blend gives a nice glow without completely obscuring tiles.
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_ADD);
+
+        const bool haveFireTex = (fireVar[0][0] != nullptr);
+
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                const Tile& t = d.at(x, y);
+                if (!t.visible) continue;
+
+                const uint8_t f = game.fireAt(x, y);
+                if (f == 0u) continue;
+
+                const uint8_t m = lightMod(x, y);
+
+                // Scale intensity by light; keep a minimum so it reads even in deep shadow.
+                int a = 40 + static_cast<int>(f) * 22;
+                a = (a * static_cast<int>(m)) / 255;
+                a = std::max(28, std::min(235, a));
+
+                // Flicker
+                a = std::max(24, std::min(245, a + (static_cast<int>((frame + x * 5 + y * 11) % 7) - 3)));
+
+                SDL_Rect r = tileDst(x, y);
+
+                if (haveFireTex) {
+                    const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                                   static_cast<uint32_t>(y)) ^ 0xF17Eu;
+                    const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(FIRE_VARS));
+                    const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
+
+                    SDL_Texture* ftex = fireVar[vi][fi];
+                    if (ftex) {
+                        // Warm fire tint, modulated by world lighting.
+                        const Color lmod = tileColorMod(x, y, /*visible=*/true);
+                        const Color base{255, 160, 80, 255};
+
+                        const uint8_t mr = static_cast<uint8_t>((static_cast<int>(base.r) * lmod.r) / 255);
+                        const uint8_t mg = static_cast<uint8_t>((static_cast<int>(base.g) * lmod.g) / 255);
+                        const uint8_t mb = static_cast<uint8_t>((static_cast<int>(base.b) * lmod.b) / 255);
+
+                        SDL_SetTextureColorMod(ftex, mr, mg, mb);
+                        SDL_SetTextureAlphaMod(ftex, static_cast<uint8_t>(a));
+                        SDL_RenderCopy(renderer, ftex, nullptr, &r);
+                        SDL_SetTextureColorMod(ftex, 255, 255, 255);
+                        SDL_SetTextureAlphaMod(ftex, 255);
+                        continue;
+                    }
+                }
+
+                // Fallback: simple tinted quad (should rarely be used).
+                SDL_SetRenderDrawColor(renderer, 255, 140, 70, static_cast<uint8_t>(a));
+                SDL_RenderFillRect(renderer, &r);
+            }
+        }
+
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    }
+
+
     // Draw discovered traps (shown on explored tiles; bright when visible, dim when remembered)
     for (const auto& tr : game.traps()) {
         if (!tr.discovered) continue;
@@ -1584,6 +1730,10 @@ void Renderer::render(const Game& game) {
         drawStatsOverlay(game);
     }
 
+    if (game.isMessageHistoryOpen()) {
+        drawMessageHistoryOverlay(game);
+    }
+
     if (game.isInventoryOpen()) {
         drawInventoryOverlay(game);
     }
@@ -1740,6 +1890,17 @@ void Renderer::drawHud(const Game& game) {
     ss << " | TURNS: " << game.turns();
     ss << " | KILLS: " << game.kills();
 
+    // Companions
+    {
+        int allies = 0;
+        for (const auto& e : game.entities()) {
+            if (e.id == p.id) continue;
+            if (e.hp <= 0) continue;
+            if (e.friendly) ++allies;
+        }
+        if (allies > 0) ss << " | ALLIES: " << allies;
+    }
+
     // Status effects
     auto addStatus = [&](const char* label, int turns) {
         if (turns <= 0) return;
@@ -1752,6 +1913,8 @@ void Renderer::drawHud(const Game& game) {
 
     addStatus("POISON", p.effects.poisonTurns);
     addStatus("WEB", p.effects.webTurns);
+    addStatus("CONF", p.effects.confusionTurns);
+    addStatus("BURN", p.effects.burnTurns);
     addStatus("REGEN", p.effects.regenTurns);
     addStatus("SHIELD", p.effects.shieldTurns);
     addStatus("HASTE", p.effects.hasteTurns);
@@ -1799,7 +1962,7 @@ void Renderer::drawHud(const Game& game) {
             "B KICK | F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH (TRAPS/SECRETS)");
     }
     drawText5x7(renderer, 8, controlY3, 2, gray,
-        "F2 OPT | # CMD | M MAP | SHIFT+TAB STATS | F5 SAVE | F9 LOAD | PGUP/PGDN LOG | ? HELP");
+        "F2 OPT | F3 MSGS | # CMD | M MAP | SHIFT+TAB STATS | F5 SAVE | F9 LOAD | PGUP/PGDN LOG | ? HELP");
 
     // Message log
     const auto& msgs = game.messages();
@@ -2257,10 +2420,13 @@ void Renderer::drawOptionsOverlay(const Game& game) {
     drawOpt(8, "EFFECT TIMERS", yesNo(game.showEffectTimers()));
     drawOpt(9, "CONFIRM QUIT", yesNo(game.confirmQuitEnabled()));
     drawOpt(10, "AUTO MORTEM", yesNo(game.autoMortemEnabled()));
-    drawOpt(11, "SAVE BACKUPS", (game.saveBackups() > 0 ? std::to_string(game.saveBackups()) : "OFF"));
-    drawOpt(12, "UI THEME", uiThemeLabel(game.uiTheme()));
-    drawOpt(13, "UI PANELS", (game.uiPanelsTextured() ? "TEXTURED" : "SOLID"));
-    drawOpt(14, "CLOSE", "");
+    drawOpt(11, "BONES FILES", yesNo(game.bonesEnabled()));
+    drawOpt(12, "SAVE BACKUPS", (game.saveBackups() > 0 ? std::to_string(game.saveBackups()) : "OFF"));
+    drawOpt(13, "UI THEME", uiThemeLabel(game.uiTheme()));
+    drawOpt(14, "UI PANELS", (game.uiPanelsTextured() ? "TEXTURED" : "SOLID"));
+    drawOpt(15, "3D SPRITES", yesNo(game.voxelSpritesEnabled()));
+    drawOpt(16, "CONTROL PRESET", game.controlPresetDisplayName());
+    drawOpt(17, "CLOSE", "");
 
     y += 14;
     drawText5x7(renderer, x0 + 16, y, scale, gray,
@@ -2335,14 +2501,22 @@ void Renderer::drawHelpOverlay(const Game& game) {
     };
 
     lineWhite("CONTROLS:");
-    lineGray("MOVE: WASD / ARROWS / NUMPAD (DIAGONALS OK)");
-    lineGray("SPACE/. WAIT  R REST  < > STAIRS");
-    lineGray("F FIRE  G PICKUP  I/TAB INVENTORY");
-    lineGray("B KICK  L/V LOOK  C SEARCH  T DISARM  K CLOSE DOOR  SHIFT+K LOCK DOOR");
+    if (game.controlPreset() == ControlPreset::Nethack) {
+        lineGray("MOVE: HJKL + YUBN (ARROWS/NUMPAD OK)");
+        lineGray("SPACE/. WAIT  R REST  SHIFT+N SNEAK  < > STAIRS");
+        lineGray("F FIRE  G/, PICKUP  I/TAB INVENTORY");
+        lineGray("CTRL+D KICK  :/V LOOK  S SEARCH  T DISARM  C CLOSE  SHIFT+C LOCK");
+    } else {
+        lineGray("MOVE: WASD / ARROWS / NUMPAD + Q/E/Z/C DIAGONALS");
+        lineGray("SPACE/. WAIT  R REST  N SNEAK  < > STAIRS");
+        lineGray("F FIRE  G/, PICKUP  I/TAB INVENTORY");
+        lineGray("B KICK  L/V LOOK  SHIFT+C SEARCH  T DISARM  K CLOSE  SHIFT+K LOCK");
+    }
     lineGray("O EXPLORE  P AUTOPICKUP  M MINIMAP  SHIFT+TAB STATS");
     lineGray("F2 OPTIONS  # EXTENDED COMMANDS  (TYPE + ENTER)");
     lineGray("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART");
     lineGray("F11 FULLSCREEN  F12 SCREENSHOT (BINDABLE)");
+    lineGray("F3/SHIFT+M MESSAGE HISTORY  (/ SEARCH, CTRL+L CLEAR)");
     lineGray("PGUP/PGDN LOG  ESC CANCEL/QUIT");
 
     y += 6;
@@ -2630,6 +2804,34 @@ void Renderer::drawStatsOverlay(const Game& game) {
         y += 22;
     }
 
+    // Renderer performance/debug info.
+    {
+        std::stringstream ss;
+        ss << "RENDER: TILE " << std::clamp(tile, 16, 256) << "px"
+           << "  VOXEL: " << (game.voxelSpritesEnabled() ? "ON" : "OFF")
+           << "  DECALS/STYLE: " << decalsPerStyleUsed
+           << "  AUTOTILE VARS: " << autoVarsUsed;
+        drawText5x7(renderer, x0 + pad, y, 2, gray, ss.str());
+        y += 18;
+    }
+    {
+        size_t ent = 0, item = 0, proj = 0;
+        spriteTex.countByCategory(ent, item, proj);
+
+        const size_t usedMB = spriteTex.usedBytes() / (1024ull * 1024ull);
+        const size_t budgetMB = spriteTex.budgetBytes() / (1024ull * 1024ull);
+
+        std::stringstream ss;
+        ss << "SPRITE CACHE: " << usedMB << "MB / ";
+        if (spriteTex.budgetBytes() == 0) ss << "UNLIMITED";
+        else ss << budgetMB << "MB";
+        ss << "  (E:" << ent << " I:" << item << " P:" << proj << ")"
+           << "  H:" << spriteTex.hits() << " M:" << spriteTex.misses() << " EV:" << spriteTex.evictions();
+
+        drawText5x7(renderer, x0 + pad, y, 2, gray, ss.str());
+        y += 22;
+    }
+
     drawText5x7(renderer, x0 + pad, y, 2, white, "TOP RUNS");
     y += 18;
 
@@ -2739,6 +2941,155 @@ void Renderer::drawLevelUpOverlay(const Game& game) {
 
     y += 14;
     drawText5x7(renderer, x0 + 16, y, scale, gray, "UP/DOWN: select  ENTER: spend  ESC: spend all");
+}
+
+
+void Renderer::drawMessageHistoryOverlay(const Game& game) {
+    ensureUIAssets();
+
+    const Color white{255,255,255,255};
+    const Color gray{180,180,180,255};
+
+    // Center panel
+    const int panelW = winW * 9 / 10;
+    const int panelH = (winH - hudH) * 9 / 10;
+    const int x0 = (winW - panelW) / 2;
+    const int y0 = (winH - hudH - panelH) / 2;
+
+    SDL_Rect panel { x0, y0, panelW, panelH };
+    drawPanel(game, panel, 230, lastFrame);
+
+    const int pad = 14;
+    int y = y0 + pad;
+
+    drawText5x7(renderer, x0 + pad, y, 2, white, "MESSAGE HISTORY");
+    y += 22;
+
+    {
+        std::stringstream ss;
+        ss << "FILTER: " << messageFilterDisplayName(game.messageHistoryFilter());
+        if (!game.messageHistorySearch().empty()) {
+            ss << "  SEARCH: \"" << game.messageHistorySearch() << "\"";
+        }
+        if (game.isMessageHistorySearchMode()) {
+            ss << "  (TYPE)";
+        }
+        drawText5x7(renderer, x0 + pad, y, 2, gray, ss.str());
+        y += 20;
+    }
+
+    drawText5x7(renderer, x0 + pad, y, 1, gray, "UP/DOWN scroll  LEFT/RIGHT filter  PGUP/PGDN scroll  / search  CTRL+L clear  ESC close");
+    y += 18;
+
+    // Build filtered view.
+    const auto& msgs = game.messages();
+    std::vector<int> idx;
+    idx.reserve(msgs.size());
+
+    auto icontainsAscii = [](const std::string& haystack, const std::string& needle) -> bool {
+        if (needle.empty()) return true;
+        auto lower = [](unsigned char c) -> unsigned char {
+            if (c >= 'A' && c <= 'Z') return static_cast<unsigned char>(c - 'A' + 'a');
+            return c;
+        };
+
+        const size_t n = needle.size();
+        const size_t m = haystack.size();
+        if (n > m) return false;
+
+        for (size_t i = 0; i + n <= m; ++i) {
+            bool ok = true;
+            for (size_t j = 0; j < n; ++j) {
+                if (lower(static_cast<unsigned char>(haystack[i + j])) != lower(static_cast<unsigned char>(needle[j]))) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) return true;
+        }
+        return false;
+    };
+
+    const MessageFilter filter = game.messageHistoryFilter();
+    const std::string& needle = game.messageHistorySearch();
+    for (size_t i = 0; i < msgs.size(); ++i) {
+        const auto& m = msgs[i];
+        if (!messageFilterMatches(filter, m.kind)) continue;
+        if (!needle.empty() && !icontainsAscii(m.text, needle)) continue;
+        idx.push_back(static_cast<int>(i));
+    }
+
+    int scroll = game.messageHistoryScroll();
+    const int maxScroll = std::max(0, static_cast<int>(idx.size()) - 1);
+    scroll = std::max(0, std::min(scroll, maxScroll));
+
+    // Text area
+    const int scale = 2;
+    const int charW = 6 * scale;
+    const int lineH = 16;
+    const int textTop = y;
+    const int footerH = 18;
+    const int textBottom = y0 + panelH - pad - footerH;
+
+    const int availH = std::max(0, textBottom - textTop);
+    const int maxLines = std::max(1, availH / lineH);
+
+    const int start = std::max(0, static_cast<int>(idx.size()) - maxLines - scroll);
+    const int end = std::min(static_cast<int>(idx.size()), start + maxLines);
+
+    auto kindColor = [&](MessageKind k) -> Color {
+        switch (k) {
+            case MessageKind::Combat:       return Color{255,230,120,255};
+            case MessageKind::Loot:         return Color{120,255,120,255};
+            case MessageKind::System:       return Color{160,200,255,255};
+            case MessageKind::Warning:      return Color{255,120,120,255};
+            case MessageKind::ImportantMsg: return Color{255,170,80,255};
+            case MessageKind::Success:      return Color{120,255,255,255};
+            case MessageKind::Info:
+            default:                        return Color{255,255,255,255};
+        }
+    };
+
+    auto fitToChars = [](const std::string& s, int maxChars) -> std::string {
+        if (maxChars <= 0) return "";
+        if (static_cast<int>(s.size()) <= maxChars) return s;
+        if (maxChars <= 3) return s.substr(0, static_cast<size_t>(maxChars));
+        return s.substr(0, static_cast<size_t>(maxChars - 3)) + "...";
+    };
+
+    const int maxChars = (panelW - 2 * pad) / charW;
+
+    if (idx.empty()) {
+        drawText5x7(renderer, x0 + pad, y + 10, 2, gray, "NO MESSAGES MATCH.");
+    } else {
+        int yy = y;
+        for (int row = start; row < end; ++row) {
+            const auto& m = msgs[idx[row]];
+            const Color c = kindColor(m.kind);
+
+            std::string prefix = "D" + std::to_string(m.depth) + " T" + std::to_string(m.turn) + " ";
+            std::string body = m.text;
+            if (m.repeat > 1) {
+                body += " (x" + std::to_string(m.repeat) + ")";
+            }
+
+            const int prefixChars = static_cast<int>(prefix.size());
+            const int bodyChars = std::max(0, maxChars - prefixChars);
+
+            drawText5x7(renderer, x0 + pad, yy, scale, gray, fitToChars(prefix, prefixChars));
+            drawText5x7(renderer, x0 + pad + prefixChars * charW, yy, scale, c, fitToChars(body, bodyChars));
+
+            yy += lineH;
+        }
+    }
+
+    // Footer status
+    {
+        std::stringstream ss;
+        ss << "SHOWING " << idx.size() << "/" << msgs.size();
+        if (maxScroll > 0) ss << "  SCROLL " << scroll << "/" << maxScroll;
+        drawText5x7(renderer, x0 + pad, y0 + panelH - pad - 12, 1, gray, ss.str());
+    }
 }
 
 void Renderer::drawTargetingOverlay(const Game& game) {

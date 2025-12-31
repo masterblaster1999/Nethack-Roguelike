@@ -37,6 +37,9 @@ enum class EntityKind : uint8_t {
 
     // Companions / allies (append-only to keep save compatibility)
     Dog,
+
+    // Undead / special (append-only to keep save compatibility)
+    Ghost,
 };
 
 
@@ -62,6 +65,7 @@ inline int baseSpeedFor(EntityKind k) {
         case EntityKind::Shopkeeper: return 100;
         case EntityKind::Minotaur: return 105;
         case EntityKind::Dog: return 120;
+        case EntityKind::Ghost: return 110;
         default: return 100;
     }
 }
@@ -76,6 +80,7 @@ inline bool monsterCanEquipWeapons(EntityKind k) {
         case EntityKind::SkeletonArcher:
         case EntityKind::KoboldSlinger:
         case EntityKind::Wizard:
+        case EntityKind::Ghost:
             return true;
         default:
             return false;
@@ -89,6 +94,7 @@ inline bool monsterCanEquipArmor(EntityKind k) {
         case EntityKind::SkeletonArcher:
         case EntityKind::KoboldSlinger:
         case EntityKind::Wizard:
+        case EntityKind::Ghost:
             return true;
         default:
             return false;
@@ -131,6 +137,7 @@ enum class Action : uint8_t {
     Load,
     LoadAuto,
     Help,
+    MessageHistory, // Full message history overlay
 
     LogUp,
     LogDown,
@@ -185,6 +192,16 @@ enum class BurdenState : uint8_t {
     Overloaded,
 };
 
+// Companion / ally orders (NetHack-ish pet control).
+// Only meaningful when Entity::friendly is true.
+enum class AllyOrder : uint8_t {
+    Follow = 0,   // stay near the player (default)
+    Stay,         // hold position (still fights nearby hostiles)
+    Fetch,        // prioritize picking up visible gold and bringing it to you
+    Guard,        // guard your current area more aggressively
+};
+
+
 enum class MessageKind : uint8_t {
     Info = 0,
     Combat,
@@ -195,12 +212,97 @@ enum class MessageKind : uint8_t {
     Success,
 };
 
+// Message log filters (used by the message history overlay).
+enum class MessageFilter : uint8_t {
+    All = 0,
+    Important,
+    Combat,
+    Loot,
+    System,
+    Warning,
+    Success,
+    Info,
+};
+
+inline const char* messageFilterDisplayName(MessageFilter f) {
+    switch (f) {
+        case MessageFilter::All:       return "ALL";
+        case MessageFilter::Important: return "IMPORTANT";
+        case MessageFilter::Combat:    return "COMBAT";
+        case MessageFilter::Loot:      return "LOOT";
+        case MessageFilter::System:    return "SYSTEM";
+        case MessageFilter::Warning:   return "WARNING";
+        case MessageFilter::Success:   return "SUCCESS";
+        case MessageFilter::Info:      return "INFO";
+        default:                       return "ALL";
+    }
+}
+
+inline bool messageFilterMatches(MessageFilter f, MessageKind k) {
+    switch (f) {
+        case MessageFilter::All:       return true;
+        case MessageFilter::Important: return k == MessageKind::ImportantMsg;
+        case MessageFilter::Combat:    return k == MessageKind::Combat;
+        case MessageFilter::Loot:      return k == MessageKind::Loot;
+        case MessageFilter::System:    return k == MessageKind::System;
+        case MessageFilter::Warning:   return k == MessageKind::Warning;
+        case MessageFilter::Success:   return k == MessageKind::Success;
+        case MessageFilter::Info:      return k == MessageKind::Info;
+        default:                       return true;
+    }
+}
+
 // UI skin theme (purely cosmetic; persisted via settings).
 enum class UITheme : uint8_t {
     DarkStone = 0,
     Parchment,
     Arcane,
 };
+
+// Input control presets.
+//
+// NOTE: Keybinds are still fully configurable via procrogue_settings.ini (bind_*).
+// The preset is a convenience for quickly applying a cohesive scheme.
+enum class ControlPreset : uint8_t {
+    Modern = 0,   // WASD + Q/E/Z/C diagonals (default)
+    Nethack,      // vi-keys HJKL + YUBN (NetHack-style)
+};
+
+inline const char* controlPresetId(ControlPreset p) {
+    switch (p) {
+        case ControlPreset::Modern:  return "modern";
+        case ControlPreset::Nethack: return "nethack";
+        default:                     return "modern";
+    }
+}
+
+inline const char* controlPresetDisplayName(ControlPreset p) {
+    switch (p) {
+        case ControlPreset::Modern:  return "MODERN";
+        case ControlPreset::Nethack: return "NETHACK";
+        default:                     return "MODERN";
+    }
+}
+
+inline bool parseControlPreset(const std::string& raw, ControlPreset& out) {
+    std::string s;
+    s.reserve(raw.size());
+    for (char c : raw) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (!std::isspace(uc)) s.push_back(static_cast<char>(std::tolower(uc)));
+    }
+
+    if (s == "modern" || s == "wasd" || s == "default") {
+        out = ControlPreset::Modern;
+        return true;
+    }
+    if (s == "nethack" || s == "vi" || s == "vim" || s == "roguelike" || s == "classic") {
+        out = ControlPreset::Nethack;
+        return true;
+    }
+
+    return false;
+}
 
 // Player starting class/role.
 // Stored in save files (per-run). The default for new runs comes from settings/CLI.
@@ -268,6 +370,10 @@ struct Message {
     std::string text;
     MessageKind kind = MessageKind::Info;
     bool fromPlayer = true;
+
+    // Metadata for log/history tools.
+    uint32_t turn = 0; // game turn when the message was generated
+    int depth = 0;     // dungeon depth when generated
 
     // Consecutive duplicate messages are compacted by incrementing this counter.
     // Example: "YOU HIT THE ORC." repeated 3 times becomes one log line with repeat=3.
@@ -341,6 +447,11 @@ struct Entity {
     // Example: speed=150 -> ~1.5 actions/turn (sometimes 2).
     int speed = 100;
     int energy = 0;
+
+    // Companion / ally state.
+    // Friendly entities are allied with the player (dogs, tamed beasts, etc.).
+    bool friendly = false;
+    AllyOrder allyOrder = AllyOrder::Follow;
 };
 
 struct FXProjectile {
@@ -370,6 +481,13 @@ struct LevelState {
     // Environmental fields (per-tile intensities).
     // Currently used for persistent Confusion Gas clouds.
     std::vector<uint8_t> confusionGas;
+
+    // Persistent flames / embers left behind by explosions and other fire sources.
+    std::vector<uint8_t> fireField;
+
+    // Persistent scent trail used by smell-capable monsters to track the player.
+    // Stored as a per-tile intensity map (0..255).
+    std::vector<uint8_t> scentField;
 };
 
 class Game {
@@ -393,6 +511,15 @@ public:
     // Available via extended command: #shout
     void shout();
     void whistle();
+
+    // Attempt to tame an adjacent beast using a food ration (costs a turn).
+    // Extended command: #tame
+    void tame();
+
+    // Set orders for all friendly companions.
+    // Extended command: #pet <follow|stay|fetch|guard>
+    void setAlliesOrder(AllyOrder order, bool verbose = true);
+
 
     // Dig/tunnel using a pickaxe (adjacent tile). Used by extended command: #dig <dir>
     // Returns true if a turn was spent.
@@ -418,6 +545,14 @@ public:
     // Persistent environmental gas on the current level (0..255 intensity).
     // 0 means no gas. Only meaningful on in-bounds tiles.
     uint8_t confusionGasAt(int x, int y) const;
+
+    // Persistent fire field on the current level (0..255 intensity).
+    // 0 means no fire. Only meaningful on in-bounds tiles.
+    uint8_t fireAt(int x, int y) const;
+
+    // Persistent scent trail intensity on the current level (0..255).
+    // 0 means no scent. Only meaningful on in-bounds tiles.
+    uint8_t scentAt(int x, int y) const;
 
     const Entity& player() const;
     Entity& playerMut();
@@ -463,6 +598,19 @@ void setUITheme(UITheme theme) { uiTheme_ = theme; }
 
 bool uiPanelsTextured() const { return uiPanelsTextured_; }
 void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
+
+// Control preset (for help text + optional keybind presets).
+ControlPreset controlPreset() const { return controlPreset_; }
+const char* controlPresetIdString() const { return ::controlPresetId(controlPreset_); }
+const char* controlPresetDisplayName() const { return ::controlPresetDisplayName(controlPreset_); }
+void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
+
+
+    // Sprite style
+    // When enabled, entity/item/projectile sprites are rendered by voxelizing the 2D procedural sprite
+    // and re-rendering it with simple 3D lighting (still within a 2D tile).
+    bool voxelSpritesEnabled() const { return voxelSpritesEnabled_; }
+    void setVoxelSpritesEnabled(bool enabled) { voxelSpritesEnabled_ = enabled; }
 
     // Inventory/UI accessors for renderer
     const std::vector<Item>& inventory() const { return inv; }
@@ -592,6 +740,10 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
     void setAutoMortemEnabled(bool enabled) { autoMortemEnabled_ = enabled; }
     bool autoMortemEnabled() const { return autoMortemEnabled_; }
 
+    // Bones files (persistent death remnants between runs).
+    void setBonesEnabled(bool enabled) { bonesEnabled_ = enabled; }
+    bool bonesEnabled() const { return bonesEnabled_; }
+
 
     // Targeting
     bool isTargeting() const { return targeting; }
@@ -665,6 +817,20 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
     const std::vector<Message>& messages() const { return msgs; }
     int messageScroll() const { return msgScroll; }
 
+    // Message history overlay (full log viewer; does not consume turns)
+    bool isMessageHistoryOpen() const { return msgHistoryOpen; }
+    bool isMessageHistorySearchMode() const { return msgHistorySearchMode; }
+    MessageFilter messageHistoryFilter() const { return msgHistoryFilter; }
+    const std::string& messageHistorySearch() const { return msgHistorySearch; }
+    int messageHistoryScroll() const { return msgHistoryScroll; }
+
+    // Text input helpers for the message history overlay (search mode).
+    void messageHistoryTextInput(const char* utf8);
+    void messageHistoryBackspace();
+    void messageHistoryToggleSearchMode();
+    void messageHistoryClearSearch();
+    void messageHistoryCycleFilter(int dir);
+
     // FX
     const std::vector<FXProjectile>& fxProjectiles() const { return fx; }
     const std::vector<FXExplosion>& fxExplosions() const { return fxExpl; }
@@ -720,6 +886,10 @@ private:
     void dropGroundItem(Vec2i pos, ItemKind k, int count = 1, int enchant = 0);
     void dropGroundItemItem(Vec2i pos, Item it);
 
+    // Bones files (persistent death remnants between runs).
+    bool tryApplyBones();
+    bool writeBonesFile();
+
     Dungeon dung;
     RNG rng;
 
@@ -740,6 +910,8 @@ private:
     // Environmental fields (current level).
     // Stored as per-tile intensities (0..255).
     std::vector<uint8_t> confusionGas_;
+    std::vector<uint8_t> fireField_;
+    std::vector<uint8_t> scentField_;
 
     int nextItemId = 1;
 
@@ -808,6 +980,13 @@ private:
     std::vector<Message> msgs;
     int msgScroll = 0;
 
+    // Message history overlay (full log viewer)
+    bool msgHistoryOpen = false;
+    bool msgHistorySearchMode = false;
+    MessageFilter msgHistoryFilter = MessageFilter::All;
+    std::string msgHistorySearch;
+    int msgHistoryScroll = 0;
+
     // Options / quality-of-life
     AutoPickupMode autoPickup = AutoPickupMode::Gold;
 
@@ -817,6 +996,9 @@ private:
     bool confirmQuitEnabled_ = true;
     bool autoMortemEnabled_ = true;
     bool mortemWritten_ = false;
+
+    bool bonesEnabled_ = true;
+    bool bonesWritten_ = false;
 
     // Hunger system (optional; when disabled, hunger does not tick).
     bool hungerEnabled_ = false;
@@ -920,6 +1102,8 @@ private:
     bool showEffectTimers_ = true;
     UITheme uiTheme_ = UITheme::DarkStone;
     bool uiPanelsTextured_ = true;
+    ControlPreset controlPreset_ = ControlPreset::Modern;
+    bool voxelSpritesEnabled_ = true;
 
     // Autosave
     int autosaveInterval = 0; // 0 = off
@@ -1055,6 +1239,7 @@ private:
     // through solid rock.
     void emitNoise(Vec2i pos, int volume);
     void applyEndOfTurnEffects();
+    void updateScentMap();
     Vec2i randomFreeTileInRoom(const Room& r, int tries = 200);
 
     // Monster factory (shared by level generation + dynamic spawns).

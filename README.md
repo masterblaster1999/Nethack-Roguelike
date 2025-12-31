@@ -10,6 +10,10 @@ A tiny NetHack-inspired roguelike with:
 
 ## New in this build (QoL + big usability upgrades)
 
+- **High-resolution procedural sprites (up to 256x256)**: the procedural sprite generator can now output higher pixel resolutions (clamped to 256) so tiles/monsters/items remain crisp when you increase `tile_size` in `procrogue_settings.ini`.
+  - Map tiles + overlays are generated at **tile resolution** to avoid blocky renderer upscaling.
+  - 3D voxel sprites also render at the requested resolution.
+
 - **New dungeon generation variety**:
   - **Depth 3** is a **cavern** (cellular automata)
   - **Depth 4** is a **maze** (perfect maze + a few loops + door chokepoints)
@@ -24,6 +28,12 @@ A tiny NetHack-inspired roguelike with:
   - **Enter** performs a **context action** (equip if gear, use if consumable)
 - **Game controller support** (SDL2 GameController): D-pad move, **A** confirm, **B** cancel, **X** inventory, **Y** pickup, shoulders for look/fire.
 - **VSync + FPS cap settings**: new `vsync` and `max_fps` keys in `procrogue_settings.ini`.
+
+- **VRAM-friendly sprite caching**:
+  - Procedural entity/item/projectile sprites are now cached with an **LRU texture cache** instead of growing unbounded.
+  - New setting: `texture_cache_mb` (0 = unlimited) to cap approximate VRAM usage for cached sprites.
+  - The **Stats** overlay (Shift+Tab) shows cache usage, hits/misses, and evictions.
+  - When using very large tiles, the renderer also reduces decal/autotile-variant counts to keep texture memory reasonable.
 
 - **Configurable keybindings**: add `bind_*` entries in `procrogue_settings.ini` (multiple keys per action).
 - **In-game options menu**: press **F2** to tweak common settings (auto-pickup, autosave, etc.).
@@ -84,6 +94,7 @@ A tiny NetHack-inspired roguelike with:
   - Shrines support `pray uncurse` (and `pray bless` may bless a piece of equipped gear).
 
 - **New trap**: **Web traps** can immobilize you for a few turns.
+- **Scent trails**: certain monsters (wolves, snakes, spiders, etc.) can follow your lingering scent around corners when you break line-of-sight (e.g. invisibility/darkness). Scent decays over time and is blocked by walls and closed doors.
 - **New combat spice**: spiders can web you (movement blocked for a few turns), and wizards can occasionally "blink" (teleport) to reposition — and sometimes curse your equipped gear.
 - **New content**: **Axe** + **Plate Armor**, and a new monster: the **Ogre**.
 - **CI build workflow** for Linux/macOS/Windows.
@@ -97,6 +108,9 @@ A tiny NetHack-inspired roguelike with:
 - **Auto-travel**: Enter while looking (or left-click a tile)
 - **Auto-explore**: `O`
 - **Search (reveal traps)**: `C`
+- **Control preset**: `F2` → **Control Preset** (or `#preset modern|nethack`)
+  - **Modern**: WASD + QEZC diagonals (Search = `C`, Kick = `B`, Look = `L/V`)
+  - **NetHack**: HJKL + YUBN diagonals (Search = `S`, Kick = `Ctrl+D`, Look = `:`/`V`)
 - **Auto-pickup mode**: `P` (cycles OFF/GOLD/SMART/ALL)
 - **Minimap**: `M`
 - **Stats / high scores**: `Shift+Tab`

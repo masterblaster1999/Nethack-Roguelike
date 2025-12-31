@@ -20,6 +20,9 @@ enum class EffectKind : uint8_t {
 
     // New debuffs (append-only)
     Confusion,
+
+    // Fire damage over time (append-only)
+    Burn,
 };
 
 // Human-readable short tag for HUD/status lists.
@@ -33,6 +36,7 @@ inline const char* effectTag(EffectKind k) {
         case EffectKind::Invis:     return "INVIS";
         case EffectKind::Web:       return "WEB";
         case EffectKind::Confusion: return "CONF";
+        case EffectKind::Burn:      return "BURN";
         default:                    return "?";
     }
 }
@@ -48,6 +52,7 @@ inline const char* effectEndMessage(EffectKind k) {
         case EffectKind::Invis:     return "YOU BECOME VISIBLE!";
         case EffectKind::Web:       return "YOU BREAK FREE OF THE WEB!";
         case EffectKind::Confusion: return "YOU FEEL LESS CONFUSED.";
+        case EffectKind::Burn:      return "THE FLAMES SUBSIDE.";
         default:                    return "";
     }
 }
@@ -66,6 +71,8 @@ struct Effects {
 
     int confusionTurns = 0; // makes movement/aim erratic while >0
 
+    int burnTurns = 0;      // take 1 HP per turn while >0
+
     bool has(EffectKind k) const { return get(k) > 0; }
 
     int get(EffectKind k) const {
@@ -78,6 +85,7 @@ struct Effects {
             case EffectKind::Invis:     return invisTurns;
             case EffectKind::Web:       return webTurns;
             case EffectKind::Confusion: return confusionTurns;
+            case EffectKind::Burn:      return burnTurns;
             default:                    return 0;
         }
     }
@@ -92,6 +100,7 @@ struct Effects {
             case EffectKind::Invis:     return invisTurns;
             case EffectKind::Web:       return webTurns;
             case EffectKind::Confusion: return confusionTurns;
+            case EffectKind::Burn:      return burnTurns;
             default:                    return poisonTurns; // should be unreachable
         }
     }
@@ -100,4 +109,4 @@ struct Effects {
 };
 
 // Keep in sync with EffectKind (append-only).
-inline constexpr int EFFECT_KIND_COUNT = static_cast<int>(EffectKind::Confusion) + 1;
+inline constexpr int EFFECT_KIND_COUNT = static_cast<int>(EffectKind::Burn) + 1;

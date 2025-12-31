@@ -321,7 +321,9 @@ static bool exportRunLogToFile(const Game& game, const std::filesystem::path& ou
                       : (m.kind == MessageKind::Warning) ? "WARN"
                       : (m.kind == MessageKind::Success) ? "SUCCESS"
                                                          : "INFO";
-        f << "[" << k << "] " << m.text << "\n";
+        f << "[" << k << "] [D" << m.depth << " T" << m.turn << "] " << m.text;
+        if (m.repeat > 1) f << " (x" << m.repeat << ")";
+        f << "\n";
     }
     return true;
 }
@@ -406,6 +408,7 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
             case EntityKind::KoboldSlinger:  return 'k';
             case EntityKind::Wolf:   return 'w';
             case EntityKind::Dog:    return 'd';
+            case EntityKind::Ghost:  return 'G';
             case EntityKind::Troll:  return 'T';
             case EntityKind::Wizard: return 'W';
             case EntityKind::Snake:  return 'n';
@@ -518,7 +521,9 @@ static std::pair<bool, bool> exportRunDumpToFile(const Game& game, const std::fi
     const auto& ms = game.messages();
     const size_t start = (ms.size() > 120) ? (ms.size() - 120) : 0;
     for (size_t i = start; i < ms.size(); ++i) {
-        f << "  " << ms[i].text << "\n";
+        f << "  [D" << ms[i].depth << " T" << ms[i].turn << "] " << ms[i].text;
+        if (ms[i].repeat > 1) f << " (x" << ms[i].repeat << ")";
+        f << "\n";
     }
 
     // Map at end (same format as exportmap)
@@ -700,7 +705,11 @@ static std::vector<std::string> extendedCommandList() {
     "shout",
     "yell",
     "whistle",
+        "pet",
+        "tame",
         "options",
+        "preset",
+        "sprites3d",
         "binds",
         "bind",
         "unbind",
@@ -728,12 +737,14 @@ static std::vector<std::string> extendedCommandList() {
     "class",
         "scores",
         "history",
+        "messages",
         "exportlog",
         "exportmap",
         "export",
         "exportall",
         "dump",
         "mortem",
+        "bones",
         "explore",
         "search",
         "rest",
@@ -742,6 +753,76 @@ static std::vector<std::string> extendedCommandList() {
         "pray",
         "pay",
     };
+}
+
+
+static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = true) {
+    const std::string settingsPath = game.settingsPath();
+    if (settingsPath.empty()) {
+        if (verbose) game.pushSystemMessage("SETTINGS PATH UNKNOWN; CAN'T APPLY CONTROL PRESET.");
+        return false;
+    }
+
+    // Persist selection + bind_* changes.
+    bool ok = true;
+    ok &= updateIniKey(settingsPath, "control_preset", controlPresetId(preset));
+
+    if (preset == ControlPreset::Nethack) {
+        // Movement (vi-keys)
+        ok &= updateIniKey(settingsPath, "bind_up", "k, up, kp_8");
+        ok &= updateIniKey(settingsPath, "bind_down", "j, down, kp_2");
+        ok &= updateIniKey(settingsPath, "bind_left", "h, left, kp_4");
+        ok &= updateIniKey(settingsPath, "bind_right", "l, right, kp_6");
+        ok &= updateIniKey(settingsPath, "bind_up_left", "y, kp_7");
+        ok &= updateIniKey(settingsPath, "bind_up_right", "u, kp_9");
+        ok &= updateIniKey(settingsPath, "bind_down_left", "b, kp_1");
+        ok &= updateIniKey(settingsPath, "bind_down_right", "n, kp_3");
+
+        // Actions
+        ok &= updateIniKey(settingsPath, "bind_search", "s");
+        ok &= updateIniKey(settingsPath, "bind_disarm", "t");
+        ok &= updateIniKey(settingsPath, "bind_close_door", "c");
+        ok &= updateIniKey(settingsPath, "bind_lock_door", "shift+c");
+        ok &= updateIniKey(settingsPath, "bind_kick", "ctrl+d");
+        // Look: ':' is usually shift+semicolon on most layouts.
+        ok &= updateIniKey(settingsPath, "bind_look", "shift+semicolon, v");
+        // Help: remove 'h' to avoid conflicting with vi movement.
+        ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash");
+        // Sneak: avoid 'n' (movement down-right in vi keys).
+        ok &= updateIniKey(settingsPath, "bind_sneak", "shift+n");
+    } else {
+        // Modern (WASD)
+        ok &= updateIniKey(settingsPath, "bind_up", "w, up, kp_8");
+        ok &= updateIniKey(settingsPath, "bind_down", "s, down, kp_2");
+        ok &= updateIniKey(settingsPath, "bind_left", "a, left, kp_4");
+        ok &= updateIniKey(settingsPath, "bind_right", "d, right, kp_6");
+        ok &= updateIniKey(settingsPath, "bind_up_left", "q, kp_7");
+        ok &= updateIniKey(settingsPath, "bind_up_right", "e, kp_9");
+        ok &= updateIniKey(settingsPath, "bind_down_left", "z, kp_1");
+        ok &= updateIniKey(settingsPath, "bind_down_right", "c, kp_3");
+
+        // Actions
+        ok &= updateIniKey(settingsPath, "bind_search", "shift+c");
+        ok &= updateIniKey(settingsPath, "bind_disarm", "t");
+        ok &= updateIniKey(settingsPath, "bind_close_door", "k");
+        ok &= updateIniKey(settingsPath, "bind_lock_door", "shift+k");
+        ok &= updateIniKey(settingsPath, "bind_kick", "b");
+        ok &= updateIniKey(settingsPath, "bind_look", "l, v");
+        ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash, h");
+        ok &= updateIniKey(settingsPath, "bind_sneak", "n");
+    }
+
+    game.setControlPreset(preset);
+
+    if (ok) {
+        game.requestKeyBindsReload();
+        if (verbose) {
+            game.pushSystemMessage(std::string("CONTROL PRESET APPLIED: ") + game.controlPresetDisplayName());
+        }
+    } else {
+        if (verbose) game.pushSystemMessage("FAILED TO APPLY CONTROL PRESET.");
+    }
+    return ok;
 }
 
 
@@ -848,6 +929,10 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         if (a == "inventory" || a == "inv") { outKey = "bind_inventory"; return true; }
         if (a == "fire") { outKey = "bind_fire"; return true; }
         if (a == "search") { outKey = "bind_search"; return true; }
+        if (a == "disarm") { outKey = "bind_disarm"; return true; }
+        if (a == "close_door" || a == "closedoor" || a == "close") { outKey = "bind_close_door"; return true; }
+        if (a == "lock_door" || a == "lockdoor" || a == "lock") { outKey = "bind_lock_door"; return true; }
+        if (a == "kick") { outKey = "bind_kick"; return true; }
         if (a == "look") { outKey = "bind_look"; return true; }
         if (a == "stairs_up" || a == "stairsup") { outKey = "bind_stairs_up"; return true; }
         if (a == "stairs_down" || a == "stairsdown") { outKey = "bind_stairs_down"; return true; }
@@ -863,6 +948,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
         // UI / meta
         if (a == "help") { outKey = "bind_help"; return true; }
+        if (a == "message_history" || a == "messagehistory" || a == "messages" || a == "msglog" || a == "msghistory") { outKey = "bind_message_history"; return true; }
         if (a == "options") { outKey = "bind_options"; return true; }
         if (a == "command" || a == "extcmd") { outKey = "bind_command"; return true; }
         if (a == "toggle_minimap" || a == "minimap") { outKey = "bind_toggle_minimap"; return true; }
@@ -904,6 +990,30 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     if (cmd == "options") {
         game.handleAction(Action::Options);
+        return;
+    }
+
+    if (cmd == "messages" || cmd == "msghistory" || cmd == "message_history") {
+        game.handleAction(Action::MessageHistory);
+        return;
+    }
+
+    if (cmd == "preset" || cmd == "controls" || cmd == "keyset") {
+        if (toks.size() <= 1) {
+            game.pushSystemMessage(std::string("CONTROL PRESET: ") + game.controlPresetDisplayName());
+            game.pushSystemMessage("USAGE: #preset modern|nethack");
+            game.pushSystemMessage("TIP: this rewrites movement/look/search/kick/sneak binds in procrogue_settings.ini.");
+            return;
+        }
+
+        ControlPreset p = ControlPreset::Modern;
+        if (!parseControlPreset(toks[1], p)) {
+            game.pushSystemMessage("UNKNOWN PRESET: " + toks[1]);
+            game.pushSystemMessage("VALID: modern | nethack");
+            return;
+        }
+
+        (void)applyControlPreset(game, p);
         return;
     }
 
@@ -1522,6 +1632,48 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "sprites3d") {
+        if (toks.size() > 1) {
+            const std::string v = toLower(toks[1]);
+            if (v == "on" || v == "true" || v == "1") {
+                game.setVoxelSpritesEnabled(true);
+                game.markSettingsDirty();
+                game.pushSystemMessage("3D SPRITES: ON");
+                return;
+            }
+            if (v == "off" || v == "false" || v == "0") {
+                game.setVoxelSpritesEnabled(false);
+                game.markSettingsDirty();
+                game.pushSystemMessage("3D SPRITES: OFF");
+                return;
+            }
+        }
+        game.pushSystemMessage(std::string("3D SPRITES: ") + (game.voxelSpritesEnabled() ? "ON" : "OFF"));
+        return;
+    }
+
+    if (cmd == "bones") {
+        if (toks.size() > 1) {
+            const std::string v = toLower(toks[1]);
+            if (v == "on" || v == "true" || v == "1") {
+                game.setBonesEnabled(true);
+                game.markSettingsDirty();
+                game.pushSystemMessage("BONES FILES: ON");
+                return;
+            }
+            if (v == "off" || v == "false" || v == "0") {
+                game.setBonesEnabled(false);
+                game.markSettingsDirty();
+                game.pushSystemMessage("BONES FILES: OFF");
+                return;
+            }
+        }
+
+        game.pushSystemMessage(std::string("BONES FILES: ") + (game.bonesEnabled() ? "ON" : "OFF"));
+        game.pushSystemMessage("USAGE: #bones on|off");
+        return;
+    }
+
     if (cmd == "mortem") {
         if (toks.size() > 1) {
             const std::string v = toLower(toks[1]);
@@ -1664,6 +1816,55 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     }
 
 
+
+    if (cmd == "pet") {
+        const std::string v = arg(1);
+        if (v.empty() || v == "status") {
+            int n = 0;
+            AllyOrder order = AllyOrder::Follow;
+            bool mixed = false;
+            bool first = true;
+
+            for (const auto& e : game.entities()) {
+                if (e.id == game.playerId()) continue;
+                if (e.hp <= 0) continue;
+                if (!e.friendly) continue;
+                ++n;
+                if (first) { order = e.allyOrder; first = false; }
+                else if (e.allyOrder != order) mixed = true;
+            }
+
+            if (n <= 0) {
+                game.pushSystemMessage("NO COMPANIONS.");
+            } else {
+                std::string o = mixed ? "MIXED" :
+                    (order == AllyOrder::Follow ? "FOLLOW" :
+                     order == AllyOrder::Stay ? "STAY" :
+                     order == AllyOrder::Fetch ? "FETCH" : "GUARD");
+                game.pushSystemMessage("COMPANIONS: " + std::to_string(n) + " | ORDER: " + o + " | USAGE: pet <follow|stay|fetch|guard>");
+            }
+            return;
+        }
+
+        AllyOrder o = AllyOrder::Follow;
+        if (v == "follow" || v == "f") o = AllyOrder::Follow;
+        else if (v == "stay" || v == "hold" || v == "s") o = AllyOrder::Stay;
+        else if (v == "fetch") o = AllyOrder::Fetch;
+        else if (v == "guard" || v == "g") o = AllyOrder::Guard;
+        else {
+            game.pushSystemMessage("USAGE: pet <follow|stay|fetch|guard>");
+            return;
+        }
+
+        game.setAlliesOrder(o, true);
+        return;
+    }
+
+    if (cmd == "tame") {
+        game.tame();
+        return;
+    }
+
     if (cmd == "shout" || cmd == "yell") {
         game.shout();
         return;
@@ -1690,6 +1891,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::KoboldSlinger: return "KOBOLD";
         case EntityKind::Wolf: return "WOLF";
         case EntityKind::Dog: return "DOG";
+        case EntityKind::Ghost: return "GHOST";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";

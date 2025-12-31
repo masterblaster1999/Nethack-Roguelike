@@ -93,7 +93,17 @@ std::string Game::describeAt(Vec2i p) const {
                 ss << " | YOU";
             } else {
                 std::string label = kindName(e->kind);
-                if (e->kind == EntityKind::Dog) label = "DOG (ALLY)";
+                if (e->friendly) {
+                    label += " (ALLY";
+                    switch (e->allyOrder) {
+                        case AllyOrder::Stay:  label += ", STAY"; break;
+                        case AllyOrder::Fetch: label += ", FETCH"; break;
+                        case AllyOrder::Guard: label += ", GUARD"; break;
+                        case AllyOrder::Follow:
+                        default: break;
+                    }
+                    label += ")";
+                }
                 ss << " | " << label << " " << e->hp << "/" << e->hpMax;
 
                 if (e->gearMelee.id != 0 && isMeleeWeapon(e->gearMelee.kind)) {
@@ -135,6 +145,10 @@ std::string Game::describeAt(Vec2i p) const {
 
     // Environmental fields
     if (dung.inBounds(p.x, p.y) && dung.at(p.x, p.y).visible) {
+        const uint8_t f = fireAt(p.x, p.y);
+        if (f > 0u) {
+            ss << " | FIRE";
+        }
         const uint8_t g = confusionGasAt(p.x, p.y);
         if (g > 0u) {
             ss << " | GAS (CONFUSION)";
@@ -156,6 +170,12 @@ void Game::restUntilSafe() {
     // If nothing to do, don't burn time.
     if (player().hp >= player().hpMax) {
         pushMsg("YOU ARE ALREADY AT FULL HEALTH.", MessageKind::System, true);
+        return;
+    }
+
+    // Resting while standing in fire (or actively burning) is a great way to die.
+    if (player().effects.burnTurns > 0 || fireAt(player().pos.x, player().pos.y) > 0u) {
+        pushMsg("YOU CAN'T REST WHILE ON FIRE!", MessageKind::Warning, true);
         return;
     }
 

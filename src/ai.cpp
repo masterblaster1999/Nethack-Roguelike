@@ -23,6 +23,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::KoboldSlinger: return "KOBOLD";
         case EntityKind::Wolf: return "WOLF";
         case EntityKind::Dog: return "DOG";
+        case EntityKind::Ghost: return "GHOST";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";
@@ -35,15 +36,36 @@ const char* kindName(EntityKind k) {
     }
 }
 
+
+
+int smellFor(EntityKind k) {
+    switch (k) {
+        // Animals and bestial monsters track well by scent.
+        case EntityKind::Wolf: return 12;
+        case EntityKind::Dog: return 11;
+        case EntityKind::Snake: return 10;
+        case EntityKind::Spider: return 9;
+        // Some brutes have a decent nose.
+        case EntityKind::Troll: return 7;
+        case EntityKind::Ogre: return 6;
+        default: return 0;
+    }
+}
+
 } // namespace
 
 void Game::monsterTurn() {
     if (isFinished()) return;
 
     const Entity& p = player();
-    Entity* dog = nullptr;
+
+    // Friendly companions (dog, tamed beasts, etc.)
+    std::vector<Entity*> allies;
+    allies.reserve(8);
     for (auto& e : ents) {
-        if (e.kind == EntityKind::Dog && e.hp > 0) { dog = &e; break; }
+        if (e.id == playerId_) continue;
+        if (e.hp <= 0) continue;
+        if (e.friendly) allies.push_back(&e);
     }
     const int W = dung.width;
     const int H = dung.height;
@@ -166,6 +188,74 @@ void Game::monsterTurn() {
     constexpr int ENERGY_PER_ACTION = 100;
     constexpr int MAX_ACTIONS_PER_TURN = 3; // safety cap: avoids runaway loops if speed is ever mis-set
 
+    // Gold pickup helper used by FETCH-mode allies.
+    auto gainGold = [&](int amount) {
+        if (amount <= 0) return;
+        Item g;
+        g.id = nextItemId++;
+        g.kind = ItemKind::Gold;
+        g.count = amount;
+        g.charges = 0;
+        g.enchant = 0;
+        g.buc = 0;
+        g.spriteSeed = rng.nextU32();
+        g.shopPrice = 0;
+        g.shopDepth = 0;
+
+        if (!tryStackItem(inv, g)) {
+            inv.push_back(g);
+        }
+    };
+
+    auto pickupGoldAt = [&](Entity& ally) -> bool {
+        for (size_t gi = 0; gi < ground.size(); ++gi) {
+            GroundItem& g = ground[gi];
+            if (g.pos != ally.pos) continue;
+            if (g.item.kind != ItemKind::Gold) continue;
+            if (g.item.shopPrice > 0) continue; // don't steal shop stock
+            const int amt = std::max(0, g.item.count);
+            if (amt <= 0) continue;
+
+            // Remove the pile and credit the player.
+            ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(gi));
+            gainGold(amt);
+
+            const bool vis = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
+            if (vis) {
+                std::ostringstream ss;
+                ss << "YOUR " << kindName(ally.kind) << " FETCHES " << amt << " GOLD.";
+                pushMsg(ss.str(), MessageKind::Loot, true);
+            }
+            return true;
+        }
+        return false;
+    };
+
+    auto findVisibleGoldTarget = [&](const Entity& ally, Vec2i& out) -> bool {
+        int bestMan = 999999;
+        Vec2i best{-1, -1};
+
+        for (const auto& g : ground) {
+            if (g.item.kind != ItemKind::Gold) continue;
+            if (g.item.shopPrice > 0) continue;
+            if (g.item.count <= 0) continue;
+
+            if (!dung.inBounds(g.pos.x, g.pos.y)) continue;
+            const Tile& t0 = dung.at(g.pos.x, g.pos.y);
+            if (!t0.visible) continue;
+
+            const int man = manhattan(ally.pos, g.pos);
+            if (man < bestMan) {
+                bestMan = man;
+                best = g.pos;
+            }
+        }
+
+        if (best.x < 0) return false;
+        out = best;
+        return true;
+    };
+
     // Pack monsters will "reserve" adjacent-to-player tiles so they spread out
     // a bit more (reduced bumping / pileups).
     std::unordered_set<int> reservedAdj;
@@ -192,19 +282,30 @@ void Game::monsterTurn() {
 
         refreshPackAnchor();
 
-        // Starting companion AI (Dog): follows the player and fights nearby hostiles.
-        if (m.kind == EntityKind::Dog) {
+        // Ally AI: friendly companions (dog, tamed beasts, etc.).
+        if (m.friendly) {
+            // FETCH: grab any gold you're standing on first.
+            if (m.allyOrder == AllyOrder::Fetch) {
+                if (pickupGoldAt(m)) return;
+            }
+
             // Look for the nearest hostile in line-of-sight.
             Entity* best = nullptr;
             int bestMan = 9999;
+
+            int maxChase = LOS_MANHATTAN;
+            if (m.allyOrder == AllyOrder::Stay) maxChase = 8;
+            else if (m.allyOrder == AllyOrder::Fetch) maxChase = 10;
+            else if (m.allyOrder == AllyOrder::Guard) maxChase = LOS_MANHATTAN;
+
             for (auto& e : ents) {
                 if (e.id == playerId_) continue;
                 if (e.hp <= 0) continue;
-                if (e.kind == EntityKind::Dog) continue;
+                if (e.friendly) continue;
                 if (e.kind == EntityKind::Shopkeeper && !e.alerted) continue;
 
                 const int man0 = manhattan(m.pos, e.pos);
-                if (man0 > LOS_MANHATTAN) continue;
+                if (man0 > maxChase) continue;
                 if (!dung.hasLineOfSight(m.pos.x, m.pos.y, e.pos.x, e.pos.y)) continue;
 
                 if (man0 < bestMan) {
@@ -227,7 +328,28 @@ void Game::monsterTurn() {
                 return;
             }
 
-            // No visible hostiles: stick close to the player.
+            // No visible hostiles: obey orders.
+            if (m.allyOrder == AllyOrder::Stay || m.allyOrder == AllyOrder::Guard) {
+                return;
+            }
+
+            if (m.allyOrder == AllyOrder::Fetch) {
+                Vec2i goldPos;
+                if (findVisibleGoldTarget(m, goldPos)) {
+                    if (goldPos == m.pos) {
+                        (void)pickupGoldAt(m);
+                        return;
+                    }
+                    const auto& costMap = getCostMap(goldPos, PathMode::Normal);
+                    const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                    if (step != m.pos) {
+                        tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
+                        return;
+                    }
+                }
+            }
+
+            // Default: stick close to the player.
             const int dist = chebyshev(m.pos, p.pos);
             if (dist > 2) {
                 const auto& costMap = getCostMap(p.pos, PathMode::Normal);
@@ -239,8 +361,7 @@ void Game::monsterTurn() {
             return;
         }
 
-
-        // Peaceful shopkeepers don't hunt or wander.
+// Peaceful shopkeepers don't hunt or wander.
         if (m.kind == EntityKind::Shopkeeper && !m.alerted) {
             // Don't allow "banked" energy while peaceful.
             m.energy = 0;
@@ -248,6 +369,42 @@ void Game::monsterTurn() {
         }
 
         const int man = manhattan(m.pos, p.pos);
+
+        const int smellR = smellFor(m.kind);
+        const uint8_t scentHere = (smellR > 0) ? scentAt(m.pos.x, m.pos.y) : 0u;
+
+        auto bestScentStep = [&]() -> Vec2i {
+            if (smellR <= 0) return m.pos;
+
+            // Require a meaningful gradient to avoid oscillations on very faint scent.
+            constexpr uint8_t TRACK_THRESHOLD = 32u;
+
+            Vec2i best = m.pos;
+            uint8_t bestV = scentHere;
+
+            for (int di = 0; di < 8; ++di) {
+                const int dx = dirs[di][0];
+                const int dy = dirs[di][1];
+                const int nx = m.pos.x + dx;
+                const int ny = m.pos.y + dy;
+
+                if (!dung.inBounds(nx, ny)) continue;
+                if (!dung.isWalkable(nx, ny)) continue;
+
+                if (dx != 0 && dy != 0) {
+                    if (!diagOk(m.pos.x, m.pos.y, dx, dy)) continue;
+                }
+
+                const uint8_t sv = scentAt(nx, ny);
+                if (sv > bestV) {
+                    bestV = sv;
+                    best = {nx, ny};
+                }
+            }
+
+            if (best != m.pos && bestV >= TRACK_THRESHOLD) return best;
+            return m.pos;
+        };
 
         bool seesPlayer = false;
         if (man <= LOS_MANHATTAN) {
@@ -277,8 +434,15 @@ void Game::monsterTurn() {
             m.lastKnownPlayerAge = 0;
             agedThisTurn = true;
         } else if (m.alerted && !agedThisTurn) {
-            if (m.lastKnownPlayerAge < 9999) m.lastKnownPlayerAge += 1;
-            agedThisTurn = true;
+            // If this monster has a nose and is currently standing in a reasonably fresh scent
+            // trail, keep it "alerted" without aging out. This lets smell-capable monsters keep
+            // tracking around corners even after visual contact is lost.
+            if (smellR > 0 && scentHere >= 24u) {
+                agedThisTurn = true;
+            } else {
+                if (m.lastKnownPlayerAge < 9999) m.lastKnownPlayerAge += 1;
+                agedThisTurn = true;
+            }
         }
 
         // Compatibility fallback: if something flagged the monster alerted but didn't provide a
@@ -300,6 +464,15 @@ void Game::monsterTurn() {
         } else if (m.alerted && m.lastKnownPlayerPos.x >= 0 && m.lastKnownPlayerPos.y >= 0 && (m.kind == EntityKind::Shopkeeper || m.lastKnownPlayerAge <= TRACK_TURNS)) {
             target = m.lastKnownPlayerPos;
             hunting = true;
+        }
+        else if (m.alerted && smellR > 0) {
+            // Smell tracking fallback: if the monster has lost the player's exact trail but can
+            // still pick up scent nearby, keep hunting.
+            const Vec2i step = bestScentStep();
+            if (step != m.pos) {
+                target = step;
+                hunting = true;
+            }
         }
 
         if (!hunting) {
@@ -353,10 +526,14 @@ void Game::monsterTurn() {
             attackMelee(m, pm);
             return;
         }
-        // Monsters will also fight your companion if it blocks them.
-        if (dog && dog->hp > 0 && dog->id != m.id && isAdjacent8(m.pos, dog->pos)) {
-            attackMelee(m, *dog);
-            return;
+        // Monsters will also fight your companions if they block them.
+        for (Entity* a : allies) {
+            if (!a || a->hp <= 0) continue;
+            if (a->id == m.id) continue;
+            if (isAdjacent8(m.pos, a->pos)) {
+                attackMelee(m, *a);
+                return;
+            }
         }
 
         // Ammo-based ranged monsters can run out. If they're standing on free ammo, reload it.
@@ -714,6 +891,15 @@ void Game::monsterTurn() {
                 }
             }
             // Fallback: chase directly below.
+        }
+
+        // Smell tracking: if a fresh scent gradient exists, follow it before falling back to
+        // the generic chase step (this helps around corners and after invis/darkness break LOS).
+        if (!seesPlayer && smellR > 0) {
+            const Vec2i to = bestScentStep();
+            if (to != m.pos) {
+                if (tryMove(m, to.x - m.pos.x, to.y - m.pos.y)) return;
+            }
         }
 
         // Default: step toward the hunt target using a cost-to-target map.

@@ -24,15 +24,23 @@ struct Settings {
     // UI skin (purely cosmetic)
     UITheme uiTheme = UITheme::DarkStone;   // darkstone|parchment|arcane
     bool uiPanelsTextured = true;           // textured|solid
+    bool voxelSprites = true;               // true = 3D voxel-extruded sprites (entities/items/projectiles)
 
     // Rendering / performance
     // - vsync: enables SDL_Renderer vsync (lower CPU usage, smoother rendering).
     // - maxFps: optional software cap when vsync is disabled (0 = uncapped).
+    // - textureCacheMB: approximate VRAM budget for cached entity/item/projectile textures.
+    //   0 disables eviction (unlimited).
+    int textureCacheMB = 256;
     bool vsync = true;
     int maxFps = 0; // 0 or 30..240
 
     // Input
     bool controllerEnabled = true;
+
+    // Control preset (convenience: applies a cohesive bind_* scheme)
+    // control_preset: modern|nethack
+    ControlPreset controlPreset = ControlPreset::Modern;
 
     // Gameplay QoL
     AutoPickupMode autoPickup = AutoPickupMode::Gold; // off|gold|smart|all
@@ -63,6 +71,7 @@ struct Settings {
     bool yendorDoomEnabled = true; // Endgame escalation after acquiring the Amulet of Yendor.
     bool confirmQuit = true;   // Require ESC twice to quit (prevents accidental quits).
     bool autoMortem = true;   // Write a procrogue_mortem_*.txt dump automatically on win/death.
+    bool bonesEnabled = true; // Allow "bones files" (persistent death remnants between runs).
 };
 
 // Loads settings from disk. If the file is missing or invalid, defaults are used.

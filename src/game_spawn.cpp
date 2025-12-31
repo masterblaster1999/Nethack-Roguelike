@@ -127,6 +127,13 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear) {
             e.hpMax = 38; e.baseAtk = 7; e.baseDef = 3;
             e.willFlee = false;
             break;
+        case EntityKind::Ghost:
+            e.hpMax = 20; e.baseAtk = 5; e.baseDef = 3;
+            e.willFlee = false;
+            // Ghosts regenerate a bit; they're meant to guard "bones" loot.
+            e.regenChancePct = 20;
+            e.regenAmount = 1;
+            break;
         default:
             e.hpMax = 6; e.baseAtk = 1; e.baseDef = 0;
             e.willFlee = true;
@@ -1069,6 +1076,58 @@ void Game::applyEndOfTurnEffects() {
             applyGasTo(m, false);
         }
     }
+
+    // ------------------------------------------------------------
+    // Environmental fields: Fire (persistent, tile-based)
+    //
+    // Fire is stored as an intensity map (0..255). Entities standing on fire have
+    // their burn duration "topped up" each turn.
+    // ------------------------------------------------------------
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+
+        auto fireIdx = [&](int x, int y) -> size_t {
+            return static_cast<size_t>(y * dung.width + x);
+        };
+        auto fireAt = [&](int x, int y) -> uint8_t {
+            if (!dung.inBounds(x, y)) return 0u;
+            const size_t i = fireIdx(x, y);
+            if (i >= fireField_.size()) return 0u;
+            return fireField_[i];
+        };
+
+        auto applyFireTo = [&](Entity& e, bool isPlayer) {
+            const uint8_t f = fireAt(e.pos.x, e.pos.y);
+            if (f == 0u) return;
+
+            // Scale burn severity with fire intensity. Keep the minimum at 2 so it
+            // doesn't instantly expire on the same turn it is applied.
+            int minTurns = 2 + static_cast<int>(f) / 3;
+            minTurns = clampi(minTurns, 2, 10);
+
+            const int before = e.effects.burnTurns;
+            if (before < minTurns) e.effects.burnTurns = minTurns;
+
+            // Message only on first ignition.
+            if (before == 0 && e.effects.burnTurns > 0) {
+                if (isPlayer) {
+                    pushMsg("YOU ARE ENGULFED IN FLAMES!", MessageKind::Warning, true);
+                } else if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(e.kind) << " CATCHES FIRE!";
+                    pushMsg(ss.str(), MessageKind::Info, false);
+                }
+            }
+        };
+
+        applyFireTo(p, true);
+        for (auto& m : ents) {
+            if (m.id == playerId_) continue;
+            if (m.hp <= 0) continue;
+            applyFireTo(m, false);
+        }
+    }
     // Timed poison: hurts once per full turn.
     if (p.effects.poisonTurns > 0) {
         p.effects.poisonTurns = std::max(0, p.effects.poisonTurns - 1);
@@ -1082,6 +1141,22 @@ void Game::applyEndOfTurnEffects() {
 
         if (p.effects.poisonTurns == 0) {
             pushMsg("THE POISON WEARS OFF.", MessageKind::System, false);
+        }
+    }
+
+    // Burning: hurts once per full turn.
+    if (p.effects.burnTurns > 0) {
+        p.effects.burnTurns = std::max(0, p.effects.burnTurns - 1);
+        p.hp -= 1;
+        if (p.hp <= 0) {
+            pushMsg("YOU BURN TO DEATH.", MessageKind::Combat, false);
+            if (endCause_.empty()) endCause_ = "BURNED TO DEATH";
+            gameOver = true;
+            return;
+        }
+
+        if (p.effects.burnTurns == 0) {
+            pushMsg(effectEndMessage(EffectKind::Burn), MessageKind::System, true);
         }
     }
 
@@ -1138,7 +1213,7 @@ void Game::applyEndOfTurnEffects() {
 
     // Natural regeneration (slow baseline healing).
     // Intentionally disabled while poisoned to keep poison meaningful.
-    if (p.effects.poisonTurns > 0 || p.hp >= p.hpMax) {
+    if (p.effects.poisonTurns > 0 || p.effects.burnTurns > 0 || p.hp >= p.hpMax) {
         naturalRegenCounter = 0;
     } else if (p.effects.regenTurns <= 0) {
         // Faster natural regen as you level.
@@ -1288,6 +1363,27 @@ void Game::applyEndOfTurnEffects() {
             }
         }
 
+        // Burning: damage over time.
+        if (m.effects.burnTurns > 0) {
+            m.effects.burnTurns = std::max(0, m.effects.burnTurns - 1);
+            m.hp -= 1;
+
+            if (m.hp <= 0) {
+                // Only message if the monster is currently visible to the player.
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(m.kind) << " BURNS TO DEATH.";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                }
+            } else if (m.effects.burnTurns == 0) {
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(m.kind) << " STOPS BURNING.";
+                    pushMsg(ss.str(), MessageKind::System, false);
+                }
+            }
+        }
+
         // Timed webbing: prevents movement while >0, then wears off.
         if (m.effects.webTurns > 0) {
             m.effects.webTurns = std::max(0, m.effects.webTurns - 1);
@@ -1365,6 +1461,80 @@ void Game::applyEndOfTurnEffects() {
         }
     }
 
+    // Update fire field decay/spread.
+    // The fire field generally decays over time, with a small chance to spread when strong.
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (expect > 0 && fireField_.size() != expect) {
+            fireField_.assign(expect, 0u);
+        }
+
+        if (!fireField_.empty()) {
+            // Fire burns away any web traps it overlaps.
+            int websBurnedSeen = 0;
+            for (size_t ti = 0; ti < trapsCur.size(); ) {
+                Trap& tr = trapsCur[ti];
+                if (tr.kind == TrapKind::Web && dung.inBounds(tr.pos.x, tr.pos.y)) {
+                    const size_t i = static_cast<size_t>(tr.pos.y * dung.width + tr.pos.x);
+                    if (i < fireField_.size() && fireField_[i] > 0u) {
+                        if (dung.at(tr.pos.x, tr.pos.y).visible) ++websBurnedSeen;
+                        trapsCur.erase(trapsCur.begin() + static_cast<std::vector<Trap>::difference_type>(ti));
+                        continue;
+                    }
+                }
+                ++ti;
+            }
+            if (websBurnedSeen > 0) {
+                pushMsg(websBurnedSeen == 1 ? "A WEB BURNS AWAY." : "WEBS BURN AWAY.", MessageKind::System, true);
+            }
+
+            const int w = dung.width;
+            const int h = dung.height;
+            const size_t n = static_cast<size_t>(w * h);
+
+            std::vector<uint8_t> next(n, 0u);
+            auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
+            auto passable = [&](int x, int y) -> bool {
+                if (!dung.inBounds(x, y)) return false;
+                // Keep fire on walkable tiles (floors, open doors, stairs).
+                return dung.isWalkable(x, y);
+            };
+
+            constexpr Vec2i kDirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const size_t i = idx2(x, y);
+                    const uint8_t s = fireField_[i];
+                    if (s == 0u) continue;
+                    if (!passable(x, y)) continue;
+
+                    // Always decay in place.
+                    const uint8_t self = (s > 0u) ? static_cast<uint8_t>(s - 1u) : 0u;
+                    if (next[i] < self) next[i] = self;
+
+                    // Strong fires can spread a bit, but we keep this rare to avoid runaway map-wide burns.
+                    if (s >= 8u) {
+                        const float baseChance = std::min(0.12f, 0.02f * static_cast<float>(s - 7u));
+                        const uint8_t spread = static_cast<uint8_t>(std::max(1, static_cast<int>(s) - 3));
+                        for (const Vec2i& d : kDirs) {
+                            const int nx = x + d.x;
+                            const int ny = y + d.y;
+                            if (!passable(nx, ny)) continue;
+                            const size_t j = idx2(nx, ny);
+                            if (fireField_[j] != 0u) continue;
+                            if (rng.chance(baseChance)) {
+                                if (next[j] < spread) next[j] = spread;
+                            }
+                        }
+                    }
+                }
+            }
+
+            fireField_.swap(next);
+        }
+    }
+
 }
 
 void Game::cleanupDead() {
@@ -1421,6 +1591,7 @@ void Game::cleanupDead() {
                 case EntityKind::Ogre:          corpseKind = ItemKind::CorpseOgre;     chance = 0.85f; break;
                 case EntityKind::Mimic:         corpseKind = ItemKind::CorpseMimic;    chance = 0.60f; break;
                 case EntityKind::Minotaur:      corpseKind = ItemKind::CorpseMinotaur; chance = 0.90f; break;
+                case EntityKind::Ghost:         ok = false; break;
                 default:
                     ok = false;
                     break;

@@ -198,6 +198,12 @@ bool Game::stepAutoMove() {
         return false;
     }
 
+    if (player().effects.burnTurns > 0 || fireAt(player().pos.x, player().pos.y) > 0u) {
+        pushMsg("AUTO-MOVE STOPPED (YOU ARE ON FIRE).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
     // In auto-explore mode, if we see "interesting" loot that won't be auto-picked, retarget toward it and
     // stop when we arrive. This is less jarring than stopping immediately on sight.
     if (autoMode == AutoMoveMode::Explore) {
@@ -303,6 +309,7 @@ bool Game::stepAutoMove() {
     const int poisonBefore = p.effects.poisonTurns;
     const int webBefore = p.effects.webTurns;
     const int confBefore = p.effects.confusionTurns;
+    const int burnBefore = p.effects.burnTurns;
     const Vec2i posBefore = p.pos;
 
     const bool acted = tryMove(p, dx, dy);
@@ -351,6 +358,24 @@ bool Game::stepAutoMove() {
 
     if (p.effects.confusionTurns > confBefore) {
         pushMsg("AUTO-MOVE STOPPED (YOU WERE CONFUSED).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
+    if (p.effects.burnTurns > burnBefore) {
+        pushMsg("AUTO-MOVE STOPPED (YOU CAUGHT FIRE).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
+    if (p.effects.burnTurns > burnBefore) {
+        pushMsg("AUTO-MOVE STOPPED (YOU CAUGHT FIRE).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
+    if (p.effects.burnTurns > burnBefore) {
+        pushMsg("AUTO-MOVE STOPPED (YOU CAUGHT FIRE).", MessageKind::Warning);
         stopAutoMove(true);
         return false;
     }
@@ -437,6 +462,7 @@ Vec2i Game::findNearestExploreFrontier() const {
             if (!(canUnlockDoors && tt == TileType::DoorLocked)) return false;
         }
         if (isKnownTrap(x, y)) return false;
+        if (fireAt(x, y) > 0u) return false;
 
         // Any adjacent unexplored tile means stepping here can reveal something.
         const int dirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
@@ -472,9 +498,10 @@ Vec2i Game::findNearestExploreFrontier() const {
                 if (!(canUnlockDoors && tt == TileType::DoorLocked)) continue;
             }
             if (isKnownTrap(nx, ny)) continue;
+            if (fireAt(nx, ny) > 0u) continue;
 
             if (const Entity* occ = entityAt(nx, ny)) {
-                if (occ->id != playerId_ && occ->kind != EntityKind::Dog) continue;
+                if (occ->id != playerId_ && !occ->friendly) continue;
             }
 
             visited[ii] = 1;
@@ -526,7 +553,7 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
 
         // Don't path through monsters.
         if (const Entity* occ = entityAt(x, y)) {
-            if (occ->id != playerId_ && occ->kind != EntityKind::Dog) return false;
+            if (occ->id != playerId_ && !occ->friendly) return false;
         }
 
         return true;
@@ -537,17 +564,25 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
         const TileType tt = dung.at(x, y).type;
 
         // Default: moving into a tile costs one turn.
+        int cost = 1;
         switch (tt) {
             case TileType::DoorClosed:
                 // 1 turn to open + 1 to step in.
-                return 2;
+                cost = 2;
+                break;
             case TileType::DoorLocked:
                 if (!canUnlockDoors) return 0;
                 // Keys are guaranteed; lockpicks can fail and burn turns.
-                return hasKey ? 2 : 4;
+                cost = hasKey ? 2 : 4;
+                break;
             default:
-                return 1;
+                cost = 1;
+                break;
         }
+
+        // Strongly prefer routes that avoid lingering fire, but don't hard-block.
+        if (fireAt(x, y) > 0u) cost += 25;
+        return cost;
     };
 
     auto diagOk = [&](int fromX, int fromY, int dx, int dy) -> bool {

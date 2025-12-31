@@ -14,6 +14,10 @@ struct Settings {
     // Player identity (used for the scoreboard and HUD)
     std::string playerName = "PLAYER";
 
+    // Default starting class for new runs.
+    // player_class: adventurer|knight|rogue|archer|wizard
+    PlayerClass playerClass = PlayerClass::Adventurer;
+
     // HUD status tags: show remaining turns for timed effects (POISON(6), REGEN(3), ...)
     bool showEffectTimers = true;
 
@@ -56,6 +60,7 @@ struct Settings {
     bool hungerEnabled = false; // Optional hunger system (adds food).
     bool encumbranceEnabled = false; // Optional carrying capacity / burden system.
     bool lightingEnabled = false; // Optional darkness/lighting system (requires torches on deeper floors).
+    bool yendorDoomEnabled = true; // Endgame escalation after acquiring the Amulet of Yendor.
     bool confirmQuit = true;   // Require ESC twice to quit (prevents accidental quits).
     bool autoMortem = true;   // Write a procrogue_mortem_*.txt dump automatically on win/death.
 };

@@ -56,6 +56,7 @@ static void printUsage(const char* exe) {
         << "Usage: " << (exe ? exe : "procrogue") << " [options]\n\n"
         << "Options:\n"
         << "  --seed <n>           Start a new run with a specific seed\n"
+        << "  --class <name>      Start a new run as a class (adventurer|knight|rogue|archer|wizard)\n"
         << "  --daily              Start a daily run (deterministic UTC-date seed)\n"
         << "  --load               Auto-load the manual save on start (alias: --continue)\n"
         << "  --load-auto          Auto-load the autosave on start\n"
@@ -87,6 +88,7 @@ int main(int argc, char** argv) {
     // By default we use a per-user writable directory (SDL_GetPrefPath), but this can be overridden.
     const std::optional<std::string> dataDirArg = parseStringArg(argc, argv, "--data-dir");
     const std::optional<std::string> slotArg = parseStringArg(argc, argv, "--slot");
+    const std::optional<std::string> classArg = parseStringArg(argc, argv, "--class");
     const bool portable = hasFlag(argc, argv, "--portable");
     const bool resetSettings = hasFlag(argc, argv, "--reset-settings");
 
@@ -220,11 +222,25 @@ int main(int argc, char** argv) {
     game.setHungerEnabled(settings.hungerEnabled);
     game.setEncumbranceEnabled(settings.encumbranceEnabled);
     game.setLightingEnabled(settings.lightingEnabled);
+    game.setYendorDoomEnabled(settings.yendorDoomEnabled);
     game.setConfirmQuitEnabled(settings.confirmQuit);
     game.setAutoMortemEnabled(settings.autoMortem);
     game.setSaveBackups(settings.saveBackups);
 
     game.setPlayerName(settings.playerName);
+
+    // Default starting class for new runs.
+    PlayerClass startClass = settings.playerClass;
+    if (classArg && !classArg->empty()) {
+        PlayerClass pc = PlayerClass::Adventurer;
+        if (parsePlayerClass(*classArg, pc)) {
+            startClass = pc;
+        } else {
+            std::cerr << "Unknown class '" << *classArg << "' (use adventurer|knight|rogue|archer|wizard)."
+                      << " Falling back to settings player_class.\n";
+        }
+    }
+    game.setPlayerClass(startClass);
     game.setShowEffectTimers(settings.showEffectTimers);
     game.setUITheme(settings.uiTheme);
     game.setUIPanelsTextured(settings.uiPanelsTextured);
@@ -561,6 +577,8 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "identify_items", game.identificationEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "hunger_enabled", game.hungerEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "encumbrance_enabled", game.encumbranceEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "lighting_enabled", game.lightingEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "yendor_doom_enabled", game.yendorDoomEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "confirm_quit", game.confirmQuitEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "auto_mortem", game.autoMortemEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "autosave_every_turns", std::to_string(game.autosaveEveryTurns()));
@@ -572,6 +590,7 @@ int main(int argc, char** argv) {
             }
 
             ok &= updateIniKey(settingsPath, "player_name", game.playerName());
+            ok &= updateIniKey(settingsPath, "player_class", game.playerClassIdString());
             ok &= updateIniKey(settingsPath, "show_effect_timers", game.showEffectTimers() ? "true" : "false");
 
 auto uiThemeToString = [](UITheme t) -> const char* {
@@ -606,6 +625,8 @@ ok &= updateIniKey(settingsPath, "ui_panels", game.uiPanelsTextured() ? "texture
             game.setIdentificationEnabled(newSettings.identifyItems);
             game.setHungerEnabled(newSettings.hungerEnabled);
             game.setEncumbranceEnabled(newSettings.encumbranceEnabled);
+            game.setLightingEnabled(newSettings.lightingEnabled);
+            game.setYendorDoomEnabled(newSettings.yendorDoomEnabled);
             game.setConfirmQuitEnabled(newSettings.confirmQuit);
             game.setAutoMortemEnabled(newSettings.autoMortem);
             game.setPlayerName(newSettings.playerName);

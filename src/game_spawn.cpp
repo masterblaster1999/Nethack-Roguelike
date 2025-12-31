@@ -1,16 +1,245 @@
 #include "game_internal.hpp"
 
 Vec2i Game::randomFreeTileInRoom(const Room& r, int tries) {
+    tries = std::max(10, tries);
+
     for (int i = 0; i < tries; ++i) {
-        int x0 = rng.range(r.x + 1, std::max(r.x + 1, r.x + r.w - 2));
-        int y0 = rng.range(r.y + 1, std::max(r.y + 1, r.y + r.h - 2));
+        const int x0 = rng.range(r.x + 1, std::max(r.x + 1, r.x + r.w - 2));
+        const int y0 = rng.range(r.y + 1, std::max(r.y + 1, r.y + r.h - 2));
         if (!dung.inBounds(x0, y0)) continue;
-        TileType t = dung.at(x0, y0).type;
+        const TileType t = dung.at(x0, y0).type;
         if (!(t == TileType::Floor || t == TileType::StairsUp || t == TileType::StairsDown || t == TileType::DoorOpen)) continue;
         if (entityAt(x0, y0)) continue;
         return {x0, y0};
     }
+
+    // Fallback: brute scan the room interior for any valid tile.
+    for (int y = r.y + 1; y < r.y + r.h - 1; ++y) {
+        for (int x = r.x + 1; x < r.x + r.w - 1; ++x) {
+            if (!dung.inBounds(x, y)) continue;
+            const TileType t = dung.at(x, y).type;
+            if (!(t == TileType::Floor || t == TileType::StairsUp || t == TileType::StairsDown || t == TileType::DoorOpen)) continue;
+            if (entityAt(x, y)) continue;
+            return {x, y};
+        }
+    }
+
+    // As a last resort, return a center-ish tile (may still be occupied in degenerate rooms).
     return {r.cx(), r.cy()};
+}
+
+Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear) {
+    Entity e;
+    e.id = nextEntityId++;
+    e.kind = k;
+    e.pos = pos;
+    e.groupId = groupId;
+    e.spriteSeed = rng.nextU32();
+
+    // Monster turn scheduling (fix: ensure spawned monsters use their intended speed).
+    e.speed = baseSpeedFor(k);
+
+    // Seed perception with something reasonable so newly-spawned pack AI doesn't do
+    // obviously-stupid things when the player is nearby.
+    if (!ents.empty() && playerId_ != 0) {
+        e.lastKnownPlayerPos = player().pos;
+    }
+
+    // Baselines per kind. Depth scaling happens below.
+    switch (k) {
+        case EntityKind::Goblin:
+            e.hpMax = 7; e.baseAtk = 1; e.baseDef = 0;
+            e.willFlee = true;
+            break;
+        case EntityKind::Orc:
+            e.hpMax = 10; e.baseAtk = 2; e.baseDef = 1;
+            e.willFlee = false;
+            break;
+        case EntityKind::Bat:
+            e.hpMax = 5; e.baseAtk = 1; e.baseDef = 0;
+            e.willFlee = true;
+            break;
+        case EntityKind::Slime:
+            e.hpMax = 12; e.baseAtk = 2; e.baseDef = 1;
+            e.willFlee = false;
+            break;
+        case EntityKind::SkeletonArcher:
+            e.hpMax = 9; e.baseAtk = 2; e.baseDef = 1;
+            e.willFlee = false;
+            e.canRanged = true;
+            // Ranged stats are stored per-entity (saved/loaded), so set them here on spawn.
+            e.rangedRange = 8;
+            e.rangedAtk = 6;
+            e.rangedProjectile = ProjectileKind::Arrow;
+            e.rangedAmmo = AmmoKind::Arrow;
+            break;
+        case EntityKind::KoboldSlinger:
+            e.hpMax = 8; e.baseAtk = 2; e.baseDef = 0;
+            e.willFlee = true;
+            e.canRanged = true;
+            e.rangedRange = 6;
+            e.rangedAtk = 5;
+            e.rangedProjectile = ProjectileKind::Rock;
+            e.rangedAmmo = AmmoKind::Rock;
+            break;
+        case EntityKind::Wolf:
+            e.hpMax = 6; e.baseAtk = 2; e.baseDef = 0;
+            e.willFlee = false;
+            e.packAI = true;
+            break;
+        case EntityKind::Troll:
+            e.hpMax = 16; e.baseAtk = 4; e.baseDef = 2;
+            e.willFlee = false;
+            // Trolls regenerate slowly; makes them scary if you can't finish them quickly.
+            e.regenChancePct = 25;
+            e.regenAmount = 1;
+            break;
+        case EntityKind::Wizard:
+            e.hpMax = 12; e.baseAtk = 3; e.baseDef = 1;
+            e.willFlee = false;
+            e.canRanged = true;
+            e.rangedRange = 7;
+            e.rangedAtk = 7;
+            e.rangedProjectile = ProjectileKind::Spark;
+            e.rangedAmmo = AmmoKind::None;
+            break;
+        case EntityKind::Snake:
+            e.hpMax = 7; e.baseAtk = 2; e.baseDef = 0;
+            e.willFlee = false;
+            break;
+        case EntityKind::Spider:
+            e.hpMax = 8; e.baseAtk = 3; e.baseDef = 1;
+            e.willFlee = false;
+            break;
+        case EntityKind::Ogre:
+            e.hpMax = 18; e.baseAtk = 5; e.baseDef = 2;
+            e.willFlee = false;
+            break;
+        case EntityKind::Mimic:
+            e.hpMax = 14; e.baseAtk = 4; e.baseDef = 2;
+            e.willFlee = false;
+            break;
+        case EntityKind::Shopkeeper:
+            e.hpMax = 18; e.baseAtk = 6; e.baseDef = 4;
+            e.willFlee = false;
+            break;
+        case EntityKind::Minotaur:
+            e.hpMax = 38; e.baseAtk = 7; e.baseDef = 3;
+            e.willFlee = false;
+            break;
+        default:
+            e.hpMax = 6; e.baseAtk = 1; e.baseDef = 0;
+            e.willFlee = true;
+            break;
+    }
+
+    // Depth scaling. Keep early monsters relevant without letting endgame balloon out of control.
+    int d = std::max(0, depth_ - 1);
+    if (k == EntityKind::Goblin || k == EntityKind::Bat || k == EntityKind::Slime || k == EntityKind::Snake) {
+        d = d / 2;
+    }
+    if (k == EntityKind::Minotaur) {
+        // Boss-tier baseline already; scale a bit slower.
+        d = std::max(0, depth_ - 6);
+    }
+
+    e.hpMax += d;
+    e.hp = e.hpMax;
+    e.baseAtk += (d / 3);
+    e.baseDef += (d / 4);
+
+    // Fix: ammo-based ranged monsters should spawn with a sensible quiver.
+    if (e.rangedAmmo != AmmoKind::None) {
+        const int depthBonus = std::max(0, (depth_ - 1) / 3);
+        if (e.rangedAmmo == AmmoKind::Arrow) {
+            e.rangedAmmoCount = 12 + depthBonus;
+        } else if (e.rangedAmmo == AmmoKind::Rock) {
+            e.rangedAmmoCount = 18 + depthBonus;
+        }
+        e.rangedAmmoCount = std::clamp(e.rangedAmmoCount, 6, 30);
+    }
+
+    // Spawn with basic gear for humanoid-ish monsters.
+    // This makes loot feel more "earned" (you can take what they were using),
+    // and creates emergent difficulty when monsters pick up better weapons/armor.
+    if (allowGear && (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k))) {
+        const RoomType rt = roomTypeAt(dung, pos);
+
+        auto makeGear = [&](ItemKind kind) -> Item {
+            Item it;
+            it.id = 1; // non-zero => present
+            it.kind = kind;
+            it.count = 1;
+            it.spriteSeed = rng.nextU32();
+            it.shopPrice = 0;
+            it.shopDepth = 0;
+
+            if (isWearableGear(kind)) {
+                it.buc = rollBucForGear(rng, depth_, rt);
+
+                // A little bit of enchantment scaling with depth.
+                if (depth_ >= 4 && rng.chance(0.18f)) {
+                    it.enchant = 1;
+                    if (depth_ >= 7 && rng.chance(0.07f)) it.enchant = 2;
+                }
+            }
+
+            return it;
+        };
+
+        switch (k) {
+            case EntityKind::Goblin:
+                if (rng.chance(0.60f)) {
+                    e.gearMelee = makeGear(ItemKind::Dagger);
+                }
+                break;
+
+            case EntityKind::Orc:
+                if (rng.chance(0.80f)) {
+                    const ItemKind wk = (depth_ >= 4 && rng.chance(0.25f)) ? ItemKind::Axe : ItemKind::Sword;
+                    e.gearMelee = makeGear(wk);
+                }
+                if (rng.chance(0.30f)) {
+                    const ItemKind ak = (depth_ >= 6 && rng.chance(0.20f)) ? ItemKind::ChainArmor : ItemKind::LeatherArmor;
+                    e.gearArmor = makeGear(ak);
+                }
+                break;
+
+            case EntityKind::SkeletonArcher:
+                if (rng.chance(0.55f)) {
+                    e.gearMelee = makeGear(ItemKind::Dagger);
+                }
+                if (rng.chance(0.20f)) {
+                    e.gearArmor = makeGear(ItemKind::ChainArmor);
+                }
+                break;
+
+            case EntityKind::KoboldSlinger:
+                if (rng.chance(0.55f)) {
+                    e.gearMelee = makeGear(ItemKind::Dagger);
+                }
+                break;
+
+            case EntityKind::Wizard:
+                if (rng.chance(0.50f)) {
+                    e.gearMelee = makeGear(ItemKind::Dagger);
+                }
+                if (depth_ >= 5 && rng.chance(0.15f)) {
+                    e.gearArmor = makeGear(ItemKind::LeatherArmor);
+                }
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    return e;
+}
+
+Entity& Game::spawnMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear) {
+    ents.push_back(makeMonster(k, pos, groupId, allowGear));
+    return ents.back();
 }
 
 void Game::spawnMonsters() {
@@ -18,226 +247,6 @@ void Game::spawnMonsters() {
     if (rooms.empty()) return;
 
     int nextGroup = 1000;
-
-    auto addMonster = [&](EntityKind k, Vec2i pos, int groupId) {
-        Entity e;
-        e.id = nextEntityId++;
-        e.kind = k;
-        e.pos = pos;
-        e.groupId = groupId;
-        e.spriteSeed = rng.nextU32();
-        e.lastKnownPlayerPos = player().pos;
-
-        // Baselines per kind. Depth scaling happens below.
-        switch (k) {
-            case EntityKind::Goblin:
-                e.hpMax = 7; e.baseAtk = 1; e.baseDef = 0;
-                e.willFlee = true;
-                break;
-            case EntityKind::Orc:
-                e.hpMax = 10; e.baseAtk = 2; e.baseDef = 1;
-                e.willFlee = false;
-                break;
-            case EntityKind::Bat:
-                e.hpMax = 5; e.baseAtk = 1; e.baseDef = 0;
-                e.willFlee = true;
-                break;
-            case EntityKind::Slime:
-                e.hpMax = 12; e.baseAtk = 2; e.baseDef = 1;
-                e.willFlee = false;
-                break;
-            case EntityKind::SkeletonArcher:
-                e.hpMax = 9; e.baseAtk = 2; e.baseDef = 1;
-                e.willFlee = false;
-                e.canRanged = true;
-                // Ranged stats are stored per-entity (saved/loaded), so set them here on spawn.
-                e.rangedRange = 8;
-                e.rangedAtk = 6;
-                e.rangedProjectile = ProjectileKind::Arrow;
-                e.rangedAmmo = AmmoKind::Arrow;
-                break;
-            case EntityKind::KoboldSlinger:
-                e.hpMax = 8; e.baseAtk = 2; e.baseDef = 0;
-                e.willFlee = true;
-                e.canRanged = true;
-                e.rangedRange = 6;
-                e.rangedAtk = 5;
-                e.rangedProjectile = ProjectileKind::Rock;
-                e.rangedAmmo = AmmoKind::Rock;
-                break;
-            case EntityKind::Wolf:
-                e.hpMax = 6; e.baseAtk = 2; e.baseDef = 0;
-                e.willFlee = false;
-                e.packAI = true;
-                break;
-            case EntityKind::Troll:
-                e.hpMax = 16; e.baseAtk = 4; e.baseDef = 2;
-                e.willFlee = false;
-                // Trolls regenerate slowly; makes them scary if you can't finish them quickly.
-                e.regenChancePct = 25;
-                e.regenAmount = 1;
-                break;
-            case EntityKind::Wizard:
-                e.hpMax = 12; e.baseAtk = 3; e.baseDef = 1;
-                e.willFlee = false;
-                e.canRanged = true;
-                e.rangedRange = 7;
-                e.rangedAtk = 7;
-                e.rangedProjectile = ProjectileKind::Spark;
-                e.rangedAmmo = AmmoKind::None;
-                break;
-            case EntityKind::Snake:
-                e.hpMax = 7; e.baseAtk = 2; e.baseDef = 0;
-                e.willFlee = false;
-                break;
-            case EntityKind::Spider:
-                e.hpMax = 8; e.baseAtk = 3; e.baseDef = 1;
-                e.willFlee = false;
-                break;
-            case EntityKind::Ogre:
-                e.hpMax = 18; e.baseAtk = 5; e.baseDef = 2;
-                e.willFlee = false;
-                break;
-            case EntityKind::Mimic:
-                e.hpMax = 14; e.baseAtk = 4; e.baseDef = 2;
-                e.willFlee = false;
-                break;
-            case EntityKind::Shopkeeper:
-                e.hpMax = 18; e.baseAtk = 6; e.baseDef = 4;
-                e.willFlee = false;
-                break;
-            case EntityKind::Minotaur:
-                e.hpMax = 38; e.baseAtk = 7; e.baseDef = 3;
-                e.willFlee = false;
-                break;
-            default:
-                e.hpMax = 6; e.baseAtk = 1; e.baseDef = 0;
-                e.willFlee = true;
-                break;
-        }
-
-        // Depth scaling. Keep early monsters relevant without letting endgame balloon out of control.
-        int d = std::max(0, depth_ - 1);
-        if (k == EntityKind::Goblin || k == EntityKind::Bat || k == EntityKind::Slime || k == EntityKind::Snake) {
-            d = d / 2;
-        }
-        if (k == EntityKind::Minotaur) {
-            // Boss-tier baseline already; scale a bit slower.
-            d = std::max(0, depth_ - 6);
-        }
-
-        e.hpMax += d;
-        e.hp = e.hpMax;
-        e.baseAtk += (d / 3);
-        e.baseDef += (d / 4);
-
-        // Spawn with basic gear for humanoid-ish monsters.
-        // This makes loot feel more "earned" (you can take what they were using),
-        // and creates emergent difficulty when monsters pick up better weapons/armor.
-        if (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k)) {
-            const RoomType rt = roomTypeAt(dung, pos);
-
-            auto makeGear = [&](ItemKind kind) -> Item {
-                Item it;
-                it.id = 1; // non-zero => present
-                it.kind = kind;
-                it.count = 1;
-                it.spriteSeed = rng.nextU32();
-                it.shopPrice = 0;
-                it.shopDepth = 0;
-
-                if (isWearableGear(kind)) {
-                    it.buc = rollBucForGear(rng, depth_, rt);
-
-                    // A little bit of enchantment scaling with depth.
-                    if (depth_ >= 4 && rng.chance(0.18f)) {
-                        it.enchant = 1;
-                        if (depth_ >= 7 && rng.chance(0.07f)) it.enchant = 2;
-                    }
-                }
-
-                return it;
-            };
-
-            switch (k) {
-                case EntityKind::Goblin:
-                    if (rng.chance(0.60f)) {
-                        e.gearMelee = makeGear(ItemKind::Dagger);
-                    }
-                    break;
-
-                case EntityKind::Orc:
-                    if (rng.chance(0.80f)) {
-                        const ItemKind wk = (depth_ >= 4 && rng.chance(0.25f)) ? ItemKind::Axe : ItemKind::Sword;
-                        e.gearMelee = makeGear(wk);
-                    }
-                    if (rng.chance(0.30f)) {
-                        const ItemKind ak = (depth_ >= 6 && rng.chance(0.20f)) ? ItemKind::ChainArmor : ItemKind::LeatherArmor;
-                        e.gearArmor = makeGear(ak);
-                    }
-                    break;
-
-                case EntityKind::SkeletonArcher:
-                    if (rng.chance(0.55f)) {
-                        e.gearMelee = makeGear(ItemKind::Dagger);
-                    }
-                    if (rng.chance(0.20f)) {
-                        e.gearArmor = makeGear(ItemKind::ChainArmor);
-                    }
-                    break;
-
-                case EntityKind::KoboldSlinger:
-                    if (rng.chance(0.55f)) {
-                        e.gearMelee = makeGear(ItemKind::Dagger);
-                    }
-                    break;
-
-                case EntityKind::Wizard:
-                    if (rng.chance(0.50f)) {
-                        e.gearMelee = makeGear(ItemKind::Dagger);
-                    }
-                    if (depth_ >= 5 && rng.chance(0.15f)) {
-                        e.gearArmor = makeGear(ItemKind::LeatherArmor);
-                    }
-                    break;
-
-                default:
-                    break;
-            }
-        }
-
-        ents.push_back(e);
-    };
-
-    auto randomFreeTileInRoom = [&](const Room& r) {
-        // 200 tries, then fallback to brute scan.
-        for (int i = 0; i < 200; ++i) {
-            const int x = rng.range(r.x + 1, r.x + r.w - 2);
-            const int y = rng.range(r.y + 1, r.y + r.h - 2);
-            Vec2i p{x, y};
-            const auto& t = dung.at(p.x, p.y);
-            if (t.type != TileType::Floor && t.type != TileType::StairsUp && t.type != TileType::StairsDown && t.type != TileType::DoorOpen) {
-                continue;
-            }
-            if (entityAt(p.x, p.y)) continue;
-            return p;
-        }
-
-        for (int y = r.y + 1; y < r.y + r.h - 1; ++y) {
-            for (int x = r.x + 1; x < r.x + r.w - 1; ++x) {
-                Vec2i p{x, y};
-                const auto& t = dung.at(p.x, p.y);
-                if (t.type != TileType::Floor && t.type != TileType::StairsUp && t.type != TileType::StairsDown && t.type != TileType::DoorOpen) {
-                    continue;
-                }
-                if (entityAt(p.x, p.y)) continue;
-                return p;
-            }
-        }
-
-        // As a last resort, drop at center-ish.
-        return Vec2i{r.x + r.w / 2, r.y + r.h / 2};
-    };
 
     for (const Room& r : rooms) {
         const bool isStart = r.contains(dung.stairsUp.x, dung.stairsUp.y);
@@ -306,9 +315,9 @@ void Game::spawnMonsters() {
             }
 
             if (k == EntityKind::Wolf) {
-                addMonster(k, p, nextGroup++);
+                spawnMonster(k, p, nextGroup++);
             } else {
-                addMonster(k, p, 0);
+                spawnMonster(k, p, 0);
             }
         }
 
@@ -344,7 +353,7 @@ void Game::spawnMonsters() {
                     else k = EntityKind::Orc;
                 }
 
-                addMonster(k, p, 0);
+                spawnMonster(k, p, 0);
             }
         }
 
@@ -354,7 +363,7 @@ void Game::spawnMonsters() {
             const int gid = nextGroup++;
             for (int i = 0; i < pack; ++i) {
                 Vec2i p = randomFreeTileInRoom(r);
-                addMonster(EntityKind::Wolf, p, gid);
+                spawnMonster(EntityKind::Wolf, p, gid);
             }
         }
     }
@@ -372,37 +381,32 @@ void Game::spawnMonsters() {
         // Midpoint: a mini-boss to signal the run's second half.
         if (depth_ == MIDPOINT_DEPTH) {
             Vec2i p = randomFreeTileInRoom(*treasure);
-            addMonster(EntityKind::Ogre, p, 0);
+            spawnMonster(EntityKind::Ogre, p, 0);
 
             // A couple of guards nearby.
             for (int i = 0; i < 2; ++i) {
                 Vec2i q = randomFreeTileInRoom(*treasure);
-                addMonster(EntityKind::Wolf, q, nextGroup++);
+                spawnMonster(EntityKind::Wolf, q, nextGroup++);
             }
         }
 
         // Penultimate floor: the Minotaur guards the central hoard.
         if (depth_ == QUEST_DEPTH - 1) {
             Vec2i p = randomFreeTileInRoom(*treasure);
-            addMonster(EntityKind::Minotaur, p, 0);
+            spawnMonster(EntityKind::Minotaur, p, 0);
         }
 
         // Final floor: a hostile archwizard guards the Amulet.
         if (depth_ == QUEST_DEPTH) {
             Vec2i p = randomFreeTileInRoom(*treasure);
-            addMonster(EntityKind::Wizard, p, 0);
+            Entity& w = spawnMonster(EntityKind::Wizard, p, 0);
 
             // Upgrade into an "archwizard" (stronger ranged profile).
-            if (!ents.empty()) {
-                Entity& w = ents.back();
-                if (w.kind == EntityKind::Wizard) {
-                    w.rangedProjectile = ProjectileKind::Fireball;
-                    w.rangedRange = std::max(w.rangedRange, 6);
-                    w.rangedAtk += 2;
-                    w.hpMax += 6;
-                    w.hp = std::min(w.hpMax, w.hp + 6);
-                }
-            }
+            w.rangedProjectile = ProjectileKind::Fireball;
+            w.rangedRange = std::max(w.rangedRange, 6);
+            w.rangedAtk += 2;
+            w.hpMax += 6;
+            w.hp = std::min(w.hpMax, w.hp + 6);
         }
     }
 }

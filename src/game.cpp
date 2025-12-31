@@ -475,6 +475,215 @@ bool Game::playerHasAmulet() const {
 }
 
 // ------------------------------------------------------------
+// Yendor Doom (endgame escalation)
+//
+// Once the player acquires the Amulet of Yendor, the dungeon begins applying
+// pressure through periodic "noise pulses" (waking/alerting monsters) and
+// hunter packs that spawn out of sight.
+// ------------------------------------------------------------
+
+int Game::computeYendorDoomLevel() const {
+    if (!yendorDoomActive_) return 0;
+
+    const uint32_t now = turnCount;
+    const uint32_t start = yendorDoomStartTurn_;
+    const int turnsSince = (now >= start) ? static_cast<int>(now - start) : 0;
+
+    // 0 at quest depth, grows as the player ascends toward the surface.
+    const int ascension = std::max(0, QUEST_DEPTH - depth_);
+
+    // Time pressure: +1 every ~40 player turns after acquiring the Amulet.
+    const int timeTerm = turnsSince / 40;
+
+    int lvl = 1 + (ascension * 2) + timeTerm;
+    return std::clamp(lvl, 1, 20);
+}
+
+void Game::onAmuletAcquired() {
+    if (!yendorDoomEnabled_) return;
+    if (gameOver || gameWon) return;
+    if (yendorDoomActive_) return;
+
+    yendorDoomActive_ = true;
+    if (yendorDoomStartTurn_ == 0u) yendorDoomStartTurn_ = turnCount;
+    yendorDoomLastPulseTurn_ = turnCount;
+    yendorDoomLastSpawnTurn_ = turnCount;
+    yendorDoomMsgStage_ = 0;
+    yendorDoomLevel_ = computeYendorDoomLevel();
+
+    pushMsg("THE DUNGEON STIRS. SOMETHING HUNTS YOU...", MessageKind::Important, true);
+}
+
+void Game::spawnYendorHunterPack(int doomLevel) {
+    if (dung.rooms.empty()) return;
+    if (ents.size() >= 120u) return; // keep things sane on huge levels
+
+    const Vec2i ppos = player().pos;
+
+    // How many hunters? Scale slowly with doom.
+    int count = 2 + (doomLevel / 5);
+    if (rng.range(0, 3) == 0) count += 1;
+    count = std::clamp(count, 2, 6);
+
+    auto pickKind = [&](int dlvl) -> EntityKind {
+        // Weighted selection by doom intensity.
+        const int r = rng.range(0, 99);
+        if (dlvl >= 18) {
+            if (r < 10) return EntityKind::Minotaur;
+            if (r < 30) return EntityKind::Wizard;
+            if (r < 55) return EntityKind::Troll;
+            if (r < 80) return EntityKind::Ogre;
+            return EntityKind::SkeletonArcher;
+        }
+        if (dlvl >= 12) {
+            if (r < 10) return EntityKind::Wizard;
+            if (r < 35) return EntityKind::Troll;
+            if (r < 60) return EntityKind::Ogre;
+            if (r < 80) return EntityKind::SkeletonArcher;
+            return EntityKind::Wolf;
+        }
+        if (dlvl >= 6) {
+            if (r < 25) return EntityKind::Ogre;
+            if (r < 50) return EntityKind::SkeletonArcher;
+            if (r < 70) return EntityKind::Orc;
+            if (r < 85) return EntityKind::Wolf;
+            return EntityKind::KoboldSlinger;
+        }
+        // Early doom: mostly fast/annoying hunters.
+        if (r < 35) return EntityKind::Wolf;
+        if (r < 60) return EntityKind::Orc;
+        if (r < 80) return EntityKind::SkeletonArcher;
+        return EntityKind::KoboldSlinger;
+    };
+
+    // Find a spawn point out of sight and not too close to the player.
+    Vec2i anchor{-1, -1};
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        const Room& r = dung.rooms[static_cast<size_t>(rng.range(0, static_cast<int>(dung.rooms.size() - 1)))];
+        if (r.type == RoomType::Shop) continue;
+
+        // Avoid spawning in the player's current room.
+        if (ppos.x >= r.x && ppos.x < r.x + r.w && ppos.y >= r.y && ppos.y < r.y + r.h) continue;
+
+        Vec2i p = randomFreeTileInRoom(r);
+        if (!dung.inBounds(p.x, p.y)) continue;
+        if (dung.at(p.x, p.y).visible) continue;
+        const int dist = std::abs(p.x - ppos.x) + std::abs(p.y - ppos.y);
+        if (dist < 10) continue;
+
+        anchor = p;
+        break;
+    }
+
+    // Fallback: random hidden floor tile.
+    if (anchor.x < 0) {
+        for (int attempt = 0; attempt < 400; ++attempt) {
+            const int x = rng.range(1, dung.width - 2);
+            const int y = rng.range(1, dung.height - 2);
+            if (!dung.inBounds(x, y)) continue;
+            const TileType t = dung.at(x, y).type;
+            if (!(t == TileType::Floor || t == TileType::DoorOpen || t == TileType::StairsUp || t == TileType::StairsDown)) continue;
+            if (entityAt(x, y)) continue;
+            if (dung.at(x, y).visible) continue;
+            const int dist = std::abs(x - ppos.x) + std::abs(y - ppos.y);
+            if (dist < 10) continue;
+            anchor = {x, y};
+            break;
+        }
+    }
+
+    if (anchor.x < 0) return;
+
+    const int gid = nextEntityId; // good enough unique group id
+    for (int i = 0; i < count; ++i) {
+        Vec2i pos = anchor;
+
+        // Spread slightly around the anchor.
+        for (int j = 0; j < 12; ++j) {
+            const int dx = rng.range(-2, 2);
+            const int dy = rng.range(-2, 2);
+            if (dx == 0 && dy == 0) continue;
+            Vec2i q{anchor.x + dx, anchor.y + dy};
+            if (!dung.inBounds(q.x, q.y)) continue;
+            const TileType t = dung.at(q.x, q.y).type;
+            if (!(t == TileType::Floor || t == TileType::DoorOpen || t == TileType::StairsUp || t == TileType::StairsDown)) continue;
+            if (entityAt(q.x, q.y)) continue;
+            if (dung.at(q.x, q.y).visible) continue;
+            pos = q;
+            break;
+        }
+
+        const EntityKind kind = pickKind(doomLevel);
+        spawnMonster(kind, pos, gid, true);
+
+        // Hunters begin alerted and immediately know (roughly) where you are.
+        Entity& m = ents.back();
+        m.alerted = true;
+        m.lastKnownPlayerPos = ppos;
+        m.lastKnownPlayerAge = 0;
+    }
+
+    // Lightly telegraph without being too spammy.
+    if (rng.range(0, 2) == 0) {
+        pushMsg("YOU FEEL A MALEVOLENT PRESENCE DRAWING NEAR.", MessageKind::Important);
+    }
+}
+
+void Game::tickYendorDoom() {
+    if (!yendorDoomEnabled_) return;
+    if (gameOver || gameWon) return;
+
+    // Safety: if the player no longer has the Amulet, the system should not run.
+    if (!playerHasAmulet()) {
+        yendorDoomActive_ = false;
+        yendorDoomLevel_ = 0;
+        return;
+    }
+
+    // If we loaded a legacy save with an Amulet already in hand, start silently.
+    if (!yendorDoomActive_) {
+        yendorDoomActive_ = true;
+        if (yendorDoomStartTurn_ == 0u) yendorDoomStartTurn_ = turnCount;
+        if (yendorDoomLastPulseTurn_ == 0u) yendorDoomLastPulseTurn_ = turnCount;
+        if (yendorDoomLastSpawnTurn_ == 0u) yendorDoomLastSpawnTurn_ = turnCount;
+    }
+
+    const int lvl = computeYendorDoomLevel();
+    yendorDoomLevel_ = lvl;
+
+    // One-time escalating warnings.
+    if (lvl >= 6 && yendorDoomMsgStage_ < 1) {
+        yendorDoomMsgStage_ = 1;
+        pushMsg("THE AIR GROWS HEAVY WITH DREAD.", MessageKind::Important);
+    } else if (lvl >= 12 && yendorDoomMsgStage_ < 2) {
+        yendorDoomMsgStage_ = 2;
+        pushMsg("THE DUNGEON'S RAGE BUILDS BEHIND YOU.", MessageKind::Important);
+    } else if (lvl >= 18 && yendorDoomMsgStage_ < 3) {
+        yendorDoomMsgStage_ = 3;
+        pushMsg("THE VERY STONES SCREAM FOR YOUR BLOOD!", MessageKind::Important);
+    }
+
+    const uint32_t now = turnCount;
+    const int pulseEvery = std::clamp(60 - (lvl * 2), 15, 60);
+    const int spawnEvery = std::clamp(90 - (lvl * 3), 25, 90);
+
+    if (now - yendorDoomLastPulseTurn_ >= static_cast<uint32_t>(pulseEvery)) {
+        yendorDoomLastPulseTurn_ = now;
+        const int volume = 10 + lvl; // louder as doom rises
+        emitNoise(player().pos, volume);
+
+        if (lvl >= 10 && rng.range(0, 4) == 0) {
+            pushMsg("THE AMULET PULSES WITH DARK POWER.", MessageKind::System);
+        }
+    }
+
+    if (now - yendorDoomLastSpawnTurn_ >= static_cast<uint32_t>(spawnEvery)) {
+        yendorDoomLastSpawnTurn_ = now;
+        spawnYendorHunterPack(lvl);
+    }
+}
+
+// ------------------------------------------------------------
 // Identification (items start unknown; appearances randomized per run)
 // ------------------------------------------------------------
 
@@ -692,6 +901,14 @@ void Game::newGame(uint32_t seed) {
     fx.clear();
     fxExpl.clear();
 
+    // Reset endgame escalation state.
+    yendorDoomActive_ = false;
+    yendorDoomLevel_ = 0;
+    yendorDoomStartTurn_ = 0u;
+    yendorDoomLastPulseTurn_ = 0u;
+    yendorDoomLastSpawnTurn_ = 0u;
+    yendorDoomMsgStage_ = 0;
+
     nextEntityId = 1;
     nextItemId = 1;
     equipMeleeId = 0;
@@ -757,6 +974,28 @@ void Game::newGame(uint32_t seed) {
     talentFocus_ = 0;
     talentPointsPending_ = 0;
 
+    // Class starting bias (small passive nudge; most growth comes from level-ups).
+    // This is applied before the first level is generated so it is part of the run identity.
+    switch (playerClass_) {
+        case PlayerClass::Knight: {
+            talentMight_ = 1;
+            talentVigor_ = 1;
+        } break;
+        case PlayerClass::Rogue: {
+            talentAgility_ = 1;
+            talentFocus_ = 1;
+        } break;
+        case PlayerClass::Archer: {
+            talentAgility_ = 2;
+        } break;
+        case PlayerClass::Wizard: {
+            talentFocus_ = 2;
+        } break;
+        case PlayerClass::Adventurer:
+        default:
+            break;
+    }
+
     // Hunger pacing (optional setting; stored per-run in save files).
     hungerMax = 800;
     hunger = hungerMax;
@@ -771,10 +1010,40 @@ void Game::newGame(uint32_t seed) {
     p.id = nextEntityId++;
     p.kind = EntityKind::Player;
     p.pos = dung.stairsUp;
+
+    // Class baseline stats.
+    // These are intentionally modest; items and talents still matter a lot.
     p.hpMax = 18;
-    p.hp = p.hpMax;
     p.baseAtk = 3;
     p.baseDef = 0;
+
+    switch (playerClass_) {
+        case PlayerClass::Knight:
+            p.hpMax = 22;
+            p.baseAtk = 4;
+            p.baseDef = 1;
+            break;
+        case PlayerClass::Rogue:
+            p.hpMax = 16;
+            p.baseAtk = 3;
+            p.baseDef = 0;
+            break;
+        case PlayerClass::Archer:
+            p.hpMax = 17;
+            p.baseAtk = 3;
+            p.baseDef = 0;
+            break;
+        case PlayerClass::Wizard:
+            p.hpMax = 14;
+            p.baseAtk = 2;
+            p.baseDef = 0;
+            break;
+        case PlayerClass::Adventurer:
+        default:
+            break;
+    }
+
+    p.hp = p.hpMax;
     p.spriteSeed = rng.nextU32();
     playerId_ = p.id;
 
@@ -836,26 +1105,77 @@ void Game::newGame(uint32_t seed) {
         return it.id;
     };
 
-    int bowId = give(ItemKind::Bow, 1);
-    give(ItemKind::Arrow, 14);
-    int dagId = give(ItemKind::Dagger, 1);
-    int armId = give(ItemKind::LeatherArmor, 1);
-    give(ItemKind::PotionHealing, 2);
-    // New: basic food. Heals a little and (if hunger is enabled) restores hunger.
+    int startGold = 10;
+    int meleeId = 0;
+    int rangedId = 0;
+    int armorId = 0;
+
+    // Class-specific kit
+    switch (playerClass_) {
+        case PlayerClass::Knight: {
+            meleeId = give(ItemKind::Sword, 1);
+            rangedId = give(ItemKind::Sling, 1);
+            give(ItemKind::Rock, 10);
+            armorId = give(ItemKind::ChainArmor, 1);
+            give(ItemKind::PotionHealing, 1);
+            give(ItemKind::PotionStrength, 1);
+            startGold = 8;
+        } break;
+        case PlayerClass::Rogue: {
+            meleeId = give(ItemKind::Dagger, 1);
+            rangedId = give(ItemKind::Sling, 1);
+            give(ItemKind::Rock, 8);
+            armorId = give(ItemKind::LeatherArmor, 1);
+            give(ItemKind::Lockpick, 2);
+            give(ItemKind::PotionHealing, 1);
+            give(ItemKind::PotionInvisibility, 1);
+            give(ItemKind::ScrollDetectTraps, 1);
+            startGold = 15;
+        } break;
+        case PlayerClass::Archer: {
+            rangedId = give(ItemKind::Bow, 1);
+            give(ItemKind::Arrow, 24);
+            meleeId = give(ItemKind::Dagger, 1);
+            armorId = give(ItemKind::LeatherArmor, 1);
+            give(ItemKind::PotionHealing, 1);
+            startGold = 12;
+        } break;
+        case PlayerClass::Wizard: {
+            rangedId = give(ItemKind::WandSparks, 1);
+            meleeId = give(ItemKind::Dagger, 1);
+            armorId = give(ItemKind::LeatherArmor, 1);
+            give(ItemKind::PotionHealing, 1);
+            give(ItemKind::PotionClarity, 1);
+            give(ItemKind::ScrollIdentify, 2);
+            startGold = 6;
+        } break;
+        case PlayerClass::Adventurer:
+        default: {
+            rangedId = give(ItemKind::Bow, 1);
+            give(ItemKind::Arrow, 14);
+            meleeId = give(ItemKind::Dagger, 1);
+            armorId = give(ItemKind::LeatherArmor, 1);
+            give(ItemKind::PotionHealing, 2);
+            startGold = 10;
+        } break;
+    }
+
+    // Shared baseline resources (survivability + escape + scouting)
     give(ItemKind::FoodRation, hungerEnabled_ ? 2 : 1);
 
     // If lighting/darkness is enabled, start with a couple torches so early dark floors are survivable.
     if (lightingEnabled_) {
         give(ItemKind::Torch, 2);
     }
+
     give(ItemKind::ScrollTeleport, 1);
     give(ItemKind::ScrollMapping, 1);
-    give(ItemKind::Gold, 10);
+    give(ItemKind::Gold, startGold);
 
     // Equip both melee + ranged so bump-attacks and FIRE both work immediately.
-    equipMeleeId = dagId;
-    equipRangedId = bowId;
-    equipArmorId = armId;
+    equipMeleeId = meleeId;
+    equipRangedId = rangedId;
+    equipArmorId = armorId;
 
     spawnMonsters();
     spawnItems();
@@ -869,6 +1189,7 @@ void Game::newGame(uint32_t seed) {
     burdenPrev_ = burdenState();
 
     pushMsg("WELCOME TO PROCROGUE++.", MessageKind::System);
+    pushMsg(std::string("CLASS: ") + playerClassDisplayName(), MessageKind::System);
     pushMsg("A DOG TROTS AT YOUR HEELS.", MessageKind::System);
     {
         std::ostringstream ss;

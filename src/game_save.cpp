@@ -447,6 +447,26 @@ void Game::setLightingEnabled(bool enabled) {
     recomputeFov();
 }
 
+void Game::setYendorDoomEnabled(bool enabled) {
+    yendorDoomEnabled_ = enabled;
+
+    // If the system is disabled, we simply pause it (state is preserved so it
+    // can be re-enabled later).
+    if (!yendorDoomEnabled_) {
+        yendorDoomActive_ = false;
+        yendorDoomLevel_ = 0;
+        return;
+    }
+
+    // If the player already has the Amulet, enable immediately.
+    if (!gameOver && !gameWon && playerId_ != 0 && playerHasAmulet()) {
+        yendorDoomActive_ = true;
+        if (yendorDoomStartTurn_ == 0) yendorDoomStartTurn_ = turnCount;
+        if (yendorDoomLastPulseTurn_ == 0) yendorDoomLastPulseTurn_ = turnCount;
+        if (yendorDoomLastSpawnTurn_ == 0) yendorDoomLastSpawnTurn_ = turnCount;
+    }
+}
+
 bool Game::darknessActive() const {
     // Keep early floors bright by default; darkness starts deeper.
     return lightingEnabled_ && depth_ >= 4;
@@ -492,7 +512,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 19u;
+constexpr uint32_t SAVE_VERSION = 21u;
 
 
 // v13+: append CRC32 of the entire payload (all bytes up to but excluding the CRC field).
@@ -972,6 +992,28 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
         writePod(mem, sneakEnabledTmp);
     }
 
+    // v20+: player class (per-run)
+    if constexpr (SAVE_VERSION >= 20u) {
+        uint8_t pc = static_cast<uint8_t>(playerClass_);
+        writePod(mem, pc);
+    }
+
+    // v21+: Yendor Doom state (per-run)
+    if constexpr (SAVE_VERSION >= 21u) {
+        const uint8_t doomActiveTmp = yendorDoomActive_ ? 1u : 0u;
+        const int32_t doomLevelTmp = static_cast<int32_t>(yendorDoomLevel_);
+        const uint32_t doomStartTurnTmp = yendorDoomStartTurn_;
+        const uint32_t doomLastPulseTmp = yendorDoomLastPulseTurn_;
+        const uint32_t doomLastSpawnTmp = yendorDoomLastSpawnTurn_;
+        const int32_t doomMsgStageTmp = static_cast<int32_t>(yendorDoomMsgStage_);
+        writePod(mem, doomActiveTmp);
+        writePod(mem, doomLevelTmp);
+        writePod(mem, doomStartTurnTmp);
+        writePod(mem, doomLastPulseTmp);
+        writePod(mem, doomLastSpawnTmp);
+        writePod(mem, doomMsgStageTmp);
+    }
+
     // Player
     writeEntity(mem, player());
 
@@ -1383,6 +1425,28 @@ bool Game::loadFromFile(const std::string& path) {
             if (!readPod(in, sneakEnabledTmp)) return fail();
         }
 
+        // v20+: player class (per-run)
+        uint8_t playerClassTmp = static_cast<uint8_t>(PlayerClass::Adventurer);
+        if (ver >= 20u) {
+            if (!readPod(in, playerClassTmp)) return fail();
+        }
+
+        // v21+: Yendor Doom state (per-run)
+        uint8_t doomActiveTmp = 0u;
+        int32_t doomLevelTmp = 0;
+        uint32_t doomStartTurnTmp = 0u;
+        uint32_t doomLastPulseTmp = 0u;
+        uint32_t doomLastSpawnTmp = 0u;
+        int32_t doomMsgStageTmp = 0;
+        if (ver >= 21u) {
+            if (!readPod(in, doomActiveTmp)) return fail();
+            if (!readPod(in, doomLevelTmp)) return fail();
+            if (!readPod(in, doomStartTurnTmp)) return fail();
+            if (!readPod(in, doomLastPulseTmp)) return fail();
+            if (!readPod(in, doomLastSpawnTmp)) return fail();
+            if (!readPod(in, doomMsgStageTmp)) return fail();
+        }
+
         Entity p;
         if (!readEntity(in, p, ver)) return fail();
 
@@ -1606,6 +1670,7 @@ bool Game::loadFromFile(const std::string& path) {
         seed_ = seedNow;
         killCount = killsNow;
         maxDepth = (maxD > 0) ? maxD : depth_;
+        playerClass_ = (ver >= 20u) ? playerClassFromU8(playerClassTmp) : PlayerClass::Adventurer;
         if (maxDepth < depth_) maxDepth = depth_;
         // If we loaded an already-finished run, don't record it again.
         runRecorded = isFinished();
@@ -1635,6 +1700,46 @@ bool Game::loadFromFile(const std::string& path) {
         sneakMode_ = (ver >= 18u) ? (sneakEnabledTmp != 0) : false;
 
         inv = std::move(invTmp);
+
+        // v21+: Yendor Doom state
+        if (ver >= 21u) {
+            yendorDoomActive_ = (doomActiveTmp != 0) && yendorDoomEnabled_;
+            yendorDoomLevel_ = std::max(0, static_cast<int>(doomLevelTmp));
+            yendorDoomStartTurn_ = doomStartTurnTmp;
+            yendorDoomLastPulseTurn_ = doomLastPulseTmp;
+            yendorDoomLastSpawnTurn_ = doomLastSpawnTmp;
+            yendorDoomMsgStage_ = std::max(0, static_cast<int>(doomMsgStageTmp));
+        } else {
+            // Older saves: the feature didn't exist; start it only if the player already
+            // has the Amulet and the setting is enabled.
+            yendorDoomActive_ = false;
+            yendorDoomLevel_ = 0;
+            yendorDoomStartTurn_ = 0u;
+            yendorDoomLastPulseTurn_ = 0u;
+            yendorDoomLastSpawnTurn_ = 0u;
+            yendorDoomMsgStage_ = 0;
+        }
+
+        // Gate the system: it only makes sense during an active run with the Amulet.
+        const bool canRunDoom = yendorDoomEnabled_ && !gameOver && !gameWon && playerHasAmulet();
+        if (!canRunDoom) {
+            yendorDoomActive_ = false;
+            yendorDoomLevel_ = 0;
+        } else if (ver < 21u) {
+            // Legacy save that already has the Amulet: start doom "now".
+            yendorDoomActive_ = true;
+            yendorDoomStartTurn_ = turnCount;
+            yendorDoomLastPulseTurn_ = turnCount;
+            yendorDoomLastSpawnTurn_ = turnCount;
+            yendorDoomMsgStage_ = 0;
+            yendorDoomLevel_ = 0;
+        }
+
+        // Defensive: clamp timeline to current turn.
+        if (yendorDoomStartTurn_ > turnCount) yendorDoomStartTurn_ = turnCount;
+        if (yendorDoomLastPulseTurn_ > turnCount) yendorDoomLastPulseTurn_ = turnCount;
+        if (yendorDoomLastSpawnTurn_ > turnCount) yendorDoomLastSpawnTurn_ = turnCount;
+
         msgs = std::move(msgsTmp);
         msgScroll = 0;
 

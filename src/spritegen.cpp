@@ -90,6 +90,182 @@ void circle(SpritePixels& s, int cx, int cy, int r, Color c) {
     }
 }
 
+// --- Pixel-art helpers (ordered dithering, outlines, shadows) ---
+
+inline float bayer4Threshold(int x, int y) {
+    // 4x4 Bayer matrix threshold map (ordered dithering)
+    static constexpr int BAYER4[4][4] = {
+        { 0,  8,  2, 10 },
+        {12,  4, 14,  6 },
+        { 3, 11,  1,  9 },
+        {15,  7, 13,  5 },
+    };
+    const int v = BAYER4[y & 3][x & 3];
+    return (static_cast<float>(v) + 0.5f) / 16.0f; // [0,1)
+}
+
+Color lerp(Color a, Color b, float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    auto lerp8 = [&](uint8_t A, uint8_t B) -> uint8_t {
+        return clamp8(static_cast<int>(std::lround(A + (B - A) * t)));
+    };
+    return { lerp8(a.r, b.r), lerp8(a.g, b.g), lerp8(a.b, b.b), lerp8(a.a, b.a) };
+}
+
+// Quantized shading ramp for crisp pixel-art lighting (4 tones), with ordered dithering.
+Color rampShade(Color base, float shade01, int x, int y) {
+    shade01 = std::clamp(shade01, 0.0f, 1.0f);
+
+    Color ramp[4];
+    ramp[0] = mul(base, 0.45f);
+    ramp[1] = mul(base, 0.70f);
+    ramp[2] = base;
+    ramp[3] = add(mul(base, 1.12f), 12, 12, 14);
+
+    // Map shade into 0..3 range.
+    const float t = shade01 * 3.0f;
+    int idx = static_cast<int>(std::floor(t));
+    float frac = t - static_cast<float>(idx);
+
+    if (idx < 0) { idx = 0; frac = 0.0f; }
+    if (idx > 3) { idx = 3; frac = 0.0f; }
+
+    // Ordered dithering between idx and idx+1.
+    if (idx < 3) {
+        const float thr = bayer4Threshold(x, y);
+        if (frac > thr) idx++;
+    }
+
+    return ramp[idx];
+}
+
+Color averageOpaqueColor(const SpritePixels& s) {
+    uint64_t sr = 0, sg = 0, sb = 0, sa = 0;
+    for (const Color& c : s.px) {
+        if (c.a == 0) continue;
+        sr += static_cast<uint64_t>(c.r) * c.a;
+        sg += static_cast<uint64_t>(c.g) * c.a;
+        sb += static_cast<uint64_t>(c.b) * c.a;
+        sa += c.a;
+    }
+    if (sa == 0) return {40, 40, 45, 255};
+    return {
+        static_cast<uint8_t>(sr / sa),
+        static_cast<uint8_t>(sg / sa),
+        static_cast<uint8_t>(sb / sa),
+        255
+    };
+}
+
+void lineBlend(SpritePixels& s, int x0, int y0, int x1, int y1, Color c) {
+    int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        blendPx(s, x0, y0, c);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+void applyDropShadow(SpritePixels& s, int dx, int dy, uint8_t alpha) {
+    if (alpha == 0) return;
+    const SpritePixels orig = s;
+    for (int y = 0; y < orig.h; ++y) {
+        for (int x = 0; x < orig.w; ++x) {
+            if (orig.at(x, y).a == 0) continue;
+            const int xx = x + dx;
+            const int yy = y + dy;
+            if (xx < 0 || yy < 0 || xx >= orig.w || yy >= orig.h) continue;
+            if (orig.at(xx, yy).a != 0) continue; // don't shadow inside
+
+            Color& dst = s.at(xx, yy);
+            if (dst.a < alpha) {
+                dst = { 0, 0, 0, alpha };
+            }
+        }
+    }
+}
+
+void applyExteriorOutline(SpritePixels& s, Color outline) {
+    if (outline.a == 0) return;
+    const SpritePixels orig = s;
+    for (int y = 0; y < orig.h; ++y) {
+        for (int x = 0; x < orig.w; ++x) {
+            if (orig.at(x, y).a == 0) continue;
+
+            for (int oy = -1; oy <= 1; ++oy) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    if (ox == 0 && oy == 0) continue;
+                    const int xx = x + ox;
+                    const int yy = y + oy;
+                    if (xx < 0 || yy < 0 || xx >= orig.w || yy >= orig.h) continue;
+                    if (orig.at(xx, yy).a != 0) continue;
+
+                    Color& dst = s.at(xx, yy);
+                    if (dst.a < outline.a) dst = outline;
+                }
+            }
+        }
+    }
+}
+
+void applyContourShade(SpritePixels& s, int edgeDx, int edgeDy, float factor) {
+    const SpritePixels orig = s;
+    for (int y = 0; y < orig.h; ++y) {
+        for (int x = 0; x < orig.w; ++x) {
+            if (orig.at(x, y).a == 0) continue;
+            const int xx = x + edgeDx;
+            const int yy = y + edgeDy;
+            if (xx < 0 || yy < 0 || xx >= orig.w || yy >= orig.h) continue;
+            if (orig.at(xx, yy).a != 0) continue;
+
+            s.at(x, y) = mul(orig.at(x, y), factor);
+        }
+    }
+}
+
+void applyRimLight(SpritePixels& s, int edgeDx, int edgeDy, Color highlight) {
+    if (highlight.a == 0) return;
+    const SpritePixels orig = s;
+    for (int y = 0; y < orig.h; ++y) {
+        for (int x = 0; x < orig.w; ++x) {
+            if (orig.at(x, y).a == 0) continue;
+            const int xx = x + edgeDx;
+            const int yy = y + edgeDy;
+            if (xx < 0 || yy < 0 || xx >= orig.w || yy >= orig.h) continue;
+            if (orig.at(xx, yy).a != 0) continue;
+
+            blendPx(s, x, y, highlight);
+        }
+    }
+}
+
+void finalizeSprite(SpritePixels& s, uint32_t seed, int frame, uint8_t outlineAlpha, uint8_t shadowAlpha) {
+    (void)seed;
+
+    // Derive a dark outline color from the sprite itself (tinted outline reads well).
+    // Compute this *before* adding a shadow so the shadow doesn't skew the average.
+    const Color avg = averageOpaqueColor(s);
+    Color outline = add(mul(avg, 0.18f), -18, -18, -18);
+    outline.a = outlineAlpha;
+
+    // 1) Drop shadow first so the outline overwrites it on edge pixels.
+    applyDropShadow(s, 1, 1, shadowAlpha);
+
+    // 2) Outline.
+    applyExteriorOutline(s, outline);
+
+    // 3) Slight contour lighting: darker bottom-right, lighter top-left.
+    applyContourShade(s, 1, 1, 0.92f);
+
+    Color rim{255, 255, 255, static_cast<uint8_t>(35 + ((frame % 2) ? 15 : 0))};
+    applyRimLight(s, -1, -1, rim);
+}
+
+
 float densityFor(EntityKind k) {
     switch (k) {
         case EntityKind::Player: return 0.55f;
@@ -138,6 +314,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
 
 } // namespace
 
+
 SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
     // Base shape from seed (stable), subtle variation from frame.
     RNG rngBase(hash32(seed));
@@ -147,58 +324,227 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
 
     // 8x8 mask, mirrored horizontally.
     bool m[8][8] = {};
+    bool lock[8][8] = {}; // template pixels we always keep
+
+    auto mark = [&](int x, int y) {
+        if (x < 0 || y < 0 || x >= 8 || y >= 8) return;
+        m[y][x] = true;
+        m[y][7 - x] = true;
+        lock[y][x] = true;
+        lock[y][7 - x] = true;
+    };
+
+    // A tiny silhouette template per monster family for readability.
+    auto addHumanoid = [&]() {
+        // Head
+        mark(3, 1); mark(4, 1);
+        mark(3, 2); mark(4, 2);
+        mark(2, 2); mark(5, 2);
+        // Torso
+        for (int y = 3; y <= 5; ++y) { mark(3, y); mark(4, y); }
+        mark(2, 4); mark(5, 4); // arms
+        // Legs
+        mark(3, 6); mark(4, 6);
+        mark(3, 7); mark(4, 7);
+    };
+
+    auto addBigHumanoid = [&]() {
+        addHumanoid();
+        // Wider shoulders/torso
+        mark(2, 3); mark(5, 3);
+        mark(2, 5); mark(5, 5);
+        // Wider legs
+        mark(2, 7); mark(5, 7);
+    };
+
+    auto addQuadruped = [&]() {
+        // Body
+        for (int x = 2; x <= 5; ++x) { mark(x, 5); mark(x, 6); }
+        // Neck/head (front)
+        mark(1, 4); mark(2, 4);
+        mark(1, 5);
+        // Legs
+        mark(2, 7); mark(4, 7); mark(5, 7);
+    };
+
+    auto addBat = [&]() {
+        // Body
+        mark(3, 4); mark(4, 4);
+        mark(3, 5); mark(4, 5);
+        // Wings
+        for (int x = 0; x <= 2; ++x) { mark(x, 3); mark(x, 4); }
+        mark(1, 2); mark(2, 2);
+        mark(0, 5); mark(1, 6); mark(2, 6);
+    };
+
+    auto addBlob = [&]() {
+        for (int y = 3; y <= 7; ++y) {
+            for (int x = 2; x <= 5; ++x) mark(x, y);
+        }
+        // Round the top
+        mark(3, 2); mark(4, 2);
+    };
+
+    auto addSnake = [&]() {
+        // Curvy body
+        mark(2, 5); mark(3, 5); mark(4, 5); mark(5, 5);
+        mark(2, 6); mark(3, 6); mark(4, 6);
+        mark(3, 4); mark(4, 4);
+        // Head
+        mark(5, 4);
+    };
+
+    auto addSpider = [&]() {
+        // Body + head
+        mark(3, 5); mark(4, 5);
+        mark(3, 4); mark(4, 4);
+        mark(3, 6); mark(4, 6);
+        // Legs
+        mark(1, 4); mark(2, 3);
+        mark(1, 6); mark(2, 7);
+    };
+
+    auto addChest = [&]() {
+        // Mimic: chunky chest silhouette.
+        for (int x = 2; x <= 5; ++x) { mark(x, 6); mark(x, 7); }
+        for (int x = 2; x <= 5; ++x) { mark(x, 5); }
+        // Lid
+        for (int x = 2; x <= 5; ++x) { mark(x, 4); }
+    };
+
+    switch (kind) {
+        case EntityKind::Bat: addBat(); break;
+        case EntityKind::Slime: addBlob(); break;
+        case EntityKind::Wolf:
+        case EntityKind::Dog: addQuadruped(); break;
+        case EntityKind::Snake: addSnake(); break;
+        case EntityKind::Spider: addSpider(); break;
+        case EntityKind::Mimic: addChest(); break;
+        case EntityKind::Troll:
+        case EntityKind::Ogre:
+        case EntityKind::Minotaur: addBigHumanoid(); break;
+        default: addHumanoid(); break;
+    }
+
+    // Random fill to add texture/variation.
     float density = densityFor(kind);
+    // Keep templates readable: let random fill be slightly less aggressive.
+    density = std::clamp(density, 0.35f, 0.80f);
+
     for (int y = 0; y < 8; ++y) {
         for (int x = 0; x < 4; ++x) {
             bool on = rngBase.chance(density);
-            m[y][x] = on;
-            m[y][7 - x] = on;
+            if (lock[y][x]) on = true;
+            m[y][x] = m[y][x] || on;
+            m[y][7 - x] = m[y][x];
+        }
+    }
+
+    // A couple cellular-automata smoothing passes remove singletons and fill holes.
+    auto countN = [&](int x, int y) {
+        int c = 0;
+        for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -1; ox <= 1; ++ox) {
+                if (ox == 0 && oy == 0) continue;
+                int xx = x + ox;
+                int yy = y + oy;
+                if (xx < 0 || yy < 0 || xx >= 8 || yy >= 8) continue;
+                if (m[yy][xx]) ++c;
+            }
+        }
+        return c;
+    };
+
+    for (int iter = 0; iter < 2; ++iter) {
+        bool tmp[8][8] = {};
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                if (lock[y][x]) { tmp[y][x] = true; continue; }
+                const int n = countN(x, y);
+                if (m[y][x]) tmp[y][x] = (n >= 2);
+                else tmp[y][x] = (n >= 5);
+            }
+        }
+        // Keep symmetry exact.
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                tmp[y][7 - x] = tmp[y][x];
+            }
+        }
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                m[y][x] = tmp[y][x];
+            }
         }
     }
 
     Color base = baseColorFor(kind, rngBase);
 
-    // Expand mask into 16x16 with chunky pixels.
+    // Expand mask into 16x16 with chunky pixels, but shade using a quantized ramp + dithering.
     for (int y = 0; y < 8; ++y) {
         for (int x = 0; x < 8; ++x) {
             if (!m[y][x]) continue;
             int px = x * 2;
             int py = y * 2;
-            Color c = base;
 
-            // Light shading top-left
-            float shade = 0.90f + 0.20f * ((7 - y) / 7.0f);
-            // Frame shimmer
-            if (frame % 2 == 1) {
-                float n = (hashCombine(seed, static_cast<uint32_t>(x + y * 11 + frame * 97)) & 0xFFu) / 255.0f;
-                shade *= (0.92f + 0.12f * n);
+            for (int oy = 0; oy < 2; ++oy) {
+                for (int ox = 0; ox < 2; ++ox) {
+                    const int xx = px + ox;
+                    const int yy = py + oy;
+
+                    // Lighting: top-left biased + subtle spherical highlight.
+                    const float lx = (15.0f - xx) / 15.0f;
+                    const float ly = (15.0f - yy) / 15.0f;
+                    float shade = 0.58f + 0.22f * ly + 0.10f * lx;
+
+                    const float cx = (xx - 7.5f) / 7.5f;
+                    const float cy = (yy - 8.0f) / 8.0f;
+                    const float d2 = cx * cx + cy * cy;
+                    const float sphere = (d2 < 1.0f) ? std::sqrt(1.0f - d2) : 0.0f;
+                    shade *= (0.78f + 0.30f * sphere);
+
+                    // Seeded micro-noise so large flat areas don't band.
+                    const uint32_t n = hashCombine(seed, static_cast<uint32_t>(xx + yy * 17 + frame * 131));
+                    const float noise = (n & 0xFFu) / 255.0f;
+                    shade *= (0.90f + 0.18f * noise);
+
+                    setPx(s, xx, yy, rampShade(base, shade, xx, yy));
+                }
             }
-            c = mul(c, shade);
-
-            rect(s, px, py, 2, 2, c);
         }
     }
 
-    // Add eyes-ish for living things
-    if (kind != EntityKind::Slime) {
+    // Add eyes-ish for living things (only if inside the body).
+    if (kind != EntityKind::Slime && kind != EntityKind::Mimic) {
         int ey = 6 + (rngVar.range(-1, 1));
         int ex = 6;
-        setPx(s, ex, ey, {255,255,255,255});
-        setPx(s, ex+3, ey, {255,255,255,255});
-        setPx(s, ex, ey+1, {0,0,0,255});
-        setPx(s, ex+3, ey+1, {0,0,0,255});
-    } else {
-        // Slime: two bright blobs
+        auto safeEye = [&](int x, int y) {
+            if (x < 0 || y < 0 || x >= 16 || y >= 16) return false;
+            return s.at(x, y).a != 0;
+        };
+
+        // If the default spot isn't inside the sprite, nudge downward a bit.
+        if (!safeEye(ex, ey) || !safeEye(ex + 3, ey)) {
+            ey = 7;
+        }
+        if (safeEye(ex, ey) && safeEye(ex + 3, ey)) {
+            setPx(s, ex, ey, {255,255,255,255});
+            setPx(s, ex+3, ey, {255,255,255,255});
+            setPx(s, ex, ey+1, {0,0,0,255});
+            setPx(s, ex+3, ey+1, {0,0,0,255});
+        }
+    } else if (kind == EntityKind::Slime) {
+        // Slime: two bright blobs.
         setPx(s, 6, 7, {230,255,255,200});
         setPx(s, 9, 7, {230,255,255,200});
     }
 
-    // Kind-specific little accents
+    // Kind-specific accents
     if (kind == EntityKind::Bat) {
         // Wing flaps (frame toggles)
         int y = (frame % 2 == 0) ? 6 : 7;
-        setPx(s, 1, y, mul(base, 0.6f));
-        setPx(s, 14, y, mul(base, 0.6f));
+        setPx(s, 1, y, mul(base, 0.55f));
+        setPx(s, 14, y, mul(base, 0.55f));
     }
     if (kind == EntityKind::SkeletonArcher) {
         // A tiny bow line
@@ -217,9 +563,7 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
     if (kind == EntityKind::Dog) {
         // Nose + a tiny collar.
         setPx(s, 8, 10, {30,30,30,255});
-        setPx(s, 7, 12, {220, 40, 40, 255});
-        setPx(s, 8, 12, {220, 40, 40, 255});
-        setPx(s, 9, 12, {220, 40, 40, 255});
+        rect(s, 7, 12, 3, 1, {220, 40, 40, 255});
         setPx(s, 8, 13, {240, 200, 80, 255});
     }
 
@@ -239,8 +583,10 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
 
     if (kind == EntityKind::Snake) {
         // Tiny tongue + a couple darker scale stripes
-        setPx(s, 8, 11, {220,80,80,255});
-        setPx(s, 9, 11, {220,80,80,255});
+        if (frame % 2 == 1) {
+            setPx(s, 8, 11, {220,80,80,255});
+            setPx(s, 9, 11, {220,80,80,255});
+        }
         Color stripe = mul(base, 0.55f);
         for (int x = 4; x <= 11; x += 2) {
             setPx(s, x, 9, stripe);
@@ -304,25 +650,11 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
         setPx(s, 8, 8, {230, 200, 80, 255});
     }
 
-    // Soft outline (helps readability)
-    for (int y = 1; y < 15; ++y) {
-        for (int x = 1; x < 15; ++x) {
-            Color c = s.at(x, y);
-            if (c.a == 0) continue;
-            // If neighbor transparent, darken edge
-            bool edge = false;
-            if (s.at(x-1, y).a == 0) edge = true;
-            if (s.at(x+1, y).a == 0) edge = true;
-            if (s.at(x, y-1).a == 0) edge = true;
-            if (s.at(x, y+1).a == 0) edge = true;
-            if (edge) {
-                s.at(x, y) = mul(c, 0.85f);
-            }
-        }
-    }
-
+    // Final pass: readable outlines + shadow.
+    finalizeSprite(s, seed, frame, /*outlineAlpha=*/255, /*shadowAlpha=*/90);
     return s;
 }
+
 
 SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame) {
     RNG rng(hash32(seed));
@@ -1043,6 +1375,9 @@ case ItemKind::Arrow: {
             break;
     }
 
+    // Post-process: subtle outline + shadow for readability on noisy floors.
+    finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+
     return s;
 }
 
@@ -1100,8 +1435,13 @@ SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int fr
         default:
             break;
     }
+
+    // Post-process: a crisp outline keeps fast projectiles readable.
+    finalizeSprite(s, seed, frame, /*outlineAlpha=*/200, /*shadowAlpha=*/55);
+
     return s;
 }
+
 
 SpritePixels generateFloorTile(uint32_t seed, int frame) {
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});
@@ -1110,31 +1450,53 @@ SpritePixels generateFloorTile(uint32_t seed, int frame) {
     Color base = { 92, 82, 64, 255 };
     base = add(base, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
 
+    // Coarse 4x4 "stone patches" + fine noise. This reads as cobble/grain instead of flat static.
     for (int y = 0; y < 16; ++y) {
         for (int x = 0; x < 16; ++x) {
-            uint32_t n = hashCombine(seed, static_cast<uint32_t>(x + y * 16));
-            float noise = ((n & 0xFFu) / 255.0f);
-            float f = 0.85f + noise * 0.35f;
+            const int cx = x / 4;
+            const int cy = y / 4;
 
-            // Slight vignette
-            float cx = (x - 7.5f) / 7.5f;
-            float cy = (y - 7.5f) / 7.5f;
-            float v = 1.0f - 0.10f * (cx*cx + cy*cy);
-            f *= v;
+            uint32_t cN = hashCombine(seed ^ 0x51F00u, static_cast<uint32_t>(cx + cy * 7));
+            float cell = (cN & 0xFFu) / 255.0f;
+            float cellF = 0.85f + cell * 0.25f;
+
+            uint32_t n = hashCombine(seed, static_cast<uint32_t>(x + y * 17 + frame * 131));
+            float noise = (n & 0xFFu) / 255.0f;
+            float f = cellF * (0.80f + noise * 0.30f);
+
+            // Directional light bias (top-left brighter) so the dungeon doesn't feel flat.
+            const float lx = (15.0f - x) / 15.0f;
+            const float ly = (15.0f - y) / 15.0f;
+            f *= (0.92f + 0.08f * (0.60f * lx + 0.40f * ly));
+
+            // Subtle vignette keeps tiles centered.
+            float vx = (x - 7.5f) / 7.5f;
+            float vy = (y - 7.5f) / 7.5f;
+            f *= 1.0f - 0.08f * (vx * vx + vy * vy);
 
             s.at(x, y) = mul(base, f);
         }
     }
 
-    // Speckles
-    for (int i = 0; i < 14; ++i) {
+    // Pebbles / chips
+    for (int i = 0; i < 18; ++i) {
         int x = rng.range(0, 15);
         int y = rng.range(0, 15);
-        s.at(x, y) = add(s.at(x, y), rng.range(-20, 20), rng.range(-20, 20), rng.range(-20, 20));
+        s.at(x, y) = add(s.at(x, y), rng.range(-22, 22), rng.range(-22, 22), rng.range(-22, 22));
+    }
+
+    // Hairline cracks (blended so they don't look like hard grid-lines).
+    Color crack = mul(base, 0.55f);
+    crack.a = 170;
+    for (int i = 0; i < 2; ++i) {
+        int x0 = rng.range(0, 15);
+        int y0 = rng.range(0, 15);
+        int x1 = std::clamp(x0 + rng.range(-10, 10), 0, 15);
+        int y1 = std::clamp(y0 + rng.range(-10, 10), 0, 15);
+        lineBlend(s, x0, y0, x1, y1, crack);
     }
 
     // Subtle animated "glint" pixels (torchlight shimmer).
-    // Frame 1 brightens a few deterministic pixels; frame 0 is the baseline.
     if (frame % 2 == 1) {
         RNG g(hash32(seed ^ 0xF17A4u));
         for (int i = 0; i < 3; ++i) {
@@ -1142,15 +1504,16 @@ SpritePixels generateFloorTile(uint32_t seed, int frame) {
             int y = g.range(0, 15);
             s.at(x, y) = add(s.at(x, y), 35, 35, 35);
         }
-        // A tiny 2px streak looks like a reflective grain line.
         int sx = g.range(1, 14);
         int sy = g.range(1, 14);
-        setPx(s, sx, sy, add(s.at(sx, sy), 25, 25, 25));
-        setPx(s, sx + 1, sy, add(s.at(sx + 1, sy), 18, 18, 18));
+        setPx(s, sx, sy, add(s.at(sx, sy), 20, 20, 20));
+        setPx(s, sx + 1, sy, add(s.at(sx + 1, sy), 14, 14, 14));
     }
 
     return s;
 }
+
+
 
 SpritePixels generateWallTile(uint32_t seed, int frame) {
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});
@@ -1159,21 +1522,49 @@ SpritePixels generateWallTile(uint32_t seed, int frame) {
     Color base = { 70, 78, 92, 255 };
     base = add(base, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
 
-    // Brick pattern
+    // Brick pattern with a tiny bevel (top edges lighter, bottom edges darker).
     for (int y = 0; y < 16; ++y) {
-        int rowOffset = (y / 4) % 2 ? 2 : 0;
+        const int rowOffset = (y / 4) % 2 ? 2 : 0;
+        const int yIn = y % 4;
         for (int x = 0; x < 16; ++x) {
-            float f = 0.9f;
-            // mortar lines
-            if ((y % 4) == 0) f = 0.55f;
-            if (((x + rowOffset) % 6) == 0) f = std::min(f, 0.6f);
+            bool mortar = false;
+            if ((yIn) == 0) mortar = true;
+            if (((x + rowOffset) % 6) == 0) mortar = true;
 
             uint32_t n = hashCombine(seed, static_cast<uint32_t>(x + y * 19));
-            float noise = ((n & 0xFFu) / 255.0f);
-            float nf = 0.85f + noise * 0.25f;
+            float noise = (n & 0xFFu) / 255.0f;
+            float nf = 0.86f + noise * 0.22f;
+
+            float f = mortar ? 0.55f : 0.95f;
+
+            if (!mortar) {
+                // Bevel: top row of the brick is brighter, bottom row darker.
+                if (yIn == 1) f *= 1.10f;
+                if (yIn == 3) f *= 0.78f;
+
+                // Slight edge shading around vertical mortar.
+                const bool leftMortar  = (((x - 1 + rowOffset) % 6) == 0);
+                const bool rightMortar = (((x + 1 + rowOffset) % 6) == 0);
+                if (leftMortar)  f *= 1.06f;
+                if (rightMortar) f *= 0.88f;
+            }
+
+            // Directional light bias (top-left brighter).
+            const float lx = (15.0f - x) / 15.0f;
+            const float ly = (15.0f - y) / 15.0f;
+            f *= (0.93f + 0.07f * (0.55f * lx + 0.45f * ly));
 
             s.at(x, y) = mul(base, f * nf);
         }
+    }
+
+    // Random chips / grime on a handful of brick pixels.
+    for (int i = 0; i < 10; ++i) {
+        int x = rng.range(1, 14);
+        int y = rng.range(1, 14);
+        // Avoid mortar-heavy rows so chips don't look like noise.
+        if ((y % 4) == 0) continue;
+        s.at(x, y) = mul(s.at(x, y), 0.78f);
     }
 
     // Subtle animated highlight on a few mortar pixels.
@@ -1182,18 +1573,18 @@ SpritePixels generateWallTile(uint32_t seed, int frame) {
         for (int i = 0; i < 4; ++i) {
             int x = g.range(0, 15);
             int y = g.range(0, 15);
-            // Prefer mortar lines for the highlight (looks like a light sweep).
-            if ((y % 4) == 0 || (((x + ((y / 4) % 2 ? 2 : 0)) % 6) == 0)) {
+            const int rowOffset = (y / 4) % 2 ? 2 : 0;
+            if ((y % 4) == 0 || (((x + rowOffset) % 6) == 0)) {
                 s.at(x, y) = add(s.at(x, y), 25, 25, 30);
             } else {
-                // If we missed mortar, just add a tiny glint anyway.
-                s.at(x, y) = add(s.at(x, y), 15, 15, 18);
+                s.at(x, y) = add(s.at(x, y), 12, 12, 14);
             }
         }
     }
 
     return s;
 }
+
 
 SpritePixels generateChasmTile(uint32_t seed, int frame) {
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});

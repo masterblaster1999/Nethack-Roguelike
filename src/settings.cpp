@@ -159,6 +159,9 @@ Settings loadSettings(const std::string& path) {
                 if (n.size() > 24) n.resize(24);
                 s.playerName = n;
             }
+        } else if (key == "player_class") {
+            PlayerClass pc = PlayerClass::Adventurer;
+            if (parsePlayerClass(val, pc)) s.playerClass = pc;
         } else if (key == "show_effect_timers") {
             bool b = true;
             if (parseBool(val, b)) s.showEffectTimers = b;
@@ -220,6 +223,9 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "lighting_enabled") {
             bool b = false;
             if (parseBool(val, b)) s.lightingEnabled = b;
+        } else if (key == "yendor_doom_enabled") {
+            bool b = true;
+            if (parseBool(val, b)) s.yendorDoomEnabled = b;
         } else if (key == "confirm_quit") {
             bool b = true;
             if (parseBool(val, b)) s.confirmQuit = b;
@@ -248,6 +254,10 @@ start_fullscreen = false
 
 # Player identity (used in the HUD + scoreboard)
 player_name = PLAYER
+
+# Starting class/role for new runs
+# player_class: adventurer | knight | rogue | archer | wizard
+player_class = adventurer
 
 # HUD
 # show_effect_timers: true/false (shows remaining turns on POISON/REGEN/... in the HUD)
@@ -293,6 +303,10 @@ encumbrance_enabled = false
 # Optional darkness / lighting
 # lighting_enabled: true/false (dark deeper floors; requires torches)
 lighting_enabled = false
+
+# Optional endgame escalation
+# yendor_doom_enabled: true/false (after you take the Amulet, the dungeon fights back)
+yendor_doom_enabled = true
 
 # Item identification
 # identify_items: true/false  (true = potions/scrolls start unidentified)

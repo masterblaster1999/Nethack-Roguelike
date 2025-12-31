@@ -389,7 +389,7 @@ void Game::handleAction(Action a) {
 
     // Overlay: options menu (does not consume turns)
     if (optionsOpen) {
-        constexpr int kOptionCount = 14;
+        constexpr int kOptionCount = 15;
 
         if (a == Action::Cancel || a == Action::Options) {
             optionsOpen = false;
@@ -488,8 +488,17 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 7) Effect timers (HUD)
+        // 7) Yendor Doom (endgame escalation)
         if (optionsSel == 7) {
+            if (left || right || confirm) {
+                setYendorDoomEnabled(!yendorDoomEnabled());
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // 8) Effect timers (HUD)
+        if (optionsSel == 8) {
             if (left || right || confirm) {
                 showEffectTimers_ = !showEffectTimers_;
                 settingsDirtyFlag = true;
@@ -497,8 +506,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 8) Confirm quit (double-ESC)
-        if (optionsSel == 8) {
+        // 9) Confirm quit (double-ESC)
+        if (optionsSel == 9) {
             if (left || right || confirm) {
                 confirmQuitEnabled_ = !confirmQuitEnabled_;
                 settingsDirtyFlag = true;
@@ -506,8 +515,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 8) Auto mortem (write a dump file on win/death)
-        if (optionsSel == 9) {
+        // 10) Auto mortem (write a dump file on win/death)
+        if (optionsSel == 10) {
             if (left || right || confirm) {
                 autoMortemEnabled_ = !autoMortemEnabled_;
                 settingsDirtyFlag = true;
@@ -515,8 +524,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 10) Save backups (0..10)
-        if (optionsSel == 10) {
+        // 11) Save backups (0..10)
+        if (optionsSel == 11) {
             if (left || right) {
                 int n = saveBackups_;
                 n += left ? -1 : +1;
@@ -526,8 +535,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-// 11) UI Theme (cycle)
-if (optionsSel == 11) {
+// 12) UI Theme (cycle)
+if (optionsSel == 12) {
     if (left || right || confirm) {
         int dir = right ? 1 : -1;
         if (confirm && !left && !right) dir = 1;
@@ -540,8 +549,8 @@ if (optionsSel == 11) {
     return;
 }
 
-// 11) UI Panels (textured / solid)
-if (optionsSel == 12) {
+// 13) UI Panels (textured / solid)
+if (optionsSel == 13) {
     if (left || right || confirm) {
         uiPanelsTextured_ = !uiPanelsTextured_;
         settingsDirtyFlag = true;
@@ -549,8 +558,8 @@ if (optionsSel == 12) {
     return;
 }
 
-// 13) Close
-if (optionsSel == 13) {
+// 14) Close
+if (optionsSel == 14) {
     if (left || right || confirm) optionsOpen = false;
     return;
 }
@@ -1051,6 +1060,11 @@ void Game::advanceAfterPlayerAction() {
         }
     }
     recomputeFov();
+
+    // Endgame escalation tick (optional): after the Amulet is acquired, the dungeon
+    // starts fighting back with noise pulses and hunter packs.
+    tickYendorDoom();
+
     maybeAutosave();
 }
 
@@ -1114,6 +1128,7 @@ void Game::maybeRecordRun() {
     e.seed = seed_;
 
     e.name = playerName_;
+    e.playerClass = playerClassIdString();
     e.slot = activeSlot_.empty() ? std::string("default") : activeSlot_;
     e.cause = endCause_;
     e.gameVersion = PROCROGUE_VERSION;

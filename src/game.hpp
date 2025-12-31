@@ -7,6 +7,8 @@
 #include "scores.hpp"
 
 #include <cstdint>
+#include <algorithm>
+#include <cctype>
 #include <array>
 #include <map>
 #include <string>
@@ -199,6 +201,63 @@ enum class UITheme : uint8_t {
     Arcane,
 };
 
+// Player starting class/role.
+// Stored in save files (per-run). The default for new runs comes from settings/CLI.
+enum class PlayerClass : uint8_t {
+    Adventurer = 0,
+    Knight,
+    Rogue,
+    Archer,
+    Wizard,
+};
+
+inline const char* playerClassId(PlayerClass c) {
+    switch (c) {
+        case PlayerClass::Adventurer: return "adventurer";
+        case PlayerClass::Knight:     return "knight";
+        case PlayerClass::Rogue:      return "rogue";
+        case PlayerClass::Archer:     return "archer";
+        case PlayerClass::Wizard:     return "wizard";
+        default:                      return "adventurer";
+    }
+}
+
+inline const char* playerClassDisplayName(PlayerClass c) {
+    switch (c) {
+        case PlayerClass::Adventurer: return "ADVENTURER";
+        case PlayerClass::Knight:     return "KNIGHT";
+        case PlayerClass::Rogue:      return "ROGUE";
+        case PlayerClass::Archer:     return "ARCHER";
+        case PlayerClass::Wizard:     return "WIZARD";
+        default:                      return "ADVENTURER";
+    }
+}
+
+inline PlayerClass playerClassFromU8(uint8_t v) {
+    const uint8_t maxV = static_cast<uint8_t>(PlayerClass::Wizard);
+    if (v <= maxV) return static_cast<PlayerClass>(v);
+    return PlayerClass::Adventurer;
+}
+
+inline bool parsePlayerClass(const std::string& raw, PlayerClass& out) {
+    std::string s;
+    s.reserve(raw.size());
+    for (unsigned char ch : raw) {
+        if (std::isspace(ch) || ch == '_' || ch == '-') continue;
+        s.push_back(static_cast<char>(std::tolower(ch)));
+    }
+
+    if (s.empty()) return false;
+
+    if (s == "adventurer" || s == "advent" || s == "adv") { out = PlayerClass::Adventurer; return true; }
+    if (s == "knight" || s == "warrior" || s == "fighter") { out = PlayerClass::Knight; return true; }
+    if (s == "rogue" || s == "thief") { out = PlayerClass::Rogue; return true; }
+    if (s == "archer" || s == "ranger" || s == "bow") { out = PlayerClass::Archer; return true; }
+    if (s == "wizard" || s == "mage" || s == "wiz") { out = PlayerClass::Wizard; return true; }
+
+    return false;
+}
+
 
 // Deterministic "daily" seed derived from the current UTC date.
 // If outDateIso is non-null, it receives an ISO date like "2025-12-27".
@@ -382,6 +441,14 @@ public:
     const std::string& playerName() const { return playerName_; }
     void setPlayerName(std::string name);
 
+    // Player starting class/role (saved per-run).
+    //
+    // The default for new runs can be set via settings.ini (player_class) or the CLI (--class).
+    PlayerClass playerClass() const { return playerClass_; }
+    const char* playerClassIdString() const { return ::playerClassId(playerClass_); }
+    const char* playerClassDisplayName() const { return ::playerClassDisplayName(playerClass_); }
+    void setPlayerClass(PlayerClass pc) { playerClass_ = pc; }
+
     // End-of-run cause (e.g., "KILLED BY GOBLIN", "ESCAPED WITH THE AMULET")
     const std::string& endCause() const { return endCause_; }
 
@@ -501,6 +568,18 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
     uint8_t tileLightLevel(int x, int y) const;
     // A short HUD-friendly label for lighting state ("DARK", "TORCH(123)", ...).
     std::string lightTag() const;
+
+    // ------------------------------------------------------------
+    // Yendor Doom (endgame escalation)
+    //
+    // Optional pressure system: once the player acquires the Amulet of Yendor,
+    // the dungeon starts fighting back with periodic "doom" noises and hunter
+    // spawns. This can be disabled for a more relaxed endgame.
+    // ------------------------------------------------------------
+    void setYendorDoomEnabled(bool enabled);
+    bool yendorDoomEnabled() const { return yendorDoomEnabled_; }
+    bool yendorDoomActive() const { return yendorDoomActive_; }
+    int yendorDoomLevel() const { return yendorDoomLevel_; }
 
     // Quit confirmation (ESC requires a second press within a short window).
     void setConfirmQuitEnabled(bool enabled) { confirmQuitEnabled_ = enabled; }
@@ -810,8 +889,24 @@ private:
     uint32_t killCount = 0;
     int maxDepth = 1;
 
+    // Yendor Doom (endgame escalation).
+    //
+    // When enabled, picking up the Amulet of Yendor activates a pressure system
+    // that grows over time and as the player ascends.
+    bool yendorDoomEnabled_ = true;   // user toggle (persisted via settings)
+    bool yendorDoomActive_ = false;   // per-run state (serialized in save v21+)
+    int yendorDoomLevel_ = 0;         // cached for HUD; recomputed during tick
+    uint32_t yendorDoomStartTurn_ = 0;
+    uint32_t yendorDoomLastPulseTurn_ = 0;
+    uint32_t yendorDoomLastSpawnTurn_ = 0;
+    int yendorDoomMsgStage_ = 0;
+
     // Player identity (persisted via settings)
     std::string playerName_ = "PLAYER";
+
+    // Starting class/role (saved per-run; default is set from settings/CLI for new games).
+    PlayerClass playerClass_ = PlayerClass::Adventurer;
+
 
     // End-of-run cause string for scoreboard / UI
     std::string endCause_;
@@ -956,6 +1051,18 @@ private:
     void emitNoise(Vec2i pos, int volume);
     void applyEndOfTurnEffects();
     Vec2i randomFreeTileInRoom(const Room& r, int tries = 200);
+
+    // Monster factory (shared by level generation + dynamic spawns).
+    // Returns a fully-initialized Entity (id, stats, speed, ammo, gear, ...).
+    Entity makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear);
+    // Convenience wrapper that appends the monster to the entity list and returns a reference.
+    Entity& spawnMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear = true);
+
+    // Yendor Doom: endgame escalation tick (runs once per player action that consumes time).
+    void onAmuletAcquired();
+    void tickYendorDoom();
+    void spawnYendorHunterPack(int doomLevel);
+    int computeYendorDoomLevel() const;
 
     // Unified "time passes" handler (runs monsters + end-of-turn effects, handles haste)
     void advanceAfterPlayerAction();

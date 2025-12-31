@@ -54,7 +54,7 @@ bool Renderer::init() {
     }
 
 // Pre-generate a few tile variants (with animation frames)
-const int tileVars = 10;
+const int tileVars = 18; // more variants reduces visible repetition
 floorVar.clear();
 wallVar.clear();
 chasmVar.clear();
@@ -798,6 +798,13 @@ void Renderer::drawHud(const Game& game) {
         const std::string st = game.sneakTag();
         if (!st.empty()) ss << " | " << st;
     }
+    {
+        const std::string lt = game.lightTag();
+        if (!lt.empty()) ss << " | " << lt;
+    }
+    if (game.yendorDoomActive()) {
+        ss << " | DOOM: " << game.yendorDoomLevel();
+    }
     if (game.autosaveEveryTurns() > 0) {
         ss << " | AS: " << game.autosaveEveryTurns();
     }
@@ -1242,13 +1249,15 @@ void Renderer::drawOptionsOverlay(const Game& game) {
     drawOpt(3, "IDENTIFY ITEMS", yesNo(game.identificationEnabled()));
     drawOpt(4, "HUNGER SYSTEM", yesNo(game.hungerEnabled()));
     drawOpt(5, "ENCUMBRANCE", yesNo(game.encumbranceEnabled()));
-    drawOpt(6, "EFFECT TIMERS", yesNo(game.showEffectTimers()));
-    drawOpt(7, "CONFIRM QUIT", yesNo(game.confirmQuitEnabled()));
-    drawOpt(8, "AUTO MORTEM", yesNo(game.autoMortemEnabled()));
-    drawOpt(9, "SAVE BACKUPS", (game.saveBackups() > 0 ? std::to_string(game.saveBackups()) : "OFF"));
-    drawOpt(10, "UI THEME", uiThemeLabel(game.uiTheme()));
-    drawOpt(11, "UI PANELS", (game.uiPanelsTextured() ? "TEXTURED" : "SOLID"));
-    drawOpt(12, "CLOSE", "");
+    drawOpt(6, "LIGHTING", yesNo(game.lightingEnabled()));
+    drawOpt(7, "YENDOR DOOM", yesNo(game.yendorDoomEnabled()));
+    drawOpt(8, "EFFECT TIMERS", yesNo(game.showEffectTimers()));
+    drawOpt(9, "CONFIRM QUIT", yesNo(game.confirmQuitEnabled()));
+    drawOpt(10, "AUTO MORTEM", yesNo(game.autoMortemEnabled()));
+    drawOpt(11, "SAVE BACKUPS", (game.saveBackups() > 0 ? std::to_string(game.saveBackups()) : "OFF"));
+    drawOpt(12, "UI THEME", uiThemeLabel(game.uiTheme()));
+    drawOpt(13, "UI PANELS", (game.uiPanelsTextured() ? "TEXTURED" : "SOLID"));
+    drawOpt(14, "CLOSE", "");
 
     y += 14;
     drawText5x7(renderer, x0 + 16, y, scale, gray,
@@ -1503,6 +1512,12 @@ void Renderer::drawStatsOverlay(const Game& game) {
     {
         std::stringstream ss;
         ss << "SEED: " << game.seed();
+        drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
+        y += 18;
+    }
+    {
+        std::stringstream ss;
+        ss << "CLASS: " << game.playerClassDisplayName();
         drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
         y += 18;
     }

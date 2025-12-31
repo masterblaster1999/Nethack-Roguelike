@@ -292,6 +292,7 @@ static bool exportRunLogToFile(const Game& game, const std::filesystem::path& ou
 
     f << PROCROGUE_APPNAME << " " << PROCROGUE_VERSION << "\n";
     f << "Name: " << game.playerName() << "\n";
+    f << "Class: " << game.playerClassDisplayName() << " (" << game.playerClassIdString() << ")\n";
     f << "Slot: " << (game.activeSlot().empty() ? std::string("default") : game.activeSlot()) << "\n";
     f << "Seed: " << game.seed() << "\n";
     f << "Depth: " << game.depth() << " (max " << game.maxDepthReached() << ")\n";
@@ -451,6 +452,7 @@ static std::pair<bool, bool> exportRunDumpToFile(const Game& game, const std::fi
 
     f << PROCROGUE_APPNAME << " dump (" << PROCROGUE_VERSION << ")\n";
     f << "Name: " << game.playerName() << "\n";
+    f << "Class: " << game.playerClassDisplayName() << " (" << game.playerClassIdString() << ")\n";
     f << "Slot: " << (game.activeSlot().empty() ? std::string("default") : game.activeSlot()) << "\n";
     f << "Seed: " << game.seed() << "\n";
     f << "Depth: " << game.depth() << " (max " << game.maxDepthReached() << ")\n";
@@ -723,6 +725,7 @@ static std::vector<std::string> extendedCommandList() {
         "seed",
         "version",
         "name",
+    "class",
         "scores",
         "history",
         "exportlog",
@@ -1289,6 +1292,43 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "class") {
+        if (toks.size() <= 1) {
+            std::ostringstream ss;
+            ss << "CLASS: " << game.playerClassDisplayName()
+               << " (" << game.playerClassIdString() << ")";
+            game.pushSystemMessage(ss.str());
+            game.pushSystemMessage("USAGE: #CLASS <adventurer|knight|rogue|archer|wizard> [same|random]");
+            game.pushSystemMessage("DEFAULT: same  (restarts the run, preserving seed)");
+            return;
+        }
+
+        PlayerClass pc = PlayerClass::Adventurer;
+        if (!parsePlayerClass(toks[1], pc)) {
+            game.pushSystemMessage("UNKNOWN CLASS. TRY: ADVENTURER, KNIGHT, ROGUE, ARCHER, WIZARD.");
+            return;
+        }
+
+        const uint32_t oldSeed = game.seed();
+        game.setPlayerClass(pc);
+        game.markSettingsDirty();
+
+        bool randomSeed = false;
+        if (toks.size() > 2) {
+            std::string mode = toLower(toks[2]);
+            if (mode == "random" || mode == "new") randomSeed = true;
+        }
+
+        if (randomSeed) {
+            game.handleAction(Action::Restart);
+            game.pushSystemMessage(std::string("RESTARTED AS ") + game.playerClassDisplayName() + ".");
+        } else {
+            game.newGame(oldSeed);
+            game.pushSystemMessage(std::string("RESTARTED AS ") + game.playerClassDisplayName() + " (SEED PRESERVED).");
+        }
+        return;
+    }
+
     if (cmd == "scores") {
         int n = 10;
         if (toks.size() > 1) {
@@ -1310,7 +1350,15 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         const int count = std::min<int>(n, static_cast<int>(es.size()));
         for (int i = 0; i < count; ++i) {
             const auto& e = es[static_cast<size_t>(i)];
-            const std::string who = e.name.empty() ? std::string("PLAYER") : e.name;
+            std::string who = e.name.empty() ? std::string("PLAYER") : e.name;
+            if (!e.playerClass.empty()) {
+                PlayerClass pc = PlayerClass::Adventurer;
+                if (parsePlayerClass(e.playerClass, pc)) {
+                    who += " (" + std::string(playerClassDisplayName(pc)) + ")";
+                } else {
+                    who += " (" + e.playerClass + ")";
+                }
+            }
             const std::string res = e.won ? std::string("WIN") : std::string("DEAD");
 
             std::string scoreLine = "#" + std::to_string(i + 1) + " " + who + " " + res + " ";
@@ -1361,7 +1409,16 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             std::ostringstream oss;
             oss << "#" << (i + 1) << " ";
             oss << (e.timestamp.empty() ? "(no timestamp)" : e.timestamp) << " ";
-            oss << (e.name.empty() ? "PLAYER" : e.name) << " ";
+            oss << (e.name.empty() ? "PLAYER" : e.name);
+            if (!e.playerClass.empty()) {
+                PlayerClass pc = PlayerClass::Adventurer;
+                if (parsePlayerClass(e.playerClass, pc)) {
+                    oss << " (" << playerClassDisplayName(pc) << ")";
+                } else {
+                    oss << " (" << e.playerClass << ")";
+                }
+            }
+            oss << " ";
             oss << (e.won ? "WIN" : "DEAD") << " ";
             oss << "S" << e.score << " D" << e.depth << " T" << e.turns << " K" << e.kills;
             oss << " SEED" << e.seed;

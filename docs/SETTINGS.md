@@ -37,6 +37,11 @@ Comments start with `#` or `;`.
 - `player_name` (string, default `PLAYER`)
   - Used in the HUD + scoreboard.
 
+- `player_class` (string, default `adventurer`)
+  - Starting class/role for **new runs**.
+  - Valid values: `adventurer`, `knight`, `rogue`, `archer`, `wizard`.
+  - You can also change this in-game with `#class <name>` (restarts the run).
+
 - `show_effect_timers` (`true/false`, default `true`)
   - When `true`, status tags show remaining turns (example: `POISON(6)`).
 
@@ -75,6 +80,22 @@ Comments start with `#` or `;`.
   - Enables an optional hunger system.
   - Adds *Food Rations* to loot tables.
   - When hunger reaches zero, you take starvation damage over time until you eat.
+
+
+- `encumbrance_enabled` (`true/false`, default `false`)
+  - Enables an optional carrying capacity / burden system.
+  - When enabled, your total inventory weight affects movement pacing (extra monster turns when heavily burdened).
+  - Overloaded characters cannot use stairs.
+
+
+- `lighting_enabled` (`true/false`, default `false`)
+  - Enables an optional darkness / lighting system.
+  - Deeper floors can have darkness that limits your vision unless you carry a light source (torches).
+
+
+- `yendor_doom_enabled` (`true/false`, default `true`)
+  - Enables an optional endgame escalation after you acquire the *Amulet of Yendor*.
+  - The dungeon will periodically emit loud "doom" noises and spawn hunter packs as you try to ascend.
 
 
 - `autosave_every_turns` (int, default `200`)

@@ -538,6 +538,7 @@ bool Game::pickupAtPlayer() {
             pushMsg(msg, MessageKind::Loot, true);
             if (it.kind == ItemKind::AmuletYendor) {
                 pushMsg("YOU HAVE FOUND THE AMULET OF YENDOR! RETURN TO THE EXIT (<) TO WIN.", MessageKind::Success, true);
+                onAmuletAcquired();
             }
             ground.erase(ground.begin() + static_cast<long>(gi));
             continue;
@@ -553,6 +554,7 @@ bool Game::pickupAtPlayer() {
         pushMsg(msg, MessageKind::Loot, true);
         if (it.kind == ItemKind::AmuletYendor) {
             pushMsg("YOU HAVE FOUND THE AMULET OF YENDOR! RETURN TO THE EXIT (<) TO WIN.", MessageKind::Success, true);
+            onAmuletAcquired();
         }
         ground.erase(ground.begin() + static_cast<long>(gi));
     }

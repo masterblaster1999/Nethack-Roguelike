@@ -190,7 +190,7 @@ enum class MessageKind : uint8_t {
     Combat,
     Loot,
     System,
-    Important,
+    ImportantMsg,
     Warning,
     Success,
 };
@@ -567,6 +567,8 @@ void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
     bool darknessActive() const;
     // Per-tile light level (0..255) for the current level.
     uint8_t tileLightLevel(int x, int y) const;
+    // Per-tile light color (RGB 0..255) for the current level.
+    Color tileLightColor(int x, int y) const;
     // A short HUD-friendly label for lighting state ("DARK", "TORCH(123)", ...).
     std::string lightTag() const;
 
@@ -830,6 +832,8 @@ private:
     bool lightingEnabled_ = false;
     // Light map for the current level (0..255 brightness per tile). Recomputed when FOV updates.
     std::vector<uint8_t> lightMap_;
+    // Per-tile light color for the current level (RGB 0..255). Recomputed with lightMap_.
+    std::vector<Color> lightColorMap_;
 
     // Item identification (NetHack-style). When enabled, potions/scrolls start unknown each run
     // and become identified through use/identify scrolls.

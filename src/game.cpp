@@ -511,7 +511,7 @@ void Game::onAmuletAcquired() {
     yendorDoomMsgStage_ = 0;
     yendorDoomLevel_ = computeYendorDoomLevel();
 
-    pushMsg("THE DUNGEON STIRS. SOMETHING HUNTS YOU...", MessageKind::Important, true);
+    pushMsg("THE DUNGEON STIRS. SOMETHING HUNTS YOU...", MessageKind::ImportantMsg, true);
 }
 
 void Game::spawnYendorHunterPack(int doomLevel) {
@@ -625,7 +625,7 @@ void Game::spawnYendorHunterPack(int doomLevel) {
 
     // Lightly telegraph without being too spammy.
     if (rng.range(0, 2) == 0) {
-        pushMsg("YOU FEEL A MALEVOLENT PRESENCE DRAWING NEAR.", MessageKind::Important);
+        pushMsg("YOU FEEL A MALEVOLENT PRESENCE DRAWING NEAR.", MessageKind::ImportantMsg);
     }
 }
 
@@ -654,13 +654,13 @@ void Game::tickYendorDoom() {
     // One-time escalating warnings.
     if (lvl >= 6 && yendorDoomMsgStage_ < 1) {
         yendorDoomMsgStage_ = 1;
-        pushMsg("THE AIR GROWS HEAVY WITH DREAD.", MessageKind::Important);
+        pushMsg("THE AIR GROWS HEAVY WITH DREAD.", MessageKind::ImportantMsg);
     } else if (lvl >= 12 && yendorDoomMsgStage_ < 2) {
         yendorDoomMsgStage_ = 2;
-        pushMsg("THE DUNGEON'S RAGE BUILDS BEHIND YOU.", MessageKind::Important);
+        pushMsg("THE DUNGEON'S RAGE BUILDS BEHIND YOU.", MessageKind::ImportantMsg);
     } else if (lvl >= 18 && yendorDoomMsgStage_ < 3) {
         yendorDoomMsgStage_ = 3;
-        pushMsg("THE VERY STONES SCREAM FOR YOUR BLOOD!", MessageKind::Important);
+        pushMsg("THE VERY STONES SCREAM FOR YOUR BLOOD!", MessageKind::ImportantMsg);
     }
 
     const uint32_t now = turnCount;

@@ -479,6 +479,17 @@ uint8_t Game::tileLightLevel(int x, int y) const {
     return lightMap_[i];
 }
 
+Color Game::tileLightColor(int x, int y) const {
+    if (!dung.inBounds(x, y)) return { 0, 0, 0, 255 };
+    const size_t i = static_cast<size_t>(y * dung.width + x);
+    if (i >= lightColorMap_.size()) {
+        // If lighting isn't active (or the cache hasn't been built yet), default to white.
+        return darknessActive() ? Color{ 0, 0, 0, 255 } : Color{ 255, 255, 255, 255 };
+    }
+    return lightColorMap_[i];
+}
+
+
 std::string Game::lightTag() const {
     if (!darknessActive()) return std::string();
 

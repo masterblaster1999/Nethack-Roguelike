@@ -1672,6 +1672,296 @@ SpritePixels generateFloorTile(uint32_t seed, int frame) {
 }
 
 
+// Themed floor tile. This intentionally keeps each theme fairly dark so that
+// entities/items remain readable, but changes material + micro-detail so that
+// special rooms stand out instantly.
+// style mapping:
+//  0 = Normal, 1 = Treasure, 2 = Lair, 3 = Shrine, 4 = Secret, 5 = Vault, 6 = Shop
+SpritePixels generateThemedFloorTile(uint32_t seed, uint8_t style, int frame) {
+    if (style == 0u) {
+        return generateFloorTile(seed, frame);
+    }
+
+    SpritePixels s = makeSprite(16, 16, {0,0,0,255});
+
+    const uint32_t sMix = static_cast<uint32_t>(style) * 0x9E3779B9u;
+    RNG rng(hash32(seed ^ sMix));
+
+    // Defaults (overridden per style)
+    Color base{ 82, 74, 60, 255 };
+    Color accent{ 130, 120, 85, 255 };
+    float noiseGain = 0.30f;
+    float patchGain = 0.25f;
+    float edgeDark = 0.12f;
+
+    switch (style) {
+        case 1: // Treasure
+            base   = { 86, 74, 50, 255 };
+            accent = { 235, 205, 120, 255 };
+            noiseGain = 0.26f;
+            patchGain = 0.22f;
+            break;
+        case 2: // Lair
+            base   = { 64, 58, 46, 255 };
+            accent = { 90, 120, 75, 255 };
+            noiseGain = 0.36f;
+            patchGain = 0.30f;
+            edgeDark = 0.16f;
+            break;
+        case 3: // Shrine
+            base   = { 72, 78, 92, 255 };
+            accent = { 150, 210, 255, 255 };
+            noiseGain = 0.22f;
+            patchGain = 0.18f;
+            break;
+        case 4: // Secret
+            base   = { 58, 62, 52, 255 };
+            accent = { 90, 140, 90, 255 };
+            noiseGain = 0.34f;
+            patchGain = 0.26f;
+            edgeDark = 0.18f;
+            break;
+        case 5: // Vault
+            base   = { 78, 84, 96, 255 };
+            accent = { 200, 220, 245, 255 };
+            noiseGain = 0.18f;
+            patchGain = 0.12f;
+            edgeDark = 0.10f;
+            break;
+        case 6: // Shop
+            base   = { 78, 58, 36, 255 };
+            accent = { 125, 90, 55, 255 };
+            noiseGain = 0.22f;
+            patchGain = 0.10f;
+            edgeDark = 0.10f;
+            break;
+        default:
+            break;
+    }
+
+    // Light base variation per-variant seed.
+    base = add(base, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
+
+    if (style == 6u) {
+        // Shop: wood planks (horizontal).
+        // The dithering ramp keeps it looking like pixel-art rather than a smooth gradient.
+        for (int y = 0; y < 16; ++y) {
+            const int plank = y / 4; // 4px planks
+            const bool seam = (y % 4) == 0;
+            for (int x = 0; x < 16; ++x) {
+                uint32_t n = hashCombine(seed ^ (0xB00Du + sMix), static_cast<uint32_t>(x + y * 23 + frame * 101));
+                float noise = (n & 0xFFu) / 255.0f;
+
+                // Gentle grain running along x.
+                const float gx = std::sin((static_cast<float>(x) * 0.55f) + (static_cast<float>(plank) * 1.2f) + (seed & 0xFFu) * 0.04f);
+                float f = 0.76f + gx * 0.06f + (noise - 0.5f) * noiseGain;
+
+                // Plank-to-plank contrast.
+                const float pVar = 0.96f + 0.04f * std::sin(static_cast<float>(plank) * 2.1f + (seed & 0x3Fu) * 0.2f);
+                f *= pVar;
+
+                // Seams between planks.
+                if (seam) f *= 0.70f;
+
+                // Slight edge darkening.
+                if (x == 0 || y == 0 || x == 15 || y == 15) f *= (1.0f - edgeDark);
+
+                s.at(x, y) = rampShadeTile(base, f, x, y);
+            }
+        }
+
+        // Occasional nails / knots.
+        for (int i = 0; i < 5; ++i) {
+            const int x = rng.range(1, 14);
+            const int y = (rng.range(0, 3) * 4) + rng.range(1, 2);
+            Color nail = mul(accent, 0.45f);
+            nail = add(nail, 25, 25, 25);
+            setPx(s, x, y, nail);
+        }
+
+        // Small rug hint (soft red stripe) sometimes.
+        if ((hash32(seed ^ 0x5A0F5u) & 1u) == 1u) {
+            const int cx = 8;
+            const int cy = 8;
+            Color rug{ 90, 35, 35, 120 };
+            if (frame % 2 == 1) rug.a = 135;
+            for (int y = 4; y <= 11; ++y) {
+                for (int x = 4; x <= 11; ++x) {
+                    const int dx = x - cx;
+                    const int dy = y - cy;
+                    if (dx * dx + dy * dy > 18) continue;
+                    blendPx(s, x, y, rug);
+                }
+            }
+        }
+
+        return s;
+    }
+
+    // Stone-like base fill (used by all other themed floors).
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            const int cx = x / 4;
+            const int cy = y / 4;
+
+            const uint32_t cN = hashCombine(seed ^ (0x51F00u + sMix), static_cast<uint32_t>(cx + cy * 7));
+            const float cell = (cN & 0xFFu) / 255.0f;
+            const float cellF = 0.86f + cell * patchGain;
+
+            const uint32_t n = hashCombine(seed ^ (0xF1000u + sMix), static_cast<uint32_t>(x + y * 17 + frame * 131));
+            const float noise = (n & 0xFFu) / 255.0f;
+            float f = cellF * (0.80f + (noise - 0.5f) * noiseGain);
+
+            // Directional light bias (top-left brighter)
+            const float lx = (15.0f - x) / 15.0f;
+            const float ly = (15.0f - y) / 15.0f;
+            f *= (0.92f + 0.08f * (0.60f * lx + 0.40f * ly));
+
+            // Subtle vignette
+            const float vx = (x - 7.5f) / 7.5f;
+            const float vy = (y - 7.5f) / 7.5f;
+            f *= 1.0f - 0.08f * (vx * vx + vy * vy);
+
+            // Edge darkening (helps "tile" separation)
+            if (x == 0 || y == 0 || x == 15 || y == 15) f *= (1.0f - edgeDark);
+
+            // Shrine: add a marble vein field.
+            if (style == 3u) {
+                const float v = std::sin((x * 0.7f + y * 1.1f) + (seed & 0xFFu) * 0.08f);
+                f *= (0.98f + 0.04f * v);
+            }
+
+            s.at(x, y) = rampShadeTile(base, f * 0.95f, x, y);
+        }
+    }
+
+    // Style-specific overlays.
+    if (style == 1u) {
+        // Treasure: gold inlays + sparkles.
+        Color inlay = mul(accent, 0.55f);
+        inlay.a = 140;
+        Color inlay2 = mul(accent, 0.35f);
+        inlay2.a = 110;
+
+        // A few thin inlay lines.
+        for (int i = 0; i < 3; ++i) {
+            const int x0 = rng.range(1, 14);
+            const int y0 = rng.range(1, 14);
+            const int x1 = std::clamp(x0 + rng.range(-8, 8), 1, 14);
+            const int y1 = std::clamp(y0 + rng.range(-8, 8), 1, 14);
+            lineBlend(s, x0, y0, x1, y1, (i % 2 == 0) ? inlay : inlay2);
+        }
+
+        // Sparkle pips.
+        if (frame % 2 == 1) {
+            for (int i = 0; i < 4; ++i) {
+                const int x = rng.range(2, 13);
+                const int y = rng.range(2, 13);
+                s.at(x, y) = add(s.at(x, y), 28, 28, 18);
+                setPx(s, x + 1, y, add(s.at(std::min(15, x + 1), y), 16, 16, 10));
+            }
+        }
+    } else if (style == 2u) {
+        // Lair: grime + mossy stains.
+        Color stain{ 35, 60, 35, 120 };
+        for (int i = 0; i < 4; ++i) {
+            const int cx = rng.range(2, 13);
+            const int cy = rng.range(2, 13);
+            const int rr = rng.range(2, 4);
+            for (int y = cy - rr; y <= cy + rr; ++y) {
+                for (int x = cx - rr; x <= cx + rr; ++x) {
+                    const int dx = x - cx;
+                    const int dy = y - cy;
+                    if (dx * dx + dy * dy > rr * rr) continue;
+                    blendPx(s, x, y, stain);
+                }
+            }
+        }
+        // Bone chips / pale grit.
+        for (int i = 0; i < 10; ++i) {
+            const int x = rng.range(0, 15);
+            const int y = rng.range(0, 15);
+            s.at(x, y) = add(s.at(x, y), 14, 12, 8);
+        }
+    } else if (style == 3u) {
+        // Shrine: rune ring + soft glows.
+        Color rune = mul(accent, 0.35f);
+        rune.a = 160;
+        Color rune2 = mul(accent, 0.22f);
+        rune2.a = 135;
+
+        // Simple ring around the center.
+        const int cx = 8;
+        const int cy = 8;
+        const int r0 = 5;
+        for (int y = 0; y < 16; ++y) {
+            for (int x = 0; x < 16; ++x) {
+                const int dx = x - cx;
+                const int dy = y - cy;
+                const int d2 = dx * dx + dy * dy;
+                if (d2 >= r0 * r0 - 3 && d2 <= r0 * r0 + 3) {
+                    blendPx(s, x, y, ((x + y) & 1) ? rune : rune2);
+                }
+            }
+        }
+
+        // Pulse spark.
+        if (frame % 2 == 1) {
+            const int x = rng.range(4, 11);
+            const int y = rng.range(4, 11);
+            blendPx(s, x, y, Color{ 255, 255, 255, 85 });
+        }
+    } else if (style == 4u) {
+        // Secret: moss patches (thresholded noise).
+        for (int y = 0; y < 16; ++y) {
+            for (int x = 0; x < 16; ++x) {
+                const uint32_t n = hashCombine(seed ^ (0x6055u + sMix), static_cast<uint32_t>(x + y * 31));
+                const uint8_t v = static_cast<uint8_t>(n & 0xFFu);
+                if (v < 52u) {
+                    Color moss{ 40, 80, 45, 120 };
+                    if ((v & 3u) == 0u) moss.a = 150;
+                    blendPx(s, x, y, moss);
+                }
+            }
+        }
+        // Extra cracks.
+        Color crack = mul(base, 0.50f);
+        crack.a = 160;
+        for (int i = 0; i < 2; ++i) {
+            const int x0 = rng.range(0, 15);
+            const int y0 = rng.range(0, 15);
+            const int x1 = std::clamp(x0 + rng.range(-10, 10), 0, 15);
+            const int y1 = std::clamp(y0 + rng.range(-10, 10), 0, 15);
+            lineBlend(s, x0, y0, x1, y1, crack);
+        }
+    } else if (style == 5u) {
+        // Vault: polished stone / metal seams.
+        Color seam = mul(base, 0.55f);
+        seam.a = 200;
+        for (int y = 0; y < 16; ++y) {
+            for (int x = 0; x < 16; ++x) {
+                if (x == 0 || y == 0) continue;
+                const bool vSeam = (x % 4) == 0;
+                const bool hSeam = (y % 4) == 0;
+                if (vSeam || hSeam) {
+                    blendPx(s, x, y, seam);
+                }
+            }
+        }
+        // A few sharp glints on pulse frame.
+        if (frame % 2 == 1) {
+            for (int i = 0; i < 3; ++i) {
+                const int x = (rng.range(1, 3) * 4) - 1;
+                const int y = (rng.range(1, 3) * 4) - 1;
+                s.at(x, y) = add(s.at(x, y), 30, 30, 38);
+            }
+        }
+    }
+
+    return s;
+}
+
+
 
 SpritePixels generateWallTile(uint32_t seed, int frame) {
     SpritePixels s = makeSprite(16, 16, {0,0,0,255});
@@ -1790,18 +2080,26 @@ SpritePixels generateChasmTile(uint32_t seed, int frame) {
 SpritePixels generatePillarTile(uint32_t seed, int frame) {
     RNG rng(hash32(seed));
 
-    // Base floor so the pillar feels embedded in the room.
-    SpritePixels s = generateFloorTile(seed ^ 0x911A4u, frame);
+    // Pillars are rendered as a transparent overlay layered on top of the
+    // underlying themed floor (handled by the renderer). This keeps pillars
+    // consistent across room floor styles.
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
 
     Color stone = { 128, 132, 145, 255 };
     stone = add(stone, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
-    Color dark = mul(stone, 0.65f);
-    Color light = add(mul(stone, 1.08f), 8, 8, 10);
+    Color dark = mul(stone, 0.62f);
+    Color light = add(mul(stone, 1.10f), 10, 10, 12);
 
-    // Soft shadow on the floor.
-    for (int y = 11; y < 15; ++y) {
-        for (int x = 4; x < 12; ++x) {
-            s.at(x, y) = mul(s.at(x, y), 0.72f);
+    // Soft shadow on the floor (semi-transparent so the floor shows through).
+    for (int y = 10; y < 15; ++y) {
+        for (int x = 3; x < 13; ++x) {
+            float cx = (x - 7.5f) / 5.5f;
+            float cy = (y - 12.5f) / 3.0f;
+            float d2 = cx*cx + cy*cy;
+            if (d2 > 1.0f) continue;
+            int a = static_cast<int>(std::lround((1.0f - d2) * 110.0f));
+            a = std::clamp(a, 0, 110);
+            setPx(s, x, y, Color{0, 0, 0, static_cast<uint8_t>(a)});
         }
     }
 
@@ -1811,8 +2109,8 @@ SpritePixels generatePillarTile(uint32_t seed, int frame) {
 
     // Carve vertical grooves.
     for (int y = 3; y < 14; ++y) {
-        if (y % 3 == 0) {
-            setPx(s, 7, y, mul(stone, 0.85f));
+        if ((y % 3) == 0) {
+            setPx(s, 7, y, mul(stone, 0.82f));
             setPx(s, 8, y, mul(stone, 0.92f));
         }
     }
@@ -1821,11 +2119,10 @@ SpritePixels generatePillarTile(uint32_t seed, int frame) {
     rect(s, 5, 2, 6, 1, light);
     rect(s, 5, 13, 6, 1, mul(stone, 0.92f));
 
-    // A slight highlight shimmer on frame 1 to match other tiles.
+    // Subtle animated sparkle so pillars don't look perfectly static.
     if (frame % 2 == 1) {
-        setPx(s, 6, 4, add(s.at(6, 4), 25, 25, 28));
-        setPx(s, 6, 9, add(s.at(6, 9), 18, 18, 20));
-        setPx(s, 9, 6, add(s.at(9, 6), 12, 12, 14));
+        setPx(s, 6, 4, add(s.at(6, 4), 22, 22, 24));
+        setPx(s, 9, 7, add(s.at(9, 7), 14, 14, 16));
     }
 
     return s;
@@ -1833,21 +2130,33 @@ SpritePixels generatePillarTile(uint32_t seed, int frame) {
 
 SpritePixels generateStairsTile(uint32_t seed, bool up, int frame) {
     RNG rng(hash32(seed));
-    SpritePixels s = makeSprite(16, 16, {0,0,0,255});
+    // Stairs are rendered as a transparent overlay layered on top of the
+    // underlying themed floor (handled by the renderer).
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
 
-    // Base = floor-like
-    SpritePixels floor = generateFloorTile(seed ^ 0xB00Bu, frame);
-    s = floor;
+    Color stair = { 185, 175, 155, 255 };
+    stair = add(stair, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
 
-    Color stair = { 180, 170, 150, 255 };
-    stair = add(stair, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+    // Soft base shadow so the stair shape reads against noisy floors.
+    for (int y = 5; y < 14; ++y) {
+        for (int x = 3; x < 14; ++x) {
+            // Slight diagonal falloff.
+            float d = (static_cast<float>(x) + static_cast<float>(y) * 0.9f) / 28.0f;
+            d = std::clamp(d, 0.0f, 1.0f);
+            uint8_t a = static_cast<uint8_t>(std::lround(55.0f + 45.0f * d));
+            setPx(s, x, y, Color{0, 0, 0, a});
+        }
+    }
 
-    // Simple diagonal steps
+    // Simple diagonal steps (opaque strokes, with a darker underside line).
     for (int i = 0; i < 6; ++i) {
         int x0 = 4 + i;
         int y0 = 11 - i;
         line(s, x0, y0, x0 + 7, y0, mul(stair, 0.95f));
-        line(s, x0, y0 + 1, x0 + 6, y0 + 1, mul(stair, 0.75f));
+        // Underside (draw slightly translucent so it blends).
+        Color under = mul(stair, 0.72f);
+        under.a = 210;
+        line(s, x0, y0 + 1, x0 + 6, y0 + 1, under);
     }
 
     // Arrow hint
@@ -1863,41 +2172,70 @@ SpritePixels generateStairsTile(uint32_t seed, bool up, int frame) {
         line(s, 10, 10, 8, 12, arrow);
     }
 
+    // Tiny rim highlight to separate stairs from the floor near the top.
+    if (frame % 2 == 1) {
+        setPx(s, 4, 5, Color{240, 235, 225, 180});
+        setPx(s, 5, 5, Color{240, 235, 225, 160});
+        setPx(s, 6, 4, Color{255, 255, 255, 120});
+    }
+
     return s;
 }
 
 SpritePixels generateDoorTile(uint32_t seed, bool open, int frame) {
     RNG rng(hash32(seed));
-    SpritePixels s = makeSprite(16, 16, {0,0,0,255});
-
-    // Base floor-ish
-    s = generateFloorTile(seed ^ 0xD00Du, frame);
+    // Doors are rendered as transparent overlays layered on top of the
+    // underlying themed floor (handled by the renderer).
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
 
     Color wood = add({140, 95, 55, 255}, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
-    Color dark = mul(wood, 0.7f);
+    Color dark = mul(wood, 0.68f);
+
+    // A subtle threshold shadow so the doorway reads against busy floors.
+    for (int y = 12; y < 15; ++y) {
+        for (int x = 4; x < 12; ++x) {
+            uint8_t a = static_cast<uint8_t>(60 + (y - 12) * 22);
+            setPx(s, x, y, Color{0,0,0,a});
+        }
+    }
 
     if (open) {
-        // Dark gap
-        rect(s, 5, 3, 6, 11, {20,20,25,255});
+        // Dark gap (semi-transparent so floor shows through).
+        for (int y = 3; y < 14; ++y) {
+            for (int x = 5; x < 11; ++x) {
+                uint8_t a = static_cast<uint8_t>(150 + (y - 3) * 4);
+                setPx(s, x, y, Color{10, 10, 14, a});
+            }
+        }
+
         // Frame
-        outlineRect(s, 4, 2, 8, 13, wood);
+        outlineRect(s, 4, 2, 8, 13, dark);
+        // Inner highlight
+        Color hi = add(mul(wood, 1.05f), 10, 10, 12);
+        hi.a = 220;
+        line(s, 5, 3, 10, 3, hi);
+
         // Hinges highlight
         if (frame % 2 == 1) {
-            setPx(s, 4, 6, {255,255,255,80});
-            setPx(s, 11, 8, {255,255,255,60});
+            setPx(s, 4, 6, {255,255,255,70});
+            setPx(s, 11, 8, {255,255,255,55});
         }
     } else {
         // Solid door
         outlineRect(s, 4, 2, 8, 13, dark);
         rect(s, 5, 3, 6, 11, wood);
+
         // Planks
-        for (int y = 4; y <= 12; y += 3) line(s, 5, y, 10, y, mul(wood, 0.8f));
-        // Knob
+        for (int y = 4; y <= 12; y += 3) {
+            Color plank = mul(wood, 0.82f);
+            plank.a = 245;
+            line(s, 5, y, 10, y, plank);
+        }
+
+        // Knob + tiny specular highlight
         circle(s, 10, 8, 1, {200, 190, 80, 255});
-        if (frame % 2 == 1) setPx(s, 11, 7, {255,255,255,120});
+        if (frame % 2 == 1) setPx(s, 11, 7, {255,255,255,110});
     }
-
-
 
     return s;
 }
@@ -1927,8 +2265,8 @@ SpritePixels generateLockedDoorTile(uint32_t seed, int frame) {
     setPx(s, x0 + 2, y0 + 5, keyhole);
     setPx(s, x0 + 2, y0 + 6, keyhole);
 
-    // Tiny shimmer highlight every so often.
-    if ((frame % 16) < 2) {
+    // Tiny shimmer highlight (alternating frame).
+    if (frame % 2 == 1) {
         setPx(s, x0 + 2, y0 + 4, Color{ 245, 235, 130, 255 });
     }
 
@@ -2061,6 +2399,694 @@ SpritePixels generateUIOrnamentTile(UITheme theme, uint32_t seed, int frame) {
         setPx(s, 3, 2, {255,255,255,60});
     }
 
+    return s;
+}
+
+
+
+// -----------------------------------------------------------------------------
+// Tile overlay decals (transparent 16x16 sprites)
+// style mapping (kept in renderer):
+//  0 = Generic, 1 = Treasure, 2 = Lair, 3 = Shrine, 4 = Secret, 5 = Vault, 6 = Shop
+// -----------------------------------------------------------------------------
+
+SpritePixels generateFloorDecalTile(uint32_t seed, uint8_t style, int frame) {
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    RNG rng(hash32(seed ^ (static_cast<uint32_t>(style) * 0x9E3779B9u)));
+
+    auto sparkle = [&](int cx, int cy, Color c) {
+        setPx(s, cx, cy, c);
+        setPx(s, cx-1, cy, mul(c, 0.75f));
+        setPx(s, cx+1, cy, mul(c, 0.75f));
+        setPx(s, cx, cy-1, mul(c, 0.75f));
+        setPx(s, cx, cy+1, mul(c, 0.75f));
+    };
+
+    switch (style) {
+        default:
+        case 0: { // Generic: cracks + pebbles
+            Color crack{ 10, 10, 14, 0 };
+            crack.a = static_cast<uint8_t>(120 + rng.range(0, 60));
+            for (int i = 0; i < 2; ++i) {
+                int x0 = rng.range(0, 15);
+                int y0 = rng.range(0, 15);
+                int x1 = std::clamp(x0 + rng.range(-9, 9), 0, 15);
+                int y1 = std::clamp(y0 + rng.range(-9, 9), 0, 15);
+                line(s, x0, y0, x1, y1, crack);
+                // small offshoot
+                if (rng.chance(0.50f)) {
+                    int x2 = std::clamp(x0 + rng.range(-4, 4), 0, 15);
+                    int y2 = std::clamp(y0 + rng.range(-4, 4), 0, 15);
+                    Color c2 = crack; c2.a = static_cast<uint8_t>(crack.a * 0.75f);
+                    line(s, x0, y0, x2, y2, c2);
+                }
+            }
+
+            // pebble specks
+            for (int i = 0; i < 10; ++i) {
+                int x = rng.range(1, 14);
+                int y = rng.range(1, 14);
+                Color p{ static_cast<uint8_t>(110 + rng.range(-10, 10)),
+                         static_cast<uint8_t>(105 + rng.range(-10, 10)),
+                         static_cast<uint8_t>(95 + rng.range(-10, 10)),
+                         static_cast<uint8_t>(60 + rng.range(0, 80)) };
+                setPx(s, x, y, p);
+            }
+
+            // occasional wet spot shimmer
+            if (frame % 2 == 1 && rng.chance(0.35f)) {
+                int cx = rng.range(3, 12);
+                int cy = rng.range(3, 12);
+                Color w{ 90, 140, 190, 70 };
+                setPx(s, cx, cy, w);
+                setPx(s, cx+1, cy, mul(w, 0.80f));
+                setPx(s, cx, cy+1, mul(w, 0.80f));
+                setPx(s, cx-1, cy, mul(w, 0.70f));
+            }
+            break;
+        }
+
+        case 1: { // Treasure: gold inlay + sparkles
+            Color gold{ 235, 200, 120, 160 };
+            Color gold2 = mul(gold, 0.70f); gold2.a = 140;
+
+            // thin filigree lines
+            int y = rng.range(3, 12);
+            for (int x = 2; x < 14; ++x) {
+                if ((x + y) % 3 == 0) setPx(s, x, y, gold);
+                if ((x + y) % 5 == 0) setPx(s, x, y+1, gold2);
+            }
+
+            // coin-ish dot
+            int cx = rng.range(4, 11);
+            int cy = rng.range(4, 11);
+            circle(s, cx, cy, 2, gold2);
+            circle(s, cx, cy, 1, gold);
+
+            // sparkle pulse
+            if (frame % 2 == 1) {
+                sparkle(rng.range(3, 12), rng.range(3, 12), Color{255, 245, 200, 180});
+            }
+            break;
+        }
+
+        case 2: { // Lair: grime + claw marks
+            Color moss{ 70, 140, 70, 120 };
+            Color grime{ 30, 35, 28, 120 };
+
+            // moss clumps around edges
+            for (int i = 0; i < 22; ++i) {
+                int x = (rng.chance(0.5f) ? rng.range(0, 5) : rng.range(10, 15));
+                int y = rng.range(0, 15);
+                if (rng.chance(0.5f)) std::swap(x, y);
+                setPx(s, x, y, rng.chance(0.6f) ? moss : grime);
+            }
+
+            // claw marks
+            Color claw{ 20, 15, 15, 150 };
+            int x0 = rng.range(2, 6);
+            int y0 = rng.range(9, 13);
+            for (int i = 0; i < 3; ++i) {
+                int dx = 4 + i;
+                line(s, x0 + dx, y0 - i, x0 + dx + 4, y0 - i - 5, claw);
+            }
+
+            // faint slime shimmer
+            if (frame % 2 == 1 && rng.chance(0.55f)) {
+                int cx = rng.range(2, 13);
+                int cy = rng.range(2, 13);
+                setPx(s, cx, cy, Color{120, 220, 160, 70});
+            }
+            break;
+        }
+
+        case 3: { // Shrine: runes (cool glow)
+            Color rune{ 160, 210, 255, 150 };
+            Color rune2{ 120, 170, 255, 120 };
+            if (frame % 2 == 1) {
+                rune = add(rune, 25, 25, 25);
+                rune.a = 180;
+            }
+
+            // central sigil
+            int cx = 8 + rng.range(-1, 1);
+            int cy = 8 + rng.range(-1, 1);
+            circle(s, cx, cy, 3, rune2);
+            circle(s, cx, cy, 2, rune);
+
+            // spokes
+            line(s, cx, cy - 4, cx, cy + 4, rune);
+            line(s, cx - 4, cy, cx + 4, cy, rune);
+
+            // dots
+            for (int i = 0; i < 4; ++i) {
+                int x = cx + (i < 2 ? -5 : 5);
+                int y = cy + (i % 2 ? -5 : 5);
+                setPx(s, std::clamp(x, 0, 15), std::clamp(y, 0, 15), rune2);
+            }
+            break;
+        }
+
+        case 4: { // Secret: dust + cobwebs (subtle)
+            Color dust{ 220, 210, 200, 60 };
+            Color dust2{ 200, 190, 175, 55 };
+
+            // corner webs
+            line(s, 0, 0, 6, 6, dust);
+            line(s, 15, 0, 9, 6, dust);
+            line(s, 0, 15, 6, 9, dust);
+            line(s, 15, 15, 9, 9, dust);
+
+            // drifting dust mote
+            if (frame % 2 == 1) {
+                int x = rng.range(3, 12);
+                int y = rng.range(3, 12);
+                setPx(s, x, y, dust2);
+                setPx(s, x+1, y, Color{255,255,255,35});
+            }
+            break;
+        }
+
+        case 5: { // Vault: steel plate seams + rivets
+            Color steel{ 200, 220, 255, 110 };
+            Color rivet{ 235, 245, 255, 150 };
+            Color scratch{ 40, 50, 65, 120 };
+
+            // seam rectangle
+            int x0 = rng.range(2, 5);
+            int y0 = rng.range(2, 5);
+            int w = rng.range(7, 11);
+            int h = rng.range(6, 9);
+            outlineRect(s, x0, y0, w, h, steel);
+
+            // rivets
+            setPx(s, x0, y0, rivet);
+            setPx(s, x0 + w - 1, y0, rivet);
+            setPx(s, x0, y0 + h - 1, rivet);
+            setPx(s, x0 + w - 1, y0 + h - 1, rivet);
+
+            // scratches
+            int sx0 = rng.range(2, 13);
+            int sy0 = rng.range(2, 13);
+            line(s, sx0, sy0, std::clamp(sx0 + rng.range(-6, 6), 0, 15), std::clamp(sy0 + rng.range(-6, 6), 0, 15), scratch);
+
+            if (frame % 2 == 1 && rng.chance(0.45f)) {
+                // tiny glint
+                sparkle(x0 + w/2, y0 + 1, Color{255,255,255,120});
+            }
+            break;
+        }
+
+        case 6: { // Shop: rug / plank hint
+            Color rug{ 170, 80, 70, 120 };
+            Color border{ 235, 210, 150, 130 };
+
+            // small rug patch
+            int x0 = rng.range(3, 6);
+            int y0 = rng.range(5, 8);
+            rect(s, x0, y0, 10 - x0, 7, rug);
+            outlineRect(s, x0, y0, 10 - x0, 7, border);
+
+            // weave pattern
+            for (int y = y0 + 1; y < y0 + 6; ++y) {
+                for (int x = x0 + 1; x < x0 + (10 - x0) - 1; ++x) {
+                    if (((x + y + frame) % 3) == 0) setPx(s, x, y, mul(rug, 0.85f));
+                }
+            }
+
+            if (frame % 2 == 1) {
+                setPx(s, x0 + 2, y0 + 2, Color{255, 240, 220, 70});
+            }
+            break;
+        }
+    }
+
+    return s;
+}
+
+SpritePixels generateWallDecalTile(uint32_t seed, uint8_t style, int frame) {
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    RNG rng(hash32(seed ^ (static_cast<uint32_t>(style) * 0xA341316Cu)));
+
+    Color stain{ 0, 0, 0, 120 };
+    switch (style) {
+        default:
+        case 0: stain = { 0, 0, 0, 110 }; break;
+        case 1: stain = { 240, 200, 120, 110 }; break; // treasure glint
+        case 2: stain = { 70, 140, 70, 120 }; break;   // moss
+        case 3: stain = { 150, 200, 255, 120 }; break; // rune glow
+        case 4: stain = { 220, 210, 200, 70 }; break;  // dust
+        case 5: stain = { 200, 220, 255, 110 }; break; // steel
+        case 6: stain = { 200, 150, 100, 110 }; break; // wood-ish
+    }
+
+    // Drips / streaks
+    const int drips = 2 + rng.range(0, 2);
+    for (int i = 0; i < drips; ++i) {
+        int x = rng.range(2, 13);
+        int y0 = rng.range(1, 8);
+        int len = rng.range(3, 8);
+        for (int j = 0; j < len; ++j) {
+            int y = std::clamp(y0 + j, 0, 15);
+            Color c = stain;
+            c.a = static_cast<uint8_t>(std::max<int>(20, stain.a - j * 10));
+            setPx(s, x, y, c);
+            if (rng.chance(0.25f)) setPx(s, x+1, y, mul(c, 0.70f));
+        }
+    }
+
+    // One crack
+    Color crack = stain;
+    crack.r = static_cast<uint8_t>(std::min<int>(crack.r, 40));
+    crack.g = static_cast<uint8_t>(std::min<int>(crack.g, 40));
+    crack.b = static_cast<uint8_t>(std::min<int>(crack.b, 55));
+    crack.a = static_cast<uint8_t>(100 + rng.range(0, 70));
+
+    int x0 = rng.range(1, 14);
+    int y0 = rng.range(1, 14);
+    int x1 = std::clamp(x0 + rng.range(-8, 8), 0, 15);
+    int y1 = std::clamp(y0 + rng.range(-8, 8), 0, 15);
+    line(s, x0, y0, x1, y1, crack);
+
+    // Gentle pulse on rune/treasure styles
+    if (frame % 2 == 1 && (style == 1 || style == 3)) {
+        int cx = rng.range(3, 12);
+        int cy = rng.range(3, 12);
+        setPx(s, cx, cy, Color{255,255,255,70});
+    }
+
+    return s;
+}
+
+
+// -----------------------------------------------------------------------------
+// Autotile overlays (transparent 16x16 sprites)
+//
+// These are layered on top of the base wall/chasm tiles in the renderer to create
+// crisp edges, corners, and a stronger sense of depth without requiring a full
+// 47-tile tileset.
+// -----------------------------------------------------------------------------
+
+static inline void setPxAlpha(SpritePixels& s, int x, int y, Color c, uint8_t a) {
+    c.a = a;
+    setPx(s, x, y, c);
+}
+
+SpritePixels generateWallEdgeOverlay(uint32_t seed, uint8_t openMask, int variant, int frame) {
+    (void)frame;
+
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    if (openMask == 0u) return s;
+
+    RNG rng(hash32(seed ^ (static_cast<uint32_t>(openMask) * 0x9E3779B9u) ^ (static_cast<uint32_t>(variant) * 0x85EBCA6Bu)));
+
+    // Grayscale pixels; the renderer applies lighting/tint via texture color modulation.
+    const Color outline = { 10, 10, 12, 255 };
+    const Color shadow  = { 0, 0, 0, 255 };
+    const Color hilite  = { 255, 255, 255, 255 };
+    const Color hilite2 = { 215, 220, 230, 255 };
+
+    const auto chip = [&](int x, int y) -> bool {
+        // Tiny deterministic wear so the outline doesn't look perfectly computer-drawn.
+        const uint32_t h = hash32(seed ^ 0xC0FFEEu ^ static_cast<uint32_t>(x + y * 17) ^ static_cast<uint32_t>(variant * 131));
+        const uint8_t r = static_cast<uint8_t>(h & 0xFFu);
+        return r < 18u;
+    };
+
+    auto drawHLine = [&](int y, bool top, uint8_t a0, uint8_t a1) {
+        for (int x = 0; x < 16; ++x) {
+            if (chip(x, y)) continue;
+            setPxAlpha(s, x, y, outline, a0);
+            // bevel highlight/shadow just inside
+            if (top) {
+                if (y + 1 < 16) setPxAlpha(s, x, y + 1, (x < 7 ? hilite : hilite2), a1);
+            } else {
+                if (y - 1 >= 0) setPxAlpha(s, x, y - 1, shadow, a1);
+            }
+        }
+    };
+
+    auto drawVLine = [&](int x, bool left, uint8_t a0, uint8_t a1) {
+        for (int y = 0; y < 16; ++y) {
+            if (chip(x, y)) continue;
+            setPxAlpha(s, x, y, outline, a0);
+            if (left) {
+                if (x + 1 < 16) setPxAlpha(s, x + 1, y, (y < 7 ? hilite : hilite2), a1);
+            } else {
+                if (x - 1 >= 0) setPxAlpha(s, x - 1, y, shadow, a1);
+            }
+        }
+    };
+
+    // Exposed edges: 1=N, 2=E, 4=S, 8=W
+    if (openMask & 0x01u) drawHLine(0, /*top=*/true, 170, 90);
+    if (openMask & 0x04u) drawHLine(15, /*top=*/false, 190, 100);
+    if (openMask & 0x08u) drawVLine(0, /*left=*/true, 170, 90);
+    if (openMask & 0x02u) drawVLine(15, /*left=*/false, 190, 100);
+
+    // Corner emphasis (helps walls read as blocks).
+    auto corner = [&](int x, int y, bool bright) {
+        const uint8_t a = bright ? 210 : 170;
+        setPxAlpha(s, x, y, bright ? hilite : outline, a);
+        setPxAlpha(s, x + (x == 0 ? 1 : -1), y, hilite2, 80);
+        setPxAlpha(s, x, y + (y == 0 ? 1 : -1), hilite2, 80);
+    };
+
+    if ((openMask & 0x01u) && (openMask & 0x08u)) corner(0, 0, true);
+    if ((openMask & 0x01u) && (openMask & 0x02u)) corner(15, 0, false);
+    if ((openMask & 0x04u) && (openMask & 0x08u)) corner(0, 15, false);
+    if ((openMask & 0x04u) && (openMask & 0x02u)) corner(15, 15, false);
+
+    // A couple of tiny pits/chips near exposed edges (adds variety without noise).
+    for (int i = 0; i < 4; ++i) {
+        int x = rng.range(1, 14);
+        int y = rng.range(1, 14);
+        // bias toward edges for readability
+        if (rng.chance(0.7f)) {
+            if (openMask & 0x01u) y = rng.range(1, 3);
+            if (openMask & 0x04u) y = rng.range(12, 14);
+            if (openMask & 0x08u) x = rng.range(1, 3);
+            if (openMask & 0x02u) x = rng.range(12, 14);
+        }
+        setPxAlpha(s, x, y, shadow, 110);
+        if (rng.chance(0.45f)) setPxAlpha(s, x + 1, y, shadow, 70);
+        if (rng.chance(0.45f)) setPxAlpha(s, x, y + 1, shadow, 70);
+    }
+
+    return s;
+}
+
+SpritePixels generateChasmRimOverlay(uint32_t seed, uint8_t openMask, int variant, int frame) {
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    if (openMask == 0u) return s;
+
+    RNG rng(hash32(seed ^ 0xA11CEu ^ (static_cast<uint32_t>(openMask) * 131u) ^ (static_cast<uint32_t>(variant) * 977u)));
+
+    // Slightly cool grayscale; renderer tint + lighting will do most of the work.
+    const Color lipHi = { 255, 255, 255, 255 };
+    const Color lipMd = { 210, 220, 240, 255 };
+    const Color lipSh = { 0, 0, 0, 255 };
+
+    auto rimH = [&](int y0, bool top) {
+        for (int x = 0; x < 16; ++x) {
+            const uint32_t h = hash32(seed ^ static_cast<uint32_t>(x + y0 * 31) ^ static_cast<uint32_t>(variant * 17));
+            const uint8_t r = static_cast<uint8_t>(h & 0xFFu);
+            const bool breakPix = (r < 10u); // tiny gaps
+            if (breakPix) continue;
+
+            if (top) {
+                setPxAlpha(s, x, y0, lipHi, 200);
+                setPxAlpha(s, x, y0 + 1, lipMd, 150);
+                setPxAlpha(s, x, y0 + 2, lipSh, 90);
+            } else {
+                setPxAlpha(s, x, y0, lipMd, 160);
+                setPxAlpha(s, x, y0 - 1, lipSh, 120);
+            }
+        }
+    };
+
+    auto rimV = [&](int x0, bool left) {
+        for (int y = 0; y < 16; ++y) {
+            const uint32_t h = hash32(seed ^ static_cast<uint32_t>(x0 + y * 29) ^ static_cast<uint32_t>(variant * 13));
+            const uint8_t r = static_cast<uint8_t>(h & 0xFFu);
+            const bool breakPix = (r < 10u);
+            if (breakPix) continue;
+
+            if (left) {
+                setPxAlpha(s, x0, y, lipHi, 200);
+                setPxAlpha(s, x0 + 1, y, lipMd, 150);
+                setPxAlpha(s, x0 + 2, y, lipSh, 90);
+            } else {
+                setPxAlpha(s, x0, y, lipMd, 160);
+                setPxAlpha(s, x0 - 1, y, lipSh, 120);
+            }
+        }
+    };
+
+    if (openMask & 0x01u) rimH(0, true);
+    if (openMask & 0x04u) rimH(15, false);
+    if (openMask & 0x08u) rimV(0, true);
+    if (openMask & 0x02u) rimV(15, false);
+
+    // A few shimmering rim pixels on the animated frame.
+    if (frame % 2 == 1) {
+        for (int i = 0; i < 5; ++i) {
+            int x = rng.range(0, 15);
+            int y = rng.range(0, 15);
+            // bias toward rim
+            if (rng.chance(0.7f)) {
+                if (openMask & 0x01u) y = 0;
+                if (openMask & 0x04u) y = 15;
+                if (openMask & 0x08u) x = 0;
+                if (openMask & 0x02u) x = 15;
+            }
+            setPxAlpha(s, x, y, lipHi, 160);
+        }
+    }
+
+    return s;
+}
+
+// Procedural confusion-gas tile: grayscale translucent cloud.
+// Color/tint is applied in the renderer (so lighting affects it naturally).
+SpritePixels generateConfusionGasTile(uint32_t seed, int frame) {
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    RNG rng(hash32(seed ^ 0xC0FF1151u));
+
+    struct Blob {
+        float cx, cy;
+        float r;
+        float w;
+        float vx, vy;
+    };
+
+    const int nBlobs = 3 + (rng.range(0, 100) < 55 ? 1 : 0);
+    std::vector<Blob> blobs;
+    blobs.reserve(static_cast<size_t>(nBlobs));
+
+    const float t = static_cast<float>(frame) * 0.9f;
+
+    for (int i = 0; i < nBlobs; ++i) {
+        Blob b;
+        b.cx = static_cast<float>(rng.range(0, 15));
+        b.cy = static_cast<float>(rng.range(0, 15));
+        b.r  = static_cast<float>(rng.range(4, 8));
+        b.w  = 0.9f + (rng.range(0, 100) / 100.0f) * 0.6f;
+        b.vx = (rng.range(-10, 10) / 10.0f) * 0.6f;
+        b.vy = (rng.range(-10, 10) / 10.0f) * 0.6f;
+        // Slight bob per frame for motion.
+        b.cx += b.vx * t;
+        b.cy += b.vy * t;
+        blobs.push_back(b);
+    }
+
+    // Carve-out holes for a swirly feel.
+    const int nHoles = 1 + (rng.range(0, 100) < 50 ? 1 : 0);
+    std::vector<Blob> holes;
+    holes.reserve(static_cast<size_t>(nHoles));
+    for (int i = 0; i < nHoles; ++i) {
+        Blob b;
+        b.cx = static_cast<float>(rng.range(0, 15));
+        b.cy = static_cast<float>(rng.range(0, 15));
+        b.r  = static_cast<float>(rng.range(3, 6));
+        b.w  = 0.8f + (rng.range(0, 100) / 100.0f) * 0.5f;
+        b.vx = (rng.range(-10, 10) / 10.0f) * 0.4f;
+        b.vy = (rng.range(-10, 10) / 10.0f) * 0.4f;
+        b.cx += b.vx * t;
+        b.cy += b.vy * t;
+        holes.push_back(b);
+    }
+
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            float v = 0.0f;
+
+            for (const Blob& b : blobs) {
+                const float dx = static_cast<float>(x) - b.cx;
+                const float dy = static_cast<float>(y) - b.cy;
+                const float d  = std::sqrt(dx*dx + dy*dy);
+                const float k  = std::clamp(1.0f - d / b.r, 0.0f, 1.0f);
+                v += (k * k) * b.w;
+            }
+
+            for (const Blob& b : holes) {
+                const float dx = static_cast<float>(x) - b.cx;
+                const float dy = static_cast<float>(y) - b.cy;
+                const float d  = std::sqrt(dx*dx + dy*dy);
+                const float k  = std::clamp(1.0f - d / b.r, 0.0f, 1.0f);
+                v -= (k * k) * b.w * 0.8f;
+            }
+
+            // Add a little fine noise so it reads as gas, not a soft blob.
+            const uint32_t hn = hash32(seed ^ static_cast<uint32_t>(x + y * 17) ^ static_cast<uint32_t>(frame * 131));
+            const float n = static_cast<float>(hn & 0xFFu) / 255.0f; // 0..1
+            v += (n - 0.5f) * 0.12f;
+
+            // Normalize-ish
+            v = std::clamp(v * 0.55f, 0.0f, 1.0f);
+
+            // Sharper edge with dithering.
+            const float edge = std::clamp((v - 0.18f) / 0.82f, 0.0f, 1.0f);
+            const float thr = bayer4Threshold(x + frame * 2, y + frame * 3);
+            if (edge < thr * 0.65f) continue;
+
+            const int a = static_cast<int>(std::round(edge * 190.0f));
+            const uint8_t aa = static_cast<uint8_t>(std::clamp(a, 0, 190));
+
+            // Slight center brightening.
+            const float vx = (x - 7.5f) / 7.5f;
+            const float vy = (y - 7.5f) / 7.5f;
+            const float center = 1.0f - 0.25f * (vx*vx + vy*vy);
+
+            const uint8_t g = clamp8(static_cast<int>(std::round(220.0f * center)));
+            setPx(s, x, y, Color{ g, g, g, aa });
+        }
+    }
+
+    return s;
+}
+
+
+// -----------------------------------------------------------------------------
+// HUD/status icons (transparent 16x16 sprites)
+// -----------------------------------------------------------------------------
+
+SpritePixels generateEffectIcon(EffectKind kind, int frame) {
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+
+    auto pulse = [&](Color c, int addv) {
+        if (frame % 2 == 1) return add(c, addv, addv, addv);
+        return c;
+    };
+
+    switch (kind) {
+        case EffectKind::Poison: {
+            Color g = pulse(Color{90, 235, 110, 255}, 15);
+            Color dk{20, 35, 20, 255};
+
+            // Droplet
+            circle(s, 8, 6, 3, mul(g, 0.85f));
+            circle(s, 8, 7, 3, g);
+            line(s, 8, 9, 8, 12, g);
+            setPx(s, 7, 11, mul(g, 0.80f));
+            setPx(s, 9, 11, mul(g, 0.80f));
+
+            // Tiny skull eyes
+            setPx(s, 7, 7, dk);
+            setPx(s, 9, 7, dk);
+            break;
+        }
+        case EffectKind::Regen: {
+            Color c = pulse(Color{120, 255, 140, 255}, 10);
+            Color c2 = mul(c, 0.70f);
+
+            // Plus
+            rect(s, 7, 4, 2, 8, c);
+            rect(s, 4, 7, 8, 2, c);
+
+            // heartbeat tick
+            line(s, 3, 12, 6, 12, c2);
+            line(s, 6, 12, 7, 10, c2);
+            line(s, 7, 10, 8, 13, c2);
+            line(s, 8, 13, 10, 11, c2);
+            line(s, 10, 11, 13, 11, c2);
+            break;
+        }
+        case EffectKind::Shield: {
+            Color c = pulse(Color{210, 220, 235, 255}, 8);
+            Color c2 = mul(c, 0.75f);
+
+            // Shield silhouette
+            rect(s, 5, 3, 6, 8, c2);
+            rect(s, 6, 2, 4, 10, c);
+            line(s, 6, 12, 8, 14, c2);
+            line(s, 8, 14, 10, 12, c2);
+
+            // Shine
+            if (frame % 2 == 1) {
+                line(s, 7, 4, 7, 10, Color{255,255,255,140});
+            }
+            break;
+        }
+        case EffectKind::Haste: {
+            Color c = pulse(Color{255, 225, 120, 255}, 12);
+            Color c2 = mul(c, 0.70f);
+
+            // Lightning bolt
+            line(s, 9, 2, 6, 8, c);
+            line(s, 6, 8, 10, 8, c);
+            line(s, 10, 8, 7, 14, c);
+            // motion ticks
+            line(s, 3, 5, 5, 5, c2);
+            line(s, 2, 8, 5, 8, c2);
+            break;
+        }
+        case EffectKind::Vision: {
+            Color c = pulse(Color{140, 220, 255, 255}, 8);
+            Color c2 = mul(c, 0.70f);
+
+            // Eye outline
+            line(s, 3, 8, 6, 5, c2);
+            line(s, 6, 5, 10, 5, c2);
+            line(s, 10, 5, 13, 8, c2);
+            line(s, 13, 8, 10, 11, c2);
+            line(s, 10, 11, 6, 11, c2);
+            line(s, 6, 11, 3, 8, c2);
+
+            circle(s, 8, 8, 2, c);
+            setPx(s, 8, 8, Color{20, 30, 40, 255});
+            break;
+        }
+        case EffectKind::Invis: {
+            Color c{190, 160, 255, static_cast<uint8_t>((frame % 2 == 1) ? 170 : 210) };
+            Color c2 = mul(c, 0.75f);
+
+            // Faint ghost-ish silhouette
+            circle(s, 6, 7, 2, c2);
+            circle(s, 10, 7, 2, c2);
+            rect(s, 5, 8, 6, 5, c);
+            // cutout holes
+            setPx(s, 7, 9, Color{0,0,0,0});
+            setPx(s, 9, 9, Color{0,0,0,0});
+            break;
+        }
+        case EffectKind::Web: {
+            Color c = pulse(Color{230, 230, 240, 255}, 6);
+            Color c2 = mul(c, 0.65f);
+
+            // Web spokes
+            line(s, 8, 2, 8, 14, c2);
+            line(s, 2, 8, 14, 8, c2);
+            line(s, 3, 3, 13, 13, c2);
+            line(s, 13, 3, 3, 13, c2);
+
+            // Rings
+            circle(s, 8, 8, 5, c);
+            circle(s, 8, 8, 3, c);
+            break;
+        }
+        case EffectKind::Confusion: {
+            Color c = pulse(Color{255, 140, 255, 255}, 10);
+            Color c2 = mul(c, 0.70f);
+
+            // Spiral-ish squiggle
+            line(s, 4, 8, 12, 4, c2);
+            line(s, 12, 4, 10, 10, c2);
+            line(s, 10, 10, 6, 12, c2);
+            line(s, 6, 12, 8, 6, c2);
+            setPx(s, 8, 6, c);
+            if (frame % 2 == 1) {
+                setPx(s, 5, 6, Color{255,255,255,100});
+                setPx(s, 11, 11, Color{255,255,255,80});
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    // A crisp outline helps tiny HUD icons read against textured panels.
+    finalizeSprite(s, hash32(static_cast<uint32_t>(kind) ^ 0x51A11u), frame, /*outlineAlpha=*/220, /*shadowAlpha=*/0);
     return s;
 }
 

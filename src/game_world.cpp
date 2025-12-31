@@ -87,16 +87,24 @@ std::vector<Vec2i> Game::bresenhamLine(Vec2i a, Vec2i b) {
 
 void Game::recomputeLightMap() {
     const size_t n = static_cast<size_t>(dung.width * dung.height);
+
+    // Always keep caches sized correctly (even when lighting is "off") so the renderer
+    // can safely query light color without special-casing.
     lightMap_.assign(n, 255);
+    lightColorMap_.assign(n, Color{ 255, 255, 255, 255 });
 
     if (!darknessActive()) {
         // Treat early depths as fully lit for accessibility.
         return;
     }
 
+    // Darkness mode: build a per-tile brightness map (for gameplay) + a per-tile RGB light
+    // modulation map (for rendering).
     lightMap_.assign(n, 0);
+    lightColorMap_.assign(n, Color{ 0, 0, 0, 255 });
 
     auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * dung.width + x); };
+
     auto setLight = [&](int x, int y, uint8_t v) {
         if (!dung.inBounds(x, y)) return;
         const size_t i = idx(x, y);
@@ -104,20 +112,80 @@ void Game::recomputeLightMap() {
         if (lightMap_[i] < v) lightMap_[i] = v;
     };
 
-    // Ambient room light: rooms are lit, corridors/caverns are dark.
+    auto setAmbient = [&](int x, int y, uint8_t amb, Color tint) {
+        if (!dung.inBounds(x, y)) return;
+        const size_t i = idx(x, y);
+        if (i >= lightMap_.size() || i >= lightColorMap_.size()) return;
+
+        if (lightMap_[i] < amb) lightMap_[i] = amb;
+
+        // Encode ambient color as "already intensity-scaled" modulation.
+        const auto scale = [&](uint8_t c) -> uint8_t {
+            const int v = (static_cast<int>(amb) * static_cast<int>(c)) / 255;
+            return static_cast<uint8_t>(clampi(v, 0, 255));
+        };
+
+        const Color ambC{ scale(tint.r), scale(tint.g), scale(tint.b), 255 };
+        Color& dst = lightColorMap_[i];
+        dst.r = std::max(dst.r, ambC.r);
+        dst.g = std::max(dst.g, ambC.g);
+        dst.b = std::max(dst.b, ambC.b);
+    };
+
+    auto addLight = [&](int x, int y, uint8_t b, Color tint) {
+        if (!dung.inBounds(x, y)) return;
+        const size_t i = idx(x, y);
+        if (i >= lightMap_.size() || i >= lightColorMap_.size()) return;
+
+        if (lightMap_[i] < b) lightMap_[i] = b;
+
+        // Additive RGB lighting. Each channel is scaled by intensity and saturates at 255.
+        auto addChan = [&](uint8_t& dst, uint8_t srcChan) {
+            const int add = (static_cast<int>(b) * static_cast<int>(srcChan)) / 255;
+            const int v = static_cast<int>(dst) + add;
+            dst = static_cast<uint8_t>((v > 255) ? 255 : v);
+        };
+
+        Color& dst = lightColorMap_[i];
+        addChan(dst.r, tint.r);
+        addChan(dst.g, tint.g);
+        addChan(dst.b, tint.b);
+    };
+
+    // Ambient room light: rooms are softly lit, corridors/caverns are dark.
     for (const Room& r : dung.rooms) {
         uint8_t amb = 140;
+        Color ambTint{ 255, 246, 236, 255 }; // warm stone by default
         switch (r.type) {
-            case RoomType::Shrine:   amb = 190; break;
-            case RoomType::Treasure: amb = 170; break;
-            case RoomType::Vault:    amb = 175; break;
-            case RoomType::Secret:   amb = 120; break;
-            default:                 amb = 140; break;
+            case RoomType::Shrine:
+                amb = 190;
+                ambTint = Color{ 206, 222, 255, 255 }; // cool/holy
+                break;
+            case RoomType::Treasure:
+                amb = 170;
+                ambTint = Color{ 255, 238, 200, 255 }; // warm/golden
+                break;
+            case RoomType::Vault:
+                amb = 175;
+                ambTint = Color{ 224, 232, 255, 255 }; // cold steel
+                break;
+            case RoomType::Secret:
+                amb = 120;
+                ambTint = Color{ 220, 206, 190, 255 }; // dusty
+                break;
+            case RoomType::Shop:
+                amb = 175;
+                ambTint = Color{ 255, 232, 205, 255 }; // cozy
+                break;
+            default:
+                amb = 140;
+                ambTint = Color{ 255, 246, 236, 255 };
+                break;
         }
 
         for (int y = r.y; y < r.y + r.h; ++y) {
             for (int x = r.x; x < r.x + r.w; ++x) {
-                setLight(x, y, amb);
+                setAmbient(x, y, amb, ambTint);
             }
         }
     }
@@ -126,27 +194,28 @@ void Game::recomputeLightMap() {
         Vec2i pos;
         int radius;
         uint8_t intensity;
+        Color tint;
     };
 
     std::vector<LightSource> sources;
-    sources.reserve(16);
 
-    // Player-carried light source (lit torch).
+    // Player light sources (carried lit torches).
     bool playerHasTorch = false;
-    for (const Item& it : inv) {
+    for (const auto& it : inv) {
         if (it.kind == ItemKind::TorchLit && it.charges > 0) {
             playerHasTorch = true;
             break;
         }
     }
     if (playerHasTorch) {
-        sources.push_back({ player().pos, 8, 255 });
+        // Warm torchlight
+        sources.push_back({ player().pos, 8, 255, Color{ 255, 208, 168, 255 } });
     }
 
     // Ground light sources (dropped lit torches).
     for (const auto& gi : ground) {
         if (gi.item.kind == ItemKind::TorchLit && gi.item.charges > 0) {
-            sources.push_back({ gi.pos, 6, 230 });
+            sources.push_back({ gi.pos, 6, 230, Color{ 255, 196, 152, 255 } });
         }
     }
 
@@ -156,26 +225,45 @@ void Game::recomputeLightMap() {
         dung.computeFovMask(s.pos.x, s.pos.y, s.radius, mask);
         if (mask.size() != lightMap_.size()) continue;
 
-        const int falloff = std::max(1, static_cast<int>(s.intensity) / (s.radius + 1));
+        const int r  = std::max(1, s.radius);
+        const int r2 = r * r;
 
         for (int y = 0; y < dung.height; ++y) {
             for (int x = 0; x < dung.width; ++x) {
                 const size_t i = idx(x, y);
                 if (!mask[i]) continue;
 
-                const int dist = std::max(std::abs(x - s.pos.x), std::abs(y - s.pos.y));
-                if (dist > s.radius) continue;
+                const int dx = x - s.pos.x;
+                const int dy = y - s.pos.y;
+                const int d2 = dx * dx + dy * dy;
+                if (d2 > r2) continue;
 
-                int b = static_cast<int>(s.intensity) - dist * falloff;
+                // Smooth quadratic falloff (0 at edge) for nicer, round torchlight.
+                const float t = static_cast<float>(d2) / static_cast<float>(r2);
+                float atten = 1.0f - t;
+                atten = atten * atten;
+
+                int b = static_cast<int>(static_cast<float>(s.intensity) * atten + 0.5f);
                 b = clampi(b, 0, 255);
 
-                if (lightMap_[i] < static_cast<uint8_t>(b)) {
-                    lightMap_[i] = static_cast<uint8_t>(b);
-                }
+                addLight(x, y, static_cast<uint8_t>(b), s.tint);
             }
         }
     }
+
+    // If a tile has brightness but ended up with no RGB tint (should be rare),
+    // fall back to grayscale to avoid a "black light" edge case.
+    for (size_t i = 0; i < lightMap_.size() && i < lightColorMap_.size(); ++i) {
+        if (lightMap_[i] == 0) continue;
+        Color& c = lightColorMap_[i];
+        if (c.r == 0 && c.g == 0 && c.b == 0) {
+            c.r = lightMap_[i];
+            c.g = lightMap_[i];
+            c.b = lightMap_[i];
+        }
+    }
 }
+
 
 void Game::recomputeFov() {
     Entity& p = playerMut();    int radius = 9;

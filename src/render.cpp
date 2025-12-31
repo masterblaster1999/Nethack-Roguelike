@@ -429,8 +429,36 @@ void Renderer::render(const Game& game) {
         return static_cast<uint8_t>(mod);
     };
 
+    // Subtle per-depth color grading so each floor feels distinct.
+    auto depthTint = [&]() -> Color {
+        auto lerpU8 = [](uint8_t a, uint8_t b, float t) -> uint8_t {
+            t = std::clamp(t, 0.0f, 1.0f);
+            const float v = static_cast<float>(a) + (static_cast<float>(b) - static_cast<float>(a)) * t;
+            int iv = static_cast<int>(v + 0.5f);
+            if (iv < 0) iv = 0;
+            if (iv > 255) iv = 255;
+            return static_cast<uint8_t>(iv);
+        };
+
+        const int depth = std::max(1, game.depth());
+        const int maxDepth = std::max(1, game.dungeonMaxDepth());
+        const float t = (maxDepth > 1) ? (static_cast<float>(depth - 1) / static_cast<float>(maxDepth - 1)) : 0.0f;
+
+        // Warm torchlit stone up top -> colder, bluer depths below.
+        const Color warm{255, 246, 232, 255};
+        const Color deep{222, 236, 255, 255};
+
+        return { lerpU8(warm.r, deep.r, t),
+                 lerpU8(warm.g, deep.g, t),
+                 lerpU8(warm.b, deep.b, t),
+                 255 };
+    };
+
+
+
 
     // Draw map tiles
+    const Color tint = depthTint();
     for (int y = 0; y < d.height; ++y) {
         for (int x = 0; x < d.width; ++x) {
             const Tile& t = d.at(x, y);
@@ -447,11 +475,17 @@ void Renderer::render(const Game& game) {
 
             if (t.visible) {
                 const uint8_t m = lightMod(x, y);
-                SDL_SetTextureColorMod(tex, m, m, m);
+                SDL_SetTextureColorMod(tex,
+                    static_cast<Uint8>((static_cast<int>(m) * tint.r) / 255),
+                    static_cast<Uint8>((static_cast<int>(m) * tint.g) / 255),
+                    static_cast<Uint8>((static_cast<int>(m) * tint.b) / 255));
                 SDL_SetTextureAlphaMod(tex, 255);
             } else {
-                if (game.darknessActive()) SDL_SetTextureColorMod(tex, 30, 30, 30);
-                else SDL_SetTextureColorMod(tex, 80, 80, 80);
+                const uint8_t base = game.darknessActive() ? 30u : 80u;
+                SDL_SetTextureColorMod(tex,
+                    static_cast<Uint8>((static_cast<int>(base) * tint.r) / 255),
+                    static_cast<Uint8>((static_cast<int>(base) * tint.g) / 255),
+                    static_cast<Uint8>((static_cast<int>(base) * tint.b) / 255));
                 SDL_SetTextureAlphaMod(tex, 255);
             }
 
@@ -461,6 +495,90 @@ void Renderer::render(const Game& game) {
             SDL_SetTextureAlphaMod(tex, 255);
         }
     }
+
+
+    // Ambient-occlusion style edge shading (walls/pillars/chasm) makes rooms and corridors pop.
+    {
+        auto isOccluder = [&](TileType tt) -> bool {
+            switch (tt) {
+                case TileType::Wall:
+                case TileType::DoorClosed:
+                case TileType::DoorLocked:
+                case TileType::DoorSecret:
+                case TileType::Pillar:
+                case TileType::Chasm:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+
+        const int thick = std::max(1, tile / 8);
+
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                const Tile& t = d.at(x, y);
+                if (!t.explored) continue;
+                if (isOccluder(t.type)) continue;
+
+                // Fade AO with visibility/light.
+                const uint8_t lm = t.visible ? lightMod(x, y) : (game.darknessActive() ? 120u : 170u);
+                int baseA = 38;
+                baseA = (baseA * static_cast<int>(lm)) / 255;
+                if (!t.visible) baseA = std::min(baseA, 26);
+
+                const auto nType = (y > 0) ? d.at(x, y - 1).type : TileType::Wall;
+                const auto sType = (y + 1 < d.height) ? d.at(x, y + 1).type : TileType::Wall;
+                const auto wType = (x > 0) ? d.at(x - 1, y).type : TileType::Wall;
+                const auto eType = (x + 1 < d.width) ? d.at(x + 1, y).type : TileType::Wall;
+
+                const bool nOcc = isOccluder(nType);
+                const bool sOcc = isOccluder(sType);
+                const bool wOcc = isOccluder(wType);
+                const bool eOcc = isOccluder(eType);
+
+                if (!nOcc && !sOcc && !wOcc && !eOcc) continue;
+
+                SDL_Rect dst{ x * tile, y * tile, tile, tile };
+
+                auto drawEdge = [&](const SDL_Rect& r, int a, bool chasmEdge) {
+                    if (a <= 0) return;
+                    if (a > 255) a = 255;
+
+                    // A subtle blue rim for chasms reads as "danger" without being loud.
+                    if (chasmEdge) {
+                        const int ga = std::max(8, a / 2);
+                        SDL_SetRenderDrawColor(renderer, 40, 80, 160, static_cast<Uint8>(ga));
+                        SDL_RenderFillRect(renderer, &r);
+                    }
+
+                    SDL_SetRenderDrawColor(renderer, 0, 0, 0, static_cast<Uint8>(a));
+                    SDL_RenderFillRect(renderer, &r);
+                };
+
+                const int aTop = static_cast<int>(baseA * 0.82f);
+                const int aLeft = static_cast<int>(baseA * 0.82f);
+                const int aBot = std::min(255, baseA + 10);
+                const int aRight = std::min(255, baseA + 10);
+
+                if (nOcc) drawEdge(SDL_Rect{ dst.x, dst.y, dst.w, thick }, aTop, nType == TileType::Chasm);
+                if (wOcc) drawEdge(SDL_Rect{ dst.x, dst.y, thick, dst.h }, aLeft, wType == TileType::Chasm);
+                if (sOcc) drawEdge(SDL_Rect{ dst.x, dst.y + dst.h - thick, dst.w, thick }, aBot, sType == TileType::Chasm);
+                if (eOcc) drawEdge(SDL_Rect{ dst.x + dst.w - thick, dst.y, thick, dst.h }, aRight, eType == TileType::Chasm);
+
+                // Darken corners a touch so diagonal contacts don't feel "open".
+                if (nOcc && wOcc) drawEdge(SDL_Rect{ dst.x, dst.y, thick, thick }, baseA, (nType == TileType::Chasm) || (wType == TileType::Chasm));
+                if (nOcc && eOcc) drawEdge(SDL_Rect{ dst.x + dst.w - thick, dst.y, thick, thick }, baseA, (nType == TileType::Chasm) || (eType == TileType::Chasm));
+                if (sOcc && wOcc) drawEdge(SDL_Rect{ dst.x, dst.y + dst.h - thick, thick, thick }, baseA + 6, (sType == TileType::Chasm) || (wType == TileType::Chasm));
+                if (sOcc && eOcc) drawEdge(SDL_Rect{ dst.x + dst.w - thick, dst.y + dst.h - thick, thick, thick }, baseA + 6, (sType == TileType::Chasm) || (eType == TileType::Chasm));
+            }
+        }
+
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    }
+
 
 
     // Auto-move path overlay
@@ -734,6 +852,7 @@ void Renderer::drawHud(const Game& game) {
     const Color yellow{255,230,120,255};
     const Color red{255,80,80,255};
     const Color green{120,255,120,255};
+    const Color important{255,160,255,255};
 
     // Top row: Title and basic stats
     {
@@ -841,12 +960,13 @@ void Renderer::drawHud(const Game& game) {
         const auto& msg = msgs[i];
         Color c = white;
         switch (msg.kind) {
-            case MessageKind::Info: c = white; break;
-            case MessageKind::Combat: c = red; break;
-            case MessageKind::Loot: c = yellow; break;
-            case MessageKind::Warning: c = yellow; break;
-            case MessageKind::Success: c = green; break;
-            case MessageKind::System: c = gray; break;
+            case MessageKind::Info:      c = white; break;
+            case MessageKind::Combat:    c = red; break;
+            case MessageKind::Loot:      c = yellow; break;
+            case MessageKind::Warning:   c = yellow; break;
+            case MessageKind::Important: c = important; break;
+            case MessageKind::Success:   c = green; break;
+            case MessageKind::System:    c = gray; break;
         }
         std::string line = msg.text;
         if (msg.repeat > 1) {

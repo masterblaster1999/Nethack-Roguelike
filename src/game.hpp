@@ -190,6 +190,7 @@ enum class MessageKind : uint8_t {
     Combat,
     Loot,
     System,
+    Important,
     Warning,
     Success,
 };

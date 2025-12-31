@@ -139,6 +139,30 @@ Color rampShade(Color base, float shade01, int x, int y) {
     return ramp[idx];
 }
 
+// Softer, hue-shifted ramp for environment tiles (stone, panels). Keeps the world looking
+// like crisp pixel-art instead of smooth gradients.
+Color rampShadeTile(Color base, float shade01, int x, int y) {
+    shade01 = std::clamp(shade01, 0.0f, 1.0f);
+
+    // Slight hue shift: cooler shadows, warmer highlights.
+    Color ramp[4];
+    ramp[0] = add(mul(base, 0.52f), -12, -12, +6);
+    ramp[1] = add(mul(base, 0.78f), -4, -4, +3);
+    ramp[2] = base;
+    ramp[3] = add(mul(base, 1.08f), +12, +10, +4);
+
+    float t = shade01 * 3.0f;
+    int idx = static_cast<int>(std::floor(t));
+    float frac = t - static_cast<float>(idx);
+    idx = std::clamp(idx, 0, 2);
+
+    const float thr = bayer4Threshold(x, y);
+    if (frac > thr) ++idx;
+
+    return ramp[idx];
+}
+
+
 Color averageOpaqueColor(const SpritePixels& s) {
     uint64_t sr = 0, sg = 0, sb = 0, sa = 0;
     for (const Color& c : s.px) {
@@ -514,6 +538,35 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
         }
     }
 
+
+    // Extra depth: inner ambient-occlusion along the silhouette makes sprites readable
+    // even on high-detail dungeon tiles.
+    {
+        SpritePixels orig = s;
+        for (int y = 0; y < s.h; ++y) {
+            for (int x = 0; x < s.w; ++x) {
+                const Color c0 = orig.at(x, y);
+                if (c0.a == 0) continue;
+
+                int open = 0;
+                const int nx[4] = { x + 1, x - 1, x, x };
+                const int ny[4] = { y, y, y + 1, y - 1 };
+                for (int i = 0; i < 4; ++i) {
+                    const int xx = nx[i];
+                    const int yy = ny[i];
+                    if (xx < 0 || yy < 0 || xx >= s.w || yy >= s.h) { open++; continue; }
+                    if (orig.at(xx, yy).a == 0) open++;
+                }
+
+                if (open > 0) {
+                    float f = 1.0f - 0.04f * static_cast<float>(open);
+                    if (f < 0.82f) f = 0.82f;
+                    s.at(x, y) = mul(c0, f);
+                }
+            }
+        }
+    }
+
     // Add eyes-ish for living things (only if inside the body).
     if (kind != EntityKind::Slime && kind != EntityKind::Mimic) {
         int ey = 6 + (rngVar.range(-1, 1));
@@ -651,6 +704,111 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame) {
     }
 
     // Final pass: readable outlines + shadow.
+
+    // Humanoid gear overlays: breaks symmetry and gives the procedural silhouettes a bit more
+    // "character" (weapon/staff/shield). This is purely cosmetic.
+    {
+        const bool rightHand = ((seed >> 5) & 1u) != 0u;
+        // Small bob so gear isn't perfectly static across frames.
+        const int wobble = (frame % 2 == 1) ? 1 : 0;
+
+        auto drawBlade = [&](int x0, int y0, int dx, int dy, int len, Color metal, Color grip) {
+            // Handle
+            setPx(s, x0, y0, grip);
+            setPx(s, x0 - dx, y0 - dy, grip);
+
+            // Blade
+            for (int i = 1; i <= len; ++i) {
+                setPx(s, x0 + dx * i, y0 + dy * i, metal);
+            }
+
+            // Specular tick.
+            setPx(s, x0 + dx * (len - 1), y0 + dy * (len - 1), add(metal, 30, 30, 30));
+        };
+
+        auto drawAxe = [&](int x0, int y0, int dir, Color metal, Color grip) {
+            // Shaft
+            line(s, x0, y0, x0, y0 - 5, grip);
+            // Head
+            setPx(s, x0 + dir, y0 - 4, metal);
+            setPx(s, x0 + dir, y0 - 3, metal);
+            setPx(s, x0 + dir * 2, y0 - 4, mul(metal, 0.85f));
+            setPx(s, x0 + dir * 2, y0 - 3, mul(metal, 0.75f));
+            setPx(s, x0, y0 - 5, add(metal, 20, 20, 25));
+        };
+
+        auto drawClub = [&](int x0, int y0, int dir, Color wood) {
+            line(s, x0, y0, x0 + dir * 2, y0 - 5, wood);
+            setPx(s, x0 + dir * 2, y0 - 5, add(wood, 18, 12, 6));
+            setPx(s, x0 + dir * 2, y0 - 4, mul(wood, 0.75f));
+            setPx(s, x0 + dir, y0 - 4, mul(wood, 0.85f));
+        };
+
+        auto drawStaff = [&](int x0, int y0, int dir, Color wood, Color orb) {
+            line(s, x0, y0, x0 + dir, y0 - 7, wood);
+            circle(s, x0 + dir, y0 - 7, 1, orb);
+            setPx(s, x0 + dir + (dir > 0 ? 1 : -1), y0 - 7, {255,255,255,120});
+        };
+
+        auto drawShield = [&](int x0, int y0, Color body) {
+            Color dark = mul(body, 0.70f);
+            outlineRect(s, x0, y0, 3, 5, dark);
+            rect(s, x0 + 1, y0 + 1, 1, 3, body);
+            setPx(s, x0 + 1, y0 + 2, add(body, 18, 18, 18));
+        };
+
+        // Seeded colors for gear.
+        Color metal = add(Color{210, 215, 225, 255}, rngVar.range(-12, 12), rngVar.range(-12, 12), rngVar.range(-12, 12));
+        Color grip  = add(Color{110, 75, 40, 255}, rngVar.range(-10, 10), rngVar.range(-10, 10), rngVar.range(-10, 10));
+        Color wood  = add(Color{120, 80, 45, 255}, rngVar.range(-12, 12), rngVar.range(-12, 12), rngVar.range(-12, 12));
+
+        const int dir = rightHand ? 1 : -1;
+        const int handX = rightHand ? 11 : 4;
+        const int handY = 12 - wobble;
+
+        switch (kind) {
+            case EntityKind::Player: {
+                drawBlade(handX, handY, dir, -1, 4, metal, grip);
+                drawShield(rightHand ? 2 : 11, 8, add({90, 120, 160, 255}, rngVar.range(-10, 10), rngVar.range(-10, 10), rngVar.range(-10, 10)));
+                break;
+            }
+            case EntityKind::Goblin: {
+                drawBlade(handX, handY, dir, -1, 3, mul(metal, 0.90f), grip);
+                break;
+            }
+            case EntityKind::Orc: {
+                drawAxe(handX, handY, dir, metal, grip);
+                drawShield(rightHand ? 2 : 11, 8, add({100, 110, 120, 255}, rngVar.range(-10, 10), rngVar.range(-10, 10), rngVar.range(-10, 10)));
+                break;
+            }
+            case EntityKind::Troll:
+            case EntityKind::Ogre: {
+                drawClub(handX, handY, dir, wood);
+                break;
+            }
+            case EntityKind::Minotaur: {
+                drawAxe(handX, handY, dir, add(metal, 10, 10, 0), grip);
+                // Bigger shield-ish chunk for silhouette.
+                drawShield(rightHand ? 1 : 12, 7, add({120, 90, 70, 255}, rngVar.range(-12, 12), rngVar.range(-12, 12), rngVar.range(-12, 12)));
+                break;
+            }
+            case EntityKind::Wizard: {
+                Color orb = add({180, 120, 255, 230}, rngVar.range(-10, 10), rngVar.range(-10, 10), rngVar.range(-10, 10));
+                drawStaff(handX, handY, dir, wood, orb);
+                break;
+            }
+            case EntityKind::Shopkeeper: {
+                // Coin-pouch / jingling keys.
+                Color gold = {235, 205, 95, 240};
+                circle(s, rightHand ? 11 : 4, 12, 1, gold);
+                setPx(s, rightHand ? 10 : 5, 12, {255,255,255,110});
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
     finalizeSprite(s, seed, frame, /*outlineAlpha=*/255, /*shadowAlpha=*/90);
     return s;
 }
@@ -1474,7 +1632,7 @@ SpritePixels generateFloorTile(uint32_t seed, int frame) {
             float vy = (y - 7.5f) / 7.5f;
             f *= 1.0f - 0.08f * (vx * vx + vy * vy);
 
-            s.at(x, y) = mul(base, f);
+            s.at(x, y) = rampShadeTile(base, f * 0.90f, x, y);
         }
     }
 
@@ -1554,7 +1712,7 @@ SpritePixels generateWallTile(uint32_t seed, int frame) {
             const float ly = (15.0f - y) / 15.0f;
             f *= (0.93f + 0.07f * (0.55f * lx + 0.45f * ly));
 
-            s.at(x, y) = mul(base, f * nf);
+            s.at(x, y) = rampShadeTile(base, (f * nf) * 0.90f, x, y);
         }
     }
 
@@ -1592,7 +1750,7 @@ SpritePixels generateChasmTile(uint32_t seed, int frame) {
 
     // A dark "void" with subtle cool highlights so it reads differently than
     // unexplored black and the regular stone floor.
-    Color base = { 10, 12, 18, 255 };
+    Color base = { 10, 14, 28, 255 };
     base = add(base, rng.range(-2, 2), rng.range(-2, 2), rng.range(-2, 2));
 
     for (int y = 0; y < 16; ++y) {
@@ -1609,11 +1767,7 @@ SpritePixels generateChasmTile(uint32_t seed, int frame) {
             float ripple = 0.90f + 0.10f * std::sin((x * 0.55f) + (y * 0.35f) + (seed % 97u) * 0.05f);
 
             float f = (0.78f + noise * 0.22f) * v * ripple;
-            Color c = mul(base, f);
-
-            // Cool tint. Keep subtle so global lighting mods still read.
-            c = add(c, 0, 2, 10);
-            s.at(x, y) = c;
+            s.at(x, y) = rampShadeTile(base, f * 0.95f, x, y);
         }
     }
 
@@ -1820,7 +1974,7 @@ SpritePixels generateUIPanelTile(UITheme theme, uint32_t seed, int frame) {
             // Darken edges a bit (helps framing).
             if (x == 0 || y == 0 || x == 15 || y == 15) f *= 0.85f;
 
-            s.at(x, y) = mul(base, f);
+            s.at(x, y) = rampShadeTile(base, f * 0.90f, x, y);
         }
     }
 

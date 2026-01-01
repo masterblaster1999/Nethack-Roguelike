@@ -267,7 +267,8 @@ bool writeDefaultSettings(const std::string& path) {
 
 # Rendering / UI
 # tile_size: 16..256  (larger = bigger tiles + larger window)
-tile_size = 32
+# NOTE: the default map is fairly large; 16 keeps the default window at a sane size.
+tile_size = 16
 hud_height = 160
 start_fullscreen = false
 

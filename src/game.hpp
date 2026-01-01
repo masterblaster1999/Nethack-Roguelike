@@ -648,8 +648,16 @@ struct LevelState {
 
 class Game {
 public:
-    static constexpr int MAP_W = 30;
-    static constexpr int MAP_H = 20;
+    // The game renders the whole dungeon at once (no camera/scrolling).
+    // Keep these in sync with Dungeon's default generation dimensions.
+    //
+    // Round 18: bumped the map up again (roughly +50% area vs the prior 68x45 layout) to
+    // support longer corridors and more interesting room connectivity.
+    // NOTE: The window size is MAP_W * tile_size by default.
+    // This map size is ~50% more area than the previous 68x45 layout.
+    // If the window is too large on your display, lower tile_size or enable fullscreen.
+    static constexpr int MAP_W = 84;
+    static constexpr int MAP_H = 55;
 
     // Run structure / quest pacing.
     // The default run now spans 10 floors.

@@ -7,7 +7,9 @@
 // Simple user-editable settings file (INI-ish: key = value).
 // The file is created next to the save file (SDL_GetPrefPath) on first run.
 struct Settings {
-    int tileSize = 32;
+    // Default tuned for the current (larger) map size so the initial window fits
+    // comfortably on typical displays.
+    int tileSize = 16;
     int hudHeight = 160;
     bool startFullscreen = false;
 

@@ -57,6 +57,9 @@ void carveFloor(Dungeon& d, int x, int y) {
     if (t.type == TileType::DoorClosed || t.type == TileType::DoorOpen || t.type == TileType::DoorSecret || t.type == TileType::DoorLocked ||
         t.type == TileType::StairsDown || t.type == TileType::StairsUp)
         return;
+    // Don't overwrite special terrain features (they shape flow and/or are interactable).
+    if (t.type == TileType::Chasm || t.type == TileType::Pillar || t.type == TileType::Boulder)
+        return;
     t.type = TileType::Floor;
 }
 
@@ -258,10 +261,309 @@ struct DoorPick {
     Vec2i corridorStart;
 };
 
-DoorPick pickDoorOnRoom(const Room& r, const Dungeon& d, RNG& rng) {
-    // Try several times to find a door that doesn't immediately go out of bounds.
+inline bool isDoorTileType(TileType t) {
+    switch (t) {
+        case TileType::DoorClosed:
+        case TileType::DoorOpen:
+        case TileType::DoorLocked:
+        case TileType::DoorSecret:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool isWallLikeForDoor(TileType t) {
+    // What counts as a "solid" boundary for a corridor chokepoint door.
+    // Note: Chasm is impassable but does not behave like a wall visually/for LOS.
+    return (t == TileType::Wall || t == TileType::Pillar || t == TileType::Boulder);
+}
+
+inline bool isOpenForDoorGeom(TileType t) {
+    // What counts as an "open" tile when deciding whether a corridor segment is a valid
+    // door chokepoint.
+    return (t == TileType::Floor || t == TileType::StairsUp || t == TileType::StairsDown || t == TileType::DoorOpen);
+}
+
+bool anyDoorInRadius(const Dungeon& d, int x, int y, int radius) {
+    radius = std::max(1, radius);
+    for (int oy = -radius; oy <= radius; ++oy) {
+        for (int ox = -radius; ox <= radius; ++ox) {
+            if (ox == 0 && oy == 0) continue;
+            const int nx = x + ox;
+            const int ny = y + oy;
+            if (!d.inBounds(nx, ny)) continue;
+            if (isDoorTileType(d.at(nx, ny).type)) return true;
+        }
+    }
+    return false;
+}
+
+const Room* findRoomContaining(const Dungeon& d, int x, int y) {
+    for (const Room& rr : d.rooms) {
+        if (rr.contains(x, y)) return &rr;
+    }
+    return nullptr;
+}
+
+bool isCorridorDoorCandidate(const Dungeon& d, int x, int y) {
+    if (!d.inBounds(x, y)) return false;
+    if (d.at(x, y).type != TileType::Floor) return false;
+
+    const TileType n = d.at(x, y - 1).type;
+    const TileType s = d.at(x, y + 1).type;
+    const TileType w = d.at(x - 1, y).type;
+    const TileType e = d.at(x + 1, y).type;
+
+    const bool nOpen = isOpenForDoorGeom(n);
+    const bool sOpen = isOpenForDoorGeom(s);
+    const bool wOpen = isOpenForDoorGeom(w);
+    const bool eOpen = isOpenForDoorGeom(e);
+
+    const int openCount = static_cast<int>(nOpen) + static_cast<int>(sOpen) + static_cast<int>(wOpen) + static_cast<int>(eOpen);
+    if (openCount != 2) return false;
+
+    // We only allow straight chokepoints (no corners/intersections).
+    const bool nsStraight = (nOpen && sOpen && !wOpen && !eOpen);
+    const bool weStraight = (wOpen && eOpen && !nOpen && !sOpen);
+    if (!(nsStraight || weStraight)) return false;
+
+    // Require walls (or wall-like obstacles) on the perpendicular sides.
+    if (nsStraight) {
+        if (!isWallLikeForDoor(w) || !isWallLikeForDoor(e)) return false;
+    } else {
+        if (!isWallLikeForDoor(n) || !isWallLikeForDoor(s)) return false;
+    }
+
+    // Never place doors adjacent to any other door.
+    if (anyDoorInRadius(d, x, y, 1)) return false;
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// Strategic corridor doors: rather than sprinkling doors randomly,
+// analyze the corridor graph and place doors in the *middle* of long,
+// straight hallway segments (between intersections).
+//
+// This avoids "door spam" on large maps and produces more readable,
+// intentional chokepoints.
+// ------------------------------------------------------------
+
+void placeStrategicCorridorDoors(Dungeon& d, RNG& rng, const std::vector<uint8_t>& inRoom, float intensity,
+                                 const std::function<bool(int,int)>& extraReject = {}) {
+    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * d.width + x); };
+
+    auto isInRoom = [&](int x, int y) -> bool {
+        if (inRoom.empty()) return false;
+        const size_t ii = idx(x, y);
+        if (ii >= inRoom.size()) return false;
+        return inRoom[ii] != 0;
+    };
+
+    auto isCorridorFloor = [&](int x, int y) -> bool {
+        if (!d.inBounds(x, y)) return false;
+        if (extraReject && extraReject(x, y)) return false;
+        if (isInRoom(x, y)) return false;
+        const TileType t = d.at(x, y).type;
+        if (t != TileType::Floor) return false;
+        return true;
+    };
+
+    auto degree = [&](int x, int y) -> int {
+        static const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+        int c = 0;
+        for (auto& dv : dirs) {
+            const int nx = x + dv[0];
+            const int ny = y + dv[1];
+            if (isCorridorFloor(nx, ny)) c++;
+        }
+        return c;
+    };
+
+    auto nearStairs = [&](int x, int y) {
+        return (std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y) <= 2)
+            || (std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y) <= 2);
+    };
+
+    // Scale intensity down on larger maps.
+    const float baseArea = 84.0f * 55.0f;
+    const float area = static_cast<float>(std::max(1, d.width * d.height));
+    const float areaScale = std::clamp(baseArea / area, 0.40f, 1.00f);
+    const float k = std::clamp(intensity * areaScale, 0.0f, 2.0f);
+
+    // Hard cap for additional corridor doors (room-connection doors are placed elsewhere).
+    const int maxDoors = std::max(4, (d.width * d.height) / 300);
+    int placed = 0;
+
+    std::vector<uint8_t> visited(static_cast<size_t>(d.width * d.height), 0);
+
+    auto tryPlaceOnSegment = [&](const std::vector<Vec2i>& seg) {
+        if (placed >= maxDoors) return;
+        const int L = static_cast<int>(seg.size());
+        if (L < 6) return;
+
+        float p = 0.0f;
+        if (L >= 18) p = 0.90f;
+        else if (L >= 14) p = 0.75f;
+        else if (L >= 10) p = 0.55f;
+        else p = 0.35f;
+        p *= k;
+        p = std::min(0.95f, p);
+        if (!rng.chance(p)) return;
+
+        // Prefer placing near the middle, but never right next to an endpoint.
+        const int mid = L / 2;
+        const int margin = 2;
+        const int lo = margin;
+        const int hi = L - 1 - margin;
+        if (lo >= hi) return;
+
+        auto ok = [&](const Vec2i& p0) -> bool {
+            if (!d.inBounds(p0.x, p0.y)) return false;
+            if (!isCorridorFloor(p0.x, p0.y)) return false;
+            if (nearStairs(p0.x, p0.y)) return false;
+            // Keep doors away from other doors (including room doors).
+            if (anyDoorInRadius(d, p0.x, p0.y, 2)) return false;
+            if (!isCorridorDoorCandidate(d, p0.x, p0.y)) return false;
+            return true;
+        };
+
+        // Search outward from the middle.
+        for (int off = 0; off <= (hi - lo); ++off) {
+            const int a = mid - off;
+            const int b = mid + off;
+            if (a >= lo && a <= hi) {
+                if (ok(seg[static_cast<size_t>(a)])) {
+                    d.at(seg[static_cast<size_t>(a)].x, seg[static_cast<size_t>(a)].y).type = TileType::DoorClosed;
+                    placed++;
+                    return;
+                }
+            }
+            if (b >= lo && b <= hi && b != a) {
+                if (ok(seg[static_cast<size_t>(b)])) {
+                    d.at(seg[static_cast<size_t>(b)].x, seg[static_cast<size_t>(b)].y).type = TileType::DoorClosed;
+                    placed++;
+                    return;
+                }
+            }
+        }
+    };
+
+    static const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    // 1) Walk segments that originate at a "node" (degree != 2).
+    for (int y = 1; y < d.height - 1 && placed < maxDoors; ++y) {
+        for (int x = 1; x < d.width - 1 && placed < maxDoors; ++x) {
+            if (!isCorridorFloor(x, y)) continue;
+            const int deg0 = degree(x, y);
+            if (deg0 == 2) continue; // not a node
+
+            for (auto& dv : dirs) {
+                const int nx = x + dv[0];
+                const int ny = y + dv[1];
+                if (!isCorridorFloor(nx, ny)) continue;
+
+                // If the first step is an internal corridor tile we've already consumed,
+                // this segment has already been processed from the other side.
+                if (degree(nx, ny) == 2 && visited[idx(nx, ny)] != 0) continue;
+
+                std::vector<Vec2i> seg;
+                seg.reserve(64);
+
+                Vec2i prev{x, y};
+                Vec2i cur{nx, ny};
+
+                // Traverse until we hit another node (degree != 2) or stop.
+                while (true) {
+                    if (!d.inBounds(cur.x, cur.y)) break;
+                    seg.push_back(cur);
+
+                    const int cd = degree(cur.x, cur.y);
+                    if (cd != 2) break;
+                    visited[idx(cur.x, cur.y)] = 1;
+
+                    // Pick the next tile that isn't "prev".
+                    Vec2i next = prev;
+                    bool found = false;
+                    for (auto& dv2 : dirs) {
+                        const int tx = cur.x + dv2[0];
+                        const int ty = cur.y + dv2[1];
+                        if (!isCorridorFloor(tx, ty)) continue;
+                        if (tx == prev.x && ty == prev.y) continue;
+                        next = {tx, ty};
+                        found = true;
+                        break;
+                    }
+                    if (!found) break;
+                    prev = cur;
+                    cur = next;
+
+                    // Safety: avoid pathological infinite loops.
+                    if (seg.size() > static_cast<size_t>(d.width * d.height)) break;
+                }
+
+                tryPlaceOnSegment(seg);
+                if (placed >= maxDoors) break;
+            }
+        }
+    }
+
+    // 2) Handle pure cycles (no nodes): any remaining unvisited degree==2 tile belongs to a loop.
+    for (int y = 1; y < d.height - 1 && placed < maxDoors; ++y) {
+        for (int x = 1; x < d.width - 1 && placed < maxDoors; ++x) {
+            if (!isCorridorFloor(x, y)) continue;
+            if (degree(x, y) != 2) continue;
+            if (visited[idx(x, y)] != 0) continue;
+
+            // Find one neighbor to start walking the loop.
+            Vec2i start{x, y};
+            Vec2i prev{x, y};
+            Vec2i cur{-1, -1};
+            for (auto& dv : dirs) {
+                const int nx = x + dv[0];
+                const int ny = y + dv[1];
+                if (isCorridorFloor(nx, ny)) { cur = {nx, ny}; break; }
+            }
+            if (cur.x < 0) { visited[idx(x, y)] = 1; continue; }
+
+            std::vector<Vec2i> seg;
+            seg.reserve(96);
+            seg.push_back(start);
+            visited[idx(start.x, start.y)] = 1;
+
+            while (cur.x != start.x || cur.y != start.y) {
+                seg.push_back(cur);
+                visited[idx(cur.x, cur.y)] = 1;
+
+                Vec2i next = prev;
+                bool found = false;
+                for (auto& dv2 : dirs) {
+                    const int tx = cur.x + dv2[0];
+                    const int ty = cur.y + dv2[1];
+                    if (!isCorridorFloor(tx, ty)) continue;
+                    if (tx == prev.x && ty == prev.y) continue;
+                    next = {tx, ty};
+                    found = true;
+                    break;
+                }
+                if (!found) break;
+                prev = cur;
+                cur = next;
+
+                if (seg.size() > static_cast<size_t>(d.width * d.height)) break;
+            }
+
+            tryPlaceOnSegment(seg);
+        }
+    }
+}
+
+DoorPick pickDoorOnRoomRandom(const Room& r, const Dungeon& d, RNG& rng) {
+    // Legacy behavior (kept as a fallback): pick a random side and a random offset.
+    // This is fast, but can create awkward corridors on larger maps.
     for (int tries = 0; tries < 20; ++tries) {
-        int side = rng.range(0, 3);
+        const int side = rng.range(0, 3);
         Vec2i door{ r.cx(), r.cy() };
         Vec2i out{ r.cx(), r.cy() };
 
@@ -287,6 +589,7 @@ DoorPick pickDoorOnRoom(const Room& r, const Dungeon& d, RNG& rng) {
             return { door, out };
         }
     }
+
     // Fallback: center-ish.
     Vec2i door{ r.cx(), r.cy() };
     Vec2i out{ r.cx(), r.cy() + 1 };
@@ -296,32 +599,313 @@ DoorPick pickDoorOnRoom(const Room& r, const Dungeon& d, RNG& rng) {
     return { door, out };
 }
 
-void connectRooms(Dungeon& d, const Room& a, const Room& b, RNG& rng) {
-    DoorPick da = pickDoorOnRoom(a, d, rng);
-    DoorPick db = pickDoorOnRoom(b, d, rng);
+DoorPick pickDoorOnRoomSmart(const Room& r, const Dungeon& d, RNG& rng, Vec2i target, const Room* selfRoom) {
+    struct Cand {
+        Vec2i door;
+        Vec2i out;
+        int score = 0;
+    };
 
-    // Place doors
-    if (d.inBounds(da.doorInside.x, da.doorInside.y))
-        d.at(da.doorInside.x, da.doorInside.y).type = TileType::DoorClosed;
-    if (d.inBounds(db.doorInside.x, db.doorInside.y))
-        d.at(db.doorInside.x, db.doorInside.y).type = TileType::DoorClosed;
+    std::vector<Cand> cands;
+    cands.reserve(static_cast<size_t>(std::max(8, (r.w + r.h) * 2)));
+
+    // Preferred side based on where the target room is.
+    const int dx = target.x - r.cx();
+    const int dy = target.y - r.cy();
+    int prefSide = 0; // 0=N, 1=S, 2=W, 3=E
+    if (std::abs(dx) >= std::abs(dy)) prefSide = (dx >= 0) ? 3 : 2;
+    else prefSide = (dy >= 0) ? 1 : 0;
+
+    auto opposite = [](int side) -> int {
+        if (side == 0) return 1;
+        if (side == 1) return 0;
+        if (side == 2) return 3;
+        return 2;
+    };
+
+    auto consider = [&](int side, int doorX, int doorY, int outX, int outY) {
+        if (!d.inBounds(doorX, doorY) || !d.inBounds(outX, outY)) return;
+
+        const TileType dt = d.at(doorX, doorY).type;
+        // Don't trample special content.
+        if (!(dt == TileType::Floor || dt == TileType::DoorClosed || dt == TileType::DoorOpen)) return;
+
+        const TileType ot = d.at(outX, outY).type;
+        if (isDoorTileType(ot) || ot == TileType::StairsUp || ot == TileType::StairsDown) return;
+
+        // Out tile should be something a corridor can sensibly occupy / carve into.
+        // Avoid carving into chasms/pillars/boulders and avoid routing corridors through any room interiors.
+        if (!(ot == TileType::Wall || ot == TileType::Floor)) return;
+        if (findRoomContaining(d, outX, outY) != nullptr) return;
+
+        // Avoid clustering doors.
+        if (anyDoorInRadius(d, doorX, doorY, 1)) return;
+
+        // Score: prefer facing the target, prefer carving into solid wall, prefer shorter corridors.
+        int score = 0;
+        if (side == prefSide) score += 35;
+        else if (side == opposite(prefSide)) score -= 10;
+
+        const int dist = std::abs(outX - target.x) + std::abs(outY - target.y);
+        score -= dist;
+
+        if (ot == TileType::Wall) score += 40;
+        else if (ot == TileType::Floor) score -= 8; // likely already a corridor; still ok
+        else score -= 20; // unusual (chasm/pillar/boulder)
+
+        // Penalize doors that open directly into another room interior.
+        if (const Room* rr = findRoomContaining(d, outX, outY)) {
+            if (rr != selfRoom) score -= 45;
+        }
+
+        // Tiny jitter so ties don't always pick the same spot.
+        score += rng.range(-2, 2);
+
+        cands.push_back({{doorX, doorY}, {outX, outY}, score});
+    };
+
+    // Enumerate candidates on each wall (excluding corners).
+    for (int x = r.x + 1; x <= r.x2() - 2; ++x) {
+        consider(0, x, r.y, x, r.y - 1);           // N
+        consider(1, x, r.y2() - 1, x, r.y2());     // S
+    }
+    for (int y = r.y + 1; y <= r.y2() - 2; ++y) {
+        consider(2, r.x, y, r.x - 1, y);           // W
+        consider(3, r.x2() - 1, y, r.x2(), y);     // E
+    }
+
+    if (cands.empty()) {
+        return pickDoorOnRoomRandom(r, d, rng);
+    }
+
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+        return a.score > b.score;
+    });
+
+    // Pick randomly among the top few to keep layouts varied.
+    const int topN = std::min(4, static_cast<int>(cands.size()));
+    const int pick = rng.range(0, topN - 1);
+    return { cands[static_cast<size_t>(pick)].door, cands[static_cast<size_t>(pick)].out };
+}
+
+
+// ------------------------------------------------------------
+// Corridor routing: A* tunneling that tries hard to avoid carving
+// through other rooms (which creates ugly "room cuts" and door-less
+// openings), while still producing reasonably short, mostly-straight
+// hallways on larger maps.
+// ------------------------------------------------------------
+
+struct AStarEntry {
+    int f = 0;
+    int g = 0;
+    int state = 0;
+};
+
+struct AStarEntryCmp {
+    bool operator()(const AStarEntry& a, const AStarEntry& b) const {
+        return a.f > b.f;
+    }
+};
+
+inline bool corridorTileOk(TileType t) {
+    return (t == TileType::Wall || t == TileType::Floor);
+}
+
+inline int corridorStepCost(TileType t) {
+    // Slightly prefer reusing existing corridors over digging new ones.
+    if (t == TileType::Floor) return 9;
+    return 10; // Wall
+}
+
+bool carveCorridorAStar(Dungeon& d, RNG& rng, Vec2i start, Vec2i goal, const std::vector<uint8_t>& roomMask) {
+    const int W = d.width;
+    const int H = d.height;
+
+    auto inside = [&](int x, int y) {
+        return x >= 1 && y >= 1 && x < W - 1 && y < H - 1;
+    };
+
+    if (!inside(start.x, start.y) || !inside(goal.x, goal.y)) return false;
+
+    auto idx = [&](int x, int y) { return y * W + x; };
+
+    const int DIR_NONE = 4;
+    const int dirs[4][2] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+    // Shuffle direction order once per corridor to vary shapes without consuming lots of RNG.
+    int order[4] = {0, 1, 2, 3};
+    for (int i = 3; i > 0; --i) {
+        int j = rng.range(0, i);
+        std::swap(order[i], order[j]);
+    }
+
+    auto inRoom = [&](int x, int y) -> bool {
+        if (roomMask.empty()) return false;
+        const size_t ii = static_cast<size_t>(idx(x, y));
+        if (ii >= roomMask.size()) return false;
+        return roomMask[ii] != 0;
+    };
+
+    auto nearRoomPenalty = [&](int x, int y) -> int {
+        // Small penalty for hugging rooms (keeps corridors from "skimming" rooms and creating
+        // accidental extra entrances).
+        if (roomMask.empty()) return 0;
+        for (int k = 0; k < 4; ++k) {
+            int nx = x + dirs[k][0];
+            int ny = y + dirs[k][1];
+            if (!inside(nx, ny)) continue;
+            if (inRoom(nx, ny)) return 2;
+        }
+        return 0;
+    };
+
+    auto heuristic = [&](int x, int y) {
+        // Manhattan distance; scale close to step costs.
+        return (std::abs(x - goal.x) + std::abs(y - goal.y)) * 9;
+    };
+
+    auto stateOf = [&](int x, int y, int dir) {
+        return (idx(x, y) * 5 + dir);
+    };
+
+    const int N = W * H;
+    const int S = N * 5;
+    const int INF = 1'000'000'000;
+
+    std::vector<int> gCost(static_cast<size_t>(S), INF);
+    std::vector<int> parent(static_cast<size_t>(S), -1);
+    std::vector<uint8_t> closed(static_cast<size_t>(S), 0);
+
+    const int startState = stateOf(start.x, start.y, DIR_NONE);
+    gCost[static_cast<size_t>(startState)] = 0;
+
+    std::priority_queue<AStarEntry, std::vector<AStarEntry>, AStarEntryCmp> open;
+    open.push({heuristic(start.x, start.y), 0, startState});
+
+    int goalStateFound = -1;
+
+    while (!open.empty()) {
+        AStarEntry cur = open.top();
+        open.pop();
+
+        const int state = cur.state;
+        if (state < 0 || state >= S) continue;
+        if (closed[static_cast<size_t>(state)] != 0) continue;
+        closed[static_cast<size_t>(state)] = 1;
+
+        const int cell = state / 5;
+        const int prevDir = state % 5;
+        const int cx = cell % W;
+        const int cy = cell / W;
+
+        if (cx == goal.x && cy == goal.y) {
+            goalStateFound = state;
+            break;
+        }
+
+        const int gHere = gCost[static_cast<size_t>(state)];
+        if (gHere >= INF) continue;
+
+        for (int oi = 0; oi < 4; ++oi) {
+            const int nd = order[oi];
+            const int nx = cx + dirs[nd][0];
+            const int ny = cy + dirs[nd][1];
+            if (!inside(nx, ny)) continue;
+
+            // Never tunnel through rooms (except the endpoints which are outside room walls anyway).
+            if (!(nx == goal.x && ny == goal.y) && inRoom(nx, ny)) continue;
+
+            const TileType tt = d.at(nx, ny).type;
+            if (!corridorTileOk(tt)) continue;
+
+            const int step = corridorStepCost(tt);
+            const int turnPenalty = (prevDir != DIR_NONE && nd != prevDir) ? 6 : 0;
+
+            const int g2 = gHere + step + turnPenalty + nearRoomPenalty(nx, ny);
+            const int ns = stateOf(nx, ny, nd);
+
+            if (g2 < gCost[static_cast<size_t>(ns)]) {
+                gCost[static_cast<size_t>(ns)] = g2;
+                parent[static_cast<size_t>(ns)] = state;
+
+                // Deterministic 0/1 tie-breaker without consuming RNG.
+                const int jitter = (nx * 17 + ny * 31 + nd * 7) & 1;
+                const int f2 = g2 + heuristic(nx, ny) + jitter;
+                open.push({f2, g2, ns});
+            }
+        }
+    }
+
+    if (goalStateFound < 0) return false;
+
+    // Reconstruct path.
+    std::vector<Vec2i> path;
+    path.reserve(256);
+
+    int st = goalStateFound;
+    while (st >= 0) {
+        const int cell = st / 5;
+        const int px = cell % W;
+        const int py = cell / W;
+        path.push_back({px, py});
+        if (st == startState) break;
+        st = parent[static_cast<size_t>(st)];
+    }
+
+    if (path.empty()) return false;
+    if (path.back().x != start.x || path.back().y != start.y) return false;
+
+    std::reverse(path.begin(), path.end());
+
+    // Carve corridor (only convert walls to floor).
+    for (const Vec2i& p : path) {
+        if (!d.inBounds(p.x, p.y)) continue;
+        TileType& tt = d.at(p.x, p.y).type;
+        if (tt == TileType::Wall) tt = TileType::Floor;
+    }
+
+    return true;
+}
+
+void connectRooms(Dungeon& d, const Room& a, const Room& b, RNG& rng, const std::vector<uint8_t>& roomMask) {
+    DoorPick da = pickDoorOnRoomSmart(a, d, rng, {b.cx(), b.cy()}, &a);
+    DoorPick db = pickDoorOnRoomSmart(b, d, rng, {a.cx(), a.cy()}, &b);
+
+    auto placeRoomDoor = [&](const Vec2i& p) {
+        if (!d.inBounds(p.x, p.y)) return;
+        TileType& tt = d.at(p.x, p.y).type;
+        // Never override special doors (vault/secret) if they happen to be in the room list.
+        if (tt == TileType::DoorLocked || tt == TileType::DoorSecret) return;
+        if (tt == TileType::StairsUp || tt == TileType::StairsDown) return;
+        // Normalize to a closed door.
+        tt = TileType::DoorClosed;
+    };
+
+    // Place the two room-connection doors.
+    placeRoomDoor(da.doorInside);
+    placeRoomDoor(db.doorInside);
 
     // Ensure corridor starts are floor
     carveFloor(d, da.corridorStart.x, da.corridorStart.y);
     carveFloor(d, db.corridorStart.x, db.corridorStart.y);
 
-    // Carve L-shaped corridor
-    const int x1 = da.corridorStart.x;
-    const int y1 = da.corridorStart.y;
-    const int x2 = db.corridorStart.x;
-    const int y2 = db.corridorStart.y;
 
-    if (rng.chance(0.5f)) {
-        carveH(d, x1, x2, y1);
-        carveV(d, y1, y2, x2);
-    } else {
-        carveV(d, y1, y2, x1);
-        carveH(d, x1, x2, y2);
+    // Prefer A* tunneling that avoids cutting through other rooms.
+    // If it fails (rare), fall back to the classic L-shaped corridor.
+    if (!carveCorridorAStar(d, rng, da.corridorStart, db.corridorStart, roomMask)) {
+        const int x1 = da.corridorStart.x;
+        const int y1 = da.corridorStart.y;
+        const int x2 = db.corridorStart.x;
+        const int y2 = db.corridorStart.y;
+
+        if (rng.chance(0.5f)) {
+            carveH(d, x1, x2, y1);
+            carveV(d, y1, y2, x2);
+        } else {
+            carveV(d, y1, y2, x1);
+            carveH(d, x1, x2, y2);
+        }
     }
 }
 
@@ -1020,28 +1604,9 @@ void generateBspRooms(Dungeon& d, RNG& rng) {
         d.rooms.push_back({2, 2, d.width - 4, d.height - 4, RoomType::Normal});
     }
 
-    // Connect rooms following the BSP tree.
-    for (int i = 0; i < static_cast<int>(nodes.size()); ++i) {
-        Leaf& n = nodes[static_cast<size_t>(i)];
-        if (n.left < 0 || n.right < 0) continue;
 
-        int ra = pickRandomRoomInSubtree(nodes, n.left, rng);
-        int rb = pickRandomRoomInSubtree(nodes, n.right, rng);
-        if (ra >= 0 && rb >= 0 && ra != rb) {
-            connectRooms(d, d.rooms[static_cast<size_t>(ra)], d.rooms[static_cast<size_t>(rb)], rng);
-        }
-    }
-
-    // Extra loops: connect random room pairs.
-    const int extra = std::max(1, static_cast<int>(d.rooms.size()) / 3);
-    for (int i = 0; i < extra; ++i) {
-        int a = rng.range(0, static_cast<int>(d.rooms.size()) - 1);
-        int b = rng.range(0, static_cast<int>(d.rooms.size()) - 1);
-        if (a == b) continue;
-        connectRooms(d, d.rooms[static_cast<size_t>(a)], d.rooms[static_cast<size_t>(b)], rng);
-    }
-
-    // Precompute which tiles are inside rooms (for branch carving).
+    // Precompute which tiles are inside rooms. Used both for smarter corridor routing
+    // (avoid tunneling through other rooms) and for later branch/door placement passes.
     std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
     for (const auto& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
@@ -1051,6 +1616,26 @@ void generateBspRooms(Dungeon& d, RNG& rng) {
         }
     }
 
+    // Connect rooms following the BSP tree.
+    for (int i = 0; i < static_cast<int>(nodes.size()); ++i) {
+        Leaf& n = nodes[static_cast<size_t>(i)];
+        if (n.left < 0 || n.right < 0) continue;
+
+        int ra = pickRandomRoomInSubtree(nodes, n.left, rng);
+        int rb = pickRandomRoomInSubtree(nodes, n.right, rng);
+        if (ra >= 0 && rb >= 0 && ra != rb) {
+            connectRooms(d, d.rooms[static_cast<size_t>(ra)], d.rooms[static_cast<size_t>(rb)], rng, inRoom);
+        }
+    }
+
+    // Extra loops: connect random room pairs.
+    const int extra = std::max(1, static_cast<int>(d.rooms.size()) / 3);
+    for (int i = 0; i < extra; ++i) {
+        int a = rng.range(0, static_cast<int>(d.rooms.size()) - 1);
+        int b = rng.range(0, static_cast<int>(d.rooms.size()) - 1);
+        if (a == b) continue;
+        connectRooms(d, d.rooms[static_cast<size_t>(a)], d.rooms[static_cast<size_t>(b)], rng, inRoom);
+    }
     // Branch corridors (dead ends)
     int branches = std::max(2, static_cast<int>(d.rooms.size()));
     for (int i = 0; i < branches; ++i) {
@@ -1109,6 +1694,14 @@ void generateBspRooms(Dungeon& d, RNG& rng) {
     if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) {
         d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
     }
+
+    // Extra corridor doors (beyond the room-connection doors) make long halls more
+    // tactically interesting.
+    //
+    // Round 18: use a corridor-graph analysis pass (place doors in the middle of long,
+    // straight hallway segments) to avoid "door spam" while still producing meaningful
+    // chokepoints.
+    placeStrategicCorridorDoors(d, rng, inRoom, 0.85f);
 }
 
 void generateCavern(Dungeon& d, RNG& rng, int depth) {
@@ -1400,34 +1993,9 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
         }
     }
 
-    auto nearStairs = [&](int x, int y) {
-        return (std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y) <= 2)
-            || (std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y) <= 2);
-    };
-
-    for (int y = 1; y < d.height - 1; ++y) {
-        for (int x = 1; x < d.width - 1; ++x) {
-            if (d.at(x, y).type != TileType::Floor) continue;
-            if (inRoom[static_cast<size_t>(y * d.width + x)] != 0) continue;
-            if (nearStairs(x, y)) continue;
-            if (!rng.chance(0.035f)) continue;
-
-            const TileType n = d.at(x, y - 1).type;
-            const TileType s = d.at(x, y + 1).type;
-            const TileType w = d.at(x - 1, y).type;
-            const TileType e = d.at(x + 1, y).type;
-
-            const bool nsOpen = (n == TileType::Floor && s == TileType::Floor);
-            const bool weOpen = (w == TileType::Floor && e == TileType::Floor);
-            const bool nsWall = (w == TileType::Wall && e == TileType::Wall);
-            const bool weWall = (n == TileType::Wall && s == TileType::Wall);
-
-            // Corridor segment between two walls.
-            if ((nsOpen && nsWall) || (weOpen && weWall)) {
-                d.at(x, y).type = TileType::DoorClosed;
-            }
-        }
-    }
+    // Use strategic doors (segment-based) so the maze gets occasional LOS-breakers
+    // without turning every intersection into a door cluster.
+    placeStrategicCorridorDoors(d, rng, inRoom, 0.95f);
 }
 
 
@@ -1684,34 +2252,10 @@ void generateLabyrinth(Dungeon& d, RNG& rng, int depth) {
         }
     }
 
-    auto nearStairs = [&](int x, int y) {
-        return (std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y) <= 2)
-            || (std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y) <= 2);
-    };
-
-    for (int y = 1; y < d.height - 1; ++y) {
-        for (int x = 1; x < d.width - 1; ++x) {
-            if (d.at(x, y).type != TileType::Floor) continue;
-            if (inRoom[static_cast<size_t>(y * d.width + x)] != 0) continue;
-            if (nearStairs(x, y)) continue;
-            if (inMoatBounds(x, y)) continue;
-            if (!rng.chance(0.055f)) continue;
-
-            const TileType n = d.at(x, y - 1).type;
-            const TileType s = d.at(x, y + 1).type;
-            const TileType w = d.at(x - 1, y).type;
-            const TileType e = d.at(x + 1, y).type;
-
-            const bool nsOpen = (n == TileType::Floor && s == TileType::Floor);
-            const bool weOpen = (w == TileType::Floor && e == TileType::Floor);
-            const bool nsWall = (w == TileType::Wall && e == TileType::Wall);
-            const bool weWall = (n == TileType::Wall && s == TileType::Wall);
-
-            if ((nsOpen && nsWall) || (weOpen && weWall)) {
-                d.at(x, y).type = TileType::DoorClosed;
-            }
-        }
-    }
+    // Place doors strategically (segment-based) while respecting the moat region.
+    placeStrategicCorridorDoors(d, rng, inRoom, 1.15f, [&](int x, int y) {
+        return inMoatBounds(x, y);
+    });
 }
 
 
@@ -1934,8 +2478,9 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     // A default-constructed Dungeon starts at 0x0. Ensure we have a valid grid
     // allocated before generation begins (especially for special layouts that return early).
     if (width <= 0 || height <= 0) {
-        width = 30;
-        height = 20;
+        // Keep consistent with Game::MAP_W/H.
+        width = 84;
+        height = 55;
     }
     const size_t expect = static_cast<size_t>(width * height);
     if (tiles.size() != expect) tiles.assign(expect, Tile{});

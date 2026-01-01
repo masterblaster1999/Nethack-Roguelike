@@ -411,6 +411,7 @@ bind_command = shift+3
 bind_toggle_minimap = m
 bind_toggle_stats = shift+tab
 bind_message_history = f3, shift+m
+bind_codex = f4
 bind_fullscreen = f11
 bind_screenshot = f12
 bind_save = f5

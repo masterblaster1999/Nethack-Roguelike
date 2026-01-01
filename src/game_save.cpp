@@ -523,7 +523,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 25u;
+constexpr uint32_t SAVE_VERSION = 26u;
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 1u;
@@ -1010,6 +1010,16 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     writePod(mem, killsNow);
     writePod(mem, maxD);
 
+    // v26+: monster codex (seen flags + kill counts; per-run)
+    if constexpr (SAVE_VERSION >= 26u) {
+        const uint32_t kindCount = static_cast<uint32_t>(ENTITY_KIND_COUNT);
+        writePod(mem, kindCount);
+        for (uint32_t i = 0; i < kindCount; ++i) {
+            writePod(mem, codexSeen_[i]);
+            writePod(mem, codexKills_[i]);
+        }
+    }
+
     // v6+: item identification tables (run knowledge + randomized appearances)
     uint32_t kindCount = static_cast<uint32_t>(ITEM_KIND_COUNT);
     writePod(mem, kindCount);
@@ -1365,6 +1375,12 @@ bool Game::loadFromFile(const std::string& path) {
         uint32_t killsNow = 0;
         int32_t maxD = 1;
 
+        // v26+: monster codex knowledge (per-run).
+        std::array<uint8_t, ENTITY_KIND_COUNT> codexSeenTmp{};
+        std::array<uint16_t, ENTITY_KIND_COUNT> codexKillsTmp{};
+        codexSeenTmp.fill(0);
+        codexKillsTmp.fill(0);
+
         if (!readPod(in, rngState)) return fail();
         if (!readPod(in, depth)) return fail();
         if (!readPod(in, pId)) return fail();
@@ -1409,6 +1425,19 @@ bool Game::loadFromFile(const std::string& path) {
             if (!readPod(in, seedNow)) return fail();
             if (!readPod(in, killsNow)) return fail();
             if (!readPod(in, maxD)) return fail();
+        }
+
+        if (ver >= 26u) {
+            uint32_t mkCount = 0;
+            if (!readPod(in, mkCount)) return fail();
+            for (uint32_t i = 0; i < mkCount; ++i) {
+                uint8_t seen = 0;
+                uint16_t kills = 0;
+                if (!readPod(in, seen)) return fail();
+                if (!readPod(in, kills)) return fail();
+                if (i < codexSeenTmp.size()) codexSeenTmp[i] = seen;
+                if (i < codexKillsTmp.size()) codexKillsTmp[i] = kills;
+            }
         }
 
         // v6+: item identification tables
@@ -1826,6 +1855,10 @@ bool Game::loadFromFile(const std::string& path) {
         if (maxDepth < depth_) maxDepth = depth_;
         // If we loaded an already-finished run, don't record it again.
         runRecorded = isFinished();
+
+        // v26+: monster codex knowledge (or empty for older saves)
+        codexSeen_ = codexSeenTmp;
+        codexKills_ = codexKillsTmp;
 
         lastAutosaveTurn = 0;
 

@@ -397,8 +397,13 @@ void trySetTile(Dungeon& d, int x, int y, TileType t, std::vector<TileChange>& c
     if (cur.type == t) return;
 
     // Only allow replacing plain floor (or an already-decorated tile if we are layering).
-    if (!(cur.type == TileType::Floor || cur.type == TileType::Chasm || cur.type == TileType::Pillar)) {
-        return;
+    // Boulders are only placed on plain floor.
+    if (t == TileType::Boulder) {
+        if (cur.type != TileType::Floor) return;
+    } else {
+        if (!(cur.type == TileType::Floor || cur.type == TileType::Chasm || cur.type == TileType::Pillar)) {
+            return;
+        }
     }
 
     changes.push_back({x, y, cur.type});
@@ -474,7 +479,7 @@ bool decorateRoomPillars(Dungeon& d, const Room& r, RNG& rng) {
     return !changes.empty();
 }
 
-bool decorateRoomChasm(Dungeon& d, const Room& r, RNG& rng) {
+bool decorateRoomChasm(Dungeon& d, const Room& r, RNG& rng, int depth) {
     // Only decorate sufficiently large rooms.
     if (r.w < 8 || r.h < 6) return false;
 
@@ -482,36 +487,315 @@ bool decorateRoomChasm(Dungeon& d, const Room& r, RNG& rng) {
     changes.reserve(48);
 
     const bool vertical = rng.chance(0.5f);
+
+    int lineX = -1;
+    int lineY = -1;
+    int bridgeX = -1;
+    int bridgeY = -1;
+
     if (vertical) {
-        const int x = r.cx();
+        lineX = r.cx();
         // A vertical chasm line with a single bridge tile.
-        const int bridgeY = rng.range(r.y + 2, r.y2() - 3);
+        bridgeY = rng.range(r.y + 2, r.y2() - 3);
         for (int y = r.y + 1; y < r.y2() - 1; ++y) {
             if (y == bridgeY) continue;
-            trySetTile(d, x, y, TileType::Chasm, changes);
+            trySetTile(d, lineX, y, TileType::Chasm, changes);
         }
     } else {
-        const int y = r.cy();
-        const int bridgeX = rng.range(r.x + 2, r.x2() - 3);
+        lineY = r.cy();
+        bridgeX = rng.range(r.x + 2, r.x2() - 3);
         for (int x = r.x + 1; x < r.x2() - 1; ++x) {
             if (x == bridgeX) continue;
-            trySetTile(d, x, y, TileType::Chasm, changes);
+            trySetTile(d, x, lineY, TileType::Chasm, changes);
         }
+    }
+
+    if (changes.empty()) return false;
+
+    if (!stairsConnected(d)) {
+        undoChanges(d, changes);
+        return false;
+    }
+
+    // Optional boulder-bridge puzzle variant:
+    // - remove the fixed bridge tile (turn it into chasm)
+    // - place a pushable boulder adjacent to the gap
+    // - request a guaranteed loot cache on the far side
+    float puzzleChance = 0.10f;
+    if (depth >= 3) puzzleChance = 0.18f;
+    if (depth >= 6) puzzleChance = 0.28f;
+
+    if (rng.chance(puzzleChance)) {
+        const Vec2i bridgePos = vertical ? Vec2i{ lineX, bridgeY } : Vec2i{ bridgeX, lineY };
+
+        auto isPlainFloor = [&](const Vec2i& p) -> bool {
+            if (!d.inBounds(p.x, p.y)) return false;
+            if (isStairsTile(d, p.x, p.y)) return false;
+            return d.at(p.x, p.y).type == TileType::Floor;
+        };
+
+        if (isPlainFloor(bridgePos)) {
+            struct Candidate {
+                Vec2i boulder;
+                Vec2i pushFrom;
+                int dx = 0;
+                int dy = 0;
+                int side = 0; // -1 = negative half, +1 = positive half
+                bool ok = false;
+            };
+
+            Candidate cand[2];
+
+            if (vertical) {
+                // Chasm line at x=lineX, bridge at (lineX, bridgeY)
+                // Candidate 0: boulder on west side, push east.
+                cand[0].boulder  = { lineX - 1, bridgeY };
+                cand[0].pushFrom = { lineX - 2, bridgeY };
+                cand[0].dx = +1; cand[0].dy = 0; cand[0].side = +1;
+                // Candidate 1: boulder on east side, push west.
+                cand[1].boulder  = { lineX + 1, bridgeY };
+                cand[1].pushFrom = { lineX + 2, bridgeY };
+                cand[1].dx = -1; cand[1].dy = 0; cand[1].side = -1;
+
+                for (int i = 0; i < 2; ++i) {
+                    const Vec2i farAdj = { bridgePos.x + cand[i].dx, bridgePos.y + cand[i].dy };
+                    cand[i].ok = isPlainFloor(cand[i].boulder) && isPlainFloor(cand[i].pushFrom) && isPlainFloor(farAdj);
+                }
+            } else {
+                // Chasm line at y=lineY, bridge at (bridgeX, lineY)
+                // Candidate 0: boulder on north side, push south.
+                cand[0].boulder  = { bridgeX, lineY - 1 };
+                cand[0].pushFrom = { bridgeX, lineY - 2 };
+                cand[0].dx = 0; cand[0].dy = +1; cand[0].side = +1;
+                // Candidate 1: boulder on south side, push north.
+                cand[1].boulder  = { bridgeX, lineY + 1 };
+                cand[1].pushFrom = { bridgeX, lineY + 2 };
+                cand[1].dx = 0; cand[1].dy = -1; cand[1].side = -1;
+
+                for (int i = 0; i < 2; ++i) {
+                    const Vec2i farAdj = { bridgePos.x + cand[i].dx, bridgePos.y + cand[i].dy };
+                    cand[i].ok = isPlainFloor(cand[i].boulder) && isPlainFloor(cand[i].pushFrom) && isPlainFloor(farAdj);
+                }
+            }
+
+            // Try candidates in random order.
+            const int start = rng.chance(0.5f) ? 0 : 1;
+            for (int k = 0; k < 2; ++k) {
+                Candidate c = cand[(start + k) & 1];
+                if (!c.ok) continue;
+
+                std::vector<TileChange> extra;
+                extra.reserve(8);
+
+                // Close the bridge.
+                extra.push_back({ bridgePos.x, bridgePos.y, d.at(bridgePos.x, bridgePos.y).type });
+                d.at(bridgePos.x, bridgePos.y).type = TileType::Chasm;
+
+                // Place the boulder next to the gap.
+                trySetTile(d, c.boulder.x, c.boulder.y, TileType::Boulder, extra);
+                if (d.at(c.boulder.x, c.boulder.y).type != TileType::Boulder) {
+                    undoChanges(d, extra);
+                    continue;
+                }
+
+                // Ensure we didn't break stairs connectivity, and that the "push from" tile is reachable.
+                const auto dist = bfsDistanceMap(d, d.stairsUp);
+                auto distAt = [&](const Vec2i& p) -> int {
+                    if (!d.inBounds(p.x, p.y)) return -1;
+                    const size_t ii = static_cast<size_t>(p.y * d.width + p.x);
+                    if (ii >= dist.size()) return -1;
+                    return dist[ii];
+                };
+
+                bool okStairs = true;
+                if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) {
+                    okStairs = (distAt(d.stairsDown) >= 0);
+                }
+                const bool okPush = (distAt(c.pushFrom) >= 0);
+
+                if (!okStairs || !okPush) {
+                    undoChanges(d, extra);
+                    continue;
+                }
+
+                // Find a loot tile on the far side of the chasm within this room.
+                Vec2i loot{-1, -1};
+                for (int tries = 0; tries < 80; ++tries) {
+                    int lx = 0, ly = 0;
+                    if (vertical) {
+                        if (c.side > 0) {
+                            lx = rng.range(lineX + 1, r.x2() - 2);
+                        } else {
+                            lx = rng.range(r.x + 1, lineX - 1);
+                        }
+                        ly = rng.range(r.y + 1, r.y2() - 2);
+                    } else {
+                        lx = rng.range(r.x + 1, r.x2() - 2);
+                        if (c.side > 0) {
+                            ly = rng.range(lineY + 1, r.y2() - 2);
+                        } else {
+                            ly = rng.range(r.y + 1, lineY - 1);
+                        }
+                    }
+                    Vec2i p{lx, ly};
+                    if (!isPlainFloor(p)) continue;
+                    loot = p;
+                    break;
+                }
+
+                if (loot.x != -1) {
+                    d.bonusLootSpots.push_back(loot);
+                }
+
+                // Keep the variant.
+                break;
+            }
+        }
+    }
+
+    return true;
+}
+
+
+bool decorateRoomBoulders(Dungeon& d, const Room& r, RNG& rng, int depth) {
+    // Scatter a few pushable boulders inside rooms to create cover and choke points.
+    if (r.w < 7 || r.h < 7) return false;
+
+    const int interiorW = std::max(0, r.w - 2);
+    const int interiorH = std::max(0, r.h - 2);
+    const int area = interiorW * interiorH;
+
+    int maxCount = 1;
+    if (area >= 60) maxCount = 2;
+    if (area >= 90) maxCount = 3;
+    if (depth >= 6) maxCount += 1;
+    maxCount = std::clamp(maxCount, 1, 5);
+
+    const int count = rng.range(1, maxCount);
+
+    std::vector<TileChange> changes;
+    changes.reserve(static_cast<size_t>(count + 4));
+
+    auto okSpot = [&](int x, int y) -> bool {
+        if (!d.inBounds(x, y)) return false;
+        if (isStairsTile(d, x, y)) return false;
+        if (d.at(x, y).type != TileType::Floor) return false;
+
+        // Avoid directly blocking doors/thresholds (rough heuristic).
+        const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+        for (auto& dv : dirs) {
+            const int nx = x + dv[0];
+            const int ny = y + dv[1];
+            if (!d.inBounds(nx, ny)) continue;
+            const TileType tt = d.at(nx, ny).type;
+            if (tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorOpen) return false;
+        }
+        return true;
+    };
+
+    int placed = 0;
+    for (int i = 0; i < count; ++i) {
+        for (int tries = 0; tries < 60; ++tries) {
+            // Bias toward corners/edges so boulders feel like clutter, not "random blockers".
+            int x = rng.range(r.x + 1, r.x2() - 2);
+            int y = rng.range(r.y + 1, r.y2() - 2);
+            if (rng.chance(0.55f)) {
+                x = (rng.chance(0.5f)) ? rng.range(r.x + 1, r.x + 3) : rng.range(r.x2() - 4, r.x2() - 2);
+            }
+            if (rng.chance(0.55f)) {
+                y = (rng.chance(0.5f)) ? rng.range(r.y + 1, r.y + 3) : rng.range(r.y2() - 4, r.y2() - 2);
+            }
+
+            if (!okSpot(x, y)) continue;
+
+            trySetTile(d, x, y, TileType::Boulder, changes);
+            if (d.at(x, y).type == TileType::Boulder) {
+                placed++;
+                break;
+            }
+        }
+    }
+
+    if (placed <= 0) {
+        undoChanges(d, changes);
+        return false;
     }
 
     if (!stairsConnected(d)) {
         undoChanges(d, changes);
         return false;
     }
-    return !changes.empty();
+
+    return true;
 }
+
+bool scatterBoulders(Dungeon& d, RNG& rng, int depth) {
+    // For non-room layouts (caverns/mazes), sprinkle a small number of boulders to
+    // create micro-terrain without needing room metadata.
+    const int area = d.width * d.height;
+    int target = std::clamp(area / 180, 2, 10);
+    target += std::min(6, depth / 2);
+
+    std::vector<TileChange> changes;
+    changes.reserve(static_cast<size_t>(target + 8));
+
+    auto tooCloseToStairs = [&](int x, int y) {
+        const int du = std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y);
+        const int dd = std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y);
+        return du <= 2 || dd <= 2;
+    };
+
+    int placed = 0;
+    for (int i = 0; i < target; ++i) {
+        for (int tries = 0; tries < 120; ++tries) {
+            int x = rng.range(1, d.width - 2);
+            int y = rng.range(1, d.height - 2);
+            if (!d.inBounds(x, y)) continue;
+            if (tooCloseToStairs(x, y)) continue;
+            if (d.at(x, y).type != TileType::Floor) continue;
+
+            // Avoid dense clustering.
+            bool near = false;
+            for (int oy = -1; oy <= 1; ++oy) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    if (ox == 0 && oy == 0) continue;
+                    int nx = x + ox, ny = y + oy;
+                    if (!d.inBounds(nx, ny)) continue;
+                    if (d.at(nx, ny).type == TileType::Boulder) { near = true; break; }
+                }
+                if (near) break;
+            }
+            if (near) continue;
+
+            trySetTile(d, x, y, TileType::Boulder, changes);
+            if (d.at(x, y).type == TileType::Boulder) {
+                placed++;
+                break;
+            }
+        }
+    }
+
+    if (placed <= 0) {
+        undoChanges(d, changes);
+        return false;
+    }
+
+    if (!stairsConnected(d)) {
+        undoChanges(d, changes);
+        return false;
+    }
+
+    return true;
+}
+
 
 void decorateRooms(Dungeon& d, RNG& rng, int depth) {
     // Decoration pacing: more structural variation deeper.
     float pPillars = 0.18f;
-    float pChasm = 0.10f;
-    if (depth >= 3) { pPillars += 0.07f; pChasm += 0.06f; }
-    if (depth >= 5) { pPillars += 0.08f; pChasm += 0.08f; }
+    float pChasm   = 0.10f;
+    float pBoulders = 0.10f;
+    if (depth >= 3) { pPillars += 0.07f; pChasm += 0.06f; pBoulders += 0.08f; }
+    if (depth >= 5) { pPillars += 0.08f; pChasm += 0.08f; pBoulders += 0.10f; }
 
     for (const Room& r : d.rooms) {
         // Don't decorate special rooms: they have bespoke gameplay (shops, shrines, etc.).
@@ -526,10 +810,13 @@ void decorateRooms(Dungeon& d, RNG& rng, int depth) {
 
         // One or two decorations per room (rare).
         if (rng.chance(pChasm)) {
-            (void)decorateRoomChasm(d, r, rng);
+            (void)decorateRoomChasm(d, r, rng, depth);
         }
         if (rng.chance(pPillars)) {
             (void)decorateRoomPillars(d, r, rng);
+        }
+        if (rng.chance(pBoulders)) {
+            (void)decorateRoomBoulders(d, r, rng, depth);
         }
     }
 }
@@ -1653,6 +1940,8 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     const size_t expect = static_cast<size_t>(width * height);
     if (tiles.size() != expect) tiles.assign(expect, Tile{});
 
+    bonusLootSpots.clear();
+
     // Sanity clamp.
     if (maxDepth < 1) maxDepth = 1;
 
@@ -1703,6 +1992,11 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     // change combat geometry and line-of-sight without breaking the critical
     // stairs path.
     decorateRooms(*this, rng, depth);
+
+    // Non-room layouts (caverns/mazes) still benefit from a bit of movable terrain.
+    if (rooms.empty()) {
+        (void)scatterBoulders(*this, rng, depth);
+    }
 
     ensureBorders(*this);
 }

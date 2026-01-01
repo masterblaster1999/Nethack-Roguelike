@@ -46,114 +46,24 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear) {
     }
 
     // Baselines per kind. Depth scaling happens below.
-    switch (k) {
-        case EntityKind::Goblin:
-            e.hpMax = 7; e.baseAtk = 1; e.baseDef = 0;
-            e.willFlee = true;
-            break;
-        case EntityKind::Orc:
-            e.hpMax = 10; e.baseAtk = 2; e.baseDef = 1;
-            e.willFlee = false;
-            break;
-        case EntityKind::Bat:
-            e.hpMax = 5; e.baseAtk = 1; e.baseDef = 0;
-            e.willFlee = true;
-            break;
-        case EntityKind::Slime:
-            e.hpMax = 12; e.baseAtk = 2; e.baseDef = 1;
-            e.willFlee = false;
-            break;
-        case EntityKind::SkeletonArcher:
-            e.hpMax = 9; e.baseAtk = 2; e.baseDef = 1;
-            e.willFlee = false;
-            e.canRanged = true;
-            // Ranged stats are stored per-entity (saved/loaded), so set them here on spawn.
-            e.rangedRange = 8;
-            e.rangedAtk = 6;
-            e.rangedProjectile = ProjectileKind::Arrow;
-            e.rangedAmmo = AmmoKind::Arrow;
-            break;
-        case EntityKind::KoboldSlinger:
-            e.hpMax = 8; e.baseAtk = 2; e.baseDef = 0;
-            e.willFlee = true;
-            e.canRanged = true;
-            e.rangedRange = 6;
-            e.rangedAtk = 5;
-            e.rangedProjectile = ProjectileKind::Rock;
-            e.rangedAmmo = AmmoKind::Rock;
-            break;
-        case EntityKind::Wolf:
-            e.hpMax = 6; e.baseAtk = 2; e.baseDef = 0;
-            e.willFlee = false;
-            e.packAI = true;
-            break;
-        case EntityKind::Troll:
-            e.hpMax = 16; e.baseAtk = 4; e.baseDef = 2;
-            e.willFlee = false;
-            // Trolls regenerate slowly; makes them scary if you can't finish them quickly.
-            e.regenChancePct = 25;
-            e.regenAmount = 1;
-            break;
-        case EntityKind::Wizard:
-            e.hpMax = 12; e.baseAtk = 3; e.baseDef = 1;
-            e.willFlee = false;
-            e.canRanged = true;
-            e.rangedRange = 7;
-            e.rangedAtk = 7;
-            e.rangedProjectile = ProjectileKind::Spark;
-            e.rangedAmmo = AmmoKind::None;
-            break;
-        case EntityKind::Snake:
-            e.hpMax = 7; e.baseAtk = 2; e.baseDef = 0;
-            e.willFlee = false;
-            break;
-        case EntityKind::Spider:
-            e.hpMax = 8; e.baseAtk = 3; e.baseDef = 1;
-            e.willFlee = false;
-            break;
-        case EntityKind::Ogre:
-            e.hpMax = 18; e.baseAtk = 5; e.baseDef = 2;
-            e.willFlee = false;
-            break;
-        case EntityKind::Mimic:
-            e.hpMax = 14; e.baseAtk = 4; e.baseDef = 2;
-            e.willFlee = false;
-            break;
-        case EntityKind::Shopkeeper:
-            e.hpMax = 18; e.baseAtk = 6; e.baseDef = 4;
-            e.willFlee = false;
-            break;
-        case EntityKind::Minotaur:
-            e.hpMax = 38; e.baseAtk = 7; e.baseDef = 3;
-            e.willFlee = false;
-            break;
-        case EntityKind::Ghost:
-            e.hpMax = 20; e.baseAtk = 5; e.baseDef = 3;
-            e.willFlee = false;
-            // Ghosts regenerate a bit; they're meant to guard "bones" loot.
-            e.regenChancePct = 20;
-            e.regenAmount = 1;
-            break;
-        default:
-            e.hpMax = 6; e.baseAtk = 1; e.baseDef = 0;
-            e.willFlee = true;
-            break;
-    }
-
-    // Depth scaling. Keep early monsters relevant without letting endgame balloon out of control.
-    int d = std::max(0, depth_ - 1);
-    if (k == EntityKind::Goblin || k == EntityKind::Bat || k == EntityKind::Slime || k == EntityKind::Snake) {
-        d = d / 2;
-    }
-    if (k == EntityKind::Minotaur) {
-        // Boss-tier baseline already; scale a bit slower.
-        d = std::max(0, depth_ - 6);
-    }
-
-    e.hpMax += d;
+    const MonsterBaseStats ms = monsterStatsForDepth(k, depth_);
+    e.hpMax = ms.hpMax;
     e.hp = e.hpMax;
-    e.baseAtk += (d / 3);
-    e.baseDef += (d / 4);
+    e.baseAtk = ms.baseAtk;
+    e.baseDef = ms.baseDef;
+
+    e.willFlee = ms.willFlee;
+    e.packAI = ms.packAI;
+
+    // Ranged stats are stored per-entity (saved/loaded), so set them here on spawn.
+    e.canRanged = ms.canRanged;
+    e.rangedRange = ms.rangedRange;
+    e.rangedAtk = ms.rangedAtk;
+    e.rangedProjectile = ms.rangedProjectile;
+    e.rangedAmmo = ms.rangedAmmo;
+
+    e.regenChancePct = ms.regenChancePct;
+    e.regenAmount = ms.regenAmount;
 
     // Fix: ammo-based ranged monsters should spawn with a sensible quiver.
     if (e.rangedAmmo != AmmoKind::None) {
@@ -909,6 +819,34 @@ void Game::spawnItems() {
             dropItemAt(ItemKind::AmuletYendor, pos, 1);
         }
     }
+
+    // Generator requested bonus loot spawns (e.g. behind boulder-bridge caches).
+    // These are always "bonus" rewards and should never be required for floor traversal.
+    for (const Vec2i& p : dung.bonusLootSpots) {
+        if (!dung.inBounds(p.x, p.y)) continue;
+        if (dung.at(p.x, p.y).type != TileType::Floor) continue;
+        if (entityAt(p.x, p.y)) continue;
+
+        Item chest;
+        chest.kind = ItemKind::Chest;
+        chest.count = 1;
+        chest.buc = 0; // Uncursed
+        chest.enchant = 0; // chest tier (see chestTier())
+        chest.charges = 0; // lock/trap bits (see setChestLocked/Trapped)
+        chest.spriteSeed = rng.nextU32();
+
+        // Scale the cache a bit with depth.
+        int tier = (depth_ <= 2) ? 1 : ((depth_ <= 5) ? 2 : 3);
+        if (depth_ >= 6 && rng.chance(0.35f)) tier = 4;
+        chest.enchant = std::clamp(tier, 1, 4);
+
+        // Some caches are a bit spicy.
+        if (rng.chance(0.40f)) setChestLocked(chest, true);
+        if (rng.chance(0.30f)) setChestTrapped(chest, true);
+
+        ground.push_back(GroundItem{ chest, p });
+    }
+    dung.bonusLootSpots.clear();
 
     // A little extra ammo somewhere on the map.
     if (rng.chance(0.75f)) {

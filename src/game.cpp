@@ -206,6 +206,30 @@ void Game::messageHistoryCycleFilter(int dir) {
     msgHistoryScroll = 0;
 }
 
+void Game::buildCodexList(std::vector<EntityKind>& out) const {
+    out.clear();
+    out.reserve(ENTITY_KIND_COUNT);
+
+    for (int i = 0; i < ENTITY_KIND_COUNT; ++i) {
+        EntityKind k = static_cast<EntityKind>(i);
+        if (k == EntityKind::Player) continue;
+
+        if (codexFilter_ == CodexFilter::Seen && !codexHasSeen(k)) continue;
+        if (codexFilter_ == CodexFilter::Killed && codexKills(k) == 0) continue;
+
+        out.push_back(k);
+    }
+
+    if (codexSort_ == CodexSort::KillsDesc) {
+        std::stable_sort(out.begin(), out.end(), [&](EntityKind a, EntityKind b) {
+            const uint16_t ka = codexKills(a);
+            const uint16_t kb = codexKills(b);
+            if (ka != kb) return ka > kb;
+            return std::string(entityKindName(a)) < std::string(entityKindName(b));
+        });
+    }
+}
+
 Entity* Game::entityById(int id) {
     for (auto& e : ents) if (e.id == id) return &e;
     return nullptr;
@@ -1055,6 +1079,11 @@ void Game::newGame(uint32_t seed) {
     msgHistorySearch.clear();
     msgHistoryScroll = 0;
 
+    codexOpen = false;
+    codexFilter_ = CodexFilter::All;
+    codexSort_ = CodexSort::Kind;
+    codexSel = 0;
+
     // autoPickup is a user setting; do not reset it between runs.
 
     sneakMode_ = false;
@@ -1075,6 +1104,8 @@ void Game::newGame(uint32_t seed) {
 
     killCount = 0;
     maxDepth = 1;
+    codexSeen_.fill(0);
+    codexKills_.fill(0);
     runRecorded = false;
     mortemWritten_ = false;
     bonesWritten_ = false;
@@ -1327,7 +1358,7 @@ void Game::newGame(uint32_t seed) {
            << "), THEN RETURN TO THE EXIT (<) TO WIN.";
         pushMsg(ss.str(), MessageKind::System);
     }
-    pushMsg("PRESS ? FOR HELP. I INVENTORY. F TARGET/FIRE. M MINIMAP. TAB STATS. F12 SCREENSHOT.", MessageKind::System);
+    pushMsg("PRESS ? FOR HELP. I INVENTORY. F TARGET/FIRE. M MINIMAP. TAB STATS. F3 LOG. F4 CODEX. F12 SCREENSHOT.", MessageKind::System);
     if (controlPreset_ == ControlPreset::Nethack) {
         pushMsg("MOVE: HJKL + YUBN DIAGONALS (ALSO ARROWS/NUMPAD). TIP: S SEARCH. : LOOK. CTRL+D KICK. C CLOSE DOOR. SHIFT+C LOCK DOOR.", MessageKind::System);
     } else {

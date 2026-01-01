@@ -116,6 +116,8 @@ void Game::handleAction(Action a) {
         msgHistorySearch.clear();
         msgHistoryScroll = 0;
 
+        codexOpen = false;
+
         if (commandOpen) {
             commandOpen = false;
             commandBuf.clear();
@@ -298,6 +300,21 @@ void Game::handleAction(Action a) {
                 msgHistoryFilter = MessageFilter::All;
                 msgHistorySearch.clear();
                 msgHistoryScroll = 0;
+            }
+            return;
+        case Action::Codex:
+            if (codexOpen) {
+                codexOpen = false;
+            } else {
+                closeOverlays();
+                codexOpen = true;
+                std::vector<EntityKind> list;
+                buildCodexList(list);
+                if (list.empty()) {
+                    codexSel = 0;
+                } else {
+                    codexSel = clampi(codexSel, 0, static_cast<int>(list.size()) - 1);
+                }
             }
             return;
         case Action::ToggleMinimap:
@@ -665,6 +682,64 @@ if (optionsSel == 17) {
     // Overlay: stats
     if (statsOpen) {
         if (a == Action::Cancel) statsOpen = false;
+        return;
+    }
+
+    // Overlay: monster codex (bestiary / encounter log)
+    if (codexOpen) {
+        std::vector<EntityKind> list;
+        buildCodexList(list);
+        const int n = static_cast<int>(list.size());
+        if (n <= 0) {
+            codexSel = 0;
+        } else {
+            codexSel = clampi(codexSel, 0, n - 1);
+        }
+
+        switch (a) {
+            case Action::Cancel:
+            case Action::Codex:
+            case Action::Confirm:
+                codexOpen = false;
+                return;
+            case Action::Up:
+                codexSel -= 1;
+                break;
+            case Action::Down:
+                codexSel += 1;
+                break;
+            case Action::LogUp:
+                codexSel -= 10;
+                break;
+            case Action::LogDown:
+                codexSel += 10;
+                break;
+            case Action::Left:
+            case Action::Right: {
+                const int dir = (a == Action::Left) ? -1 : 1;
+                const int maxF = static_cast<int>(CodexFilter::Killed);
+                int v = static_cast<int>(codexFilter_);
+                v += dir;
+                if (v < 0) v = maxF;
+                if (v > maxF) v = 0;
+                codexFilter_ = static_cast<CodexFilter>(v);
+                codexSel = 0;
+                return;
+            }
+            case Action::Inventory:
+            case Action::SortInventory:
+                codexSort_ = (codexSort_ == CodexSort::Kind) ? CodexSort::KillsDesc : CodexSort::Kind;
+                codexSel = 0;
+                return;
+            default:
+                return;
+        }
+
+        if (n <= 0) {
+            codexSel = 0;
+            return;
+        }
+        codexSel = clampi(codexSel, 0, n - 1);
         return;
     }
 

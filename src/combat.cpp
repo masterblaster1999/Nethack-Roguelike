@@ -445,6 +445,13 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
 
             if ((attacker.kind == EntityKind::Player || attacker.friendly) && !defender.friendly) {
                 ++killCount;
+
+                const size_t kidx = static_cast<size_t>(defender.kind);
+                if (kidx < codexKills_.size()) {
+                    codexSeen_[kidx] = 1;
+                    if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
+                }
+
                 grantXp(xpFor(defender.kind));
             }
         }
@@ -599,6 +606,13 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                 pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
                 if (fromPlayer && !hit->friendly) {
                     ++killCount;
+
+                    const size_t kidx = static_cast<size_t>(hit->kind);
+                    if (kidx < codexKills_.size()) {
+                        codexSeen_[kidx] = 1;
+                        if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
+                    }
+
                     grantXp(xpFor(hit->kind));
                 }
             }
@@ -821,6 +835,13 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                     }
                     if (fromPlayer && !e->friendly) {
                         ++killCount;
+
+                        const size_t kidx = static_cast<size_t>(e->kind);
+                        if (kidx < codexKills_.size()) {
+                            codexSeen_[kidx] = 1;
+                            if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
+                        }
+
                         grantXp(xpFor(e->kind));
                     }
                 }

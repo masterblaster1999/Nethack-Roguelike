@@ -154,6 +154,46 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         return false;
     }
 
+    // Pushable boulders (Sokoban-style): stepping into a boulder attempts to push it.
+    // This is orthogonal-only (no diagonal pushes). Boulders can also be pushed into chasms
+    // to create a rough bridge.
+    if (dung.at(nx, ny).type == TileType::Boulder) {
+        if (dx != 0 && dy != 0) {
+            if (e.kind == EntityKind::Player) pushMsg("YOU CAN'T PUSH THE BOULDER DIAGONALLY.");
+            return false;
+        }
+
+        const int bx = nx + dx;
+        const int by = ny + dy;
+
+        if (!dung.inBounds(bx, by)) {
+            if (e.kind == EntityKind::Player) pushMsg("THE BOULDER WON'T BUDGE.");
+            return false;
+        }
+        if (entityAt(bx, by)) {
+            if (e.kind == EntityKind::Player) pushMsg("SOMETHING BLOCKS THE BOULDER.");
+            return false;
+        }
+
+        const TileType dest = dung.at(bx, by).type;
+        if (dest == TileType::Floor) {
+            // Slide boulder forward one tile.
+            dung.at(bx, by).type = TileType::Boulder;
+            dung.at(nx, ny).type = TileType::Floor;
+            if (e.kind == EntityKind::Player) pushMsg("YOU PUSH THE BOULDER.", MessageKind::Info, true);
+            emitNoise({nx, ny}, 13);
+        } else if (dest == TileType::Chasm) {
+            // Boulder falls in and fills a single chasm tile, forming a walkable bridge.
+            dung.at(bx, by).type = TileType::Floor;
+            dung.at(nx, ny).type = TileType::Floor;
+            if (e.kind == EntityKind::Player) pushMsg("THE BOULDER CRASHES INTO THE CHASM, FORMING A ROUGH BRIDGE.", MessageKind::Info, true);
+            emitNoise({nx, ny}, 16);
+        } else {
+            if (e.kind == EntityKind::Player) pushMsg("THE BOULDER WON'T BUDGE.");
+            return false;
+        }
+    }
+
     if (!dung.isWalkable(nx, ny)) {
         if (e.kind == EntityKind::Player) {
             // Quality-of-life: if you are wielding a pickaxe, bumping into a diggable

@@ -20,6 +20,8 @@ enum class TileType : uint8_t {
     Chasm,
     // Append-only: interior column that blocks movement and line-of-sight.
     Pillar,
+    // Append-only: pushable boulder obstacle; blocks movement but does NOT block line-of-sight.
+    Boulder,
 };
 
 struct Tile {
@@ -65,6 +67,10 @@ public:
     std::vector<Tile> tiles;
 
     std::vector<Room> rooms;
+
+    // Generator hints: optional guaranteed bonus loot spawns (e.g. boulder bridge caches).
+    // Used only during floor generation; not serialized.
+    std::vector<Vec2i> bonusLootSpots;
     Vec2i stairsUp{ -1, -1 };
     Vec2i stairsDown{ -1, -1 };
 

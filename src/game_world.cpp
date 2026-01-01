@@ -303,43 +303,50 @@ void Game::recomputeLightMap() {
 
 
 void Game::recomputeFov() {
-    Entity& p = playerMut();    int radius = 9;
+    Entity& p = playerMut();
+    int radius = 9;
     if (p.effects.visionTurns > 0) radius += 3;
 
-    // Lighting is cached separately from FOV; keep it current.
     recomputeLightMap();
 
     if (!darknessActive()) {
-        // Classic behavior (fully lit).
         dung.computeFov(p.pos.x, p.pos.y, radius, true);
-        return;
-    }
+    } else {
+        // If darkness is active, compute FOV without auto-explore marking so we can
+        // apply a light-threshold filter first.
+        dung.computeFov(p.pos.x, p.pos.y, radius, false);
 
-    // Compute raw LOS without auto-exploring; we'll apply darkness filtering first.
-    dung.computeFov(p.pos.x, p.pos.y, radius, false);
+        // Then apply a light threshold: only tiles lit above a minimum are visible.
+        const float minLight = 0.35f;
+        for (int y = 0; y < Dungeon::H; ++y) {
+            for (int x = 0; x < Dungeon::W; ++x) {
+                if (!dung.at(x, y).visible) continue;
+                if (lightMap[y][x] < minLight) {
+                    dung.at(x, y).visible = false;
+                }
+            }
+        }
 
-    constexpr int kDarkVisionRadius = 2;
-
-    for (int y = 0; y < dung.height; ++y) {
-        for (int x = 0; x < dung.width; ++x) {
-            Tile& t = dung.at(x, y);
-            if (!t.visible) continue;
-
-            const int dist = std::max(std::abs(x - p.pos.x), std::abs(y - p.pos.y));
-            if (dist <= kDarkVisionRadius) continue;
-
-            // Beyond "feel around" range, you only see lit tiles.
-            if (tileLightLevel(x, y) == 0) {
-                t.visible = false;
+        // Mark explored tiles after darkness filtering.
+        for (int y = 0; y < Dungeon::H; ++y) {
+            for (int x = 0; x < Dungeon::W; ++x) {
+                if (dung.at(x, y).visible) {
+                    dung.at(x, y).explored = true;
+                }
             }
         }
     }
 
-    // Mark explored tiles only after darkness filtering.
-    for (int y = 0; y < dung.height; ++y) {
-        for (int x = 0; x < dung.width; ++x) {
-            Tile& t = dung.at(x, y);
-            if (t.visible) t.explored = true;
+    // Monster codex: any monster kind currently visible to the player is considered
+    // "seen" for this run. (Idempotent: we only store a boolean.)
+    for (const Entity& e : ents) {
+        if (e.id == playerId_) continue;
+        if (e.hp <= 0) continue;
+        if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
+        if (!dung.at(e.pos.x, e.pos.y).visible) continue;
+        const size_t idx = static_cast<size_t>(e.kind);
+        if (idx < codexSeen_.size()) {
+            codexSeen_[idx] = 1;
         }
     }
 }

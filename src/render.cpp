@@ -91,11 +91,13 @@ bool Renderer::init() {
     wallVar.clear();
     chasmVar.clear();
     pillarOverlayVar.clear();
+    boulderOverlayVar.clear();
 
     for (auto& v : floorThemeVar) v.resize(static_cast<size_t>(tileVars));
     wallVar.resize(static_cast<size_t>(tileVars));
     chasmVar.resize(static_cast<size_t>(tileVars));
     pillarOverlayVar.resize(static_cast<size_t>(tileVars));
+    boulderOverlayVar.resize(static_cast<size_t>(tileVars));
 
     for (int i = 0; i < tileVars; ++i) {
         // Floor: build a full themed tileset so special rooms pop.
@@ -111,12 +113,14 @@ bool Renderer::init() {
         const uint32_t wSeed = hashCombine(0xAA110u, static_cast<uint32_t>(i));
         const uint32_t cSeed = hashCombine(0xC1A500u, static_cast<uint32_t>(i));
         const uint32_t pSeed = hashCombine(0x9111A0u, static_cast<uint32_t>(i));
+        const uint32_t bSeed = hashCombine(0xB011D3u, static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
             wallVar[static_cast<size_t>(i)][static_cast<size_t>(f)]  = textureFromSprite(generateWallTile(wSeed, f, spritePx));
             chasmVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateChasmTile(cSeed, f, spritePx));
             // Pillar is generated as a transparent overlay; it will be layered over the
             // underlying themed floor at render-time.
             pillarOverlayVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generatePillarTile(pSeed, f, spritePx));
+            boulderOverlayVar[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(generateBoulderTile(bSeed, f, spritePx));
         }
     }
 
@@ -234,9 +238,15 @@ for (auto& arr : pillarOverlayVar) {
         if (t) SDL_DestroyTexture(t);
     }
 }
+for (auto& arr : boulderOverlayVar) {
+    for (SDL_Texture* t : arr) {
+        if (t) SDL_DestroyTexture(t);
+    }
+}
 wallVar.clear();
 chasmVar.clear();
 pillarOverlayVar.clear();
+boulderOverlayVar.clear();
 
 // Decal overlay textures
 for (auto& arr : floorDecalVar) {
@@ -412,6 +422,7 @@ SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int fram
         // Base tile fetch returns nullptr so the caller doesn't accidentally draw a standalone
         // overlay without its floor.
         case TileType::Pillar:
+        case TileType::Boulder:
             return nullptr;
         case TileType::DoorSecret: {
             // Draw secret doors as walls until discovered (tile is converted to DoorClosed).
@@ -1002,6 +1013,7 @@ void Renderer::render(const Game& game) {
             // underlying floor so they inherit themed room flooring.
             const bool isOverlay =
                 (t.type == TileType::Pillar) ||
+                (t.type == TileType::Boulder) ||
                 (t.type == TileType::StairsUp) || (t.type == TileType::StairsDown) ||
                 (t.type == TileType::DoorClosed) || (t.type == TileType::DoorLocked) || (t.type == TileType::DoorOpen);
 
@@ -1140,6 +1152,16 @@ void Renderer::render(const Game& game) {
                         }
                         break;
                     }
+                    case TileType::Boulder: {
+                        if (!boulderOverlayVar.empty()) {
+                            const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                                           static_cast<uint32_t>(y)) ^ 0xB011D3u;
+                            const uint32_t rr = hash32(hh);
+                            const size_t idx = static_cast<size_t>(rr % static_cast<uint32_t>(boulderOverlayVar.size()));
+                            otex = boulderOverlayVar[idx][static_cast<size_t>(frame % FRAMES)];
+                        }
+                        break;
+                    }
                     case TileType::StairsUp:
                         otex = stairsUpOverlayTex[static_cast<size_t>(frame % FRAMES)];
                         break;
@@ -1181,6 +1203,7 @@ void Renderer::render(const Game& game) {
                 case TileType::DoorLocked:
                 case TileType::DoorSecret:
                 case TileType::Pillar:
+                case TileType::Boulder:
                 case TileType::Chasm:
                     return true;
                 default:
@@ -1262,6 +1285,7 @@ void Renderer::render(const Game& game) {
             switch (tt) {
                 case TileType::Wall:
                 case TileType::Pillar:
+                case TileType::Boulder:
                 case TileType::DoorClosed:
                 case TileType::DoorLocked:
                 case TileType::DoorSecret:
@@ -1728,6 +1752,10 @@ void Renderer::render(const Game& game) {
 
     if (game.isStatsOpen()) {
         drawStatsOverlay(game);
+    }
+
+    if (game.isCodexOpen()) {
+        drawCodexOverlay(game);
     }
 
     if (game.isMessageHistoryOpen()) {
@@ -2517,6 +2545,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART");
     lineGray("F11 FULLSCREEN  F12 SCREENSHOT (BINDABLE)");
     lineGray("F3/SHIFT+M MESSAGE HISTORY  (/ SEARCH, CTRL+L CLEAR)");
+    lineGray("F4 MONSTER CODEX  (TAB SORT, LEFT/RIGHT FILTER)");
     lineGray("PGUP/PGDN LOG  ESC CANCEL/QUIT");
 
     y += 6;
@@ -2635,6 +2664,10 @@ void Renderer::drawMinimapOverlay(const Game& game) {
                 // they read as distinct from border stone.
                 if (vis) drawCell(x, y, 130, 130, 130);
                 else     drawCell(x, y, 75, 75, 75);
+            } else if (t.type == TileType::Boulder) {
+                // Boulders are pushable obstacles; display them darker than pillars.
+                if (vis) drawCell(x, y, 95, 98, 104);
+                else     drawCell(x, y, 55, 58, 62);
             } else if (t.type == TileType::Chasm) {
                 // Chasms are impassable but not opaque.
                 if (vis) drawCell(x, y, 20, 30, 55);
@@ -2944,8 +2977,229 @@ void Renderer::drawLevelUpOverlay(const Game& game) {
 }
 
 
+void Renderer::drawCodexOverlay(const Game& game) {
+    const int pad = 14;
+    const int panelW = winW * 9 / 10;
+    const int panelH = (winH - hudH) * 9 / 10;
+    const int panelX = (winW - panelW) / 2;
+    const int panelY = (winH - hudH - panelH) / 2;
+
+    drawPanel(panelX, panelY, panelW, panelH, 1.0f);
+
+    const Color white{240, 240, 240, 255};
+    const Color gray{170, 170, 170, 255};
+    const Color dark{110, 110, 110, 255};
+    const Color yellow{255, 230, 120, 255};
+
+    const int titleScale = 2;
+    const int bodyScale = 1;
+    const int lineH = 10 * bodyScale;
+
+    int x = panelX + pad;
+    int y = panelY + pad;
+
+    drawText5x7(renderer, x, y, titleScale, white, "MONSTER CODEX");
+    y += 20;
+
+    // Filter / sort summary + quick controls.
+    auto filterName = [&]() -> const char* {
+        switch (game.codexFilter()) {
+            case CodexFilter::All:    return "ALL";
+            case CodexFilter::Seen:   return "SEEN";
+            case CodexFilter::Killed: return "KILLED";
+            default:                  return "ALL";
+        }
+    };
+    auto sortName = [&]() -> const char* {
+        switch (game.codexSort()) {
+            case CodexSort::Kind:      return "KIND";
+            case CodexSort::KillsDesc: return "KILLS";
+            default:                   return "KIND";
+        }
+    };
+
+    {
+        std::string meta = "FILTER: ";
+        meta += filterName();
+        meta += "   SORT: ";
+        meta += sortName();
+        meta += "   (TAB/I SORT, LEFT/RIGHT FILTER)";
+        drawText5x7(renderer, x, y, bodyScale, gray, meta);
+        y += 14;
+        drawText5x7(renderer, x, y, bodyScale, gray,
+                    "UP/DOWN SELECT   ENTER/ESC CLOSE");
+        y += 18;
+    }
+
+    // Build filtered/sorted list.
+    std::vector<EntityKind> list;
+    game.buildCodexList(list);
+
+    // Layout: list column + details column.
+    const int innerW = panelW - pad * 2;
+    const int innerH = panelH - pad * 2 - (y - (panelY + pad));
+    const int listW = innerW * 4 / 10;
+    const int detailsW = innerW - listW - pad;
+    const int listX = x;
+    const int listY = y;
+    const int detailsX = listX + listW + pad;
+    const int detailsY = listY;
+
+    const int maxLines = std::max(1, innerH / lineH);
+
+    int sel = game.codexSelection();
+    if (list.empty()) {
+        sel = 0;
+    } else {
+        sel = clampi(sel, 0, static_cast<int>(list.size()) - 1);
+    }
+
+    // Keep selection visible by auto-scrolling.
+    int first = 0;
+    if (sel >= maxLines) first = sel - maxLines + 1;
+    const int maxFirst = std::max(0, static_cast<int>(list.size()) - maxLines);
+    first = clampi(first, 0, maxFirst);
+
+    // Draw list.
+    {
+        SDL_Rect clip{listX, listY, listW, innerH};
+        SDL_RenderSetClipRect(renderer, &clip);
+
+        for (int row = 0; row < maxLines; ++row) {
+            const int idx = first + row;
+            if (idx >= static_cast<int>(list.size())) break;
+
+            const EntityKind k = list[idx];
+            const bool seen = game.codexHasSeen(k);
+            const uint16_t kills = game.codexKills(k);
+
+            const int rowY = listY + row * lineH;
+
+            if (idx == sel) {
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 36);
+                SDL_Rect r{listX, rowY - 1, listW, lineH};
+                SDL_RenderFillRect(renderer, &r);
+            }
+
+            const Color nameCol = seen ? white : dark;
+            const char* nm = seen ? entityKindName(k) : "??????";
+
+            // Left: name. Right: kill count.
+            const std::string killsStr = (kills > 0) ? ("K:" + std::to_string(kills)) : "";
+
+            drawText5x7(renderer, listX + 4, rowY, bodyScale, nameCol, nm);
+
+            if (!killsStr.empty()) {
+                const int wKills = static_cast<int>(killsStr.size()) * 6 * bodyScale;
+                drawText5x7(renderer, listX + listW - 4 - wKills, rowY, bodyScale,
+                            seen ? gray : dark, killsStr);
+            }
+        }
+
+        SDL_RenderSetClipRect(renderer, nullptr);
+
+        // Divider.
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 40);
+        SDL_RenderDrawLine(renderer, listX + listW + pad / 2, listY,
+                           listX + listW + pad / 2, listY + innerH);
+    }
+
+    // Draw details.
+    {
+        auto dline = [&](const std::string& s, Color c = white) {
+            drawText5x7(renderer, detailsX, y, bodyScale, c, s);
+            y += 14;
+        };
+
+        y = detailsY;
+
+        if (list.empty()) {
+            dline("NO ENTRIES", gray);
+            dline("(TRY EXPLORING TO DISCOVER MONSTERS)", dark);
+            return;
+        }
+
+        const EntityKind k = list[sel];
+        const bool seen = game.codexHasSeen(k);
+        const uint16_t kills = game.codexKills(k);
+
+        if (!seen) {
+            dline("UNKNOWN CREATURE", gray);
+            dline("YOU HAVEN'T ENCOUNTERED THIS MONSTER YET.", dark);
+            dline("FILTER: ALL SHOWS PLACEHOLDERS FOR UNSEEN KINDS.", dark);
+            return;
+        }
+
+        // Header.
+        dline(std::string(entityKindName(k)), white);
+
+        // Stats.
+        const MonsterBaseStats base = baseMonsterStatsFor(k);
+        const MonsterBaseStats scaled = monsterStatsForDepth(k, game.depth());
+
+        dline("SEEN: YES   KILLS: " + std::to_string(kills), gray);
+        dline("XP (ON KILL): " + std::to_string(game.xpFor(k)), gray);
+        dline("SPEED: " + std::to_string(baseSpeedFor(k)), gray);
+
+        dline("BASE STATS (DEPTH 1):", gray);
+        dline("  HP " + std::to_string(base.hpMax) + "   ATK " + std::to_string(base.baseAtk) +
+              "   DEF " + std::to_string(base.baseDef), white);
+
+        if (game.depth() != 1) {
+            dline("SCALED STATS (CURRENT DEPTH " + std::to_string(game.depth()) + "):", gray);
+            dline("  HP " + std::to_string(scaled.hpMax) + "   ATK " + std::to_string(scaled.baseAtk) +
+                  "   DEF " + std::to_string(scaled.baseDef), white);
+        } else {
+            dline("(STATS SCALE WITH DEPTH)", dark);
+        }
+
+        // Behavior / abilities.
+        {
+            if (base.canRanged) {
+                std::string r = "RANGED: ";
+                switch (base.rangedProjectile) {
+                    case ProjectileKind::Arrow: r += "ARROWS"; break;
+                    case ProjectileKind::Rock:  r += "ROCKS"; break;
+                    case ProjectileKind::Spark: r += "SPARK"; break;
+                    case ProjectileKind::Bolt:  r += "BOLT"; break;
+                    default:                    r += "PROJECTILE"; break;
+                }
+                r += "  (R" + std::to_string(base.rangedRange) + " ATK " + std::to_string(base.rangedAtk) + ")";
+                dline(r, gray);
+            }
+
+            if (base.regenChancePct > 0 && base.regenAmount > 0) {
+                dline("REGEN: " + std::to_string(base.regenChancePct) + "% CHANCE / TURN (" +
+                      std::to_string(base.regenAmount) + " HP)", gray);
+            }
+
+            if (base.packAI) {
+                dline("BEHAVIOR: PACK HUNTER", gray);
+            }
+            if (base.willFlee) {
+                dline("BEHAVIOR: MAY FLEE WHEN HURT", gray);
+            }
+        }
+
+        // Monster-specific notes. These are intentionally short & gameplay-focused.
+        {
+            auto note = [&](const char* s) { dline(std::string("NOTE: ") + s, dark); };
+            switch (k) {
+                case EntityKind::Snake:  note("POISONOUS BITE."); break;
+                case EntityKind::Spider: note("CAN WEB YOU, LIMITING MOVEMENT."); break;
+                case EntityKind::Mimic:  note("DISGUISES ITSELF AS LOOT."); break;
+                case EntityKind::Ghost:  note("RARE; CAN REGENERATE."); break;
+                case EntityKind::Minotaur: note("BOSS-LIKE THREAT; SCALES MORE SLOWLY UNTIL DEEPER LEVELS."); break;
+                case EntityKind::Shopkeeper: note("ATTACKING MAY ANGER THE SHOP."); break;
+                default: break;
+            }
+        }
+    }
+}
+
+
 void Renderer::drawMessageHistoryOverlay(const Game& game) {
-    ensureUIAssets();
+    ensureUIAssets(game);
 
     const Color white{255,255,255,255};
     const Color gray{180,180,180,255};

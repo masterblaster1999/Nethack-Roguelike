@@ -7,6 +7,7 @@ void Game::beginLook() {
     helpOpen = false;
     minimapOpen = false;
     statsOpen = false;
+    codexOpen = false;
     msgScroll = 0;
 
     looking = true;
@@ -60,6 +61,7 @@ std::string Game::describeAt(Vec2i p) const {
         case TileType::Wall: ss << "WALL"; break;
         case TileType::DoorSecret: ss << "WALL"; break; // don't spoil undiscovered secrets
         case TileType::Pillar: ss << "PILLAR"; break;
+        case TileType::Boulder: ss << "BOULDER"; break;
         case TileType::Chasm: ss << "CHASM"; break;
         case TileType::Floor: ss << "FLOOR"; break;
         case TileType::StairsUp: ss << "STAIRS UP"; break;
@@ -105,6 +107,13 @@ std::string Game::describeAt(Vec2i p) const {
                     label += ")";
                 }
                 ss << " | " << label << " " << e->hp << "/" << e->hpMax;
+
+                // Codex (per-run) stats: kills by kind + XP value.
+                const uint16_t kindKills = codexKills(e->kind);
+                if (kindKills > 0) {
+                    ss << " | KILLS: " << kindKills;
+                }
+                ss << " | XP: " << xpFor(e->kind);
 
                 if (e->gearMelee.id != 0 && isMeleeWeapon(e->gearMelee.kind)) {
                     ss << " | WPN: " << itemDisplayNameSingle(e->gearMelee.kind);

@@ -48,6 +48,7 @@ A tiny NetHack-inspired roguelike with:
   - If auto-explore spots a chest or loot you won’t auto-pick, it will **auto-walk to it and stop on arrival**.
 - **Auto-pickup modes**: press **P** to cycle **OFF → GOLD → SMART → ALL → OFF**.
 - **8-way movement**: move diagonally with **Q/E/Z/C** (or numpad 1/3/7/9). (Fully rebindable.)
+- **Monster Codex (bestiary)**: press **F4** to open an in-game bestiary of monsters you've **seen/killed**, with quick stats and behavior notes.
 - **Minimap + stats overlays**:
   - **M** toggles the minimap
   - **Shift+Tab** toggles the stats/high-scores panel
@@ -143,6 +144,7 @@ A tiny NetHack-inspired roguelike with:
 - **Screenshot**: `F12` (bindable via `bind_screenshot`)
 - **Fullscreen**: `F11` (bindable via `bind_fullscreen`)
 - **Message log scroll**: PageUp / PageDown (or mouse wheel)
+- **Monster codex**: `F4` (filter with Left/Right, sort with Tab)
 - **Restart**: `F6`
 - **Quit**: Esc (or Esc twice if `confirm_quit` is enabled)
 

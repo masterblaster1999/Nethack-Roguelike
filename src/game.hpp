@@ -42,6 +42,32 @@ enum class EntityKind : uint8_t {
     Ghost,
 };
 
+inline constexpr int ENTITY_KIND_COUNT = static_cast<int>(EntityKind::Ghost) + 1;
+
+inline const char* entityKindName(EntityKind k) {
+    switch (k) {
+        case EntityKind::Player: return "PLAYER";
+        case EntityKind::Goblin: return "GOBLIN";
+        case EntityKind::Orc: return "ORC";
+        case EntityKind::Bat: return "BAT";
+        case EntityKind::Slime: return "SLIME";
+        case EntityKind::SkeletonArcher: return "SKELETON ARCHER";
+        case EntityKind::KoboldSlinger: return "KOBOLD SLINGER";
+        case EntityKind::Wolf: return "WOLF";
+        case EntityKind::Troll: return "TROLL";
+        case EntityKind::Wizard: return "WIZARD";
+        case EntityKind::Snake: return "SNAKE";
+        case EntityKind::Spider: return "SPIDER";
+        case EntityKind::Ogre: return "OGRE";
+        case EntityKind::Mimic: return "MIMIC";
+        case EntityKind::Shopkeeper: return "SHOPKEEPER";
+        case EntityKind::Minotaur: return "MINOTAUR";
+        case EntityKind::Dog: return "DOG";
+        case EntityKind::Ghost: return "GHOST";
+        default: return "UNKNOWN";
+    }
+}
+
 
 // Baseline movement speed for monsters (used by the energy-based turn scheduler).
 // 100 = normal speed (roughly 1 action per player turn).
@@ -68,6 +94,106 @@ inline int baseSpeedFor(EntityKind k) {
         case EntityKind::Ghost: return 110;
         default: return 100;
     }
+}
+
+struct MonsterBaseStats {
+    int hpMax = 6;
+    int baseAtk = 1;
+    int baseDef = 0;
+
+    bool willFlee = true;
+    bool packAI = false;
+
+    bool canRanged = false;
+    int rangedRange = 0;
+    int rangedAtk = 0;
+    ProjectileKind rangedProjectile = ProjectileKind::Arrow;
+    AmmoKind rangedAmmo = AmmoKind::None;
+
+    int regenChancePct = 0;
+    int regenAmount = 0;
+};
+
+// Baseline (unscaled) monster stats/flags per kind.
+inline MonsterBaseStats baseMonsterStatsFor(EntityKind k) {
+    MonsterBaseStats s;
+    switch (k) {
+        case EntityKind::Goblin: s.hpMax = 7; s.baseAtk = 1; s.baseDef = 0; s.willFlee = true; break;
+        case EntityKind::Orc: s.hpMax = 10; s.baseAtk = 2; s.baseDef = 1; s.willFlee = false; break;
+        case EntityKind::Bat: s.hpMax = 5; s.baseAtk = 1; s.baseDef = 0; s.willFlee = true; break;
+        case EntityKind::Slime: s.hpMax = 12; s.baseAtk = 2; s.baseDef = 1; s.willFlee = false; break;
+        case EntityKind::SkeletonArcher:
+            s.hpMax = 9; s.baseAtk = 2; s.baseDef = 1; s.willFlee = false;
+            s.canRanged = true;
+            s.rangedRange = 8;
+            s.rangedAtk = 6;
+            s.rangedProjectile = ProjectileKind::Arrow;
+            s.rangedAmmo = AmmoKind::Arrow;
+            break;
+        case EntityKind::KoboldSlinger:
+            s.hpMax = 8; s.baseAtk = 2; s.baseDef = 0; s.willFlee = true;
+            s.canRanged = true;
+            s.rangedRange = 6;
+            s.rangedAtk = 5;
+            s.rangedProjectile = ProjectileKind::Rock;
+            s.rangedAmmo = AmmoKind::Rock;
+            break;
+        case EntityKind::Wolf:
+            s.hpMax = 6; s.baseAtk = 2; s.baseDef = 0; s.willFlee = false;
+            s.packAI = true;
+            break;
+        case EntityKind::Troll:
+            s.hpMax = 16; s.baseAtk = 4; s.baseDef = 2; s.willFlee = false;
+            s.regenChancePct = 25;
+            s.regenAmount = 1;
+            break;
+        case EntityKind::Wizard:
+            s.hpMax = 12; s.baseAtk = 3; s.baseDef = 1; s.willFlee = false;
+            s.canRanged = true;
+            s.rangedRange = 7;
+            s.rangedAtk = 7;
+            s.rangedProjectile = ProjectileKind::Spark;
+            s.rangedAmmo = AmmoKind::None;
+            break;
+        case EntityKind::Snake: s.hpMax = 7; s.baseAtk = 2; s.baseDef = 0; s.willFlee = false; break;
+        case EntityKind::Spider: s.hpMax = 8; s.baseAtk = 3; s.baseDef = 1; s.willFlee = false; break;
+        case EntityKind::Ogre: s.hpMax = 18; s.baseAtk = 5; s.baseDef = 2; s.willFlee = false; break;
+        case EntityKind::Mimic: s.hpMax = 14; s.baseAtk = 4; s.baseDef = 2; s.willFlee = false; break;
+        case EntityKind::Shopkeeper: s.hpMax = 18; s.baseAtk = 6; s.baseDef = 4; s.willFlee = false; break;
+        case EntityKind::Minotaur: s.hpMax = 38; s.baseAtk = 7; s.baseDef = 3; s.willFlee = false; break;
+        case EntityKind::Dog: s.hpMax = 10; s.baseAtk = 2; s.baseDef = 0; s.willFlee = false; break;
+        case EntityKind::Ghost:
+            s.hpMax = 20; s.baseAtk = 5; s.baseDef = 3; s.willFlee = false;
+            s.regenChancePct = 20;
+            s.regenAmount = 1;
+            break;
+        default:
+            // Player and unknown kinds fall back to a tame baseline.
+            s.hpMax = 6; s.baseAtk = 1; s.baseDef = 0; s.willFlee = true;
+            break;
+    }
+    return s;
+}
+
+inline int monsterDepthScale(EntityKind k, int depth) {
+    int d = std::max(0, depth - 1);
+    if (k == EntityKind::Goblin || k == EntityKind::Bat || k == EntityKind::Slime || k == EntityKind::Snake) {
+        d = d / 2;
+    }
+    if (k == EntityKind::Minotaur) {
+        d = std::max(0, depth - 6);
+    }
+    return d;
+}
+
+// Stats after depth scaling. Flags (ranged, pack AI, etc.) are preserved.
+inline MonsterBaseStats monsterStatsForDepth(EntityKind k, int depth) {
+    MonsterBaseStats s = baseMonsterStatsFor(k);
+    int d = monsterDepthScale(k, depth);
+    s.hpMax += d;
+    s.baseAtk += (d / 3);
+    s.baseDef += (d / 4);
+    return s;
 }
 
 
@@ -138,6 +264,7 @@ enum class Action : uint8_t {
     LoadAuto,
     Help,
     MessageHistory, // Full message history overlay
+    Codex,          // Monster codex / bestiary overlay
 
     LogUp,
     LogDown,
@@ -249,6 +376,35 @@ inline bool messageFilterMatches(MessageFilter f, MessageKind k) {
         case MessageFilter::Success:   return k == MessageKind::Success;
         case MessageFilter::Info:      return k == MessageKind::Info;
         default:                       return true;
+    }
+}
+
+// Monster codex overlay filter/sort modes.
+enum class CodexFilter : uint8_t {
+    All = 0,
+    Seen,
+    Killed,
+};
+
+enum class CodexSort : uint8_t {
+    Kind = 0,      // enum order
+    KillsDesc,     // most kills first
+};
+
+inline const char* codexFilterDisplayName(CodexFilter f) {
+    switch (f) {
+        case CodexFilter::All:    return "ALL";
+        case CodexFilter::Seen:   return "SEEN";
+        case CodexFilter::Killed: return "KILLED";
+        default:                  return "ALL";
+    }
+}
+
+inline const char* codexSortDisplayName(CodexSort s) {
+    switch (s) {
+        case CodexSort::Kind:      return "KIND";
+        case CodexSort::KillsDesc: return "KILLS";
+        default:                   return "KIND";
     }
 }
 
@@ -831,6 +987,23 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     void messageHistoryClearSearch();
     void messageHistoryCycleFilter(int dir);
 
+    // Monster codex (bestiary / encounter log)
+    bool isCodexOpen() const { return codexOpen; }
+    CodexFilter codexFilter() const { return codexFilter_; }
+    CodexSort codexSort() const { return codexSort_; }
+    int codexSelection() const { return codexSel; }
+
+    bool codexHasSeen(EntityKind k) const {
+        const size_t idx = static_cast<size_t>(k);
+        return idx < codexSeen_.size() && codexSeen_[idx] != 0;
+    }
+    uint16_t codexKills(EntityKind k) const {
+        const size_t idx = static_cast<size_t>(k);
+        return idx < codexKills_.size() ? codexKills_[idx] : 0;
+    }
+
+    void buildCodexList(std::vector<EntityKind>& out) const;
+
     // FX
     const std::vector<FXProjectile>& fxProjectiles() const { return fx; }
     const std::vector<FXExplosion>& fxExplosions() const { return fxExpl; }
@@ -987,6 +1160,12 @@ private:
     std::string msgHistorySearch;
     int msgHistoryScroll = 0;
 
+    // Monster codex overlay (bestiary / encounter log)
+    bool codexOpen = false;
+    CodexFilter codexFilter_ = CodexFilter::All;
+    CodexSort codexSort_ = CodexSort::Kind;
+    int codexSel = 0;
+
     // Options / quality-of-life
     AutoPickupMode autoPickup = AutoPickupMode::Gold;
 
@@ -1075,6 +1254,10 @@ private:
     uint32_t seed_ = 0;
     uint32_t killCount = 0;
     int maxDepth = 1;
+
+    // Monster codex knowledge (per-run).
+    std::array<uint8_t, ENTITY_KIND_COUNT> codexSeen_{};
+    std::array<uint16_t, ENTITY_KIND_COUNT> codexKills_{};
 
     // Yendor Doom (endgame escalation).
     //

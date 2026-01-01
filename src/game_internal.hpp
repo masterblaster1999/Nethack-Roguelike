@@ -336,7 +336,7 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
 
     f << PROCROGUE_APPNAME << " map export (" << PROCROGUE_VERSION << ")\n";
     f << "Seed: " << game.seed() << "  Depth: " << game.depth() << "  Turns: " << game.turns() << "\n";
-    f << "Legend: # wall, . floor, + door, / open door, * locked door, < up, > down, ~ chasm, I pillar, ^ trap, @ you\n";
+    f << "Legend: # wall, . floor, + door, / open door, * locked door, < up, > down, ~ chasm, I pillar, B boulder, ^ trap, @ you\n";
     f << "        $ gold, ! potion, ? scroll, : food, K key, l lockpick, C chest\n";
     f << "        g goblin, o orc, b bat, j slime, S skeleton, k kobold, w wolf, T troll, W wizard, n snake, s spider, O ogre\n\n";
 
@@ -363,6 +363,7 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
                 case TileType::DoorLocked: c = '*'; break;
                 case TileType::Chasm:      c = '~'; break;
                 case TileType::Pillar:     c = 'I'; break;
+                case TileType::Boulder:    c = 'B'; break;
                 default:                   c = '?'; break;
             }
 

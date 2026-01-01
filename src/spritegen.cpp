@@ -33,7 +33,7 @@ SpritePixels makeSprite(int w, int h, Color fill) {
     SpritePixels s;
     s.w = w; s.h = h;
     s.px.assign(static_cast<size_t>(w * h), fill);
-    return resampleSpriteToSize(s, pxSize);
+    return s;
 }
 
 void setPx(SpritePixels& s, int x, int y, Color c) {
@@ -2247,6 +2247,109 @@ SpritePixels generatePillarTile(uint32_t seed, int frame, int pxSize) {
         setPx(s, 6, 4, add(s.at(6, 4), 22, 22, 24));
         setPx(s, 9, 7, add(s.at(9, 7), 14, 14, 16));
     }
+
+    return resampleSpriteToSize(s, pxSize);
+}
+
+SpritePixels generateBoulderTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    // Boulder is a transparent overlay layered on top of the themed floor.
+    RNG rng(hash32(seed ^ 0xB00B135u));
+
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+
+    Color stone = { 118, 122, 130, 255 };
+    stone = add(stone, rng.range(-14, 14), rng.range(-14, 14), rng.range(-14, 14));
+    Color dark = mul(stone, 0.58f);
+    Color light = add(mul(stone, 1.12f), 14, 14, 16);
+
+    auto rand01 = [&](uint32_t v) -> float {
+        return static_cast<float>(v) / 4294967295.0f;
+    };
+
+    // Soft shadow under the boulder.
+    for (int y = 9; y < 15; ++y) {
+        for (int x = 2; x < 14; ++x) {
+            float cx = (x - 7.5f) / 6.0f;
+            float cy = (y - 12.5f) / 3.2f;
+            float d2 = cx*cx + cy*cy;
+            if (d2 > 1.0f) continue;
+            int a = static_cast<int>(std::lround((1.0f - d2) * 120.0f));
+            a = std::clamp(a, 0, 120);
+            setPx(s, x, y, Color{0, 0, 0, static_cast<uint8_t>(a)});
+        }
+    }
+
+    // Boulder body: slightly irregular ellipse with top-left lighting.
+    const float cx = 7.5f;
+    const float cy = 7.0f;
+    const float rx = 6.2f;
+    const float ry = 5.2f;
+
+    for (int y = 1; y < 15; ++y) {
+        for (int x = 1; x < 15; ++x) {
+            float nx = (static_cast<float>(x) - cx) / rx;
+            float ny = (static_cast<float>(y) - cy) / ry;
+            float d2 = nx*nx + ny*ny;
+
+            // Small shape jitter via hash-based noise.
+            uint32_t hv = hash32(seed ^ static_cast<uint32_t>(x * 73856093) ^ static_cast<uint32_t>(y * 19349663) ^ static_cast<uint32_t>(frame * 83492791));
+            float n = rand01(hv) - 0.5f; // [-0.5, +0.5]
+            float edge = 1.0f + n * 0.08f;
+
+            if (d2 > edge) continue;
+
+            // Lighting: highlight toward (-1,-1) direction.
+            float shade = 0.80f;
+            shade += (-nx * 0.10f) + (-ny * 0.14f);
+            shade = std::clamp(shade, 0.52f, 1.18f);
+
+            Color c = rampShadeTile(stone, shade, x, y);
+
+            // Darker rim for definition.
+            if (d2 > edge * 0.88f) c = mul(c, 0.78f);
+
+            setPx(s, x, y, c);
+        }
+    }
+
+    // A couple of cracks / speckles.
+    for (int i = 0; i < 8; ++i) {
+        int x = rng.range(3, 12);
+        int y = rng.range(3, 11);
+        if (s.at(x, y).a == 0) continue;
+        if (rng.chance(0.55f)) setPx(s, x, y, mul(s.at(x, y), 0.72f));
+        if (rng.chance(0.35f) && x + 1 < 16 && s.at(x + 1, y).a != 0) setPx(s, x + 1, y, mul(s.at(x + 1, y), 0.80f));
+        if (rng.chance(0.30f) && y + 1 < 16 && s.at(x, y + 1).a != 0) setPx(s, x, y + 1, mul(s.at(x, y + 1), 0.86f));
+    }
+
+    // Subtle animated glint so boulders don't read as a flat blob.
+    if (frame % 2 == 1) {
+        if (s.at(5, 4).a != 0) setPx(s, 5, 4, add(s.at(5, 4), 18, 18, 20));
+        if (s.at(6, 3).a != 0) setPx(s, 6, 3, add(s.at(6, 3), 10, 10, 12));
+    }
+
+    // Outline pass for crispness.
+    for (int y = 1; y < 15; ++y) {
+        for (int x = 1; x < 15; ++x) {
+            if (s.at(x, y).a == 0) continue;
+            bool edgePx = false;
+            for (int oy = -1; oy <= 1; ++oy) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    if (ox == 0 && oy == 0) continue;
+                    int nx = x + ox;
+                    int ny = y + oy;
+                    if (nx < 0 || nx >= 16 || ny < 0 || ny >= 16) { edgePx = true; continue; }
+                    if (s.at(nx, ny).a == 0) edgePx = true;
+                }
+            }
+            if (edgePx) setPx(s, x, y, mul(s.at(x, y), 0.88f));
+        }
+    }
+
+    // Add a small highlight stroke.
+    line(s, 4, 6, 7, 4, light);
+    line(s, 5, 7, 8, 5, add(light, -10, -10, -10));
 
     return resampleSpriteToSize(s, pxSize);
 }

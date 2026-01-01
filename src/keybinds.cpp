@@ -202,6 +202,7 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     if (name == "screenshot" || name == "take_screenshot") return Action::Screenshot;
     if (name == "help") return Action::Help;
     if (name == "message_history" || name == "messagehistory" || name == "messages" || name == "msghistory" || name == "msglog") return Action::MessageHistory;
+    if (name == "codex" || name == "monster_codex" || name == "bestiary" || name == "monsters") return Action::Codex;
     if (name == "options") return Action::Options;
     if (name == "command" || name == "extcmd") return Action::Command;
 
@@ -308,6 +309,7 @@ KeyBinds KeyBinds::defaults() {
     add(Action::ToggleMinimap, SDLK_m);
     add(Action::MessageHistory, SDLK_F3);
     add(Action::MessageHistory, SDLK_m, KMOD_SHIFT);
+    add(Action::Codex, SDLK_F4);
     add(Action::ToggleStats, SDLK_TAB, KMOD_SHIFT);
 
     add(Action::ToggleFullscreen, SDLK_F11);
@@ -515,6 +517,7 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
 
     {Action::Help, "help"},
     {Action::MessageHistory, "message_history"},
+    {Action::Codex, "codex"},
     {Action::Options, "options"},
     {Action::Command, "command"},
     {Action::ToggleMinimap, "toggle_minimap"},

@@ -42,6 +42,7 @@ SpritePixels generateChasmTile(uint32_t seed, int frame, int pxSize = 16);
 // NOTE: Pillar/door/stairs tiles are generated as *transparent overlays*.
 // The renderer layers them on top of the underlying themed floor tile.
 SpritePixels generatePillarTile(uint32_t seed, int frame, int pxSize = 16);
+SpritePixels generateBoulderTile(uint32_t seed, int frame, int pxSize = 16);
 SpritePixels generateStairsTile(uint32_t seed, bool up, int frame, int pxSize = 16);
 SpritePixels generateDoorTile(uint32_t seed, bool open, int frame, int pxSize = 16);
 SpritePixels generateLockedDoorTile(uint32_t seed, int frame, int pxSize = 16);

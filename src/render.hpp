@@ -218,6 +218,8 @@ private:
     // Pillars are rendered as an overlay on top of the underlying floor so the
     // pillar always matches the room's themed floor.
     std::vector<AnimTex> pillarOverlayVar;
+    // Boulders are also overlays so they inherit the underlying room floor theme.
+    std::vector<AnimTex> boulderOverlayVar;
 
     // Extra tile overlays / decals (transparent textures)
     static constexpr int DECAL_STYLES = ROOM_STYLES;
@@ -293,6 +295,7 @@ private:
     void drawCommandOverlay(const Game& game);
     void drawHelpOverlay(const Game& game);
     void drawMessageHistoryOverlay(const Game& game);
+    void drawCodexOverlay(const Game& game);
     void drawTargetingOverlay(const Game& game);
     void drawLookOverlay(const Game& game);
 

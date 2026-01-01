@@ -1088,13 +1088,13 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
         uint8_t fp = m.fromPlayer ? 1 : 0;
         uint32_t rep = static_cast<uint32_t>(m.repeat);
         uint32_t turn = m.turn;
-        uint32_t depth = static_cast<uint32_t>(m.depth);
+        uint32_t msgDepth = static_cast<uint32_t>(m.depth);
         writePod(mem, mk);
         writePod(mem, fp);
         if constexpr (SAVE_VERSION >= 24u) {
             writePod(mem, rep);
             writePod(mem, turn);
-            writePod(mem, depth);
+            writePod(mem, msgDepth);
         }
         writeString(mem, m.text);
     }
@@ -1587,7 +1587,7 @@ bool Game::loadFromFile(const std::string& path) {
                 uint8_t fp = 1;
                 uint32_t rep = 1;
                 uint32_t turn = 0;
-                uint32_t depth = 0;
+                uint32_t msgDepth = 0;
                 std::string s;
 
                 if (!readPod(in, mk)) return fail();
@@ -1595,7 +1595,7 @@ bool Game::loadFromFile(const std::string& path) {
                 if (ver >= 24u) {
                     if (!readPod(in, rep)) return fail();
                     if (!readPod(in, turn)) return fail();
-                    if (!readPod(in, depth)) return fail();
+                    if (!readPod(in, msgDepth)) return fail();
                 }
                 if (!readString(in, s)) return fail();
 
@@ -1605,7 +1605,7 @@ bool Game::loadFromFile(const std::string& path) {
                 m.fromPlayer = fp != 0;
                 m.repeat = static_cast<int>(rep);
                 m.turn = turn;
-                m.depth = static_cast<int>(depth);
+                m.depth = static_cast<int>(msgDepth);
                 msgsTmp.push_back(std::move(m));
             } else {
                 std::string s;
@@ -2076,7 +2076,8 @@ bool Game::tryApplyBones() {
     if (!std::filesystem::exists(path, ec) || ec) return false;
 
     // Chance to apply, so bones don't appear every single time.
-    const float depthBonus = std::min(10, std::max(0, depth_ - 2));
+    const int depthBonusI = std::min(10, std::max(0, depth_ - 2));
+    const float depthBonus = static_cast<float>(depthBonusI);
     const float chance = std::clamp(0.55f + 0.03f * depthBonus, 0.55f, 0.85f);
     if (!rng.chance(chance)) return false;
 

@@ -318,18 +318,22 @@ void Game::recomputeFov() {
 
         // Then apply a light threshold: only tiles lit above a minimum are visible.
         const float minLight = 0.35f;
-        for (int y = 0; y < Dungeon::H; ++y) {
-            for (int x = 0; x < Dungeon::W; ++x) {
+        for (int y = 0; y < dung.height; ++y) {
+            for (int x = 0; x < dung.width; ++x) {
                 if (!dung.at(x, y).visible) continue;
-                if (lightMap[y][x] < minLight) {
+
+                // lightMap_ stores 0..255 brightness per-tile.
+                const size_t i = static_cast<size_t>(y * dung.width + x);
+                const float lit = (i < lightMap_.size()) ? (static_cast<float>(lightMap_[i]) / 255.0f) : 0.0f;
+                if (lit < minLight) {
                     dung.at(x, y).visible = false;
                 }
             }
         }
 
         // Mark explored tiles after darkness filtering.
-        for (int y = 0; y < Dungeon::H; ++y) {
-            for (int x = 0; x < Dungeon::W; ++x) {
+        for (int y = 0; y < dung.height; ++y) {
+            for (int x = 0; x < dung.width; ++x) {
                 if (dung.at(x, y).visible) {
                     dung.at(x, y).explored = true;
                 }

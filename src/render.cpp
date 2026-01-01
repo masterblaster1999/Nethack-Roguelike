@@ -12,7 +12,16 @@
 #include <iomanip>
 
 Renderer::Renderer(int windowW, int windowH, int tileSize, int hudHeight, bool vsync, int textureCacheMB_)
-    : winW(windowW), winH(windowH), tile(tileSize), hudH(hudHeight), vsyncEnabled(vsync), textureCacheMB(textureCacheMB_) {}
+    : winW(windowW), winH(windowH), tile(tileSize), hudH(hudHeight), vsyncEnabled(vsync), textureCacheMB(textureCacheMB_) {
+    // Derive viewport size in tiles from the logical window size.
+    // The bottom HUD area is not part of the map viewport.
+    const int t = std::max(1, tile);
+    viewTilesW = std::max(1, winW / t);
+    viewTilesH = std::max(1, std::max(0, winH - hudH) / t);
+
+    camX = 0;
+    camY = 0;
+}
 
 Renderer::~Renderer() {
     shutdown();
@@ -349,6 +358,99 @@ void Renderer::toggleFullscreen() {
     SDL_SetWindowFullscreen(window, isFs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
 }
 
+SDL_Rect Renderer::mapTileDst(int mapX, int mapY) const {
+    // Map-space tiles are drawn relative to the camera (top-left) and then
+    // optionally offset by transient screen shake (mapOffX/Y).
+    return SDL_Rect{ (mapX - camX) * tile + mapOffX, (mapY - camY) * tile + mapOffY, tile, tile };
+}
+
+bool Renderer::mapTileInView(int mapX, int mapY) const {
+    return mapX >= camX && mapY >= camY &&
+           mapX < (camX + viewTilesW) && mapY < (camY + viewTilesH);
+}
+
+void Renderer::updateCamera(const Game& game) {
+    const Dungeon& d = game.dungeon();
+
+
+    // Re-derive viewport size in case logical sizing changed.
+    const int t = std::max(1, tile);
+    viewTilesW = std::max(1, winW / t);
+    viewTilesH = std::max(1, std::max(0, winH - hudH) / t);
+
+    // If the viewport fully contains the map, keep camera locked at origin.
+    const int maxCamX = std::max(0, d.width - viewTilesW);
+    const int maxCamY = std::max(0, d.height - viewTilesH);
+    if (maxCamX == 0) camX = 0;
+    if (maxCamY == 0) camY = 0;
+
+    // Focus point selection:
+    // - Normal: follow the player.
+    // - Look: follow the look cursor (so you can pan around).
+    // - Targeting: try to keep BOTH player and cursor on-screen if they fit,
+    //   otherwise follow the cursor.
+    Vec2i playerPos = game.player().pos;
+
+    Vec2i cursorPos = playerPos;
+    bool usingCursor = false;
+    if (game.isLooking()) {
+        cursorPos = game.lookCursor();
+        usingCursor = true;
+    } else if (game.isTargeting()) {
+        cursorPos = game.targetingCursor();
+        usingCursor = true;
+    }
+
+    auto clampCam = [&]() {
+        camX = std::clamp(camX, 0, maxCamX);
+        camY = std::clamp(camY, 0, maxCamY);
+    };
+
+    // Targeting: keep both points in view when possible.
+    if (game.isTargeting() && usingCursor && (maxCamX > 0 || maxCamY > 0)) {
+        const int minX = std::min(playerPos.x, cursorPos.x);
+        const int maxX = std::max(playerPos.x, cursorPos.x);
+        const int minY = std::min(playerPos.y, cursorPos.y);
+        const int maxY = std::max(playerPos.y, cursorPos.y);
+
+        if ((maxX - minX + 1) <= viewTilesW && (maxY - minY + 1) <= viewTilesH) {
+            const int cx = (minX + maxX) / 2;
+            const int cy = (minY + maxY) / 2;
+            camX = cx - viewTilesW / 2;
+            camY = cy - viewTilesH / 2;
+            clampCam();
+            return;
+        }
+    }
+
+    // Deadzone follow (prevents jitter when moving near the center).
+    Vec2i focus = usingCursor ? cursorPos : playerPos;
+
+    // Clamp focus to map bounds defensively.
+    focus.x = std::clamp(focus.x, 0, std::max(0, d.width - 1));
+    focus.y = std::clamp(focus.y, 0, std::max(0, d.height - 1));
+
+    // Margins: smaller viewports need smaller deadzones.
+    const int marginX = std::clamp(viewTilesW / 4, 0, std::max(0, (viewTilesW - 1) / 2));
+    const int marginY = std::clamp(viewTilesH / 4, 0, std::max(0, (viewTilesH - 1) / 2));
+
+    if (maxCamX > 0) {
+        const int left = camX + marginX;
+        const int right = camX + viewTilesW - 1 - marginX;
+        if (focus.x < left) camX = focus.x - marginX;
+        else if (focus.x > right) camX = focus.x - (viewTilesW - 1 - marginX);
+    }
+
+    if (maxCamY > 0) {
+        const int top = camY + marginY;
+        const int bottom = camY + viewTilesH - 1 - marginY;
+        if (focus.y < top) camY = focus.y - marginY;
+        else if (focus.y > bottom) camY = focus.y - (viewTilesH - 1 - marginY);
+    }
+
+    clampCam();
+}
+
 bool Renderer::windowToMapTile(int winX, int winY, int& tileX, int& tileY) const {
     if (!renderer) return false;
 
@@ -361,12 +463,20 @@ bool Renderer::windowToMapTile(int winX, int winY, int& tileX, int& tileY) const
     if (x < 0 || y < 0) return false;
 
     // Map rendering can be temporarily offset (screen shake). Convert clicks in
-    // window coordinates back into stable map-tile coordinates.
+    // window coordinates back into stable viewport coordinates.
     const int mx = x - mapOffX;
     const int my = y - mapOffY;
 
-    tileX = mx / tile;
-    tileY = my / tile;
+    if (mx < 0 || my < 0) return false;
+
+    const int localX = mx / std::max(1, tile);
+    const int localY = my / std::max(1, tile);
+
+    // Reject clicks outside the map viewport (e.g., HUD area).
+    if (localX < 0 || localY < 0 || localX >= viewTilesW || localY >= viewTilesH) return false;
+
+    tileX = localX + camX;
+    tileY = localY + camY;
 
     if (tileX < 0 || tileY < 0 || tileX >= Game::MAP_W || tileY >= Game::MAP_H) return false;
     return true;
@@ -721,9 +831,12 @@ void Renderer::render(const Game& game) {
 
     const Dungeon& d = game.dungeon();
 
+    // Update camera based on player/cursor and current viewport.
+    updateCamera(game);
+
     // Clip all map-space drawing to the map region so that screen shake / FX never
     // bleed into the HUD area.
-    const SDL_Rect mapClip{ 0, 0, d.width * tile, d.height * tile };
+    const SDL_Rect mapClip{ 0, 0, viewTilesW * tile, viewTilesH * tile };
     SDL_RenderSetClipRect(renderer, &mapClip);
 
     // Transient screen shake based on active explosions.
@@ -752,7 +865,7 @@ void Renderer::render(const Game& game) {
     }
 
     auto tileDst = [&](int x, int y) -> SDL_Rect {
-        return SDL_Rect{ x * tile + mapOffX, y * tile + mapOffY, tile, tile };
+        return mapTileDst(x, y);
     };
 
     // Room type cache (used for themed decals / minimap)
@@ -1540,8 +1653,9 @@ void Renderer::render(const Game& game) {
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(renderer, r, g, b, a);
 
-        const int x0 = tr.pos.x * tile + mapOffX;
-        const int y0 = tr.pos.y * tile + mapOffY;
+        SDL_Rect base = mapTileDst(tr.pos.x, tr.pos.y);
+        const int x0 = base.x;
+        const int y0 = base.y;
         SDL_RenderDrawLine(renderer, x0 + 4, y0 + 4, x0 + tile - 5, y0 + tile - 5);
         SDL_RenderDrawLine(renderer, x0 + tile - 5, y0 + 4, x0 + 4, y0 + tile - 5);
         SDL_RenderDrawPoint(renderer, x0 + tile / 2, y0 + tile / 2);
@@ -2754,6 +2868,24 @@ void Renderer::drawMinimapOverlay(const Game& game) {
         if (!t.visible) continue;
         drawCell(e.pos.x, e.pos.y, 255, 80, 80);
     }
+
+    // Viewport indicator (camera): draw the currently visible map region on the minimap.
+    {
+        const int vw = std::min(viewTilesW, W);
+        const int vh = std::min(viewTilesH, H);
+        if (vw > 0 && vh > 0) {
+            const int vx = std::clamp(camX, 0, std::max(0, W - vw));
+            const int vy = std::clamp(camY, 0, std::max(0, H - vh));
+
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 180);
+            SDL_Rect vr { mapX + vx * px, mapY + vy * px, vw * px, vh * px };
+            SDL_RenderDrawRect(renderer, &vr);
+
+            // Slightly thicker border for readability (if space allows).
+            SDL_Rect vr2 { vr.x - 1, vr.y - 1, vr.w + 2, vr.h + 2 };
+            SDL_RenderDrawRect(renderer, &vr2);
+        }
+    }
 }
 
 void Renderer::drawStatsOverlay(const Game& game) {
@@ -2842,6 +2974,8 @@ void Renderer::drawStatsOverlay(const Game& game) {
         std::stringstream ss;
         ss << "RENDER: TILE " << std::clamp(tile, 16, 256) << "px"
            << "  VOXEL: " << (game.voxelSpritesEnabled() ? "ON" : "OFF")
+           << "  VIEW: " << viewTilesW << "x" << viewTilesH
+           << "  CAM: " << camX << "," << camY
            << "  DECALS/STYLE: " << decalsPerStyleUsed
            << "  AUTOTILE VARS: " << autoVarsUsed;
         drawText5x7(renderer, x0 + pad, y, 2, gray, ss.str());
@@ -3358,19 +3492,20 @@ void Renderer::drawTargetingOverlay(const Game& game) {
     SDL_SetRenderDrawColor(renderer, ok ? 0 : 255, ok ? 255 : 0, 0, 80);
     for (size_t i = 1; i < linePts.size(); ++i) {
         Vec2i p = linePts[i];
-        SDL_Rect r{ p.x * tile + mapOffX + tile/4, p.y * tile + mapOffY + tile/4, tile/2, tile/2 };
+        SDL_Rect base = mapTileDst(p.x, p.y);
+        SDL_Rect r{ base.x + tile/4, base.y + tile/4, tile/2, tile/2 };
         SDL_RenderFillRect(renderer, &r);
     }
 
     // Crosshair on cursor
-    SDL_Rect c{ cursor.x * tile + mapOffX, cursor.y * tile + mapOffY, tile, tile };
+    SDL_Rect c = mapTileDst(cursor.x, cursor.y);
     SDL_SetRenderDrawColor(renderer, ok ? 0 : 255, ok ? 255 : 0, 0, 200);
     SDL_RenderDrawRect(renderer, &c);
 
     // Small label near bottom HUD
     const int scale = 2;
     const Color yellow{ 255, 230, 120, 255 };
-    int hudTop = Game::MAP_H * tile;
+    const int hudTop = winH - hudH;
     drawText5x7(renderer, 10, hudTop - 18, scale, yellow, ok ? "TARGET: ENTER TO FIRE, ESC TO CANCEL" : "TARGET: OUT OF RANGE/NO LOS");
 }
 
@@ -3382,7 +3517,7 @@ void Renderer::drawLookOverlay(const Game& game) {
     if (!d.inBounds(cursor.x, cursor.y)) return;
 
     // Cursor box
-    SDL_Rect c{ cursor.x * tile + mapOffX, cursor.y * tile + mapOffY, tile, tile };
+    SDL_Rect c = mapTileDst(cursor.x, cursor.y);
     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 200);
     SDL_RenderDrawRect(renderer, &c);
 
@@ -3394,7 +3529,7 @@ void Renderer::drawLookOverlay(const Game& game) {
     // Label near bottom of map
     const int scale = 2;
     const Color yellow{ 255, 230, 120, 255 };
-    int hudTop = Game::MAP_H * tile;
+    const int hudTop = winH - hudH;
 
     std::string s = game.lookInfoText();
     if (s.empty()) s = "LOOK";

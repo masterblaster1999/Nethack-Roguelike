@@ -160,8 +160,56 @@ int main(int argc, char** argv) {
 
     const int tileSize = settings.tileSize;
     const int hudHeight = settings.hudHeight;
-    const int winW = Game::MAP_W * tileSize;
-    const int winH = Game::MAP_H * tileSize + hudHeight;
+
+    // Viewport / camera:
+    // - If view_w/view_h are set in settings, they define the visible tile area.
+    // - Otherwise, auto-fit a viewport that comfortably fits the current display.
+    //
+    // This keeps the game playable even with large tile sizes, and enables a scrolling camera
+    // when the viewport is smaller than the dungeon map.
+    const int mapW = Game::MAP_W;
+    const int mapH = Game::MAP_H;
+
+    auto clampViewW = [&](int v) {
+        if (v <= 0) return 0;
+        return std::clamp(v, 1, mapW);
+    };
+    auto clampViewH = [&](int v) {
+        if (v <= 0) return 0;
+        return std::clamp(v, 1, mapH);
+    };
+
+    int viewW = clampViewW(settings.viewW);
+    int viewH = clampViewH(settings.viewH);
+
+    if (viewW == 0 || viewH == 0) {
+        // Auto-fit to display size (conservative margins for window decorations/taskbar).
+        SDL_DisplayMode dm;
+        int dispW = 1920;
+        int dispH = 1080;
+        if (SDL_GetCurrentDisplayMode(0, &dm) == 0) {
+            dispW = dm.w;
+            dispH = dm.h;
+        }
+
+        const int maxWinW = std::max(640, dispW - 120);
+        const int maxWinH = std::max(480, dispH - 120);
+
+        const int fullW = mapW * tileSize;
+        const int fullH = mapH * tileSize + hudHeight;
+
+        if (fullW <= maxWinW && fullH <= maxWinH) {
+            viewW = mapW;
+            viewH = mapH;
+        } else {
+            viewW = std::clamp(maxWinW / std::max(1, tileSize), 1, mapW);
+            const int availH = std::max(0, maxWinH - hudHeight);
+            viewH = std::clamp(availH / std::max(1, tileSize), 1, mapH);
+        }
+    }
+
+    const int winW = viewW * tileSize;
+    const int winH = viewH * tileSize + hudHeight;
 
     Renderer renderer(winW, winH, tileSize, hudHeight, settings.vsync, settings.textureCacheMB);
     if (!renderer.init()) {

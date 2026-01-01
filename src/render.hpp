@@ -196,6 +196,15 @@ private:
     int hudH = 160;
     bool vsyncEnabled = false;
 
+    // Viewport size in tiles (derived from winW/winH and tile size).
+    // When this is smaller than the dungeon dimensions, a scrolling camera is used.
+    int viewTilesW = 0;
+    int viewTilesH = 0;
+
+    // Camera top-left (in map tiles). Only meaningful when the viewport is smaller than the map.
+    int camX = 0;
+    int camY = 0;
+
     bool initialized = false;
 	// Cached animation frame index for overlay/UI draws.
 	int lastFrame = 0;
@@ -277,6 +286,13 @@ private:
     LRUTextureCache<FRAMES> spriteTex;
     int textureCacheMB = 0;
     size_t spriteEntryBytes = 0;
+
+    // Map-space -> screen-space helpers (respect camera + screen shake).
+    SDL_Rect mapTileDst(int mapX, int mapY) const;
+    bool mapTileInView(int mapX, int mapY) const;
+
+    // Updates camera position based on player/cursor and current viewport size.
+    void updateCamera(const Game& game);
 
     SDL_Texture* textureFromSprite(const SpritePixels& s);
 

@@ -62,6 +62,16 @@ struct Room {
 
 class Dungeon {
 public:
+    // Default map size.
+    // Keep this in sync with Game::MAP_W/H (Game uses these values for window sizing
+    // and various UI bounds).
+    //
+    // Round 19: bumped the map up again by +50% area (from 84x55 -> 105x66)
+    // to support longer corridors, more interesting door play, and bigger
+    // room layouts without cramping generation.
+    static constexpr int DEFAULT_W = 105;
+    static constexpr int DEFAULT_H = 66;
+
     int width = 0;
     int height = 0;
     std::vector<Tile> tiles;

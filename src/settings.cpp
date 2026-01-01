@@ -145,12 +145,28 @@ Settings loadSettings(const std::string& path) {
 
         if (key == "tile_size") {
             int v = 0;
-            // Allow large tiles for high-DPI / 4K+ displays.
-            // Note: very large tiles will increase the window size (MAP_W*tile_size).
-            if (parseInt(val, v)) s.tileSize = std::clamp(v, 16, 256);
+            // Allow both smaller and larger tiles:
+            // - smaller tiles help the (increasingly large) map fit on 1080p displays
+            // - larger tiles are useful for high-DPI / 4K+ displays
+            // Note: window size is MAP_W*tile_size by default.
+            if (parseInt(val, v)) s.tileSize = std::clamp(v, 8, 256);
         } else if (key == "hud_height") {
             int v = 0;
             if (parseInt(val, v)) s.hudHeight = std::clamp(v, 120, 240);
+        } else if (key == "view_w" || key == "view_width" || key == "viewport_w") {
+            int v = 0;
+            if (parseInt(val, v)) {
+                // 0 = auto-fit (choose a viewport that fits the current display).
+                // Otherwise interpret as a tile count.
+                if (v <= 0) s.viewW = 0;
+                else s.viewW = std::clamp(v, 1, Game::MAP_W);
+            }
+        } else if (key == "view_h" || key == "view_height" || key == "viewport_h") {
+            int v = 0;
+            if (parseInt(val, v)) {
+                if (v <= 0) s.viewH = 0;
+                else s.viewH = std::clamp(v, 1, Game::MAP_H);
+            }
         } else if (key == "start_fullscreen") {
             bool b = false;
             if (parseBool(val, b)) s.startFullscreen = b;
@@ -266,11 +282,19 @@ bool writeDefaultSettings(const std::string& path) {
 # This file is auto-created on first run. Edit it and restart the game.
 
 # Rendering / UI
-# tile_size: 16..256  (larger = bigger tiles + larger window)
-# NOTE: the default map is fairly large; 16 keeps the default window at a sane size.
-tile_size = 16
+# tile_size: 8..256  (larger = bigger tiles + larger window)
+# NOTE: the default map is fairly large; smaller tile sizes help it fit on 1080p displays.
+tile_size = 13
 hud_height = 160
 start_fullscreen = false
+
+# Viewport / camera
+# view_w/view_h: 0 = auto-fit to your display; otherwise set a fixed viewport in tiles.
+# Example (classic 16:9-ish): view_w = 80, view_h = 45
+# If the viewport is smaller than the dungeon map, the renderer uses a scrolling camera that
+# follows the player (and the look/target cursor when those modes are active).
+view_w = 0
+view_h = 0
 
 # Player identity (used in the HUD + scoreboard)
 player_name = PLAYER

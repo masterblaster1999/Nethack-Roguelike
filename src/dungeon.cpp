@@ -1,5 +1,6 @@
 #include "dungeon.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <deque>
 #include <functional>
@@ -63,6 +64,11 @@ void carveFloor(Dungeon& d, int x, int y) {
     t.type = TileType::Floor;
 }
 
+// Forward decls: secret/vault carving wants to reuse the shared door helpers.
+inline bool isDoorTileType(TileType t);
+bool anyDoorInRadius(const Dungeon& d, int x, int y, int radius);
+const Room* findRoomContaining(const Dungeon& d, int x, int y);
+
 // ------------------------------------------------------------
 // Secret rooms: optional side-rooms hidden behind secret doors.
 // These do NOT affect critical connectivity (stairs remain reachable).
@@ -82,6 +88,31 @@ bool tryCarveSecretRoom(Dungeon& d, RNG& rng) {
         if (!d.inBounds(x, y)) continue;
         if (d.at(x, y).type != TileType::Wall) continue;
 
+        // Avoid making secret doors trivial/obvious:
+        // - don't hug stairs
+        // - don't cluster near other doors
+        // - prefer "quiet" wall tiles that border exactly one floor tile
+        auto tooCloseToStairs = [&](int tx, int ty) {
+            const int du = (d.inBounds(d.stairsUp.x, d.stairsUp.y))
+                ? (std::abs(tx - d.stairsUp.x) + std::abs(ty - d.stairsUp.y))
+                : 9999;
+            const int dd = (d.inBounds(d.stairsDown.x, d.stairsDown.y))
+                ? (std::abs(tx - d.stairsDown.x) + std::abs(ty - d.stairsDown.y))
+                : 9999;
+            return du <= 3 || dd <= 3;
+        };
+        if (tooCloseToStairs(x, y)) continue;
+        if (anyDoorInRadius(d, x, y, 2)) continue;
+
+        int adjFloors = 0;
+        for (const Vec2i& dv : dirs) {
+            const int nx = x + dv.x;
+            const int ny = y + dv.y;
+            if (!d.inBounds(nx, ny)) continue;
+            if (d.at(nx, ny).type == TileType::Floor) adjFloors++;
+        }
+        if (adjFloors != 1) continue;
+
         // Randomize direction check order for variety.
         int start = rng.range(0, 3);
         for (int i = 0; i < 4; ++i) {
@@ -91,6 +122,12 @@ bool tryCarveSecretRoom(Dungeon& d, RNG& rng) {
             const int fy = y + dir.y;
             if (!d.inBounds(fx, fy)) continue;
             if (d.at(fx, fy).type != TileType::Floor) continue; // must attach to existing floor
+
+            // Avoid attaching a secret door directly into special rooms (shops/shrines/etc)
+            // or other already-carved bonus rooms.
+            if (const Room* rr = findRoomContaining(d, fx, fy)) {
+                if (rr->type != RoomType::Normal) continue;
+            }
 
             // Room extends opposite the floor neighbor.
             const int dx = -dir.x;
@@ -161,6 +198,30 @@ bool tryCarveVaultRoom(Dungeon& d, RNG& rng) {
         if (!d.inBounds(x, y)) continue;
         if (d.at(x, y).type != TileType::Wall) continue;
 
+        // Avoid placing vault entrances right next to stairs or clustered with
+        // other doors. Prefer walls that border exactly one floor tile so the
+        // vault reads as a discrete "side door".
+        auto tooCloseToStairs = [&](int tx, int ty) {
+            const int du = (d.inBounds(d.stairsUp.x, d.stairsUp.y))
+                ? (std::abs(tx - d.stairsUp.x) + std::abs(ty - d.stairsUp.y))
+                : 9999;
+            const int dd = (d.inBounds(d.stairsDown.x, d.stairsDown.y))
+                ? (std::abs(tx - d.stairsDown.x) + std::abs(ty - d.stairsDown.y))
+                : 9999;
+            return du <= 3 || dd <= 3;
+        };
+        if (tooCloseToStairs(x, y)) continue;
+        if (anyDoorInRadius(d, x, y, 2)) continue;
+
+        int adjFloors = 0;
+        for (const Vec2i& dv : dirs) {
+            const int nx = x + dv.x;
+            const int ny = y + dv.y;
+            if (!d.inBounds(nx, ny)) continue;
+            if (d.at(nx, ny).type == TileType::Floor) adjFloors++;
+        }
+        if (adjFloors != 1) continue;
+
         // Randomize direction check order for variety.
         int start = rng.range(0, 3);
         for (int i = 0; i < 4; ++i) {
@@ -170,6 +231,11 @@ bool tryCarveVaultRoom(Dungeon& d, RNG& rng) {
             const int fy = y + dir.y;
             if (!d.inBounds(fx, fy)) continue;
             if (d.at(fx, fy).type != TileType::Floor) continue; // must attach to existing floor
+
+            // Avoid vault doors opening straight into special rooms/bonus rooms.
+            if (const Room* rr = findRoomContaining(d, fx, fy)) {
+                if (rr->type != RoomType::Normal) continue;
+            }
 
             // Room extends opposite the floor neighbor.
             const int dx = -dir.x;
@@ -386,8 +452,9 @@ void placeStrategicCorridorDoors(Dungeon& d, RNG& rng, const std::vector<uint8_t
             || (std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y) <= 2);
     };
 
-    // Scale intensity down on larger maps.
-    const float baseArea = 84.0f * 55.0f;
+    // Scale intensity down on maps larger than our default baseline.
+    // This keeps corridor-door density sane if we later experiment with even bigger levels.
+    const float baseArea = static_cast<float>(Dungeon::DEFAULT_W) * static_cast<float>(Dungeon::DEFAULT_H);
     const float area = static_cast<float>(std::max(1, d.width * d.height));
     const float areaScale = std::clamp(baseArea / area, 0.40f, 1.00f);
     const float k = std::clamp(intensity * areaScale, 0.0f, 2.0f);
@@ -403,6 +470,7 @@ void placeStrategicCorridorDoors(Dungeon& d, RNG& rng, const std::vector<uint8_t
         const int L = static_cast<int>(seg.size());
         if (L < 6) return;
 
+        // Base chance that *this* segment gets at least one door.
         float p = 0.0f;
         if (L >= 18) p = 0.90f;
         else if (L >= 14) p = 0.75f;
@@ -412,9 +480,21 @@ void placeStrategicCorridorDoors(Dungeon& d, RNG& rng, const std::vector<uint8_t
         p = std::min(0.95f, p);
         if (!rng.chance(p)) return;
 
-        // Prefer placing near the middle, but never right next to an endpoint.
-        const int mid = L / 2;
-        const int margin = 2;
+        // Long, straight corridors benefit from *multiple* LOS breakers.
+        // We keep it rare and only for genuinely long hallway segments.
+        int wantDoors = 1;
+        if (L >= 34) {
+            float p2 = 0.0f;
+            if (L >= 52) p2 = 0.65f;
+            else p2 = 0.45f;
+            p2 *= k;
+            p2 = std::min(0.80f, p2);
+            if (rng.chance(p2)) wantDoors = 2;
+        }
+        if (placed + wantDoors > maxDoors) wantDoors = std::max(1, maxDoors - placed);
+
+        // Never place right next to an endpoint.
+        const int margin = (wantDoors >= 2) ? 3 : 2;
         const int lo = margin;
         const int hi = L - 1 - margin;
         if (lo >= hi) return;
@@ -429,24 +509,46 @@ void placeStrategicCorridorDoors(Dungeon& d, RNG& rng, const std::vector<uint8_t
             return true;
         };
 
-        // Search outward from the middle.
-        for (int off = 0; off <= (hi - lo); ++off) {
-            const int a = mid - off;
-            const int b = mid + off;
-            if (a >= lo && a <= hi) {
-                if (ok(seg[static_cast<size_t>(a)])) {
-                    d.at(seg[static_cast<size_t>(a)].x, seg[static_cast<size_t>(a)].y).type = TileType::DoorClosed;
-                    placed++;
-                    return;
+        auto placeNearIndex = [&](int targetIdx) -> bool {
+            // Search outward from the target index. (Segment tiles are already in order.)
+            for (int off = 0; off <= (hi - lo); ++off) {
+                const int a = targetIdx - off;
+                const int b = targetIdx + off;
+                if (a >= lo && a <= hi) {
+                    if (ok(seg[static_cast<size_t>(a)])) {
+                        d.at(seg[static_cast<size_t>(a)].x, seg[static_cast<size_t>(a)].y).type = TileType::DoorClosed;
+                        placed++;
+                        return true;
+                    }
+                }
+                if (b >= lo && b <= hi && b != a) {
+                    if (ok(seg[static_cast<size_t>(b)])) {
+                        d.at(seg[static_cast<size_t>(b)].x, seg[static_cast<size_t>(b)].y).type = TileType::DoorClosed;
+                        placed++;
+                        return true;
+                    }
                 }
             }
-            if (b >= lo && b <= hi && b != a) {
-                if (ok(seg[static_cast<size_t>(b)])) {
-                    d.at(seg[static_cast<size_t>(b)].x, seg[static_cast<size_t>(b)].y).type = TileType::DoorClosed;
-                    placed++;
-                    return;
-                }
-            }
+            return false;
+        };
+
+        // Door targets:
+        // - 1 door: center
+        // - 2 doors: ~1/3 and ~2/3 of the segment (better spacing than center+quarter)
+        std::vector<int> targets;
+        targets.reserve(static_cast<size_t>(wantDoors));
+        if (wantDoors == 1) {
+            targets.push_back(L / 2);
+        } else {
+            targets.push_back(L / 3);
+            targets.push_back((2 * L) / 3);
+            // Randomize placement order so one bad target doesn't always dominate.
+            if (rng.chance(0.5f)) std::swap(targets[0], targets[1]);
+        }
+
+        for (int ti : targets) {
+            if (placed >= maxDoors) break;
+            (void)placeNearIndex(ti);
         }
     };
 
@@ -1526,11 +1628,21 @@ Vec2i farthestPassableTile(const Dungeon& d, const std::vector<int>& dist, RNG& 
 }
 
 void generateBspRooms(Dungeon& d, RNG& rng) {
-    // BSP parameters tuned for small-ish maps.
-    const int minLeaf = 8;
+    // BSP parameters tuned for "classic" ProcRogue maps.
+    // As the map grows, keep leaves (and thus room granularity) roughly stable by
+    // scaling the minimum leaf size with the map's linear dimension.
+    //
+    // Baseline: the previous standard 84x55 used minLeaf=8.
+    constexpr float kTuneBaseArea = 84.0f * 55.0f;
+    const float area = static_cast<float>(std::max(1, d.width * d.height));
+    const float linear = std::sqrt(area / kTuneBaseArea);
+    const int minLeaf = std::clamp(static_cast<int>(std::lround(8.0f * linear)), 8, 16);
 
     std::vector<Leaf> nodes;
-    nodes.reserve(128);
+    // A rough upper bound on BSP node count is O(area/minLeaf^2). Reserve enough to
+    // avoid churn on larger maps while staying cheap on small maps.
+    const int estLeaves = std::max(32, (d.width * d.height) / (minLeaf * minLeaf));
+    nodes.reserve(static_cast<size_t>(estLeaves * 2));
 
     nodes.push_back({1, 1, d.width - 2, d.height - 2, -1, -1, -1}); // root
 
@@ -2479,8 +2591,8 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     // allocated before generation begins (especially for special layouts that return early).
     if (width <= 0 || height <= 0) {
         // Keep consistent with Game::MAP_W/H.
-        width = 84;
-        height = 55;
+        width = Dungeon::DEFAULT_W;
+        height = Dungeon::DEFAULT_H;
     }
     const size_t expect = static_cast<size_t>(width * height);
     if (tiles.size() != expect) tiles.assign(expect, Tile{});

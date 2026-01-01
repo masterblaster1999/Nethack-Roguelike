@@ -9,9 +9,17 @@
 struct Settings {
     // Default tuned for the current (larger) map size so the initial window fits
     // comfortably on typical displays.
-    int tileSize = 16;
+    int tileSize = 13;
     int hudHeight = 160;
     bool startFullscreen = false;
+
+    // Viewport / camera
+    // view_w/view_h are in tiles:
+    // - 0 means auto-fit to your current display (and uses full-map view when it fits).
+    // - if smaller than the map, the renderer enables a scrolling camera that follows the player
+    //   (and the look/target cursor when those modes are active).
+    int viewW = 0;
+    int viewH = 0;
 
     // Player identity (used for the scoreboard and HUD)
     std::string playerName = "PLAYER";

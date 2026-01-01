@@ -1,5 +1,20 @@
 #include "game_internal.hpp"
 
+static ChestContainer* findChestContainer(std::vector<ChestContainer>& containers, int chestId) {
+    for (auto& c : containers) {
+        if (c.chestId == chestId) return &c;
+    }
+    return nullptr;
+}
+
+static const ChestContainer* findChestContainer(const std::vector<ChestContainer>& containers, int chestId) {
+    for (const auto& c : containers) {
+        if (c.chestId == chestId) return &c;
+    }
+    return nullptr;
+}
+
+
 void Game::openInventory() {
     // Close other overlays
     targeting = false;
@@ -8,6 +23,14 @@ void Game::openInventory() {
     minimapOpen = false;
     statsOpen = false;
     msgScroll = 0;
+
+    // Close other modal overlays.
+    chestOpen = false;
+    chestOpenId = 0;
+    chestSel = 0;
+    chestPaneChest = true;
+    chestOpenTier_ = 0;
+    chestOpenMaxStacks_ = 0;
 
     invOpen = true;
     invIdentifyMode = false;
@@ -80,6 +103,65 @@ void Game::sortInventory() {
     invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 
     pushMsg("INVENTORY SORTED.", MessageKind::System, true);
+}
+
+void Game::sortChestContents(int chestId, int* selInOut) {
+    ChestContainer* c = findChestContainer(chestContainers_, chestId);
+    if (!c) return;
+
+    if (c->items.empty()) {
+        if (selInOut) *selInOut = 0;
+        pushMsg("CHEST IS EMPTY.", MessageKind::Info, true);
+        return;
+    }
+
+    // Remember selection by id (best-effort for stacked items).
+    int selectedId = 0;
+    if (selInOut && *selInOut >= 0 && *selInOut < static_cast<int>(c->items.size())) {
+        selectedId = c->items[static_cast<size_t>(*selInOut)].id;
+    }
+
+    auto category = [&](const Item& it) -> int {
+        // 0 = quest/special
+        if (it.kind == ItemKind::AmuletYendor) return 0;
+
+        // 1 = equipment
+        const ItemDef& d = itemDef(it.kind);
+        if (d.slot != EquipSlot::None) return 1;
+
+        // 2 = consumables
+        if (d.consumable) return 2;
+
+        // 3 = ammo
+        if (it.kind == ItemKind::Arrow || it.kind == ItemKind::Rock) return 3;
+
+        // 4 = gold
+        if (it.kind == ItemKind::Gold) return 4;
+
+        return 5;
+    };
+
+    std::stable_sort(c->items.begin(), c->items.end(), [&](const Item& a, const Item& b) {
+        const int ca = category(a);
+        const int cb = category(b);
+        if (ca != cb) return ca < cb;
+
+        const std::string na = displayItemName(a);
+        const std::string nb = displayItemName(b);
+        if (na != nb) return na < nb;
+
+        return a.id < b.id;
+    });
+
+    if (selInOut) {
+        if (selectedId != 0) {
+            int idx = findItemIndexById(c->items, selectedId);
+            if (idx >= 0) *selInOut = idx;
+        }
+        *selInOut = clampi(*selInOut, 0, std::max(0, static_cast<int>(c->items.size()) - 1));
+    }
+
+    pushMsg("CHEST SORTED.", MessageKind::System, true);
 }
 
 bool Game::autoPickupAtPlayer() {
@@ -351,14 +433,30 @@ bool Game::openChestAtPlayer() {
         return true;
     }
 
-    // Loot: gold + a few items based on tier and depth.
-    auto dropItemHere = [&](ItemKind k, int count = 1, int enchant = 0) {
+    const int tier = chestTier(chest);
+
+    // Ensure this chest has an associated container entry.
+    ChestContainer* cont = findChestContainer(chestContainers_, chest.id);
+    if (!cont) {
+        chestContainers_.push_back(ChestContainer{ chest.id, {} });
+        cont = &chestContainers_.back();
+    } else {
+        // Defensive: closed chests shouldn't have saved containers, but older saves might.
+        cont->items.clear();
+    }
+
+    // Loot: generate gold + a few items based on tier and depth into the chest.
+    // If the chest stack-limit is exceeded, we spill the overflow to the ground so loot is never lost.
+    const int stackLimit = chestStackLimitForTier(tier);
+
+    auto addItemToChest = [&](ItemKind k, int count = 1, int enchant = 0) {
         Item it;
         it.id = nextItemId++;
         it.kind = k;
         it.count = std::max(1, count);
         it.spriteSeed = rng.nextU32();
         it.enchant = enchant;
+
         const ItemDef& d = itemDef(k);
         if (d.maxCharges > 0) it.charges = d.maxCharges;
 
@@ -381,14 +479,22 @@ bool Game::openChestAtPlayer() {
                 }
             }
         }
-        ground.push_back({it, pos});
+
+        // Try to merge into existing stacks inside the chest.
+        if (!tryStackItem(cont->items, it)) {
+            if (static_cast<int>(cont->items.size()) < stackLimit) {
+                cont->items.push_back(it);
+            } else {
+                // Last-resort fallback so we never delete generated loot.
+                ground.push_back({ it, pos });
+            }
+        }
     };
 
-    const int tier = chestTier(chest);
     int goldBase = rng.range(8, 16) + depth_ * 4;
     if (tier == 1) goldBase = static_cast<int>(goldBase * 1.5f);
     if (tier >= 2) goldBase = goldBase * 2;
-    dropItemHere(ItemKind::Gold, goldBase);
+    addItemToChest(ItemKind::Gold, goldBase);
 
     int rolls = 1 + tier;
     if (depth_ >= 4 && rng.chance(0.50f)) rolls += 1;
@@ -402,12 +508,12 @@ bool Game::openChestAtPlayer() {
             int wroll = rng.range(0, 99);
             ItemKind wk = (wroll < 45) ? ItemKind::Sword : (wroll < 80) ? ItemKind::Axe : ItemKind::Pickaxe;
             int ench = (rng.chance(0.25f + 0.10f * tier)) ? rng.range(1, 1 + tier) : 0;
-            dropItemHere(wk, 1, ench);
+            addItemToChest(wk, 1, ench);
         } else if (roll < 34) {
             // Armor
             ItemKind ak = (roll < 26) ? ItemKind::ChainArmor : ItemKind::PlateArmor;
             int ench = (rng.chance(0.25f + 0.10f * tier)) ? rng.range(1, 1 + tier) : 0;
-            dropItemHere(ak, 1, ench);
+            addItemToChest(ak, 1, ench);
         } else if (roll < 38) {
             // Rings (rare)
             int rr = rng.range(0, 99);
@@ -417,7 +523,7 @@ bool Game::openChestAtPlayer() {
             else if (rr < 90) rk = ItemKind::RingAgility;
             else rk = ItemKind::RingFocus;
             int ench = (rng.chance(0.20f + 0.08f * tier)) ? rng.range(1, 1 + tier) : 0;
-            dropItemHere(rk, 1, ench);
+            addItemToChest(rk, 1, ench);
         } else if (roll < 48) {
             ItemKind wk;
             if (depth_ >= 6 && tier >= 1 && rng.chance(0.12f)) {
@@ -425,49 +531,324 @@ bool Game::openChestAtPlayer() {
             } else {
                 wk = rng.chance(0.30f) ? ItemKind::WandDigging : ItemKind::WandSparks;
             }
-            dropItemHere(wk, 1);
+            addItemToChest(wk, 1);
         } else if (roll < 60) {
-            dropItemHere(ItemKind::PotionStrength, rng.range(1, 2));
+            addItemToChest(ItemKind::PotionStrength, rng.range(1, 2));
         } else if (roll < 78) {
-            dropItemHere(ItemKind::PotionHealing, rng.range(1, 2));
+            addItemToChest(ItemKind::PotionHealing, rng.range(1, 2));
         } else if (roll < 90) {
-            dropItemHere(ItemKind::PotionAntidote, rng.range(1, 2));
+            addItemToChest(ItemKind::PotionAntidote, rng.range(1, 2));
         } else if (roll < 100) {
-            dropItemHere(ItemKind::PotionRegeneration, 1);
+            addItemToChest(ItemKind::PotionRegeneration, 1);
         } else if (roll < 108) {
-            dropItemHere(ItemKind::PotionShielding, 1);
+            addItemToChest(ItemKind::PotionShielding, 1);
         } else if (roll < 116) {
-            dropItemHere(ItemKind::PotionHaste, 1);
+            addItemToChest(ItemKind::PotionHaste, 1);
         } else if (roll < 124) {
             const ItemKind pk = rng.chance(0.25f) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
-            dropItemHere(pk, 1);
+            addItemToChest(pk, 1);
         } else if (roll < 130) {
-            dropItemHere(ItemKind::ScrollMapping, 1);
+            addItemToChest(ItemKind::ScrollMapping, 1);
         } else if (roll < 134) {
-            dropItemHere(ItemKind::ScrollTeleport, 1);
+            addItemToChest(ItemKind::ScrollTeleport, 1);
         } else if (roll < 136) {
-            dropItemHere(ItemKind::ScrollEnchantWeapon, 1);
+            addItemToChest(ItemKind::ScrollEnchantWeapon, 1);
         } else if (roll < 138) {
-            dropItemHere(ItemKind::ScrollEnchantArmor, 1);
+            addItemToChest(ItemKind::ScrollEnchantArmor, 1);
         } else if (roll < 142) {
-            dropItemHere(ItemKind::ScrollRemoveCurse, 1);
+            addItemToChest(ItemKind::ScrollRemoveCurse, 1);
         } else {
             int pick = rng.range(0, 3);
             ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
                                       : (pick == 1) ? ItemKind::ScrollDetectTraps
                                       : (pick == 2) ? ItemKind::ScrollDetectSecrets
                                                     : ItemKind::ScrollKnock;
-            dropItemHere(sk, 1);
+            addItemToChest(sk, 1);
         }
     }
 
-    // Turn the chest into a decorative open chest.
+    // Mark chest as opened and render it differently.
     chest.kind = ItemKind::ChestOpen;
     chest.charges = CHEST_FLAG_OPENED;
 
-    // Respect auto-pickup preference after loot spills out (mostly useful for gold).
-    (void)autoPickupAtPlayer();
+    // Auto-open the chest container UI unless a trap moved the player away.
+    if (player().pos == pos) {
+        chestOpen = true;
+        chestOpenId = chest.id;
+        chestSel = 0;
+        chestPaneChest = true;
+        chestOpenTier_ = tier;
+        chestOpenMaxStacks_ = stackLimit;
 
+        chestSel = clampi(chestSel, 0, std::max(0, static_cast<int>(cont->items.size()) - 1));
+        invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+    }
+
+    return true;
+}
+
+const std::vector<Item>& Game::chestOpenItems() const {
+    static const std::vector<Item> empty;
+    if (!chestOpen || chestOpenId == 0) return empty;
+
+    const ChestContainer* c = findChestContainer(chestContainers_, chestOpenId);
+    if (!c) return empty;
+    return c->items;
+}
+
+bool Game::openChestOverlayAtPlayer() {
+    if (gameOver || gameWon) return false;
+
+    const Vec2i pos = player().pos;
+
+    GroundItem* giChest = nullptr;
+    for (auto& gi : ground) {
+        if (gi.pos == pos && gi.item.kind == ItemKind::ChestOpen) {
+            giChest = &gi;
+            break;
+        }
+    }
+    if (!giChest) return false;
+
+    Item& chest = giChest->item;
+    const int tier = chestTier(chest);
+
+    // Ensure a container entry exists so open chests can be used as a stash even if
+    // they were opened in an older save (before containers existed).
+    ChestContainer* cont = findChestContainer(chestContainers_, chest.id);
+    if (!cont) {
+        chestContainers_.push_back(ChestContainer{ chest.id, {} });
+        cont = &chestContainers_.back();
+    }
+
+    chestOpen = true;
+    chestOpenId = chest.id;
+    chestSel = clampi(chestSel, 0, std::max(0, static_cast<int>(cont->items.size()) - 1));
+    chestPaneChest = true;
+    chestOpenTier_ = tier;
+    chestOpenMaxStacks_ = chestStackLimitForTier(tier);
+
+    invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+    msgScroll = 0;
+
+    return true;
+}
+
+void Game::closeChestOverlay() {
+    chestOpen = false;
+    chestOpenId = 0;
+    chestSel = 0;
+    chestPaneChest = true;
+    chestOpenTier_ = 0;
+    chestOpenMaxStacks_ = 0;
+}
+
+void Game::moveChestSelection(int dy) {
+    if (!chestOpen) return;
+
+    if (chestPaneChest) {
+        const int n = static_cast<int>(chestOpenItems().size());
+        if (n <= 0) { chestSel = 0; return; }
+        chestSel = clampi(chestSel + dy, 0, n - 1);
+    } else {
+        const int n = static_cast<int>(inv.size());
+        if (n <= 0) { invSel = 0; return; }
+        invSel = clampi(invSel + dy, 0, n - 1);
+    }
+}
+
+bool Game::chestMoveSelected(bool moveAll) {
+    if (!chestOpen || chestOpenId == 0) return false;
+
+    const int maxInv = 26;
+
+    // Ensure container exists.
+    ChestContainer* cont = findChestContainer(chestContainers_, chestOpenId);
+    if (!cont) {
+        chestContainers_.push_back(ChestContainer{ chestOpenId, {} });
+        cont = &chestContainers_.back();
+    }
+    auto& chestItems = cont->items;
+
+    auto isEquipped = [&](int itemId) -> bool {
+        return itemId != 0 && (itemId == equipMeleeId || itemId == equipRangedId || itemId == equipArmorId ||
+                               itemId == equipRing1Id || itemId == equipRing2Id);
+    };
+
+    const int chestLimit = (chestOpenMaxStacks_ > 0) ? chestOpenMaxStacks_ : chestStackLimitForTier(chestOpenTier_);
+
+    if (chestPaneChest) {
+        if (chestItems.empty()) {
+            pushMsg("CHEST IS EMPTY.", MessageKind::Info, true);
+            return false;
+        }
+
+        chestSel = clampi(chestSel, 0, static_cast<int>(chestItems.size()) - 1);
+        const Item& src = chestItems[static_cast<size_t>(chestSel)];
+
+        Item moved = src;
+        if (!moveAll && isStackable(moved.kind) && moved.count > 1) {
+            moved.count = 1;
+        }
+
+        // Can we add this to the inventory?
+        bool stacked = tryStackItem(inv, moved);
+        if (!stacked) {
+            if (static_cast<int>(inv.size()) >= maxInv) {
+                pushMsg("YOUR PACK IS FULL.", MessageKind::Info, true);
+                return false;
+            }
+            inv.push_back(moved);
+        }
+
+        // Remove from chest.
+        if (!moveAll && isStackable(src.kind) && chestItems[static_cast<size_t>(chestSel)].count > 1) {
+            chestItems[static_cast<size_t>(chestSel)].count -= 1;
+        } else {
+            chestItems.erase(chestItems.begin() + chestSel);
+        }
+
+        if (chestSel >= static_cast<int>(chestItems.size())) {
+            chestSel = std::max(0, static_cast<int>(chestItems.size()) - 1);
+        }
+
+        pushMsg("YOU TAKE " + displayItemName(moved) + ".", MessageKind::Loot, true);
+        return true;
+    } else {
+        if (inv.empty()) {
+            pushMsg("YOU HAVE NOTHING TO STASH.", MessageKind::Info, true);
+            return false;
+        }
+
+        invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
+        const Item& src = inv[static_cast<size_t>(invSel)];
+
+        if (src.shopPrice > 0) {
+            pushMsg("YOU CAN'T STASH UNPAID GOODS.", MessageKind::Warning, true);
+            return false;
+        }
+
+        if (isEquipped(src.id) && src.buc < 0) {
+            pushMsg("YOU CAN'T LET GO OF CURSED GEAR.", MessageKind::Warning, true);
+            return false;
+        }
+
+        Item moved = src;
+        if (!moveAll && isStackable(moved.kind) && moved.count > 1) {
+            moved.count = 1;
+        }
+
+        // Can we add this to the chest?
+        bool stacked = tryStackItem(chestItems, moved);
+        if (!stacked) {
+            if (static_cast<int>(chestItems.size()) >= chestLimit) {
+                pushMsg("THE CHEST IS FULL.", MessageKind::Info, true);
+                return false;
+            }
+            chestItems.push_back(moved);
+        }
+
+        // Remove from inventory (and unequip if needed).
+        if (!moveAll && isStackable(src.kind) && inv[static_cast<size_t>(invSel)].count > 1) {
+            inv[static_cast<size_t>(invSel)].count -= 1;
+        } else {
+            if (src.id == equipMeleeId) equipMeleeId = 0;
+            if (src.id == equipRangedId) equipRangedId = 0;
+            if (src.id == equipArmorId) equipArmorId = 0;
+            if (src.id == equipRing1Id) equipRing1Id = 0;
+            if (src.id == equipRing2Id) equipRing2Id = 0;
+            inv.erase(inv.begin() + invSel);
+        }
+
+        if (invSel >= static_cast<int>(inv.size())) {
+            invSel = std::max(0, static_cast<int>(inv.size()) - 1);
+        }
+
+        pushMsg("YOU PUT " + displayItemName(moved) + " IN THE CHEST.", MessageKind::Loot, true);
+        return true;
+    }
+}
+
+bool Game::chestMoveAll() {
+    if (!chestOpen || chestOpenId == 0) return false;
+
+    const int maxInv = 26;
+
+    ChestContainer* cont = findChestContainer(chestContainers_, chestOpenId);
+    if (!cont) {
+        chestContainers_.push_back(ChestContainer{ chestOpenId, {} });
+        cont = &chestContainers_.back();
+    }
+    auto& chestItems = cont->items;
+
+    auto isEquipped = [&](int itemId) -> bool {
+        return itemId != 0 && (itemId == equipMeleeId || itemId == equipRangedId || itemId == equipArmorId ||
+                               itemId == equipRing1Id || itemId == equipRing2Id);
+    };
+
+    const int chestLimit = (chestOpenMaxStacks_ > 0) ? chestOpenMaxStacks_ : chestStackLimitForTier(chestOpenTier_);
+
+    bool movedAny = false;
+
+    if (chestPaneChest) {
+        // Take everything from the chest.
+        size_t i = 0;
+        while (i < chestItems.size()) {
+            Item moved = chestItems[i];
+
+            bool stacked = tryStackItem(inv, moved);
+            if (!stacked) {
+                if (static_cast<int>(inv.size()) >= maxInv) break;
+                inv.push_back(moved);
+            }
+
+            chestItems.erase(chestItems.begin() + i);
+            movedAny = true;
+        }
+
+        if (!movedAny) {
+            if (chestItems.empty()) pushMsg("CHEST IS EMPTY.", MessageKind::Info, true);
+            else pushMsg("YOUR PACK IS FULL.", MessageKind::Info, true);
+            return false;
+        }
+
+        pushMsg("YOU LOOT THE CHEST.", MessageKind::Loot, true);
+    } else {
+        // Put everything (except equipped/unpaid) into the chest.
+        size_t i = 0;
+        while (i < inv.size()) {
+            const Item& src = inv[i];
+
+            if (isEquipped(src.id) || src.shopPrice > 0) {
+                ++i;
+                continue;
+            }
+
+            Item moved = src;
+
+            bool stacked = tryStackItem(chestItems, moved);
+            if (!stacked) {
+                if (static_cast<int>(chestItems.size()) >= chestLimit) {
+                    ++i;
+                    continue;
+                }
+                chestItems.push_back(moved);
+            }
+
+            inv.erase(inv.begin() + i);
+            movedAny = true;
+        }
+
+        if (!movedAny) {
+            pushMsg("NOTHING TO STASH.", MessageKind::Info, true);
+            return false;
+        }
+
+        pushMsg("YOU STASH YOUR SUPPLIES.", MessageKind::Loot, true);
+    }
+
+    chestSel = clampi(chestSel, 0, std::max(0, static_cast<int>(chestItems.size()) - 1));
+    invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
     return true;
 }
 

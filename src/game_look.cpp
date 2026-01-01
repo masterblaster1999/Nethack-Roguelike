@@ -3,6 +3,7 @@
 void Game::beginLook() {
     // Close other overlays
     invOpen = false;
+    closeChestOverlay();
     targeting = false;
     helpOpen = false;
     minimapOpen = false;
@@ -88,6 +89,11 @@ std::string Game::describeAt(Vec2i p) const {
         break;
     }
 
+    // Player map marker / note (persistent on this floor).
+    if (const MapMarker* mm = markerAt(p)) {
+        ss << " | MARK: " << markerKindName(mm->kind) << " \"" << mm->label << "\"";
+    }
+
     // Entities/items: only if currently visible.
     if (t.visible) {
         if (const Entity* e = entityAt(p.x, p.y)) {
@@ -115,6 +121,10 @@ std::string Game::describeAt(Vec2i p) const {
                 }
                 ss << " | XP: " << xpFor(e->kind);
 
+                if (e->kind == EntityKind::Leprechaun && e->stolenGold > 0) {
+                    ss << " | STOLEN: " << e->stolenGold << "G";
+                }
+
                 if (e->gearMelee.id != 0 && isMeleeWeapon(e->gearMelee.kind)) {
                     ss << " | WPN: " << itemDisplayNameSingle(e->gearMelee.kind);
                 }
@@ -139,6 +149,16 @@ std::string Game::describeAt(Vec2i p) const {
             if (first->item.kind == ItemKind::Chest) {
                 if (chestLocked(first->item)) itemLabel += " (LOCKED)";
                 if (chestTrapped(first->item) && chestTrapKnown(first->item)) itemLabel += " (TRAPPED)";
+            } else if (first->item.kind == ItemKind::ChestOpen) {
+                int stacks = 0;
+                for (const auto& c : chestContainers_) {
+                    if (c.chestId == first->item.id) { stacks = static_cast<int>(c.items.size()); break; }
+                }
+                const int tier = chestTier(first->item);
+                const int limit = chestStackLimitForTier(tier);
+                std::stringstream cs;
+                cs << " (" << chestTierName(tier) << " " << stacks << "/" << limit << ")";
+                itemLabel += cs.str();
             }
             ss << " | ITEM: " << itemLabel;
             if (itemCount > 1) ss << " (+" << (itemCount - 1) << ")";

@@ -41,7 +41,7 @@ void Game::update(float dt) {
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
-        if (invOpen || targeting || kicking || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || levelUpOpen || optionsOpen || commandOpen || isFinished()) {
+        if (invOpen || chestOpen || targeting || kicking || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || levelUpOpen || optionsOpen || commandOpen || isFinished()) {
             stopAutoMove(true);
             return;
         }
@@ -102,6 +102,7 @@ void Game::handleAction(Action a) {
     auto closeOverlays = [&]() {
         invOpen = false;
         invIdentifyMode = false;
+        closeChestOverlay();
         targeting = false;
         kicking = false;
         helpOpen = false;
@@ -897,6 +898,67 @@ if (optionsSel == 17) {
         return;
     }
 
+
+    // Chest container (loot/stash) overlay mode
+    if (chestOpen) {
+        bool acted = false;
+
+        switch (a) {
+            case Action::Cancel:
+            case Action::Inventory:
+                closeChestOverlay();
+                return;
+
+            case Action::Left:
+                chestPaneChest = true;
+                return;
+
+            case Action::Right:
+                chestPaneChest = false;
+                return;
+
+            case Action::Up:
+                moveChestSelection(-1);
+                return;
+
+            case Action::Down:
+                moveChestSelection(1);
+                return;
+
+            case Action::Confirm:
+                acted = chestMoveSelected(true);
+                break;
+
+            case Action::Drop:
+                acted = chestMoveSelected(false);
+                break;
+
+            case Action::DropAll:
+                acted = chestMoveSelected(true);
+                break;
+
+            case Action::Pickup:
+                acted = chestMoveAll();
+                break;
+
+            case Action::SortInventory:
+                if (chestPaneChest) {
+                    sortChestContents(chestOpenId, &chestSel);
+                } else {
+                    sortInventory();
+                }
+                return;
+
+            default:
+                return;
+        }
+
+        if (acted) {
+            advanceAfterPlayerAction();
+        }
+        return;
+    }
+
     // Inventory mode.
     if (invOpen) {
         switch (a) {
@@ -1057,24 +1119,34 @@ if (optionsSel == 17) {
             } else {
                 // QoL: context action on the current tile.
                 // 1) Chests (world-interactable) have priority.
-                bool hasChest = false;
+                bool hasClosedChest = false;
+                bool hasOpenChest = false;
                 bool hasPickableItem = false;
+
                 for (const auto& gi : ground) {
                     if (gi.pos != p.pos) continue;
-                    if (gi.item.kind == ItemKind::Chest) hasChest = true;
-                    if (!isChestKind(gi.item.kind)) hasPickableItem = true;
+
+                    if (gi.item.kind == ItemKind::Chest) hasClosedChest = true;
+                    else if (gi.item.kind == ItemKind::ChestOpen) hasOpenChest = true;
+                    else hasPickableItem = true;
                 }
 
-                if (hasChest) {
+                bool handled = false;
+
+                if (hasClosedChest) {
                     acted = openChestAtPlayer();
-                    // If we didn't open the chest (e.g., locked and no keys/picks), still allow picking
-                    // up any other items on the tile.
-                    if (!acted && hasPickableItem) {
-                        acted = pickupAtPlayer();
-                    }
-                } else if (hasPickableItem) {
+                    handled = acted; // only handled if the attempt consumes the action (open / pick / reveal)
+                }
+
+                if (!handled && hasOpenChest) {
+                    handled = openChestOverlayAtPlayer();
+                    acted = false; // opening the UI is instant; time passes when you move items
+                }
+
+                // If we didn't interact with a chest, allow picking up other items on the tile.
+                if (!handled && hasPickableItem) {
                     acted = pickupAtPlayer();
-                } else {
+                } else if (!hasClosedChest && !hasOpenChest && !hasPickableItem) {
                     pushMsg("THERE IS NOTHING HERE.");
                 }
             }

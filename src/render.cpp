@@ -1661,6 +1661,31 @@ void Renderer::render(const Game& game) {
         SDL_RenderDrawPoint(renderer, x0 + tile / 2, y0 + tile / 2);
     }
 
+    // Draw player map markers / notes (shown on explored tiles; subtle indicator).
+    for (const auto& m : game.mapMarkers()) {
+        if (!d.inBounds(m.pos.x, m.pos.y)) continue;
+        const Tile& t = d.at(m.pos.x, m.pos.y);
+        if (!t.explored) continue;
+        if (!mapTileInView(m.pos.x, m.pos.y)) continue;
+
+        uint8_t r = 220, g = 220, b = 220;
+        switch (m.kind) {
+            case MarkerKind::Danger: r = 230; g = 80;  b = 80;  break;
+            case MarkerKind::Loot:   r = 235; g = 200; b = 80;  break;
+            case MarkerKind::Note:
+            default:                 r = 220; g = 220; b = 220; break;
+        }
+
+        const uint8_t a = t.visible ? 220 : 120;
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, r, g, b, a);
+
+        SDL_Rect base = mapTileDst(m.pos.x, m.pos.y);
+        const int s = (m.kind == MarkerKind::Danger) ? 6 : 4;
+        SDL_Rect pip{ base.x + tile - s - 2, base.y + 2, s, s };
+        SDL_RenderFillRect(renderer, &pip);
+    }
+
     // Draw entities (only if their tile is visible; player always visible)
     for (const auto& e : game.entities()) {
         if (!d.inBounds(e.pos.x, e.pos.y)) continue;
@@ -1878,6 +1903,10 @@ void Renderer::render(const Game& game) {
 
     if (game.isInventoryOpen()) {
         drawInventoryOverlay(game);
+    }
+
+    if (game.isChestOpen()) {
+        drawChestOverlay(game);
     }
 
     if (game.isOptionsOpen()) {
@@ -2499,6 +2528,145 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     }
 }
 
+
+void Renderer::drawChestOverlay(const Game& game) {
+    const int panelW = winW - 40;
+    const int panelH = winH - 40;
+    SDL_Rect bg{ 20, 20, panelW, panelH };
+
+    drawPanel(game, bg, 210, lastFrame);
+
+    const Color white{240,240,240,255};
+    const Color gray{160,160,160,255};
+    const Color yellow{255,230,120,255};
+
+    const int scale = 2;
+    const int pad = 16;
+
+    int x = bg.x + pad;
+    int y = bg.y + pad;
+
+    auto tierName = [](int tier) -> const char* {
+        switch (tier) {
+            case 0: return "COMMON";
+            case 1: return "STURDY";
+            case 2: return "ORNATE";
+            case 3: return "LARGE";
+            case 4: return "ANCIENT";
+            default: return "CHEST";
+        }
+    };
+
+    const int tier = game.chestOpenTier();
+    const int limit = game.chestOpenStackLimit();
+    const int chestStacks = static_cast<int>(game.chestOpenItems().size());
+
+    std::stringstream hs;
+    hs << "CHEST (" << tierName(tier) << ")";
+    drawText5x7(renderer, x, y, scale, yellow, hs.str());
+
+    drawText5x7(renderer, x + 220, y, scale, gray, "(ENTER: move, D: move 1, G: all, S: sort, ESC/I: close)");
+
+    std::stringstream cap;
+    cap << "CAP: " << chestStacks << "/" << limit << " STACKS  (LEFT/RIGHT: switch pane)";
+    drawText5x7(renderer, x, y + 14, scale, gray, cap.str());
+
+    y += 44;
+
+    const bool paneChest = game.chestPaneIsChest();
+
+    const int colGap = 18;
+    const int colW = (bg.w - pad * 2 - colGap) / 2;
+
+    // Column headers
+    drawText5x7(renderer, x, y, scale, paneChest ? yellow : gray, "CHEST CONTENTS");
+    drawText5x7(renderer, x + colW + colGap, y, scale, paneChest ? gray : yellow, "INVENTORY");
+
+    y += 28;
+
+    SDL_Rect chestRect{ x, y, colW, bg.y + bg.h - pad - y };
+    SDL_Rect invRect{ x + colW + colGap, y, colW, chestRect.h };
+
+    const auto& chestItems = game.chestOpenItems();
+    const auto& inv = game.inventory();
+
+    const int chestSel = game.chestSelection();
+    const int invSel = game.inventorySelection();
+
+    const int lineH = 18;
+    const int maxLines = std::max(1, chestRect.h / lineH);
+
+    auto startIndex = [&](int sel, int count) -> int {
+        if (count <= 0) return 0;
+        return std::clamp(sel - maxLines / 2, 0, std::max(0, count - maxLines));
+    };
+
+    const int chestStart = startIndex(chestSel, (int)chestItems.size());
+    const int invStart = startIndex(invSel, (int)inv.size());
+
+    const int chestEnd = std::min((int)chestItems.size(), chestStart + maxLines);
+    const int invEnd = std::min((int)inv.size(), invStart + maxLines);
+
+    // Selection highlight
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    if (paneChest && !chestItems.empty() && chestSel >= chestStart && chestSel < chestEnd) {
+        SDL_Rect hi{ chestRect.x - 6, chestRect.y + (chestSel - chestStart) * lineH - 2, chestRect.w + 12, lineH };
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 20);
+        SDL_RenderFillRect(renderer, &hi);
+    }
+    if (!paneChest && !inv.empty() && invSel >= invStart && invSel < invEnd) {
+        SDL_Rect hi{ invRect.x - 6, invRect.y + (invSel - invStart) * lineH - 2, invRect.w + 12, lineH };
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 20);
+        SDL_RenderFillRect(renderer, &hi);
+    }
+
+    // Helpers
+    auto fitToChars = [](const std::string& s, int maxChars) -> std::string {
+        if ((int)s.size() <= maxChars) return s;
+        if (maxChars <= 3) return s.substr(0, std::max(0, maxChars));
+        return s.substr(0, maxChars - 3) + "...";
+    };
+
+    auto drawList = [&](const std::vector<Item>& items, const SDL_Rect& r, int start, int end, int sel, bool active, bool showEquippedTag) {
+        int rowY = r.y;
+        const int iconX = r.x;
+        const int textX = iconX + 20;
+        const int maxChars = std::max(8, (r.w - 26) / ((5 + 1) * scale));
+
+        if (items.empty()) {
+            drawText5x7(renderer, r.x, r.y, scale, gray, "(EMPTY)");
+            return;
+        }
+
+        for (int i = start; i < end; ++i) {
+            const Item& it = items[(size_t)i];
+
+            // Selected arrow (active pane only).
+            if (active && i == sel) {
+                drawText5x7(renderer, r.x - 12, rowY + 3, scale, yellow, ">");
+            }
+
+            drawItemIcon(game, it, iconX, rowY, 16);
+
+            std::string line = game.displayItemName(it);
+            if (showEquippedTag) {
+                const std::string tag = game.equippedTag(it.id);
+                if (!tag.empty()) {
+                    line += " " + tag;
+                }
+            }
+            line = fitToChars(line, maxChars);
+
+            drawText5x7(renderer, textX, rowY + 3, scale, white, line);
+
+            rowY += lineH;
+        }
+    };
+
+    drawList(chestItems, chestRect, chestStart, chestEnd, chestSel, paneChest, false);
+    drawList(inv, invRect, invStart, invEnd, invSel, !paneChest, true);
+}
+
 void Renderer::drawOptionsOverlay(const Game& game) {
     const int panelW = std::min(winW - 80, 820);
     const int panelH = 440;
@@ -2666,6 +2834,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineWhite("EXTENDED COMMAND EXAMPLES:");
     lineGray("save | load | loadauto | quit | version | seed | name | scores");
     lineGray("autopickup off/gold/all");
+    lineGray("mark [note|danger|loot] <label>  marks  travel <index|label>");
     lineGray("name <text>  scores [N]");
     lineGray("autosave <turns>  stepdelay <ms>  identify on/off  timers on/off");
     lineGray("pray [heal|cure|identify|bless|uncurse]");
@@ -2687,6 +2856,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("SEARCH CAN REVEAL TRAPS AND SECRET DOORS. EXT: #SEARCH N [ALL]");
     lineGray("LOCKED DOORS: USE KEYS, LOCKPICKS, A SCROLL OF KNOCK, OR KICK THEM IN (RISKY).");
     lineGray("KICKING CHESTS MAY TRIGGER TRAPS AND CAN SLIDE THEM.");
+    lineGray("OPEN CHESTS CAN STORE ITEMS: ENTER OPENS, ENTER MOVES STACK, D MOVES 1, G MOVES ALL.");
     lineGray("SOME VAULT DOORS MAY BE TRAPPED.");
     lineGray("AUTO-EXPLORE STOPS IF YOU SEE AN ENEMY OR GET HURT/DEBUFFED.");
     lineGray("INVENTORY: E EQUIP  U USE  X DROP  SHIFT+X DROP ALL");
@@ -2855,6 +3025,31 @@ void Renderer::drawMinimapOverlay(const Game& game) {
         SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, c.a);
         SDL_Rect rr { mapX + r.x * px, mapY + r.y * px, r.w * px, r.h * px };
         SDL_RenderDrawRect(renderer, &rr);
+    }
+
+    // Player map markers / notes (explored tiles only).
+    for (const auto& m : game.mapMarkers()) {
+        if (!d.inBounds(m.pos.x, m.pos.y)) continue;
+        const Tile& t = d.at(m.pos.x, m.pos.y);
+        if (!t.explored) continue;
+
+        const bool vis = t.visible;
+        uint8_t r = 230, g = 230, b = 230;
+        switch (m.kind) {
+            case MarkerKind::Danger: r = 255; g = 80;  b = 80;  break;
+            case MarkerKind::Loot:   r = 255; g = 220; b = 120; break;
+            case MarkerKind::Note:
+            default:                 r = 230; g = 230; b = 230; break;
+        }
+
+        // Fade markers in the fog-of-war (still visible, but less prominent).
+        if (!vis) {
+            r = static_cast<uint8_t>(std::max<int>(40, r / 2));
+            g = static_cast<uint8_t>(std::max<int>(40, g / 2));
+            b = static_cast<uint8_t>(std::max<int>(40, b / 2));
+        }
+
+        drawCell(m.pos.x, m.pos.y, r, g, b, 220);
     }
 
     // Entities (only show visible monsters; always show player)
@@ -3324,6 +3519,7 @@ void Renderer::drawCodexOverlay(const Game& game) {
                 case EntityKind::Spider: note("CAN WEB YOU, LIMITING MOVEMENT."); break;
                 case EntityKind::Mimic:  note("DISGUISES ITSELF AS LOOT."); break;
                 case EntityKind::Ghost:  note("RARE; CAN REGENERATE."); break;
+                case EntityKind::Leprechaun: note("STEALS GOLD AND BLINKS AWAY."); break;
                 case EntityKind::Minotaur: note("BOSS-LIKE THREAT; SCALES MORE SLOWLY UNTIL DEEPER LEVELS."); break;
                 case EntityKind::Shopkeeper: note("ATTACKING MAY ANGER THE SHOP."); break;
                 default: break;

@@ -34,6 +34,7 @@
 #include <sstream>
 #include <fstream>
 #include <cstring>
+#include <optional>
 #include <filesystem>
 #include <iomanip>
 #include <ctime>
@@ -338,6 +339,7 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
     f << "Seed: " << game.seed() << "  Depth: " << game.depth() << "  Turns: " << game.turns() << "\n";
     f << "Legend: # wall, . floor, + door, / open door, * locked door, < up, > down, ~ chasm, I pillar, B boulder, ^ trap, @ you\n";
     f << "        $ gold, ! potion, ? scroll, : food, K key, l lockpick, C chest\n";
+    f << "        = note mark, X danger mark, % loot mark\n";
     f << "        g goblin, o orc, b bat, j slime, S skeleton, k kobold, w wolf, T troll, W wizard, n snake, s spider, O ogre\n\n";
 
     std::vector<std::string> grid(static_cast<size_t>(d.height), std::string(static_cast<size_t>(d.width), ' '));
@@ -369,6 +371,23 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
 
             grid[static_cast<size_t>(y)][static_cast<size_t>(x)] = c;
         }
+    }
+
+    // Player markers (explored tiles only). Draw before traps/items/monsters so they can override.
+    for (const auto& m : game.mapMarkers()) {
+        if (!d.inBounds(m.pos.x, m.pos.y)) continue;
+        const Tile& t = d.at(m.pos.x, m.pos.y);
+        if (!t.explored) continue;
+
+        char c = '=';
+        switch (m.kind) {
+            case MarkerKind::Danger: c = 'X'; break;
+            case MarkerKind::Loot:   c = '%'; break;
+            case MarkerKind::Note:
+            default:                 c = '='; break;
+        }
+
+        grid[static_cast<size_t>(m.pos.y)][static_cast<size_t>(m.pos.x)] = c;
     }
 
     // Traps (discovered, on explored tiles).
@@ -410,6 +429,7 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
             case EntityKind::Wolf:   return 'w';
             case EntityKind::Dog:    return 'd';
             case EntityKind::Ghost:  return 'G';
+            case EntityKind::Leprechaun: return 'l';
             case EntityKind::Troll:  return 'T';
             case EntityKind::Wizard: return 'W';
             case EntityKind::Snake:  return 'n';
@@ -622,8 +642,27 @@ static TrapKind chestTrapKind(const Item& it) {
 }
 
 static int chestTier(const Item& it) {
-    // Stored in enchant (0..2). Not shown to the player.
-    return clampi(it.enchant, 0, 2);
+    // Stored in enchant (0..4). Not shown to the player.
+    // Some generators create higher-tier "cache" chests deeper in the dungeon.
+    return clampi(it.enchant, 0, 4);
+}
+
+static const char* chestTierName(int tier) {
+    switch (clampi(tier, 0, 4)) {
+        case 0: return "COMMON";
+        case 1: return "STURDY";
+        case 2: return "ORNATE";
+        case 3: return "LARGE";
+        case 4: return "ANCIENT";
+        default: return "CHEST";
+    }
+}
+
+// Stack-based capacity limit for container storage.
+// The game uses stacks (not item weight/volume) to keep the UI fast and deterministic.
+static int chestStackLimitForTier(int tier) {
+    tier = clampi(tier, 0, 4);
+    return 16 + 4 * tier; // 16..32 stacks
 }
 
 static void setChestLocked(Item& it, bool v) {
@@ -747,6 +786,10 @@ static std::vector<std::string> extendedCommandList() {
         "mortem",
         "bones",
         "explore",
+        "mark",
+        "unmark",
+        "marks",
+        "travel",
         "search",
         "rest",
         "sneak",
@@ -981,6 +1024,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.pushSystemMessage("TIP: type a prefix (e.g., 'autop') and press ENTER.");
         game.pushSystemMessage("SLOTS: slot [name], save [slot], load [slot], loadauto [slot], saves");
         game.pushSystemMessage("EXPORT: exportlog/exportmap/export/exportall/dump");
+        game.pushSystemMessage("MARKS: mark [note|danger|loot] <label> | unmark | marks | travel <index|label>");
         game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse] (costs gold)");
         game.pushSystemMessage("DIG: dig <dir> (requires wielded pickaxe)");
         game.pushSystemMessage("CURSES: CURSED weapons/armor can't be removed until uncursed (scroll or shrine).");
@@ -1268,6 +1312,251 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     if (cmd == "explore") {
         game.requestAutoExplore();
+        return;
+    }
+
+    // ---------------------------------------------------------------------
+    // Map markers / notes
+    // ---------------------------------------------------------------------
+    if (cmd == "mark" || cmd == "annotate" || cmd == "note") {
+        // Usage:
+        //   #mark <label...>                  -> NOTE marker
+        //   #mark danger <label...>           -> DANGER marker
+        //   #mark loot <label...>             -> LOOT marker
+        //   #mark [kind] X Y <label...>       -> marker at coordinates (explored only)
+        // TIP: If you're in Look mode, the marker applies to the look cursor.
+
+        if (toks.size() <= 1) {
+            game.pushSystemMessage("USAGE: mark [note|danger|loot] <label>");
+            game.pushSystemMessage("TIP: open LOOK (:) and move the cursor to mark remote tiles.");
+            return;
+        }
+
+        MarkerKind kind = MarkerKind::Note;
+        size_t i = 1;
+        if (i < toks.size()) {
+            const std::string k0 = toLower(toks[i]);
+            if (k0 == "danger" || k0 == "d" || k0 == "!") {
+                kind = MarkerKind::Danger;
+                ++i;
+            } else if (k0 == "loot" || k0 == "l" || k0 == "$") {
+                kind = MarkerKind::Loot;
+                ++i;
+            } else if (k0 == "note" || k0 == "n") {
+                kind = MarkerKind::Note;
+                ++i;
+            }
+        }
+
+        Vec2i pos = game.isLooking() ? game.lookCursor() : game.player().pos;
+        // Optional coordinates: #mark [kind] X Y <label...>
+        if (i + 2 < toks.size()) {
+            try {
+                const int x = std::stoi(toks[i], nullptr, 0);
+                const int y = std::stoi(toks[i + 1], nullptr, 0);
+                pos = { x, y };
+                i += 2;
+            } catch (...) {
+                // Not coordinates; treat as label text.
+            }
+        }
+
+        std::string label;
+        for (size_t j = i; j < toks.size(); ++j) {
+            if (j > i) label += " ";
+            label += toks[j];
+        }
+        label = trim(label);
+        if (label.empty()) {
+            game.pushSystemMessage("USAGE: mark [note|danger|loot] <label>");
+            return;
+        }
+
+        (void)game.setMarker(pos, kind, label, /*verbose*/true);
+        return;
+    }
+
+    if (cmd == "unmark" || cmd == "unannotate" || cmd == "clearmark") {
+        const Vec2i pos = game.isLooking() ? game.lookCursor() : game.player().pos;
+        (void)game.clearMarker(pos, /*verbose*/true);
+        return;
+    }
+
+    if (cmd == "marks" || cmd == "notes" || cmd == "markers") {
+        // Optional:
+        //   #marks          -> list marks on this floor
+        //   #marks clear    -> clear marks on this floor
+        if (toks.size() > 1) {
+            const std::string a = toLower(toks[1]);
+            if (a == "clear" || a == "reset" || a == "off") {
+                game.clearAllMarkers(true);
+                return;
+            }
+        }
+
+        const auto& ms = game.mapMarkers();
+        if (ms.empty()) {
+            game.pushSystemMessage("NO MARKS ON THIS FLOOR.");
+            game.pushSystemMessage("USAGE: #mark <label>");
+            return;
+        }
+
+        game.pushSystemMessage("MARKS (THIS FLOOR):");
+        const size_t maxShow = 30;
+        for (size_t i = 0; i < ms.size() && i < maxShow; ++i) {
+            const auto& m = ms[i];
+            std::ostringstream oss;
+            oss << "  [" << (i + 1) << "] (" << m.pos.x << "," << m.pos.y << ") ";
+            oss << markerKindName(m.kind) << " \"" << m.label << "\"";
+            game.pushSystemMessage(oss.str());
+        }
+        if (ms.size() > maxShow) {
+            game.pushSystemMessage("  ... (" + std::to_string(ms.size() - maxShow) + " more)");
+        }
+        game.pushSystemMessage("TRAVEL: #travel <index|label-prefix>");
+        return;
+    }
+
+    if (cmd == "travel" || cmd == "goto" || cmd == "go") {
+        // Usage:
+        //   #travel 3
+        //   #travel 12 34
+        //   #travel potion
+        // Matches are on the current floor only.
+        if (toks.size() <= 1) {
+            game.pushSystemMessage("USAGE: travel <mark-index|label-prefix>");
+            game.pushSystemMessage("TIP: use #marks to list mark indices.");
+            return;
+        }
+
+        // Coordinates: #travel X Y (convenient for scripts and map references)
+        if (toks.size() >= 3) {
+            try {
+                const int x = std::stoi(toks[1], nullptr, 0);
+                const int y = std::stoi(toks[2], nullptr, 0);
+                (void)game.requestAutoTravel({x, y});
+                return;
+            } catch (...) {
+                // fall through to marker lookup
+            }
+        }
+
+        const auto& ms = game.mapMarkers();
+        if (ms.empty()) {
+            game.pushSystemMessage("NO MARKS ON THIS FLOOR.");
+            game.pushSystemMessage("TIP: #mark <label> to create one, or #travel X Y to travel by coordinates.");
+            return;
+        }
+
+        // Join the remainder so users can travel to marks with spaces.
+        std::string query;
+        for (size_t i = 1; i < toks.size(); ++i) {
+            if (i > 1) query += " ";
+            query += toks[i];
+        }
+        query = trim(query);
+        if (query.empty()) {
+            game.pushSystemMessage("USAGE: travel <mark-index|label-prefix>");
+            return;
+        }
+
+        auto resolvedTravelGoal = [&](Vec2i goal) -> std::optional<Vec2i> {
+            const Dungeon& d = game.dungeon();
+            if (d.inBounds(goal.x, goal.y) && d.isPassable(goal.x, goal.y)) {
+                return goal;
+            }
+
+            // If the marker is on a wall/blocked tile (useful for notes), try to
+            // find the nearest adjacent passable explored tile.
+            Vec2i best{0, 0};
+            bool found = false;
+            int bestDist = 1'000'000;
+            const Vec2i src = game.player().pos;
+
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
+                    const Vec2i q{ goal.x + dx, goal.y + dy };
+                    if (!d.inBounds(q.x, q.y)) continue;
+                    if (!d.at(q.x, q.y).explored) continue;
+                    if (!d.isPassable(q.x, q.y)) continue;
+                    const int dist = manhattan(q, src);
+                    if (!found || dist < bestDist) {
+                        found = true;
+                        bestDist = dist;
+                        best = q;
+                    }
+                }
+            }
+
+            if (found) {
+                game.pushSystemMessage("MARK IS ON A BLOCKED TILE; TRAVELING TO AN ADJACENT TILE.");
+                return best;
+            }
+            return std::nullopt;
+        };
+
+        // Try numeric index first.
+        int idx = -1;
+        try {
+            idx = std::stoi(query, nullptr, 0);
+        } catch (...) {
+            idx = -1;
+        }
+
+        if (idx >= 1) {
+            const size_t i = static_cast<size_t>(idx - 1);
+            if (i >= ms.size()) {
+                game.pushSystemMessage("NO SUCH MARK INDEX.");
+                return;
+            }
+            if (auto goal = resolvedTravelGoal(ms[i].pos)) {
+                (void)game.requestAutoTravel(*goal);
+            } else {
+                game.pushSystemMessage("MARK IS ON A BLOCKED TILE WITH NO ADJACENT PASSABLE TILE.");
+            }
+            return;
+        }
+
+        // Otherwise: label prefix match (case-insensitive).
+        const std::string pref = toLower(query);
+        std::vector<size_t> hits;
+        hits.reserve(ms.size());
+        for (size_t i = 0; i < ms.size(); ++i) {
+            const std::string lab = toLower(ms[i].label);
+            if (lab.rfind(pref, 0) == 0) {
+                hits.push_back(i);
+            }
+        }
+
+        if (hits.empty()) {
+            game.pushSystemMessage("NO MATCHING MARKS.");
+            game.pushSystemMessage("TIP: use #marks to see available labels.");
+            return;
+        }
+
+        if (hits.size() > 1) {
+            game.pushSystemMessage("MULTIPLE MATCHES:");
+            const size_t maxShow = 12;
+            for (size_t j = 0; j < hits.size() && j < maxShow; ++j) {
+                const auto& m = ms[hits[j]];
+                std::ostringstream oss;
+                oss << "  [" << (hits[j] + 1) << "] (" << m.pos.x << "," << m.pos.y << ") ";
+                oss << markerKindName(m.kind) << " \"" << m.label << "\"";
+                game.pushSystemMessage(oss.str());
+            }
+            if (hits.size() > maxShow) {
+                game.pushSystemMessage("  ...");
+            }
+            game.pushSystemMessage("TIP: disambiguate by using an index: #travel <number>.");
+            return;
+        }
+
+        if (auto goal = resolvedTravelGoal(ms[hits.front()].pos)) {
+            (void)game.requestAutoTravel(*goal);
+        } else {
+            game.pushSystemMessage("MARK IS ON A BLOCKED TILE WITH NO ADJACENT PASSABLE TILE.");
+        }
         return;
     }
 
@@ -1893,6 +2182,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Wolf: return "WOLF";
         case EntityKind::Dog: return "DOG";
         case EntityKind::Ghost: return "GHOST";
+        case EntityKind::Leprechaun: return "LEPRECHAUN";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";

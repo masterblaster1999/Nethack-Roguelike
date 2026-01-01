@@ -209,8 +209,9 @@ void Game::spawnMonsters() {
                 else if (roll < 70) k = EntityKind::Snake;
                 else if (roll < 80) k = EntityKind::KoboldSlinger;
                 else if (roll < 90) k = EntityKind::Troll;
-                else if (roll < 96) k = EntityKind::Ogre;
-                else if (roll < 100) k = (depth_ >= 6 ? EntityKind::Mimic : EntityKind::Wizard);
+                else if (roll < 95) k = EntityKind::Ogre;
+                else if (roll < 98) k = (depth_ >= 6 ? EntityKind::Mimic : EntityKind::Wizard);
+                else k = EntityKind::Leprechaun;
             } else {
                 // Deep band (7+): higher threat density and occasional rarities.
                 if (roll < 12) k = EntityKind::Orc;
@@ -224,6 +225,7 @@ void Game::spawnMonsters() {
                 else if (roll < 92) k = EntityKind::KoboldSlinger;
                 else if (roll < 96) k = EntityKind::Slime;
                 else if (roll < 98) k = EntityKind::Snake;
+                else if (roll < 99) k = EntityKind::Leprechaun;
                 else {
                     // Keep Minotaurs rare and avoid spawning extras on the final floor.
                     if (depth_ < QUEST_DEPTH && depth_ >= 8) k = EntityKind::Minotaur;
@@ -271,6 +273,15 @@ void Game::spawnMonsters() {
                 }
 
                 spawnMonster(k, p, 0);
+            }
+
+            // Thieves love high-value rooms.
+            if (depth_ >= 2) {
+                const float chance = (r.type == RoomType::Vault) ? 0.35f : 0.20f;
+                if (rng.chance(chance)) {
+                    Vec2i tp = randomFreeTileInRoom(r);
+                    spawnMonster(EntityKind::Leprechaun, tp, 0);
+                }
             }
         }
 
@@ -495,7 +506,7 @@ void Game::spawnItems() {
         chest.kind = ItemKind::Chest;
         chest.count = 1;
         chest.spriteSeed = rng.nextU32();
-        chest.enchant = clampi(tier, 0, 2);
+        chest.enchant = clampi(tier, 0, 4);
         chest.charges = 0;
 
         if (rng.chance(lockedChance)) {
@@ -829,6 +840,7 @@ void Game::spawnItems() {
 
         Item chest;
         chest.kind = ItemKind::Chest;
+        chest.id = nextItemId++;
         chest.count = 1;
         chest.buc = 0; // Uncursed
         chest.enchant = 0; // chest tier (see chestTier())
@@ -842,7 +854,11 @@ void Game::spawnItems() {
 
         // Some caches are a bit spicy.
         if (rng.chance(0.40f)) setChestLocked(chest, true);
-        if (rng.chance(0.30f)) setChestTrapped(chest, true);
+        if (rng.chance(0.30f)) {
+            setChestTrapped(chest, true);
+            setChestTrapKnown(chest, false);
+            setChestTrapKind(chest, rollChestTrap());
+        }
 
         ground.push_back(GroundItem{ chest, p });
     }
@@ -1583,6 +1599,12 @@ void Game::cleanupDead() {
                 dropGroundItem(e.pos, ammoK, n);
             }
         }
+
+        // Thief loot: drop any carried stolen gold (so the player can recover it).
+        if (e.stolenGold > 0) {
+            dropGroundItem(e.pos, ItemKind::Gold, e.stolenGold);
+        }
+
 
         // Simple drops
         if (rng.chance(0.55f)) {

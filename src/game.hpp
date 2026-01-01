@@ -40,9 +40,12 @@ enum class EntityKind : uint8_t {
 
     // Undead / special (append-only to keep save compatibility)
     Ghost,
+
+    // Tricksters / thieves (append-only to keep save compatibility)
+    Leprechaun,
 };
 
-inline constexpr int ENTITY_KIND_COUNT = static_cast<int>(EntityKind::Ghost) + 1;
+inline constexpr int ENTITY_KIND_COUNT = static_cast<int>(EntityKind::Leprechaun) + 1;
 
 inline const char* entityKindName(EntityKind k) {
     switch (k) {
@@ -64,6 +67,7 @@ inline const char* entityKindName(EntityKind k) {
         case EntityKind::Minotaur: return "MINOTAUR";
         case EntityKind::Dog: return "DOG";
         case EntityKind::Ghost: return "GHOST";
+        case EntityKind::Leprechaun: return "LEPRECHAUN";
         default: return "UNKNOWN";
     }
 }
@@ -92,6 +96,7 @@ inline int baseSpeedFor(EntityKind k) {
         case EntityKind::Minotaur: return 105;
         case EntityKind::Dog: return 120;
         case EntityKind::Ghost: return 110;
+        case EntityKind::Leprechaun: return 140;
         default: return 100;
     }
 }
@@ -167,6 +172,10 @@ inline MonsterBaseStats baseMonsterStatsFor(EntityKind k) {
             s.regenChancePct = 20;
             s.regenAmount = 1;
             break;
+        case EntityKind::Leprechaun:
+            // Fast, fragile thief: relies on stealing and blinking away rather than brawling.
+            s.hpMax = 8; s.baseAtk = 2; s.baseDef = 1; s.willFlee = true;
+            break;
         default:
             // Player and unknown kinds fall back to a tame baseline.
             s.hpMax = 6; s.baseAtk = 1; s.baseDef = 0; s.willFlee = true;
@@ -177,7 +186,7 @@ inline MonsterBaseStats baseMonsterStatsFor(EntityKind k) {
 
 inline int monsterDepthScale(EntityKind k, int depth) {
     int d = std::max(0, depth - 1);
-    if (k == EntityKind::Goblin || k == EntityKind::Bat || k == EntityKind::Slime || k == EntityKind::Snake) {
+    if (k == EntityKind::Goblin || k == EntityKind::Bat || k == EntityKind::Slime || k == EntityKind::Snake || k == EntityKind::Leprechaun) {
         d = d / 2;
     }
     if (k == EntityKind::Minotaur) {
@@ -608,6 +617,10 @@ struct Entity {
     // Friendly entities are allied with the player (dogs, tamed beasts, etc.).
     bool friendly = false;
     AllyOrder allyOrder = AllyOrder::Follow;
+
+    // Loot carried by monsters (append-only for save compatibility).
+    // Used by thieves (e.g., Leprechauns) so stolen gold can be recovered on death.
+    int stolenGold = 0;
 };
 
 struct FXProjectile {
@@ -627,12 +640,52 @@ struct FXExplosion {
     float duration = 0.18f; // total flash duration
 };
 
+// -----------------------------------------------------------------------------
+// Map markers / notes
+// -----------------------------------------------------------------------------
+
+enum class MarkerKind : uint8_t {
+    Note = 0,
+    Danger,
+    Loot,
+};
+
+inline const char* markerKindName(MarkerKind k) {
+    switch (k) {
+        case MarkerKind::Danger: return "DANGER";
+        case MarkerKind::Loot:   return "LOOT";
+        case MarkerKind::Note:
+        default:
+            return "NOTE";
+    }
+}
+
+struct MapMarker {
+    Vec2i pos{0, 0};
+    MarkerKind kind = MarkerKind::Note;
+    std::string label;
+};
+
+struct ChestContainer {
+    int chestId = 0;
+    std::vector<Item> items;
+};
+
 struct LevelState {
     int depth = 1;
     Dungeon dung;
     std::vector<Entity> monsters;
     std::vector<GroundItem> ground;
     std::vector<Trap> traps;
+
+    // Player annotations / map markers.
+    // These are sparse and can be used for navigation (see: #mark / #travel).
+    std::vector<MapMarker> markers;
+
+    // Container contents keyed by chest item id.
+    // This enables NetHack-like persistent storage (stash) in opened chests.
+    std::vector<ChestContainer> chestContainers;
+
 
     // Environmental fields (per-tile intensities).
     // Currently used for persistent Confusion Gas clouds.
@@ -703,6 +756,13 @@ public:
     const std::vector<Entity>& entities() const { return ents; }
     const std::vector<GroundItem>& groundItems() const { return ground; }
     const std::vector<Trap>& traps() const { return trapsCur; }
+
+    // Map markers / notes (sparse, per-level, persisted in saves).
+    const std::vector<MapMarker>& mapMarkers() const { return mapMarkers_; }
+    const MapMarker* markerAt(Vec2i p) const;
+    bool setMarker(Vec2i p, MarkerKind kind, const std::string& label, bool verbose = true);
+    bool clearMarker(Vec2i p, bool verbose = true);
+    void clearAllMarkers(bool verbose = true);
 
 
     // Persistent environmental gas on the current level (0..255 intensity).
@@ -790,6 +850,16 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     std::string equippedRing2Name() const;
     int playerAttack() const;
     int playerDefense() const;
+
+
+    // Chest container (loot / stash) overlay accessors for renderer
+    bool isChestOpen() const { return chestOpen; }
+    int chestSelection() const { return chestSel; }
+    bool chestPaneIsChest() const { return chestPaneChest; }
+    int chestOpenChestId() const { return chestOpenId; }
+    int chestOpenTier() const { return chestOpenTier_; }
+    int chestOpenStackLimit() const { return chestOpenMaxStacks_; }
+    const std::vector<Item>& chestOpenItems() const;
 
     // Talents (earned on level-up). These provide build variety while keeping the
     // classic ATK/DEF progression intact.
@@ -1087,8 +1157,14 @@ private:
 
     // Items on ground (current level)
     std::vector<GroundItem> ground;
+
+    // Opened chest contents / containers on current level.
+    std::vector<ChestContainer> chestContainers_;
     // Traps on current level
     std::vector<Trap> trapsCur;
+
+    // Player map markers / notes on current level.
+    std::vector<MapMarker> mapMarkers_;
 
     // Environmental fields (current level).
     // Stored as per-tile intensities (0..255).
@@ -1109,6 +1185,14 @@ private:
     int invSel = 0;
     // Temporary inventory sub-mode (used for prompts like selecting an item to identify).
     bool invIdentifyMode = false;
+
+    // Chest container overlay (loot/stash).
+    bool chestOpen = false;
+    int chestOpenId = 0;
+    int chestSel = 0;
+    bool chestPaneChest = true;
+    int chestOpenTier_ = 0;
+    int chestOpenMaxStacks_ = 0;
 
     // Targeting mode
     bool targeting = false;
@@ -1397,6 +1481,14 @@ private:
     // QoL / traps / status
     bool autoPickupAtPlayer();
     bool openChestAtPlayer();
+
+    // Chest container overlay
+    bool openChestOverlayAtPlayer();
+    void closeChestOverlay();
+    void moveChestSelection(int dy);
+    bool chestMoveSelected(bool moveAll);
+    bool chestMoveAll();
+    void sortChestContents(int chestId, int* selInOut);
     bool consumeKeys(int n);
     bool consumeLockpicks(int n);
 

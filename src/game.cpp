@@ -528,6 +528,7 @@ int Game::xpFor(EntityKind k) const {
         case EntityKind::Ogre: return 30;
         case EntityKind::Wizard: return 32;
         case EntityKind::Ghost: return 34;
+        case EntityKind::Leprechaun: return 18;
         case EntityKind::Mimic: return 22;
         case EntityKind::Minotaur: return 45;
         case EntityKind::Shopkeeper: return 0;
@@ -592,6 +593,7 @@ void Game::onPlayerLevelUp() {
     // Cancel other UI modes / automation so the player can make a choice.
     invOpen = false;
     invIdentifyMode = false;
+    closeChestOverlay();
     targeting = false;
     targetLine.clear();
     targetValid = false;
@@ -1034,7 +1036,9 @@ void Game::newGame(uint32_t seed) {
 
     ents.clear();
     ground.clear();
+    chestContainers_.clear();
     trapsCur.clear();
+    mapMarkers_.clear();
     confusionGas_.clear();
     fireField_.clear();
     scentField_.clear();
@@ -1373,6 +1377,8 @@ void Game::storeCurrentLevel() {
     st.dung = dung;
     st.ground = ground;
     st.traps = trapsCur;
+    st.markers = mapMarkers_;
+    st.chestContainers = chestContainers_;
     st.confusionGas = confusionGas_;
     st.fireField = fireField_;
     st.scentField = scentField_;
@@ -1391,6 +1397,19 @@ bool Game::restoreLevel(int depth) {
     dung = it->second.dung;
     ground = it->second.ground;
     trapsCur = it->second.traps;
+    mapMarkers_ = it->second.markers;
+    chestContainers_ = it->second.chestContainers;
+
+    // Drop any orphaned containers (e.g., chests that were destroyed).
+    if (!chestContainers_.empty()) {
+        chestContainers_.erase(std::remove_if(chestContainers_.begin(), chestContainers_.end(), [&](const ChestContainer& c) {
+            if (c.chestId <= 0) return true;
+            for (const auto& gi : ground) {
+                if (isChestKind(gi.item.kind) && gi.item.id == c.chestId) return false;
+            }
+            return true;
+        }), chestContainers_.end());
+    }
 
     confusionGas_ = it->second.confusionGas;
     const size_t expect = static_cast<size_t>(dung.width * dung.height);
@@ -1629,6 +1648,8 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         }), ents.end());
         ground.clear();
         trapsCur.clear();
+        mapMarkers_.clear();
+        chestContainers_.clear();
         confusionGas_.clear();
         fireField_.clear();
         scentField_.clear();
@@ -1757,6 +1778,13 @@ void Game::changeLevel(int newDepth, bool goingDown) {
 
     if (goingDown && depth_ == MIDPOINT_DEPTH) {
         pushMsg("YOU HAVE REACHED THE MIDPOINT OF THE DUNGEON.", MessageKind::System, true);
+    }
+
+    // Special floor callout: the Sokoban puzzle floor teaches/spotlights the
+    // boulder-into-chasm bridging mechanic.
+    if (goingDown && depth_ == 3) {
+        pushMsg("THE AIR VIBRATES WITH A LOW RUMBLE...", MessageKind::System, true);
+        pushMsg("BOULDERS AND CHASMS AHEAD. BRIDGE THE GAPS BY PUSHING BOULDERS INTO THEM.", MessageKind::System, true);
     }
 
     if (goingDown && depth_ == QUEST_DEPTH - 1) {

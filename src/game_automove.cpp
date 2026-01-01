@@ -95,6 +95,7 @@ bool Game::requestAutoTravel(Vec2i goal) {
 
     // Close overlays so you can see the walk.
     invOpen = false;
+    closeChestOverlay();
     targeting = false;
     helpOpen = false;
     minimapOpen = false;

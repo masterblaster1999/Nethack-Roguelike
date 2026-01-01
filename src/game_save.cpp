@@ -251,6 +251,7 @@ int hearingFor(EntityKind k) {
         case EntityKind::Wizard:         return 9;
         case EntityKind::Spider:         return 8;
         case EntityKind::Goblin:         return 8;
+        case EntityKind::Leprechaun:     return 11;
         case EntityKind::Orc:            return 8;
         case EntityKind::KoboldSlinger:  return 8;
         case EntityKind::SkeletonArcher: return 7;
@@ -523,7 +524,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 26u;
+constexpr uint32_t SAVE_VERSION = 29u;
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 1u;
@@ -742,6 +743,10 @@ void writeEntity(std::ostream& out, const Entity& e) {
     uint8_t order = static_cast<uint8_t>(e.allyOrder);
     writePod(out, friendly);
     writePod(out, order);
+
+    // v28+: monsters can carry stolen gold (used by Leprechauns, etc.)
+    int32_t stolenGold = e.stolenGold;
+    writePod(out, stolenGold);
 }
 
 bool readEntity(std::istream& in, Entity& e, uint32_t version) {
@@ -777,6 +782,7 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     int32_t confusionTurns = 0;
     int32_t burnTurns = 0;
 
+    int32_t stolenGold = 0;
 
     Item gearMelee;
     Item gearArmor;
@@ -849,6 +855,10 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         if (!readPod(in, order)) return false;
     }
 
+    if (version >= 28u) {
+        if (!readPod(in, stolenGold)) return false;
+    }
+
     e.id = id;
     e.kind = static_cast<EntityKind>(kind);
     e.pos = { x, y };
@@ -912,7 +922,14 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         e.allyOrder = AllyOrder::Follow;
     }
 
-    // Monster speed scheduling fields aren't serialized (derived from kind). fields aren't serialized (derived from kind).
+    // v28+: carried/stolen gold
+    if (version >= 28u) {
+        e.stolenGold = stolenGold;
+    } else {
+        e.stolenGold = 0;
+    }
+
+    // Monster speed scheduling fields aren't serialized (derived from kind).
     e.speed = baseSpeedFor(e.kind);
     e.energy = 0;
 
@@ -1174,6 +1191,35 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
             writePod(mem, tx);
             writePod(mem, ty);
             writePod(mem, disc);
+        }
+
+        // Map markers / notes (v27+)
+        if constexpr (SAVE_VERSION >= 27u) {
+            uint32_t mCount = static_cast<uint32_t>(st.markers.size());
+            writePod(mem, mCount);
+            for (const auto& m : st.markers) {
+                int32_t mx = m.pos.x;
+                int32_t my = m.pos.y;
+                uint8_t mk = static_cast<uint8_t>(m.kind);
+                writePod(mem, mx);
+                writePod(mem, my);
+                writePod(mem, mk);
+                writeString(mem, m.label);
+            }
+        }
+
+        // Chest containers (v29+)
+        if constexpr (SAVE_VERSION >= 29u) {
+            uint32_t cCount = static_cast<uint32_t>(st.chestContainers.size());
+            writePod(mem, cCount);
+            for (const auto& c : st.chestContainers) {
+                writePod(mem, c.chestId);
+                uint32_t iCount = static_cast<uint32_t>(c.items.size());
+                writePod(mem, iCount);
+                for (const auto& it : c.items) {
+                    writeItem(mem, it);
+                }
+            }
         }
 
         // Confusion gas field (v15+)
@@ -1721,6 +1767,76 @@ bool Game::loadFromFile(const std::string& path) {
                 }
             }
 
+            // Map markers / notes (v27+)
+            st.markers.clear();
+            if (ver >= 27u) {
+                uint32_t mCount = 0;
+                if (!readPod(in, mCount)) return fail();
+                // Defensive clamp to prevent pathological allocations.
+                if (mCount > 5000u) mCount = 5000u;
+                st.markers.reserve(mCount);
+
+                for (uint32_t mi = 0; mi < mCount; ++mi) {
+                    int32_t mx = 0, my = 0;
+                    uint8_t mk = 0;
+                    std::string label;
+                    if (!readPod(in, mx)) return fail();
+                    if (!readPod(in, my)) return fail();
+                    if (!readPod(in, mk)) return fail();
+                    if (!readString(in, label)) return fail();
+
+                    // Validate basics (skip invalid entries rather than failing the whole load).
+                    if (label.empty()) continue;
+                    if (!st.dung.inBounds(mx, my)) continue;
+
+                    // Clamp unknown marker kinds to NOTE for forward/backward compatibility.
+                    if (mk > static_cast<uint8_t>(MarkerKind::Loot)) mk = 0;
+
+                    MapMarker m;
+                    m.pos = { mx, my };
+                    m.kind = static_cast<MarkerKind>(mk);
+                    // Clamp label to keep UI tidy.
+                    if (label.size() > 64) label.resize(64);
+                    m.label = std::move(label);
+
+                    // De-dup markers on the same tile (first wins).
+                    bool dup = false;
+                    for (const auto& ex : st.markers) {
+                        if (ex.pos.x == m.pos.x && ex.pos.y == m.pos.y) { dup = true; break; }
+                    }
+                    if (dup) continue;
+
+                    st.markers.push_back(std::move(m));
+                }
+            }
+
+            // Chest containers (v29+)
+            st.chestContainers.clear();
+            if (ver >= 29u) {
+                uint32_t cCount = 0;
+                if (!readPod(in, cCount)) return fail();
+                if (cCount > 4096u) cCount = 4096u;
+                st.chestContainers.reserve(cCount);
+
+                for (uint32_t ci = 0; ci < cCount; ++ci) {
+                    ChestContainer c;
+                    if (!readPod(in, c.chestId)) return fail();
+
+                    uint32_t iCount = 0;
+                    if (!readPod(in, iCount)) return fail();
+                    if (iCount > 8192u) iCount = 8192u;
+                    c.items.reserve(iCount);
+
+                    for (uint32_t ii = 0; ii < iCount; ++ii) {
+                        Item it;
+                        if (!readItem(in, it, ver)) return fail();
+                        c.items.push_back(it);
+                    }
+
+                    st.chestContainers.push_back(std::move(c));
+                }
+            }
+
             // Confusion gas field (v15+)
             st.confusionGas.clear();
             if (ver >= 15u) {
@@ -1943,6 +2059,12 @@ bool Game::loadFromFile(const std::string& path) {
         // Close transient UI and effects.
         invOpen = false;
         invIdentifyMode = false;
+        chestOpen = false;
+        chestOpenId = 0;
+        chestSel = 0;
+        chestPaneChest = true;
+        chestOpenTier_ = 0;
+        chestOpenMaxStacks_ = 0;
         targeting = false;
         helpOpen = false;
         minimapOpen = false;

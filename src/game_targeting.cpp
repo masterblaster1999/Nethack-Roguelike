@@ -31,6 +31,7 @@ void Game::beginTargeting() {
 
     targeting = true;
     invOpen = false;
+    closeChestOverlay();
     helpOpen = false;
     looking = false;
     minimapOpen = false;

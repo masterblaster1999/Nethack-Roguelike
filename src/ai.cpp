@@ -24,6 +24,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Wolf: return "WOLF";
         case EntityKind::Dog: return "DOG";
         case EntityKind::Ghost: return "GHOST";
+        case EntityKind::Leprechaun: return "LEPRECHAUN";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";
@@ -370,6 +371,29 @@ void Game::monsterTurn() {
 
         const int man = manhattan(m.pos, p.pos);
 
+        // Leprechaun: snatch loose gold on the floor (but never shop bookkeeping).
+        if (m.kind == EntityKind::Leprechaun) {
+            for (size_t gi = 0; gi < ground.size(); ++gi) {
+                GroundItem& g = ground[gi];
+                if (g.pos != m.pos) continue;
+                if (g.item.kind != ItemKind::Gold) continue;
+                if (g.item.count <= 0) continue;
+                if (g.shopPrice > 0) continue;
+
+                const int amt = g.item.count;
+                m.stolenGold += amt;
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << "THE LEPRECHAUN SNATCHES " << amt << " GOLD!";
+                    pushMsg(ss.str(), MessageKind::Warning, false);
+                }
+                emitNoise(m.pos, 9);
+
+                ground.erase(ground.begin() + static_cast<std::ptrdiff_t>(gi));
+                return;
+            }
+        }
+
         const int smellR = smellFor(m.kind);
         const uint8_t scentHere = (smellR > 0) ? scentAt(m.pos.x, m.pos.y) : 0u;
 
@@ -520,9 +544,74 @@ void Game::monsterTurn() {
         const std::vector<int>& costMap = getCostMap(target, pathMode);
         const int d0 = costMap[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
 
-        // If adjacent, melee attack.
+        // If adjacent, melee attack (with some monster-specific tricks).
         if (isAdjacent8(m.pos, p.pos)) {
             Entity& pm = playerMut();
+
+            // Leprechaun: try to steal gold and teleport away instead of trading blows.
+            if (m.kind == EntityKind::Leprechaun && seesPlayer) {
+                const int playerGold = countGold(inv);
+                if (playerGold > 0) {
+                    // Steal a chunk (bounded so early-game isn't instantly ruined).
+                    int want = rng.range(6, 16) + std::max(0, depth_ - 1) * 2;
+                    if (want > playerGold) want = playerGold;
+
+                    int need = want;
+                    for (size_t ii = 0; ii < inv.size() && need > 0; ) {
+                        Item& it = inv[ii];
+                        if (it.kind == ItemKind::Gold) {
+                            const int take = std::min(it.count, need);
+                            it.count -= take;
+                            need -= take;
+                            if (it.count <= 0) {
+                                inv.erase(inv.begin() + static_cast<std::ptrdiff_t>(ii));
+                                continue;
+                            }
+                        }
+                        ++ii;
+                    }
+                    const int took = want - need;
+
+                    if (took > 0) {
+                        m.stolenGold += took;
+                        emitNoise(m.pos, 10);
+
+                        {
+                            std::ostringstream ss;
+                            ss << "THE LEPRECHAUN STEALS " << took << " GOLD!";
+                            pushMsg(ss.str(), MessageKind::Warning, true);
+                        }
+
+                        // Teleport away to a random safe floor tile.
+                        Vec2i dst = m.pos;
+                        for (int tries = 0; tries < 400; ++tries) {
+                            Vec2i cand = dung.randomFloor(rng, true);
+                            if (entityAt(cand.x, cand.y)) continue;
+                            if (cand == dung.stairsUp || cand == dung.stairsDown) continue;
+                            if (manhattan(cand, p.pos) < 8) continue;
+                            dst = cand;
+                            break;
+                        }
+
+                        if (dst != m.pos) {
+                            const bool wasVisible = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+                            m.pos = dst;
+                            if (wasVisible) pushMsg("IT VANISHES!", MessageKind::Info, false);
+                            return;
+                        }
+
+                        // Fallback: step away if teleport couldn't find a good spot.
+                        if (d0 >= 0) {
+                            Vec2i to = bestStepAway(m, costMap, pathMode);
+                            if (to != m.pos) {
+                                tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
             attackMelee(m, pm);
             return;
         }
@@ -703,6 +792,31 @@ void Game::monsterTurn() {
             }
         }
 
+
+        // Leprechaun: blinks away aggressively once it has stolen gold.
+        if (m.kind == EntityKind::Leprechaun && seesPlayer) {
+            const bool hasLoot = (m.stolenGold > 0);
+            const bool close = (man <= 4);
+            if ((hasLoot && (close || rng.chance(0.35f))) || rng.chance(0.04f)) {
+                Vec2i dst = m.pos;
+                for (int tries = 0; tries < 250; ++tries) {
+                    Vec2i cand = dung.randomFloor(rng, true);
+                    if (entityAt(cand.x, cand.y)) continue;
+                    if (cand == dung.stairsUp || cand == dung.stairsDown) continue;
+                    if (manhattan(cand, p.pos) < 7) continue;
+                    dst = cand;
+                    break;
+                }
+
+                if (dst != m.pos) {
+                    const bool wasVisible = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+                    m.pos = dst;
+                    if (wasVisible) pushMsg("THE LEPRECHAUN VANISHES!", MessageKind::Warning, false);
+                    return;
+                }
+            }
+        }
+
         // If the monster reached the last-known spot but can't see the player, it will "search"
         // around for a little while and then eventually give up.
         if (!seesPlayer && m.pos == target) {
@@ -783,7 +897,8 @@ void Game::monsterTurn() {
         }
 
         // Fleeing behavior (away from whatever the monster is currently "hunting").
-        if (m.willFlee && m.hp <= std::max(1, m.hpMax / 3) && d0 >= 0) {
+        const bool fleeLoot = (m.kind == EntityKind::Leprechaun && m.stolenGold > 0 && seesPlayer);
+        if ((fleeLoot || (m.willFlee && m.hp <= std::max(1, m.hpMax / 3))) && d0 >= 0) {
             Vec2i to = bestStepAway(m, costMap, pathMode);
             if (to != m.pos) {
                 tryMove(m, to.x - m.pos.x, to.y - m.pos.y);

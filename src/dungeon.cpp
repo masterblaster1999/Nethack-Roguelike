@@ -2371,6 +2371,155 @@ void generateLabyrinth(Dungeon& d, RNG& rng, int depth) {
 }
 
 
+// A Sokoban-inspired puzzle floor: the critical path is blocked by multi-tile chasms.
+// The player must push boulders into chasms to create bridges.
+//
+// This is intentionally hand-authored (like the labyrinth/sanctum) so it is always solvable
+// as long as the player uses the provided boulders.
+void generateSokoban(Dungeon& d, RNG& rng, int depth) {
+    (void)depth;
+    fillWalls(d);
+
+    d.rooms.clear();
+
+    const int cy = d.height / 2;
+
+    // --- Core geometry ---
+    // Start and exit chambers on the left/right, connected by a 3-wide corridor.
+    const int roomW = 16;
+    const int roomH = 11;
+
+    const int sx = 2;
+    const int sy = clampi(cy - roomH / 2, 2, d.height - roomH - 2);
+    carveRect(d, sx, sy, roomW, roomH, TileType::Floor);
+
+    const int ex = d.width - roomW - 3;
+    const int ey = clampi(cy - roomH / 2, 2, d.height - roomH - 2);
+    carveRect(d, ex, ey, roomW, roomH, TileType::Floor);
+
+    d.stairsUp = {sx + roomW / 2, sy + roomH / 2};
+    d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+
+    d.stairsDown = {ex + roomW / 2, ey + roomH / 2};
+    d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
+
+    const int corX = sx + roomW;
+    const int corY = cy - 1;
+    const int corW = std::max(1, ex - corX);
+    const int corH = 3;
+    carveRect(d, corX, corY, corW, corH, TileType::Floor);
+
+    // --- Chasm barriers ---
+    // Two multi-column chasm blocks that force incremental bridge-building.
+    int b1w = rng.range(3, 5);
+    int b2w = rng.range(2, 4);
+    b1w = std::clamp(b1w, 3, 6);
+    b2w = std::clamp(b2w, 2, 6);
+
+    int b1x = corX + corW / 3 - b1w / 2;
+    int b2x = corX + (2 * corW) / 3 - b2w / 2;
+
+    // Ensure a healthy gap between barriers; fall back to stable placements if needed.
+    const int b1Min = corX + 10;
+    const int b2Max = corX + corW - b2w - 10;
+    b1x = clampi(b1x, b1Min, std::max(b1Min, b2Max - (b1w + 18)));
+    b2x = clampi(b2x, b1x + b1w + 14, b2Max);
+    if (b2x < b1x + b1w + 10) {
+        b1x = corX + 16;
+        b2x = corX + corW - b2w - 16;
+    }
+
+    for (int y = corY; y < corY + corH; ++y) {
+        for (int x = b1x; x < b1x + b1w; ++x) {
+            if (d.inBounds(x, y)) d.at(x, y).type = TileType::Chasm;
+        }
+        for (int x = b2x; x < b2x + b2w; ++x) {
+            if (d.inBounds(x, y)) d.at(x, y).type = TileType::Chasm;
+        }
+    }
+
+    // --- Boulder storage (supply) ---
+    const int storW = 22;
+    const int storH = 11;
+    int storX = corX + 6;
+    int storY = corY + corH + 4; // leave a wall buffer below the corridor
+    storX = clampi(storX, 2, d.width - storW - 2);
+    storY = clampi(storY, 2, d.height - storH - 2);
+    carveRect(d, storX, storY, storW, storH, TileType::Floor);
+
+    // Narrow vertical access hallway from the main corridor to the storage.
+    const int hallX = storX + storW / 2;
+    for (int y = corY + corH; y <= storY; ++y) {
+        if (d.inBounds(hallX, y)) d.at(hallX, y).type = TileType::Floor;
+    }
+
+    // Provide enough boulders to solve both barriers + the optional treasure bridge.
+    // Required for main path is b1w + b2w. The treasure detour requires 2 more.
+    const int treasureGap = 2;
+    const int required = b1w + b2w + treasureGap;
+    const int targetBoulders = required + rng.range(2, 5); // extra slack to reduce deadlocks
+
+    int placed = 0;
+    for (int y = storY + 2; y <= storY + storH - 3 && placed < targetBoulders; y += 2) {
+        for (int x = storX + 2; x <= storX + storW - 3 && placed < targetBoulders; x += 2) {
+            // Keep the hallway mouth clear so the player can always access the storage.
+            if (x == hallX && y <= storY + 3) continue;
+            if (!d.inBounds(x, y)) continue;
+            if (d.at(x, y).type != TileType::Floor) continue;
+            d.at(x, y).type = TileType::Boulder;
+            ++placed;
+        }
+    }
+
+    // Fallback placement if the grid didn't fit (should be rare, but be safe).
+    for (int y = storY + 1; y < storY + storH - 1 && placed < targetBoulders; ++y) {
+        for (int x = storX + 1; x < storX + storW - 1 && placed < targetBoulders; ++x) {
+            if (x == hallX && y <= storY + 3) continue;
+            if (!d.inBounds(x, y)) continue;
+            if (d.at(x, y).type != TileType::Floor) continue;
+            d.at(x, y).type = TileType::Boulder;
+            ++placed;
+        }
+    }
+
+    // --- Optional treasure detour ---
+    // A small room above the main corridor, reachable only by building a short vertical bridge.
+    const int rw = 18;
+    const int rh = 9;
+    const int midX = (b1x + b1w + b2x) / 2;
+    int rx = clampi(midX - rw / 2, 2, d.width - rw - 2);
+    int ry = clampi(corY - rh - 7, 2, d.height - rh - 2);
+    carveRect(d, rx, ry, rw, rh, TileType::Floor);
+
+    const int hall2X = rx + rw / 2;
+    for (int y = ry + rh; y <= corY - 1; ++y) {
+        if (d.inBounds(hall2X, y)) d.at(hall2X, y).type = TileType::Floor;
+    }
+
+    // Insert a 2-tile chasm gap in the hallway (must be bridged with boulders).
+    int gapY0 = corY - 4;
+    int gapY1 = corY - 3;
+    if (gapY0 < ry + rh) {
+        gapY0 = ry + rh + 1;
+        gapY1 = gapY0 + 1;
+    }
+    if (gapY1 <= corY - 1) {
+        if (d.inBounds(hall2X, gapY0)) d.at(hall2X, gapY0).type = TileType::Chasm;
+        if (d.inBounds(hall2X, gapY1)) d.at(hall2X, gapY1).type = TileType::Chasm;
+    }
+
+    // Bonus loot spots inside the detour room (spawned as chests by Game::spawnItems).
+    d.bonusLootSpots.push_back({rx + rw / 2, ry + rh / 2});
+    if (rw >= 10) d.bonusLootSpots.push_back({rx + rw / 2 - 3, ry + rh / 2});
+
+    // Rooms (for spawns and room-type mechanics).
+    d.rooms.push_back({sx, sy, roomW, roomH, RoomType::Normal});
+    d.rooms.push_back({ex, ey, roomW, roomH, RoomType::Normal});
+    d.rooms.push_back({storX, storY, storW, storH, RoomType::Normal});
+    d.rooms.push_back({rx, ry, rw, rh, RoomType::Treasure});
+}
+
+
 void generateSanctum(Dungeon& d, RNG& rng, int depth) {
     (void)rng;
     (void)depth; // reserved for future per-depth theming
@@ -2613,6 +2762,14 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     // (Hard-coded so the run has a consistent "final approach" feel.)
     if (maxDepth >= 2 && depth == maxDepth - 1) {
         generateLabyrinth(*this, rng, depth);
+        ensureBorders(*this);
+        return;
+    }
+
+    // Sokoban-inspired puzzle floor (early-mid game).
+    // Keep it at a fixed depth so players learn to recognize the "boulder -> chasm" bridge mechanic.
+    if (depth == 3) {
+        generateSokoban(*this, rng, depth);
         ensureBorders(*this);
         return;
     }

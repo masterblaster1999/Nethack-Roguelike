@@ -389,6 +389,7 @@ float densityFor(EntityKind k) {
     switch (k) {
         case EntityKind::Player: return 0.55f;
         case EntityKind::Goblin: return 0.58f;
+        case EntityKind::Leprechaun: return 0.50f;
         case EntityKind::Orc: return 0.62f;
         case EntityKind::Bat: return 0.40f;
         case EntityKind::Slime: return 0.70f;
@@ -413,6 +414,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
     switch (k) {
         case EntityKind::Player: return add({ 160, 200, 255, 255 }, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
         case EntityKind::Goblin: return add({ 80, 180, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
+        case EntityKind::Leprechaun: return add({ 60, 210, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Orc: return add({ 70, 150, 60, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Bat: return add({ 120, 100, 140, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Slime: return add({ 70, 200, 160, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));

@@ -2186,13 +2186,13 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         iy += 22;
 
         // Sprite preview
-        const int icon = std::min(96, infoRect.w);
-        SDL_Rect sprDst{ ix, iy, icon, icon };
+        const int previewPx = std::min(96, infoRect.w);
+        SDL_Rect sprDst{ ix, iy, previewPx, previewPx };
         SDL_Texture* tex = itemTexture(it, lastFrame);
         if (tex) {
             SDL_RenderCopy(renderer, tex, nullptr, &sprDst);
         }
-        iy += icon + 10;
+        iy += previewPx + 10;
 
         // Stats lines
         auto statLine = [&](const std::string& s, const Color& c) {
@@ -2984,7 +2984,8 @@ void Renderer::drawCodexOverlay(const Game& game) {
     const int panelX = (winW - panelW) / 2;
     const int panelY = (winH - hudH - panelH) / 2;
 
-    drawPanel(panelX, panelY, panelW, panelH, 1.0f);
+    SDL_Rect panel{ panelX, panelY, panelW, panelH };
+    drawPanel(game, panel, 230, lastFrame);
 
     const Color white{240, 240, 240, 255};
     const Color gray{170, 170, 170, 255};
@@ -3106,7 +3107,7 @@ void Renderer::drawCodexOverlay(const Game& game) {
 
     // Draw details.
     {
-        auto dline = [&](const std::string& s, Color c = white) {
+        auto dline = [&](const std::string& s, const Color& c) {
             drawText5x7(renderer, detailsX, y, bodyScale, c, s);
             y += 14;
         };
@@ -3161,7 +3162,7 @@ void Renderer::drawCodexOverlay(const Game& game) {
                     case ProjectileKind::Arrow: r += "ARROWS"; break;
                     case ProjectileKind::Rock:  r += "ROCKS"; break;
                     case ProjectileKind::Spark: r += "SPARK"; break;
-                    case ProjectileKind::Bolt:  r += "BOLT"; break;
+                    case ProjectileKind::Fireball: r += "FIREBALL"; break;
                     default:                    r += "PROJECTILE"; break;
                 }
                 r += "  (R" + std::to_string(base.rangedRange) + " ATK " + std::to_string(base.rangedAtk) + ")";

@@ -825,6 +825,9 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     int characterLevel() const { return charLevel; }
     int experience() const { return xp; }
     int experienceToNext() const { return xpNext; }
+
+    // XP reward for killing a given monster kind (used by UI such as the Codex).
+    int xpFor(EntityKind k) const;
     AutoPickupMode autoPickupMode() const { return autoPickup; }
     bool autoPickupEnabled() const { return autoPickup != AutoPickupMode::Off; }
     void setAutoPickupMode(AutoPickupMode m);
@@ -1368,7 +1371,6 @@ private:
     bool playerHasRangedReady(std::string* reasonOut) const;
 
     // Progression
-    int xpFor(EntityKind k) const;
     void grantXp(int amount);
     void onPlayerLevelUp();
 

@@ -1309,9 +1309,9 @@ SpritePixels renderVoxel(const VoxelModel& m, int outW, int outH, int frame, flo
             const Color c = img.at(x,y);
             if (c.a == 0) continue;
             const int sx = x + 1;
-            const int sy = y + 1;
-            if (sx < 0 || sy < 0 || sx >= outW || sy >= outH) continue;
-            Color& d = withShadow.at(sx,sy);
+            const int shY = y + 1;
+            if (sx < 0 || shY < 0 || sx >= outW || shY >= outH) continue;
+            Color& d = withShadow.at(sx,shY);
             if (d.a == 0) {
                 d = {0,0,0,80};
             }

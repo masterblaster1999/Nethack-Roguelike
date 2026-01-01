@@ -463,7 +463,7 @@ int main(int argc, char** argv) {
                                 game.messageHistoryBackspace();
                                 break;
                             }
-                            if ((mod & KMOD_CTRL) != 0 && (key == SDLK_l || key == SDLK_L)) {
+                            if ((mod & KMOD_CTRL) != 0 && (key == SDLK_l)) {
                                 game.messageHistoryClearSearch();
                                 break;
                             }

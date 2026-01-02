@@ -56,6 +56,10 @@ struct Settings {
     AutoPickupMode autoPickup = AutoPickupMode::Gold; // off|gold|smart|all
     int autoStepDelayMs = 45; // auto-move speed (10..500)
 
+    // Auto-explore can optionally spend turns searching dead-ends/corridor corners for secret doors
+    // once the floor appears fully explored.
+    bool autoExploreSearch = false;
+
     // Autosave (0 = off)
     int autosaveEveryTurns = 200;
 

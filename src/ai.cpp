@@ -378,7 +378,7 @@ void Game::monsterTurn() {
                 if (g.pos != m.pos) continue;
                 if (g.item.kind != ItemKind::Gold) continue;
                 if (g.item.count <= 0) continue;
-                if (g.shopPrice > 0) continue;
+                if (g.item.shopPrice > 0) continue;
 
                 const int amt = g.item.count;
                 m.stolenGold += amt;

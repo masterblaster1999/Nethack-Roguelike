@@ -44,6 +44,12 @@ public:
     std::vector<std::pair<std::string, std::string>> describeAll() const;
     std::string describeAction(Action a) const;
 
+    // Utilities for UI/editor: produce a parseable chord token string (e.g. "ctrl+f", "shift+comma").
+    // Note: This uses the same canonical tokens as describeAction()/the INI parser.
+    static bool isModifierKey(SDL_Keycode key);
+    static std::string chordToString(SDL_Keycode key, Uint16 mods);
+
+
 private:
     std::unordered_map<Action, std::vector<KeyChord>, ActionHash> binds;
 

@@ -113,11 +113,16 @@ This repo’s CMake is set up to:
 
 This project includes a small unit test executable (no SDL required).
 
+If you don't have SDL2 installed, disable the game target while building tests:
+
 ```bash
-cmake -S . -B build -DPROCROGUE_BUILD_TESTS=ON
+cmake -S . -B build -DPROCROGUE_BUILD_GAME=OFF -DPROCROGUE_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+(If you *do* have SDL2 installed and also want to build the game, you can omit `-DPROCROGUE_BUILD_GAME=OFF`.)
+
 
 
 ## Tests only (no SDL required)
@@ -132,3 +137,20 @@ ctest --test-dir build_tests --output-on-failure
 
 This is also what the CI "tests-only" job uses.
 
+
+
+## Headless replay verification (no SDL required)
+
+ProcRogue can verify recorded replays without SDL2 or a renderer. This is useful for CI and for chasing determinism issues.
+
+```bash
+cmake -S . -B build -DPROCROGUE_BUILD_GAME=OFF -DPROCROGUE_BUILD_HEADLESS=ON
+cmake --build build --target ProcRogueHeadless
+./ProcRogueHeadless --replay your_run.prr
+```
+
+Useful flags:
+
+- `--frame-ms <n>`: simulation step (1..100). Default is 16ms.
+- `--no-verify-hashes`: run the input stream without validating StateHash checkpoints.
+- `--max-ms <n>` / `--max-frames <n>`: safety limits for runaway auto-move.

@@ -16,6 +16,14 @@ option(PROCROGUE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(PROCROGUE_BUILD_TESTS "Build unit tests (no SDL required)" OFF)
 option(PROCROGUE_BUILD_GAME "Build the SDL2 game executable" ON)
 
+# Headless tools are most useful for CI/regression (and are also SDL-free).
+set(_PROCROGUE_HEADLESS_DEFAULT OFF)
+if (PROCROGUE_BUILD_TESTS)
+    set(_PROCROGUE_HEADLESS_DEFAULT ON)
+endif()
+option(PROCROGUE_BUILD_HEADLESS "Build the headless replay verifier tool (no SDL required)" ${_PROCROGUE_HEADLESS_DEFAULT})
+unset(_PROCROGUE_HEADLESS_DEFAULT)
+
 # Fetching SDL2 is most useful on Windows/MSVC. On Linux/macOS, SDL2 is typically installed
 # via the system package manager and found via pkg-config. Default accordingly.
 set(_PROCROGUE_FETCH_SDL2_DEFAULT OFF)
@@ -25,12 +33,30 @@ endif()
 option(PROCROGUE_FETCH_SDL2 "Fetch SDL2 automatically when it is not found" ${_PROCROGUE_FETCH_SDL2_DEFAULT})
 unset(_PROCROGUE_FETCH_SDL2_DEFAULT)
 
-if (PROCROGUE_BUILD_GAME)
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+function(procrogue_apply_warnings tgt)
+    if (MSVC)
+        target_compile_options(${tgt} PRIVATE /W4)
+        if (PROCROGUE_WARNINGS_AS_ERRORS)
+            target_compile_options(${tgt} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wpedantic)
+        if (PROCROGUE_WARNINGS_AS_ERRORS)
+            target_compile_options(${tgt} PRIVATE -Werror)
+        endif()
+    endif()
+endfunction()
 
-set(PROCROGUE_TARGET proc_rogue)
-
-set(PROCROGUE_SOURCES
-    src/main.cpp
+# ------------------------------------------------------------
+# Core (SDL-free) library
+# ------------------------------------------------------------
+set(PROCROGUE_CORE_SOURCES
+    src/replay.cpp
+    src/replay_runner.cpp
+    src/content.cpp
     src/keybinds.cpp
     src/game.cpp
     src/game_save.cpp
@@ -42,14 +68,12 @@ set(PROCROGUE_SOURCES
     src/game_inventory.cpp
     src/game_targeting.cpp
     src/game_spawn.cpp
+    src/game_markers.cpp
     src/pathfinding.cpp
     src/combat.cpp
     src/physics.cpp
     src/combat_rules.cpp
     src/dungeon.cpp
-    src/render.cpp
-    src/spritegen.cpp
-    src/spritegen3d.cpp
     src/items.cpp
     src/shop.cpp
     src/scores.cpp
@@ -57,44 +81,73 @@ set(PROCROGUE_SOURCES
 
 # Optional sources (present in some forks/patches)
 if (EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/settings.cpp")
-    list(APPEND PROCROGUE_SOURCES src/settings.cpp)
+    list(APPEND PROCROGUE_CORE_SOURCES src/settings.cpp)
 endif()
 if (EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/ai.cpp")
-    list(APPEND PROCROGUE_SOURCES src/ai.cpp)
+    list(APPEND PROCROGUE_CORE_SOURCES src/ai.cpp)
 endif()
 
-add_executable(${PROCROGUE_TARGET} ${PROCROGUE_SOURCES})
-set_target_properties(${PROCROGUE_TARGET} PROPERTIES OUTPUT_NAME ProcRogue)
+add_library(procrogue_core STATIC ${PROCROGUE_CORE_SOURCES})
+target_include_directories(procrogue_core PUBLIC src)
+target_compile_features(procrogue_core PUBLIC cxx_std_17)
 
-target_include_directories(${PROCROGUE_TARGET} PRIVATE src)
-target_compile_features(${PROCROGUE_TARGET} PRIVATE cxx_std_17)
-
-target_compile_definitions(${PROCROGUE_TARGET} PRIVATE
+target_compile_definitions(procrogue_core PUBLIC
     PROCROGUE_VERSION="${PROJECT_VERSION}"
     PROCROGUE_APPNAME="ProcRogue"
 )
 
 if (WIN32)
-    target_compile_definitions(${PROCROGUE_TARGET} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(procrogue_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
+procrogue_apply_warnings(procrogue_core)
+
+# ------------------------------------------------------------
+# Headless tool (SDL-free)
+# ------------------------------------------------------------
+if (PROCROGUE_BUILD_HEADLESS)
+    add_executable(procrogue_headless
+        src/headless_main.cpp
+    )
+    set_target_properties(procrogue_headless PROPERTIES OUTPUT_NAME ProcRogueHeadless)
+
+    target_link_libraries(procrogue_headless PRIVATE procrogue_core)
+    procrogue_apply_warnings(procrogue_headless)
 endif()
 
 # ------------------------------------------------------------
-# Warnings
+# SDL2 game executable
 # ------------------------------------------------------------
+if (PROCROGUE_BUILD_GAME)
+
+set(PROCROGUE_TARGET proc_rogue)
+
+add_executable(${PROCROGUE_TARGET}
+    src/main.cpp
+    src/render.cpp
+    src/spritegen.cpp
+    src/spritegen3d.cpp
+)
+set_target_properties(${PROCROGUE_TARGET} PROPERTIES OUTPUT_NAME ProcRogue)
+
+target_include_directories(${PROCROGUE_TARGET} PRIVATE src)
+target_compile_features(${PROCROGUE_TARGET} PRIVATE cxx_std_17)
+
+target_link_libraries(${PROCROGUE_TARGET} PRIVATE procrogue_core)
+
+# SDL redefines main() on some platforms unless SDL_MAIN_HANDLED is set.
+target_compile_definitions(${PROCROGUE_TARGET} PRIVATE SDL_MAIN_HANDLED)
+
+# Ensure a console subsystem when building with MSVC (helps for logs/stdout).
 if (MSVC)
-    target_compile_options(${PROCROGUE_TARGET} PRIVATE /W4)
-    if (PROCROGUE_WARNINGS_AS_ERRORS)
-        target_compile_options(${PROCROGUE_TARGET} PRIVATE /WX)
-    endif()
-else()
-    target_compile_options(${PROCROGUE_TARGET} PRIVATE -Wall -Wextra -Wpedantic)
-    if (PROCROGUE_WARNINGS_AS_ERRORS)
-        target_compile_options(${PROCROGUE_TARGET} PRIVATE -Werror)
-    endif()
+    target_link_options(${PROCROGUE_TARGET} PRIVATE "/SUBSYSTEM:CONSOLE")
 endif()
 
+
+procrogue_apply_warnings(${PROCROGUE_TARGET})
+
 # ------------------------------------------------------------
-# SDL2 dependency
+# SDL2 dependency (only required for the game executable)
 # ------------------------------------------------------------
 #
 # We try, in order:

@@ -1,4 +1,5 @@
 #include "game_internal.hpp"
+#include "content.hpp"
 
 Vec2i Game::randomFreeTileInRoom(const Room& r, int tries) {
     tries = std::max(10, tries);
@@ -179,59 +180,7 @@ void Game::spawnMonsters() {
         for (int i = 0; i < n; ++i) {
             Vec2i p = randomFreeTileInRoom(r);
 
-            EntityKind k = EntityKind::Goblin;
-            const int roll = rng.range(0, 99);
-
-            if (depth_ <= 1) {
-                if (roll < 65) k = EntityKind::Goblin;
-                else k = EntityKind::Orc;
-            } else if (depth_ == 2) {
-                if (roll < 35) k = EntityKind::Goblin;
-                else if (roll < 55) k = EntityKind::Orc;
-                else if (roll < 70) k = EntityKind::Bat;
-                else if (roll < 85) k = EntityKind::Slime;
-                else k = EntityKind::KoboldSlinger;
-            } else if (depth_ == 3) {
-                if (roll < 20) k = EntityKind::Orc;
-                else if (roll < 35) k = EntityKind::SkeletonArcher;
-                else if (roll < 50) k = EntityKind::Spider;
-                else if (roll < 65) k = EntityKind::Snake;
-                else if (roll < 80) k = EntityKind::Bat;
-                else k = EntityKind::Wolf;
-            } else if (depth_ <= 6) {
-                // Midgame band (4-6): introduce heavy hitters, but keep variety.
-                if (roll < 12) k = EntityKind::Orc;
-                else if (roll < 22) k = EntityKind::SkeletonArcher;
-                else if (roll < 32) k = EntityKind::Spider;
-                else if (roll < 42) k = EntityKind::Wolf;
-                else if (roll < 52) k = EntityKind::Slime;
-                else if (roll < 60) k = EntityKind::Bat;
-                else if (roll < 70) k = EntityKind::Snake;
-                else if (roll < 80) k = EntityKind::KoboldSlinger;
-                else if (roll < 90) k = EntityKind::Troll;
-                else if (roll < 95) k = EntityKind::Ogre;
-                else if (roll < 98) k = (depth_ >= 6 ? EntityKind::Mimic : EntityKind::Wizard);
-                else k = EntityKind::Leprechaun;
-            } else {
-                // Deep band (7+): higher threat density and occasional rarities.
-                if (roll < 12) k = EntityKind::Orc;
-                else if (roll < 24) k = EntityKind::SkeletonArcher;
-                else if (roll < 34) k = EntityKind::Spider;
-                else if (roll < 46) k = EntityKind::Troll;
-                else if (roll < 56) k = EntityKind::Ogre;
-                else if (roll < 66) k = EntityKind::Mimic;
-                else if (roll < 76) k = EntityKind::Wizard;
-                else if (roll < 86) k = EntityKind::Wolf;
-                else if (roll < 92) k = EntityKind::KoboldSlinger;
-                else if (roll < 96) k = EntityKind::Slime;
-                else if (roll < 98) k = EntityKind::Snake;
-                else if (roll < 99) k = EntityKind::Leprechaun;
-                else {
-                    // Keep Minotaurs rare and avoid spawning extras on the final floor.
-                    if (depth_ < QUEST_DEPTH && depth_ >= 8) k = EntityKind::Minotaur;
-                    else k = EntityKind::Bat;
-                }
-            }
+            EntityKind k = pickSpawnMonster(SpawnCategory::Room, rng, depth_);
 
             if (k == EntityKind::Wolf) {
                 spawnMonster(k, p, nextGroup++);
@@ -245,32 +194,7 @@ void Game::spawnMonsters() {
             int guardians = (r.type == RoomType::Vault) ? rng.range(0, 1) : rng.range(0, 2);
             for (int i = 0; i < guardians; ++i) {
                 Vec2i p = randomFreeTileInRoom(r);
-                EntityKind k = EntityKind::Troll;
-                const int roll = rng.range(0, 99);
-
-                if (depth_ >= 7) {
-                    if (roll < 20) k = EntityKind::Wizard;
-                    else if (roll < 35) k = EntityKind::Ogre;
-                    else if (roll < 50) k = EntityKind::Troll;
-                    else if (roll < 65) k = EntityKind::Mimic;
-                    else if (roll < 72) k = EntityKind::Spider;
-                    else if (roll < 75) {
-                        // Keep Minotaurs off the final floor; the endgame boss is different now.
-                        k = (depth_ == QUEST_DEPTH) ? EntityKind::Troll : EntityKind::Minotaur;
-                    }
-                    else k = EntityKind::SkeletonArcher;
-                } else if (depth_ >= 4) {
-                    if (roll < 25) k = EntityKind::Wizard;
-                    else if (roll < 55) k = EntityKind::Ogre;
-                    else k = EntityKind::Troll;
-                } else if (depth_ == 3) {
-                    if (roll < 25) k = EntityKind::Orc;
-                    else if (roll < 60) k = EntityKind::SkeletonArcher;
-                    else k = EntityKind::Spider;
-                } else {
-                    if (roll < 50) k = EntityKind::Goblin;
-                    else k = EntityKind::Orc;
-                }
+                EntityKind k = pickSpawnMonster(SpawnCategory::Guardian, rng, depth_);
 
                 spawnMonster(k, p, 0);
             }

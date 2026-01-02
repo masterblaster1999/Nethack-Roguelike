@@ -1101,6 +1101,11 @@ void Game::newGame(uint32_t seed) {
     autoStepTimer = 0.0f;
     autoExploreGoalIsLoot = false;
     autoExploreGoalPos = Vec2i{-1, -1};
+    autoExploreGoalIsSearch = false;
+    autoExploreSearchGoalPos = Vec2i{-1, -1};
+    autoExploreSearchTurnsLeft = 0;
+    autoExploreSearchAnnounced = false;
+    autoExploreSearchTriedTurns.assign(MAP_W * MAP_H, 0);
 
     turnCount = 0;
     naturalRegenCounter = 0;
@@ -1540,6 +1545,13 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     autoPathTiles.clear();
     autoPathIndex = 0;
     autoStepTimer = 0.0f;
+    autoExploreGoalIsLoot = false;
+    autoExploreGoalPos = Vec2i{-1, -1};
+    autoExploreGoalIsSearch = false;
+    autoExploreSearchGoalPos = Vec2i{-1, -1};
+    autoExploreSearchTurnsLeft = 0;
+    autoExploreSearchAnnounced = false;
+    autoExploreSearchTriedTurns.assign(MAP_W * MAP_H, 0);
     invOpen = false;
     targeting = false;
     helpOpen = false;
@@ -1808,3 +1820,337 @@ void Game::changeLevel(int newDepth, bool goingDown) {
 }
 
 
+
+
+// -----------------------------------------------------------------------------
+// Determinism hash
+// -----------------------------------------------------------------------------
+//
+// This is used by replay recording/verification to detect divergences in gameplay
+// simulation. It intentionally excludes:
+//   - UI-only state (menus, cursors, message log)
+//   - transient visual FX animation (projectiles/explosions)
+//   - real-time timers (dt-dependent pacing)
+// so that it remains stable across frame rates.
+//
+// The goal is not cryptographic security; it's a fast, deterministic fingerprint.
+namespace {
+struct Hash64 {
+    // FNV-1a 64-bit
+    uint64_t h = 14695981039346656037ULL;
+    static constexpr uint64_t kPrime = 1099511628211ull;
+
+    void addByte(uint8_t b) {
+        h ^= static_cast<uint64_t>(b);
+        h *= kPrime;
+    }
+
+    void addBool(bool v) { addByte(v ? 1u : 0u); }
+    void addU8(uint8_t v) { addByte(v); }
+
+    void addU16(uint16_t v) {
+        addByte(static_cast<uint8_t>(v & 0xFFu));
+        addByte(static_cast<uint8_t>((v >> 8) & 0xFFu));
+    }
+
+    void addU32(uint32_t v) {
+        addByte(static_cast<uint8_t>(v & 0xFFu));
+        addByte(static_cast<uint8_t>((v >> 8) & 0xFFu));
+        addByte(static_cast<uint8_t>((v >> 16) & 0xFFu));
+        addByte(static_cast<uint8_t>((v >> 24) & 0xFFu));
+    }
+
+    void addU64(uint64_t v) {
+        addByte(static_cast<uint8_t>(v & 0xFFull));
+        addByte(static_cast<uint8_t>((v >> 8) & 0xFFull));
+        addByte(static_cast<uint8_t>((v >> 16) & 0xFFull));
+        addByte(static_cast<uint8_t>((v >> 24) & 0xFFull));
+        addByte(static_cast<uint8_t>((v >> 32) & 0xFFull));
+        addByte(static_cast<uint8_t>((v >> 40) & 0xFFull));
+        addByte(static_cast<uint8_t>((v >> 48) & 0xFFull));
+        addByte(static_cast<uint8_t>((v >> 56) & 0xFFull));
+    }
+
+    void addI32(int v) { addU32(static_cast<uint32_t>(v)); }
+    void addSize(size_t v) { addU64(static_cast<uint64_t>(v)); }
+
+    void addVec2(Vec2i p) {
+        addI32(p.x);
+        addI32(p.y);
+    }
+
+    void addString(const std::string& s) {
+        addU32(static_cast<uint32_t>(s.size()));
+        for (unsigned char c : s) addByte(static_cast<uint8_t>(c));
+    }
+
+    template <typename EnumT>
+    void addEnum(EnumT e) {
+        addU32(static_cast<uint32_t>(e));
+    }
+};
+
+static void hashItem(Hash64& hh, const Item& it) {
+    hh.addI32(it.id);
+    hh.addEnum(it.kind);
+    hh.addI32(it.count);
+    hh.addI32(it.charges);
+    hh.addI32(it.enchant);
+    hh.addI32(it.buc);
+    hh.addU32(it.spriteSeed);
+    hh.addI32(it.shopPrice);
+    hh.addI32(it.shopDepth);
+}
+
+static void hashEffects(Hash64& hh, const Effects& ef) {
+    hh.addI32(ef.poisonTurns);
+    hh.addI32(ef.regenTurns);
+    hh.addI32(ef.shieldTurns);
+    hh.addI32(ef.hasteTurns);
+    hh.addI32(ef.visionTurns);
+    hh.addI32(ef.invisTurns);
+    hh.addI32(ef.webTurns);
+    hh.addI32(ef.confusionTurns);
+    hh.addI32(ef.burnTurns);
+}
+
+static void hashEntity(Hash64& hh, const Entity& e) {
+    hh.addI32(e.id);
+    hh.addEnum(e.kind);
+    hh.addVec2(e.pos);
+    hh.addI32(e.hp);
+    hh.addI32(e.hpMax);
+    hh.addI32(e.baseAtk);
+    hh.addI32(e.baseDef);
+
+    hashItem(hh, e.gearMelee);
+    hashItem(hh, e.gearArmor);
+
+    hh.addBool(e.canRanged);
+    hh.addI32(e.rangedRange);
+    hh.addI32(e.rangedAtk);
+    hh.addEnum(e.rangedProjectile);
+    hh.addEnum(e.rangedAmmo);
+    hh.addI32(e.rangedAmmoCount);
+
+    hh.addBool(e.willFlee);
+    hh.addBool(e.packAI);
+    hh.addI32(e.groupId);
+
+    hh.addI32(e.regenChancePct);
+    hh.addI32(e.regenAmount);
+
+    hh.addBool(e.alerted);
+    hh.addVec2(e.lastKnownPlayerPos);
+    hh.addI32(e.lastKnownPlayerAge);
+
+    hashEffects(hh, e.effects);
+
+    hh.addU32(e.spriteSeed);
+
+    hh.addI32(e.speed);
+    hh.addI32(e.energy);
+
+    hh.addBool(e.friendly);
+    hh.addEnum(e.allyOrder);
+
+    hh.addI32(e.stolenGold);
+}
+
+static void hashDungeon(Hash64& hh, const Dungeon& d) {
+    hh.addI32(d.width);
+    hh.addI32(d.height);
+    hh.addVec2(d.stairsUp);
+    hh.addVec2(d.stairsDown);
+
+    // Tiles: type + fog-of-war.
+    hh.addU32(static_cast<uint32_t>(d.tiles.size()));
+    for (const auto& t : d.tiles) {
+        hh.addEnum(t.type);
+        hh.addBool(t.visible);
+        hh.addBool(t.explored);
+    }
+
+    // Rooms: used for special behaviors (shops, shrines, etc.).
+    hh.addU32(static_cast<uint32_t>(d.rooms.size()));
+    for (const auto& r : d.rooms) {
+        hh.addI32(r.x);
+        hh.addI32(r.y);
+        hh.addI32(r.w);
+        hh.addI32(r.h);
+        hh.addEnum(r.type);
+    }
+
+    // bonusLootSpots intentionally excluded: generation-only, not serialized, not gameplay.
+}
+
+static void hashTrap(Hash64& hh, const Trap& t) {
+    hh.addEnum(t.kind);
+    hh.addVec2(t.pos);
+    hh.addBool(t.discovered);
+}
+
+static void hashGroundItem(Hash64& hh, const GroundItem& g) {
+    hashItem(hh, g.item);
+    hh.addVec2(g.pos);
+}
+
+static void hashMapMarker(Hash64& hh, const MapMarker& m) {
+    hh.addVec2(m.pos);
+    hh.addEnum(m.kind);
+    hh.addString(m.label);
+}
+
+static void hashChestContainer(Hash64& hh, const ChestContainer& c) {
+    hh.addI32(c.chestId);
+    hh.addU32(static_cast<uint32_t>(c.items.size()));
+    for (const auto& it : c.items) hashItem(hh, it);
+}
+
+static void hashLevelState(Hash64& hh, const LevelState& ls) {
+    hh.addI32(ls.depth);
+    hashDungeon(hh, ls.dung);
+
+    hh.addU32(static_cast<uint32_t>(ls.monsters.size()));
+    for (const auto& e : ls.monsters) hashEntity(hh, e);
+
+    hh.addU32(static_cast<uint32_t>(ls.ground.size()));
+    for (const auto& g : ls.ground) hashGroundItem(hh, g);
+
+    hh.addU32(static_cast<uint32_t>(ls.traps.size()));
+    for (const auto& t : ls.traps) hashTrap(hh, t);
+
+    hh.addU32(static_cast<uint32_t>(ls.markers.size()));
+    for (const auto& m : ls.markers) hashMapMarker(hh, m);
+
+    hh.addU32(static_cast<uint32_t>(ls.chestContainers.size()));
+    for (const auto& c : ls.chestContainers) hashChestContainer(hh, c);
+
+    hh.addU32(static_cast<uint32_t>(ls.confusionGas.size()));
+    for (uint8_t v : ls.confusionGas) hh.addU8(v);
+
+    hh.addU32(static_cast<uint32_t>(ls.fireField.size()));
+    for (uint8_t v : ls.fireField) hh.addU8(v);
+
+    hh.addU32(static_cast<uint32_t>(ls.scentField.size()));
+    for (uint8_t v : ls.scentField) hh.addU8(v);
+}
+} // namespace
+
+uint64_t Game::determinismHash() const {
+    Hash64 hh;
+
+    // Core run identity.
+    hh.addU32(seed_);
+    hh.addU32(rng.state);
+    hh.addI32(depth_);
+    hh.addI32(maxDepth);
+    hh.addU32(turnCount);
+
+    // Core counters that affect future simulation.
+    hh.addI32(playerId_);
+    hh.addU32(killCount);
+    hh.addI32(naturalRegenCounter);
+    hh.addBool(hastePhase);
+    hh.addBool(gameOver);
+    hh.addBool(gameWon);
+
+    // ID allocation (affects future spawns/loot).
+    hh.addI32(nextEntityId);
+    hh.addI32(nextItemId);
+
+    // Global toggles that affect gameplay.
+    hh.addEnum(autoPickup);
+    hh.addBool(autoExploreSearchEnabled_);
+    hh.addBool(identifyItemsEnabled);
+    hh.addBool(hungerEnabled_);
+    hh.addI32(hunger);
+    hh.addI32(hungerMax);
+    hh.addBool(encumbranceEnabled_);
+    hh.addBool(lightingEnabled_);
+
+    // Endgame escalation.
+    hh.addBool(yendorDoomEnabled_);
+    hh.addBool(yendorDoomActive_);
+    hh.addI32(yendorDoomLevel_);
+    hh.addU32(yendorDoomStartTurn_);
+    hh.addU32(yendorDoomLastPulseTurn_);
+    hh.addU32(yendorDoomLastSpawnTurn_);
+    hh.addI32(yendorDoomMsgStage_);
+
+    // Automation (affects future turns without further player input).
+    hh.addEnum(autoMode);
+    hh.addU32(static_cast<uint32_t>(autoPathTiles.size()));
+    for (const auto& p : autoPathTiles) hh.addVec2(p);
+    hh.addSize(autoPathIndex);
+    hh.addU32(static_cast<uint32_t>(autoStepDelayMs()));
+
+    hh.addBool(autoExploreGoalIsLoot);
+    hh.addVec2(autoExploreGoalPos);
+    hh.addBool(autoExploreGoalIsSearch);
+    hh.addVec2(autoExploreSearchGoalPos);
+    hh.addI32(autoExploreSearchTurnsLeft);
+    hh.addBool(autoExploreSearchAnnounced);
+    hh.addU32(static_cast<uint32_t>(autoExploreSearchTriedTurns.size()));
+    for (uint8_t v : autoExploreSearchTriedTurns) hh.addU8(v);
+
+    // Player progression.
+    hh.addEnum(playerClass_);
+    hh.addI32(charLevel);
+    hh.addI32(xp);
+    hh.addI32(xpNext);
+    hh.addI32(talentMight_);
+    hh.addI32(talentAgility_);
+    hh.addI32(talentVigor_);
+    hh.addI32(talentFocus_);
+    hh.addI32(talentPointsPending_);
+
+    // Inventory + equipment.
+    hh.addU32(static_cast<uint32_t>(inv.size()));
+    for (const auto& it : inv) hashItem(hh, it);
+    hh.addI32(equipMeleeId);
+    hh.addI32(equipRangedId);
+    hh.addI32(equipRing1Id);
+    hh.addI32(equipRing2Id);
+    hh.addI32(equipArmorId);
+
+    // Identification tables.
+    for (uint8_t v : identKnown) hh.addU8(v);
+    for (uint8_t v : identAppearance) hh.addU8(v);
+
+    // Current level: dungeon, entities, items, traps, markers, fields.
+    hashDungeon(hh, dung);
+
+    hh.addU32(static_cast<uint32_t>(ents.size()));
+    for (const auto& e : ents) hashEntity(hh, e);
+
+    hh.addU32(static_cast<uint32_t>(ground.size()));
+    for (const auto& g : ground) hashGroundItem(hh, g);
+
+    hh.addU32(static_cast<uint32_t>(trapsCur.size()));
+    for (const auto& t : trapsCur) hashTrap(hh, t);
+
+    hh.addU32(static_cast<uint32_t>(mapMarkers_.size()));
+    for (const auto& m : mapMarkers_) hashMapMarker(hh, m);
+
+    hh.addU32(static_cast<uint32_t>(chestContainers_.size()));
+    for (const auto& c : chestContainers_) hashChestContainer(hh, c);
+
+    hh.addU32(static_cast<uint32_t>(confusionGas_.size()));
+    for (uint8_t v : confusionGas_) hh.addU8(v);
+
+    hh.addU32(static_cast<uint32_t>(fireField_.size()));
+    for (uint8_t v : fireField_) hh.addU8(v);
+
+    hh.addU32(static_cast<uint32_t>(scentField_.size()));
+    for (uint8_t v : scentField_) hh.addU8(v);
+
+    // Persisted off-screen levels.
+    hh.addU32(static_cast<uint32_t>(levels.size()));
+    for (const auto& kv : levels) {
+        hh.addI32(kv.first);
+        hashLevelState(hh, kv.second);
+    }
+
+    return hh.h;
+}

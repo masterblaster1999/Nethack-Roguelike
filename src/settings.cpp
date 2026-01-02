@@ -221,6 +221,9 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "auto_step_delay_ms") {
             int v = 0;
             if (parseInt(val, v)) s.autoStepDelayMs = std::clamp(v, 10, 500);
+        } else if (key == "auto_explore_search") {
+            bool b = false;
+            if (parseBool(val, b)) s.autoExploreSearch = b;
         } else if (key == "auto_pickup") {
             std::string v = toLower(val);
             if (v == "off") s.autoPickup = AutoPickupMode::Off;
@@ -338,6 +341,8 @@ control_preset = modern
 auto_pickup = gold
 # auto_step_delay_ms: 10..500 (lower = faster auto-move)
 auto_step_delay_ms = 45
+# auto_explore_search: true/false (auto-explore will search dead ends for secret doors)
+auto_explore_search = false
 
 # Safety
 # confirm_quit: true/false (true = ESC twice to quit)

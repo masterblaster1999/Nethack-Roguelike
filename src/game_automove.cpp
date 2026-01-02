@@ -12,6 +12,14 @@ void Game::stopAutoMove(bool silent) {
     autoPathIndex = 0;
     autoStepTimer = 0.0f;
 
+    // Clear auto-explore sub-goals/state.
+    autoExploreGoalIsLoot = false;
+    autoExploreGoalPos = Vec2i{-1, -1};
+    autoExploreGoalIsSearch = false;
+    autoExploreSearchGoalPos = Vec2i{-1, -1};
+    autoExploreSearchTurnsLeft = 0;
+    autoExploreSearchAnnounced = false;
+
     if (!silent) {
         pushMsg("AUTO-MOVE: OFF.", MessageKind::System);
     }
@@ -205,6 +213,127 @@ bool Game::stepAutoMove() {
         return false;
     }
 
+    // Auto-explore: optional secret-hunting pass. If we're at a chosen search spot, spend turns searching
+    // before declaring the floor fully explored.
+    if (autoMode == AutoMoveMode::Explore && autoExploreGoalIsSearch && player().pos == autoExploreSearchGoalPos) {
+        // Lazily size the per-tile search budget grid (not serialized; purely transient).
+        if (autoExploreSearchTriedTurns.size() != MAP_W * MAP_H) {
+            autoExploreSearchTriedTurns.assign(MAP_W * MAP_H, 0);
+        }
+
+        constexpr int kMaxSearchTurnsPerSpot = 4;
+
+        const Vec2i here = player().pos;
+        const int idx = here.y * MAP_W + here.x;
+        const int tried = (idx >= 0 && static_cast<size_t>(idx) < autoExploreSearchTriedTurns.size())
+                              ? static_cast<int>(autoExploreSearchTriedTurns[static_cast<size_t>(idx)])
+                              : 0;
+
+        if (autoExploreSearchTurnsLeft <= 0) {
+            const int remaining = kMaxSearchTurnsPerSpot - tried;
+            if (remaining <= 0) {
+                // This spot is exhausted; clear the goal and continue selecting other targets.
+                autoExploreGoalIsSearch = false;
+                autoExploreSearchGoalPos = Vec2i{-1, -1};
+                autoExploreSearchTurnsLeft = 0;
+
+                // Clear any stale path and build the next explore target (frontier or another search spot).
+                autoPathTiles.clear();
+                autoPathIndex = 0;
+
+                if (!buildAutoExplorePath()) {
+                    pushMsg("FLOOR FULLY EXPLORED.", MessageKind::System);
+                    stopAutoMove(true);
+                    return false;
+                }
+                return true;
+            }
+
+            // Announce once per "secret hunting" stretch so the player understands why we're pausing.
+            if (!autoExploreSearchAnnounced) {
+                pushMsg("AUTO-EXPLORE: SEARCHING FOR SECRETS...", MessageKind::System);
+                autoExploreSearchAnnounced = true;
+            }
+
+            autoExploreSearchTurnsLeft = remaining;
+        }
+
+        Entity& p = playerMut();
+        const int hpBefore = p.hp;
+        const int poisonBefore = p.effects.poisonTurns;
+        const int webBefore = p.effects.webTurns;
+        const int confBefore = p.effects.confusionTurns;
+        const int burnBefore = p.effects.burnTurns;
+
+        int foundTraps = 0;
+        int foundSecrets = 0;
+        searchForTraps(/*verbose*/false, &foundTraps, &foundSecrets);
+
+        if (idx >= 0 && static_cast<size_t>(idx) < autoExploreSearchTriedTurns.size()) {
+            uint8_t& counter = autoExploreSearchTriedTurns[static_cast<size_t>(idx)];
+            if (counter < 255) counter++;
+        }
+
+        autoExploreSearchTurnsLeft--;
+
+        advanceAfterPlayerAction();
+
+        // Post-action safety stops (monsters can act during the turn we just spent searching).
+        if (hungerEnabled_ && hungerStateFor(hunger, hungerMax) >= 2) {
+            pushMsg("AUTO-MOVE STOPPED (YOU ARE STARVING).", MessageKind::Warning);
+            stopAutoMove(true);
+            return false;
+        }
+        if (p.hp < hpBefore) {
+            pushMsg("AUTO-MOVE STOPPED (YOU TOOK DAMAGE).", MessageKind::Warning);
+            stopAutoMove(true);
+            return false;
+        }
+        if (p.effects.poisonTurns > poisonBefore) {
+            pushMsg("AUTO-MOVE STOPPED (YOU WERE POISONED).", MessageKind::Warning);
+            stopAutoMove(true);
+            return false;
+        }
+        if (p.effects.webTurns > webBefore) {
+            pushMsg("AUTO-MOVE STOPPED (YOU WERE WEBBED).", MessageKind::Warning);
+            stopAutoMove(true);
+            return false;
+        }
+        if (p.effects.confusionTurns > confBefore) {
+            pushMsg("AUTO-MOVE STOPPED (YOU WERE CONFUSED).", MessageKind::Warning);
+            stopAutoMove(true);
+            return false;
+        }
+        if (p.effects.burnTurns > burnBefore) {
+            pushMsg("AUTO-MOVE STOPPED (YOU CAUGHT FIRE).", MessageKind::Warning);
+            stopAutoMove(true);
+            return false;
+        }
+
+        if ((foundTraps + foundSecrets) > 0) {
+            pushMsg(formatSearchDiscoveryMessage(foundTraps, foundSecrets), MessageKind::Info, true);
+        }
+
+        // If we found a secret, the world just changed (new door/frontier). Re-plan immediately.
+        if (foundSecrets > 0 || autoExploreSearchTurnsLeft <= 0) {
+            autoExploreGoalIsSearch = false;
+            autoExploreSearchGoalPos = Vec2i{-1, -1};
+            autoExploreSearchTurnsLeft = 0;
+
+            // Clear stale path and build the next explore target (frontier or another search spot).
+            autoPathTiles.clear();
+            autoPathIndex = 0;
+
+            if (!buildAutoExplorePath()) {
+                pushMsg("FLOOR FULLY EXPLORED.", MessageKind::System);
+                stopAutoMove(true);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     // In auto-explore mode, if we see "interesting" loot that won't be auto-picked, retarget toward it and
     // stop when we arrive. This is less jarring than stopping immediately on sight.
     if (autoMode == AutoMoveMode::Explore) {
@@ -251,6 +380,11 @@ bool Game::stepAutoMove() {
                 autoExploreGoalIsLoot = true;
                 autoExploreGoalPos = bestPos;
 
+                // Cancel any secret-search sub-goal when we decide to go pick up loot.
+                autoExploreGoalIsSearch = false;
+                autoExploreSearchGoalPos = Vec2i{-1, -1};
+                autoExploreSearchTurnsLeft = 0;
+
                 pushMsg((bestPri == 0) ? "AUTO-EXPLORE: TARGETING CHEST." : "AUTO-EXPLORE: TARGETING LOOT.",
                         MessageKind::System);
             }
@@ -276,7 +410,8 @@ bool Game::stepAutoMove() {
 
     if (autoPathIndex >= autoPathTiles.size()) return false;
 
-    Entity& p = playerMut();    const Vec2i next = autoPathTiles[autoPathIndex];
+    Entity& p = playerMut();
+    const Vec2i next = autoPathTiles[autoPathIndex];
 
     // Sanity: we expect a 4-neighbor path.
     if (!isAdjacent8(p.pos, next)) {
@@ -369,18 +504,6 @@ bool Game::stepAutoMove() {
         return false;
     }
 
-    if (p.effects.burnTurns > burnBefore) {
-        pushMsg("AUTO-MOVE STOPPED (YOU CAUGHT FIRE).", MessageKind::Warning);
-        stopAutoMove(true);
-        return false;
-    }
-
-    if (p.effects.burnTurns > burnBefore) {
-        pushMsg("AUTO-MOVE STOPPED (YOU CAUGHT FIRE).", MessageKind::Warning);
-        stopAutoMove(true);
-        return false;
-    }
-
     // If we were auto-exploring toward loot, stop once we arrive (so the player can decide what to do).
     if (autoMode == AutoMoveMode::Explore && autoExploreGoalIsLoot && p.pos == autoExploreGoalPos) {
         if (tileHasAutoExploreLoot(p.pos)) {
@@ -427,9 +550,38 @@ bool Game::buildAutoExplorePath() {
     autoExploreGoalIsLoot = false;
     autoExploreGoalPos = Vec2i{-1, -1};
 
+    // Clear any stale search goal when replanning.
+    autoExploreGoalIsSearch = false;
+    autoExploreSearchGoalPos = Vec2i{-1, -1};
+    autoExploreSearchTurnsLeft = 0;
+
     Vec2i goal = findNearestExploreFrontier();
-    if (goal.x < 0 || goal.y < 0) return false;
-    return buildAutoTravelPath(goal, /*requireExplored*/true);
+    if (goal.x >= 0 && goal.y >= 0) {
+        // We have something "normal" to do again; reset the secret-hunt announcement.
+        autoExploreSearchAnnounced = false;
+        return buildAutoTravelPath(goal, /*requireExplored*/true);
+    }
+
+    // Optional: when the floor appears fully explored, walk to dead-ends/corridor corners and spend a few
+    // turns searching for secret doors before giving up.
+    if (!autoExploreSearchEnabled_) return false;
+
+    Vec2i searchGoal = findNearestExploreSearchSpot();
+    if (searchGoal.x < 0 || searchGoal.y < 0) return false;
+
+    autoExploreGoalIsSearch = true;
+    autoExploreSearchGoalPos = searchGoal;
+    autoExploreSearchTurnsLeft = 0; // initialized when we arrive
+
+    if (searchGoal == player().pos) {
+        // We are already standing on a candidate search tile; no travel path required.
+        autoPathTiles.clear();
+        autoPathIndex = 0;
+        autoStepTimer = 0.0f;
+        return true;
+    }
+
+    return buildAutoTravelPath(searchGoal, /*requireExplored*/true);
 }
 
 Vec2i Game::findNearestExploreFrontier() const {
@@ -505,6 +657,132 @@ Vec2i Game::findNearestExploreFrontier() const {
                 if (occ->id != playerId_ && !occ->friendly) continue;
             }
 
+            visited[ii] = 1;
+            q.push_back({nx, ny});
+        }
+    }
+
+    return {-1, -1};
+}
+
+Vec2i Game::findNearestExploreSearchSpot() const {
+    constexpr int kMaxSearchTurnsPerSpot = 4;
+
+    const Vec2i start = player().pos;
+    const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
+
+    auto idxOf = [](int x, int y) { return y * MAP_W + x; };
+
+    auto isKnownTrap = [&](int x, int y) {
+        for (const Trap& t : trapsCur) {
+            if (t.pos.x == x && t.pos.y == y && t.discovered) return true;
+        }
+        return false;
+    };
+
+    auto passable = [&](int x, int y) {
+        if (!dung.inBounds(x, y)) return false;
+        if (!dung.at(x, y).explored) return false;
+
+        // Treat locked doors as passable if we can actually unlock them.
+        if (!dung.isPassable(x, y)) {
+            if (!(canUnlockDoors && dung.at(x, y).type == TileType::DoorLocked)) return false;
+        }
+
+        if (isKnownTrap(x, y)) return false;
+        if (fireAt(x, y) > 0u) return false;
+
+        if (const Entity* occ = entityAt(x, y)) {
+            if (occ->id != playerId_ && !occ->friendly) return false;
+        }
+
+        return true;
+    };
+
+    auto isValidSearchSpot = [&](int x, int y) {
+        if (!dung.inBounds(x, y)) return false;
+        const Tile& t = dung.at(x, y);
+        if (!t.explored) return false;
+        if (!passable(x, y)) return false;
+        if (isKnownTrap(x, y)) return false;
+        if (fireAt(x, y) > 0u) return false;
+
+        const int ii = idxOf(x, y);
+        const int tried = (ii >= 0 && static_cast<size_t>(ii) < autoExploreSearchTriedTurns.size())
+                              ? static_cast<int>(autoExploreSearchTriedTurns[static_cast<size_t>(ii)])
+                              : 0;
+        if (tried >= kMaxSearchTurnsPerSpot) return false;
+
+        if (const Entity* occ = entityAt(x, y)) {
+            if (occ->id != playerId_ && !occ->friendly) return false;
+        }
+
+        // Corridor geometry heuristic:
+        // - Dead ends are strong candidates.
+        // - Tight corners (L-bends in corridors) are moderate candidates.
+        // We intentionally avoid using hidden knowledge (e.g., the presence of a DoorSecret tile).
+        const bool n = passable(x, y - 1);
+        const bool s = passable(x, y + 1);
+        const bool w = passable(x - 1, y);
+        const bool e = passable(x + 1, y);
+        const int pass4 = (int)n + (int)s + (int)w + (int)e;
+
+        if (pass4 <= 1) return true;
+
+        if (pass4 == 2) {
+            // Exclude straight corridors; only corners.
+            if ((n && s) || (e && w)) return false;
+
+            // Exclude roomy corners (e.g., room interiors) by requiring a very tight 8-neighborhood.
+            int pass8 = 0;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
+                    if (passable(x + dx, y + dy)) pass8++;
+                }
+            }
+            if (pass8 <= 2) return true;
+        }
+
+        return false;
+    };
+
+    std::vector<uint8_t> visited(MAP_W * MAP_H, 0);
+    std::deque<Vec2i> q;
+    visited[idxOf(start.x, start.y)] = 1;
+    q.push_back(start);
+
+    static constexpr int kDirs8[8][2] = {
+        {1, 0},
+        {-1, 0},
+        {0, 1},
+        {0, -1},
+        {1, 1},
+        {1, -1},
+        {-1, 1},
+        {-1, -1},
+    };
+
+    while (!q.empty()) {
+        const Vec2i cur = q.front();
+        q.pop_front();
+
+        if (isValidSearchSpot(cur.x, cur.y)) {
+            return cur;
+        }
+
+        for (int i = 0; i < 8; ++i) {
+            const int dx = kDirs8[i][0];
+            const int dy = kDirs8[i][1];
+            const int nx = cur.x + dx;
+            const int ny = cur.y + dy;
+
+            if (!dung.inBounds(nx, ny)) continue;
+            if (!passable(nx, ny)) continue;
+            if (!diagonalPassable(dung, cur, dx, dy)) continue;
+
+            const int ii = idxOf(nx, ny);
+            if (visited[ii]) continue;
             visited[ii] = 1;
             q.push_back({nx, ny});
         }
@@ -592,4 +870,3 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
 
     return dijkstraPath(MAP_W, MAP_H, start, goal, passable, stepCost, diagOk);
 }
-

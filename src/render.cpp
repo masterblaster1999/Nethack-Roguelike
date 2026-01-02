@@ -4,6 +4,7 @@
 #include "version.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iostream>
 #include <sstream>
@@ -1913,6 +1914,10 @@ void Renderer::render(const Game& game) {
         drawOptionsOverlay(game);
     }
 
+    if (game.isKeybindsOpen()) {
+        drawKeybindsOverlay(game);
+    }
+
     if (game.isHelpOpen()) {
         drawHelpOverlay(game);
     }
@@ -2721,26 +2726,124 @@ void Renderer::drawOptionsOverlay(const Game& game) {
 
     drawOpt(0, "AUTO-PICKUP", autoPickupLabel(game.autoPickupMode()));
     drawOpt(1, "AUTO-STEP DELAY", std::to_string(game.autoStepDelayMs()) + "ms");
-    drawOpt(2, "AUTOSAVE", (game.autosaveEveryTurns() > 0 ? ("EVERY " + std::to_string(game.autosaveEveryTurns()) + " TURNS") : "OFF"));
-    drawOpt(3, "IDENTIFY ITEMS", yesNo(game.identificationEnabled()));
-    drawOpt(4, "HUNGER SYSTEM", yesNo(game.hungerEnabled()));
-    drawOpt(5, "ENCUMBRANCE", yesNo(game.encumbranceEnabled()));
-    drawOpt(6, "LIGHTING", yesNo(game.lightingEnabled()));
-    drawOpt(7, "YENDOR DOOM", yesNo(game.yendorDoomEnabled()));
-    drawOpt(8, "EFFECT TIMERS", yesNo(game.showEffectTimers()));
-    drawOpt(9, "CONFIRM QUIT", yesNo(game.confirmQuitEnabled()));
-    drawOpt(10, "AUTO MORTEM", yesNo(game.autoMortemEnabled()));
-    drawOpt(11, "BONES FILES", yesNo(game.bonesEnabled()));
-    drawOpt(12, "SAVE BACKUPS", (game.saveBackups() > 0 ? std::to_string(game.saveBackups()) : "OFF"));
-    drawOpt(13, "UI THEME", uiThemeLabel(game.uiTheme()));
-    drawOpt(14, "UI PANELS", (game.uiPanelsTextured() ? "TEXTURED" : "SOLID"));
-    drawOpt(15, "3D SPRITES", yesNo(game.voxelSpritesEnabled()));
-    drawOpt(16, "CONTROL PRESET", game.controlPresetDisplayName());
-    drawOpt(17, "CLOSE", "");
+    drawOpt(2, "AUTO-EXPLORE SEARCH", yesNo(game.autoExploreSearchEnabled()));
+    drawOpt(3, "AUTOSAVE", (game.autosaveEveryTurns() > 0 ? ("EVERY " + std::to_string(game.autosaveEveryTurns()) + " TURNS") : "OFF"));
+    drawOpt(4, "IDENTIFY ITEMS", yesNo(game.identificationEnabled()));
+    drawOpt(5, "HUNGER SYSTEM", yesNo(game.hungerEnabled()));
+    drawOpt(6, "ENCUMBRANCE", yesNo(game.encumbranceEnabled()));
+    drawOpt(7, "LIGHTING", yesNo(game.lightingEnabled()));
+    drawOpt(8, "YENDOR DOOM", yesNo(game.yendorDoomEnabled()));
+    drawOpt(9, "EFFECT TIMERS", yesNo(game.showEffectTimers()));
+    drawOpt(10, "CONFIRM QUIT", yesNo(game.confirmQuitEnabled()));
+    drawOpt(11, "AUTO MORTEM", yesNo(game.autoMortemEnabled()));
+    drawOpt(12, "BONES FILES", yesNo(game.bonesEnabled()));
+    drawOpt(13, "SAVE BACKUPS", (game.saveBackups() > 0 ? std::to_string(game.saveBackups()) : "OFF"));
+    drawOpt(14, "UI THEME", uiThemeLabel(game.uiTheme()));
+    drawOpt(15, "UI PANELS", (game.uiPanelsTextured() ? "TEXTURED" : "SOLID"));
+    drawOpt(16, "3D SPRITES", yesNo(game.voxelSpritesEnabled()));
+    drawOpt(17, "CONTROL PRESET", game.controlPresetDisplayName());
+    drawOpt(18, "KEYBINDS", "");
+    drawOpt(19, "CLOSE", "");
 
     y += 14;
     drawText5x7(renderer, x0 + 16, y, scale, gray,
-        "LEFT/RIGHT: change | ENTER: toggle/next | ESC: close");
+        "LEFT/RIGHT: change | ENTER: toggle/next/open | ESC: close");
+}
+
+void Renderer::drawKeybindsOverlay(const Game& game) {
+    const int panelW = std::min(winW - 80, 980);
+    const int panelH = std::min(winH - 80, 640);
+    const int x0 = (winW - panelW) / 2;
+    const int y0 = (winH - panelH) / 2;
+
+    SDL_Rect bg{x0, y0, panelW, panelH};
+    drawPanel(game, bg, 220, lastFrame);
+
+    const Color white{240, 240, 240, 255};
+    const Color gray{160, 160, 160, 255};
+    const Color yellow{255, 230, 120, 255};
+    const Color warn{255, 170, 120, 255};
+
+    const int scale = 2;
+
+    int y = y0 + 16;
+    drawText5x7(renderer, x0 + 16, y, scale, yellow, "KEYBINDS");
+    y += 24;
+
+    const auto& rows = game.keybindsDescription();
+    const int n = static_cast<int>(rows.size());
+    const int sel = game.keybindsSelection();
+    const int scroll = game.keybindsScroll();
+
+    auto upperSpaces = [&](std::string s) {
+        for (char& ch : s) {
+            if (ch == '_') ch = ' ';
+            else ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        }
+        return s;
+    };
+
+    auto fit = [&](const std::string& s, int maxChars) -> std::string {
+        if (maxChars <= 0) return "";
+        if (static_cast<int>(s.size()) <= maxChars) return s;
+        if (maxChars <= 3) return s.substr(0, maxChars);
+        return s.substr(0, maxChars - 3) + "...";
+    };
+
+    const int lineH = 18;
+    const int footerH = 54;
+    const int headerPad = 8;
+    const int listTop = y + headerPad;
+    const int listH = panelH - (listTop - y0) - footerH;
+    const int visibleRows = std::max(1, listH / lineH);
+
+    const int start = clampi(scroll, 0, std::max(0, n - visibleRows));
+    int yy = listTop;
+
+    if (n <= 0) {
+        drawText5x7(renderer, x0 + 16, yy, scale, warn, "NO KEYBINDS DATA (TRY REOPENING OPTIONS).");
+    } else {
+        // Column sizing (monospace-ish 5x7): ~6px per char at scale1.
+        const int maxCharsTotal = std::max(0, (panelW - 32) / (6 * scale));
+        const int labelChars = 20;
+        const int valueChars = std::max(0, maxCharsTotal - 4 - labelChars); // 4 for prefix + spaces
+
+        for (int i = start; i < n && i < start + visibleRows; ++i) {
+            const Color c = (i == sel) ? white : gray;
+            std::string label = upperSpaces(rows[i].first);
+            std::string val = rows[i].second;
+
+            // Build a padded label column for alignment.
+            label = fit(label, labelChars);
+            if (static_cast<int>(label.size()) < labelChars) {
+                label += std::string(labelChars - label.size(), ' ');
+            }
+
+            const std::string prefix = (i == sel) ? "> " : "  ";
+            const std::string line = prefix + label + " : " + fit(val, valueChars);
+
+            drawText5x7(renderer, x0 + 16, yy, scale, c, line);
+            yy += lineH;
+        }
+    }
+
+    // Footer / instructions
+    int fy = y0 + panelH - footerH + 10;
+    drawText5x7(renderer, x0 + 16, fy, 1, gray,
+        "UP/DOWN SELECT  ENTER REBIND  RIGHT ADD  LEFT RESET  ESC BACK");
+
+    fy += 16;
+
+    if (game.isKeybindsCapturing()) {
+        const int capIdx = game.keybindsCaptureActionIndex();
+        std::string target = "UNKNOWN";
+        if (capIdx >= 0 && capIdx < n) target = upperSpaces(rows[capIdx].first);
+
+        std::string mode = game.keybindsCaptureAddMode() ? "ADD" : "REPLACE";
+        drawText5x7(renderer, x0 + 16, fy, 2, warn, "PRESS KEY: " + target + " (" + mode + ")");
+    } else {
+        drawText5x7(renderer, x0 + 16, fy, 1, gray, "TIP: EXT CMD #bind / #unbind / #binds ALSO AVAILABLE");
+    }
 }
 
 void Renderer::drawCommandOverlay(const Game& game) {

@@ -1,4 +1,5 @@
 #include "items.hpp"
+#include "content.hpp"
 #include <algorithm>
 #include <sstream>
 
@@ -37,7 +38,7 @@ std::string pluralizeStackableName(ItemKind kind, const char* name, int count) {
 
 const ItemDef& itemDef(ItemKind k) {
     // Keep in sync with enum ordering.
-    static const ItemDef defs[] = {
+    static const ItemDef baseDefs[] = {
         // Weapons
         { ItemKind::Dagger,         "DAGGER",            false, false, false, EquipSlot::MeleeWeapon,  1, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 10, 8 },
         { ItemKind::Sword,          "SWORD",             false, false, false, EquipSlot::MeleeWeapon,  2, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 20, 20 },
@@ -135,8 +136,51 @@ const ItemDef& itemDef(ItemKind k) {
         { ItemKind::RingProtection,   "RING OF PROTECTION", false, false, false, EquipSlot::Ring,       0, 0, 1, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0, 0, 1, 190, 0, 0, 0, 0 },
     };
 
+    static std::vector<ItemDef> defs;
+    static uint32_t appliedGen = 0;
+
+    const uint32_t gen = contentOverridesGeneration();
+    if (defs.empty() || appliedGen != gen) {
+        defs.assign(baseDefs, baseDefs + (sizeof(baseDefs) / sizeof(baseDefs[0])));
+
+        // Apply optional balance/content overrides (runtime).
+        const auto& ovs = contentOverrides().items;
+        for (const auto& kv : ovs) {
+            const ItemKind kind = kv.first;
+            const ItemDefOverride& o = kv.second;
+            const size_t j = static_cast<size_t>(kind);
+            if (j >= defs.size()) continue;
+            ItemDef& d = defs[j];
+            if (d.kind != kind) continue;
+
+            if (o.meleeAtk) d.meleeAtk = *o.meleeAtk;
+            if (o.rangedAtk) d.rangedAtk = *o.rangedAtk;
+            if (o.defense) d.defense = *o.defense;
+            if (o.range) d.range = *o.range;
+            if (o.maxCharges) d.maxCharges = *o.maxCharges;
+            if (o.healAmount) d.healAmount = *o.healAmount;
+            if (o.hungerRestore) d.hungerRestore = *o.hungerRestore;
+            if (o.weight) d.weight = *o.weight;
+            if (o.value) d.value = *o.value;
+            if (o.modMight) d.modMight = *o.modMight;
+            if (o.modAgility) d.modAgility = *o.modAgility;
+            if (o.modVigor) d.modVigor = *o.modVigor;
+            if (o.modFocus) d.modFocus = *o.modFocus;
+
+            // Basic safety clamps.
+            d.range = std::max(0, d.range);
+            d.maxCharges = std::max(0, d.maxCharges);
+            d.healAmount = std::max(0, d.healAmount);
+            d.hungerRestore = std::max(0, d.hungerRestore);
+            d.weight = std::max(0, d.weight);
+            d.value = std::max(0, d.value);
+        }
+
+        appliedGen = gen;
+    }
+
     const size_t idx = static_cast<size_t>(k);
-    if (idx >= (sizeof(defs) / sizeof(defs[0]))) {
+    if (idx >= defs.size()) {
         return defs[0];
     }
     return defs[idx];

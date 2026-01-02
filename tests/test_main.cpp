@@ -8,6 +8,10 @@
 #include "scores.hpp"
 #include "settings.hpp"
 #include "slot_utils.hpp"
+#include "replay.hpp"
+#include "replay_runner.hpp"
+#include "content.hpp"
+#include "version.hpp"
 
 #include <cstdint>
 #include <cctype>
@@ -1110,7 +1114,8 @@ void test_settings_writeDefaultSettings_creates_parent_dirs() {
     expect(fs::exists(file), "writeDefaultSettings should create the settings file");
 
     Settings s = loadSettings(file.string());
-    expect(s.tileSize == 32, "writeDefaultSettings should write defaults (tile_size=32)");
+    Settings defaults;
+    expect(s.tileSize == defaults.tileSize, "writeDefaultSettings should write defaults (tile_size)");
     expect(s.playerName == "PLAYER", "writeDefaultSettings should write defaults (player_name=PLAYER)");
 
     fs::remove_all(root, ec);
@@ -1656,6 +1661,223 @@ void test_monster_energy_scheduling_basic() {
     }
 }
 
+void test_replay_roundtrip_basic() {
+    // Basic sanity: write a replay file, read it back, verify meta + events.
+    const std::filesystem::path p = std::filesystem::temp_directory_path() / "procrogue_replay_test.prr";
+
+    {
+        std::error_code ec;
+        std::filesystem::remove(p, ec);
+    }
+
+    ReplayMeta meta;
+    meta.gameVersion = "unit_test";
+    meta.seed = 123456u;
+    meta.playerClassId = "adventurer";
+    meta.autoStepDelayMs = 70;
+    meta.autoExploreSearch = true;
+    meta.autoPickup = AutoPickupMode::Smart;
+    meta.identifyItems = true;
+    meta.hungerEnabled = true;
+    meta.encumbranceEnabled = false;
+    meta.lightingEnabled = true;
+    meta.yendorDoomEnabled = false;
+    meta.bonesEnabled = false;
+
+    {
+        ReplayWriter w;
+        std::string err;
+        expect(w.open(p, meta, &err), "ReplayWriter.open should succeed");
+
+        w.writeAction(0, Action::Left);
+        w.writeStateHash(1, 0, 0x0123456789abcdefULL);
+        w.writeAction(5, Action::Rest);
+        w.writeStateHash(6, 1, 0xfedcba9876543210ULL);
+        w.writeTextInput(10, "hello world");
+        w.writeCommandBackspace(15);
+        w.writeCommandAutocomplete(20);
+        w.writeHistoryToggleSearch(25);
+        w.writeHistoryClearSearch(30);
+        w.writeHistoryBackspace(35);
+        w.writeAutoTravel(40, Vec2i{12, 34});
+        w.writeBeginLook(45, Vec2i{9, 8});
+        w.writeTargetCursor(50, Vec2i{1, 2});
+        w.writeLookCursor(55, Vec2i{3, 4});
+
+        w.close();
+    }
+
+    ReplayFile rf;
+    {
+        std::string err;
+        expect(loadReplayFile(p, rf, &err), "loadReplayFile should succeed");
+    }
+
+    expect(rf.meta.seed == meta.seed, "Replay meta seed should roundtrip");
+    expect(rf.meta.playerClassId == meta.playerClassId, "Replay meta class should roundtrip");
+    expect(rf.meta.autoStepDelayMs == meta.autoStepDelayMs, "Replay meta autoStepDelayMs should roundtrip");
+    expect(rf.meta.autoExploreSearch == meta.autoExploreSearch, "Replay meta autoExploreSearch should roundtrip");
+    expect(rf.meta.autoPickup == meta.autoPickup, "Replay meta autoPickup should roundtrip");
+    expect(rf.events.size() == size_t(14), "Replay should load expected number of events");
+
+    expect(rf.events[0].kind == ReplayEventType::Action && rf.events[0].action == Action::Left, "Event 0 should be Action::Left");
+    expect(rf.events[1].kind == ReplayEventType::StateHash && rf.events[1].turn == 0u && rf.events[1].hash == 0x0123456789abcdefULL, "Event 1 should be the initial state hash");
+    expect(rf.events[3].kind == ReplayEventType::StateHash && rf.events[3].turn == 1u && rf.events[3].hash == 0xfedcba9876543210ULL, "Event 3 should be the next state hash");
+    expect(rf.events[4].kind == ReplayEventType::TextInput && rf.events[4].text == "hello world", "Event 4 should be text input");
+    expect(rf.events[10].kind == ReplayEventType::AutoTravel && rf.events[10].pos == Vec2i{12, 34}, "AutoTravel event should roundtrip pos");
+
+    {
+        std::error_code ec;
+        std::filesystem::remove(p, ec);
+    }
+}
+
+void test_headless_replay_runner_verifies_hashes() {
+    // Construct a tiny replay in-memory, where hashes are generated from an initial run,
+    // then verify the headless runner can reproduce it exactly.
+    ReplayFile rf;
+
+    rf.meta.gameVersion = PROCROGUE_VERSION;
+    rf.meta.seed = 123456u;
+    rf.meta.playerClassId = "adventurer";
+    rf.meta.autoPickup = AutoPickupMode::Off;
+    rf.meta.autoStepDelayMs = 45;
+    rf.meta.autoExploreSearch = false;
+    rf.meta.identifyItems = true;
+    rf.meta.hungerEnabled = false;
+    rf.meta.encumbranceEnabled = false;
+    rf.meta.lightingEnabled = false;
+    rf.meta.yendorDoomEnabled = true;
+    rf.meta.bonesEnabled = false;
+
+    // First run: generate expected hashes by actually simulating the actions.
+    {
+        Game g;
+        std::string err;
+        expect(prepareGameForReplay(g, rf, &err), "prepareGameForReplay should succeed (baseline run)");
+
+        uint32_t t = 0;
+
+        // Turn 0 checkpoint.
+        ReplayEvent h0;
+        h0.tMs = t;
+        h0.kind = ReplayEventType::StateHash;
+        h0.turn = g.turns();
+        h0.hash = g.determinismHash();
+        rf.events.push_back(h0);
+
+        const int kSteps = 12;
+        for (int i = 0; i < kSteps; ++i) {
+            t += 10;
+
+            ReplayEvent a;
+            a.tMs = t;
+            a.kind = ReplayEventType::Action;
+            a.action = Action::Wait;
+            rf.events.push_back(a);
+
+            g.handleAction(Action::Wait);
+
+            ReplayEvent h;
+            h.tMs = t;
+            h.kind = ReplayEventType::StateHash;
+            h.turn = g.turns();
+            h.hash = g.determinismHash();
+            rf.events.push_back(h);
+        }
+    }
+
+    // Second run: verify via the headless replay runner.
+    {
+        Game g;
+        std::string err;
+        expect(prepareGameForReplay(g, rf, &err), "prepareGameForReplay should succeed (verify run)");
+
+        ReplayRunOptions opt;
+        opt.frameMs = 16;
+        opt.verifyHashes = true;
+        opt.maxSimMs = 20000;
+        opt.maxFrames = 0;
+
+        ReplayRunStats stats;
+        const bool ok = runReplayHeadless(g, rf, opt, &stats, &err);
+        expect(ok, std::string("runReplayHeadless should succeed: ") + err);
+        expect(stats.turns >= 12u, "runReplayHeadless should advance turns");
+    }
+}
+
+
+
+void test_content_overrides_basic() {
+#if __has_include(<filesystem>)
+    std::filesystem::path p = std::filesystem::temp_directory_path() / "procrogue_test_content.ini";
+    {
+        std::ofstream f(p);
+        expect(bool(f), "Should open temp content ini for writing");
+
+        f << "# ProcRogue test content overrides\n";
+        f << "monster.goblin.hp_max = 42\n";
+        f << "monster.goblin.base_atk = 7\n";
+        f << "monster.goblin.base_def = 5\n";
+        f << "item.dagger.melee_atk = 99\n";
+        f << "spawn.room.1.bat = 1\n";
+        f << "spawn.room.1.goblin = 0\n";
+        f << "spawn.room.1.orc = 0\n";
+        f << "spawn.guardian.1.goblin = 0\n";
+        f << "spawn.guardian.1.orc = 0\n";
+        f << "spawn.guardian.1.bat = 1\n";
+    }
+
+    ContentOverrides co;
+    std::string warns;
+    const bool ok = loadContentOverridesIni(p.string(), co, &warns);
+    expect(ok, "loadContentOverridesIni should succeed for valid file");
+    setContentOverrides(co);
+
+    {
+        const MonsterBaseStats g = baseMonsterStatsFor(EntityKind::Goblin);
+        expect(g.hpMax == 42, "Monster override should change goblin.hpMax");
+        expect(g.baseAtk == 7, "Monster override should change goblin.baseAtk");
+        expect(g.baseDef == 5, "Monster override should change goblin.baseDef");
+    }
+
+    {
+        const ItemDef& d = itemDef(ItemKind::Dagger);
+        expect(d.meleeAtk == 99, "Item override should change dagger.meleeAtk");
+    }
+
+    {
+        RNG rng(123u);
+        for (int i = 0; i < 10; ++i) {
+            const EntityKind k = pickSpawnMonster(SpawnCategory::Room, rng, 1);
+            expect(k == EntityKind::Bat, "Spawn override should force bat-only spawns on room depth 1");
+        }
+    }
+
+    {
+        RNG rng(123u);
+        for (int i = 0; i < 10; ++i) {
+            const EntityKind k = pickSpawnMonster(SpawnCategory::Guardian, rng, 1);
+            expect(k == EntityKind::Bat, "Spawn override should force bat-only spawns on guardian depth 1");
+        }
+    }
+
+    clearContentOverrides();
+
+    {
+        const ItemDef& d = itemDef(ItemKind::Dagger);
+        expect(d.meleeAtk != 99, "Clearing content overrides should restore default dagger.meleeAtk");
+    }
+
+    {
+        std::error_code ec;
+        std::filesystem::remove(p, ec);
+    }
+#else
+    (void)0;
+#endif
+}
+
 
 int main() {
     std::cout << "Running ProcRogue tests...\n";
@@ -1710,6 +1932,9 @@ int main() {
     test_dungeon_digging();
     test_wand_display_shows_charges();
     test_monster_energy_scheduling_basic();
+    test_replay_roundtrip_basic();
+    test_headless_replay_runner_verifies_hashes();
+    test_content_overrides_basic();
 
     if (failures == 0) {
         std::cout << "All tests passed.\n";

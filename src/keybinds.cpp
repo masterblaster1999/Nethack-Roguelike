@@ -622,6 +622,34 @@ static std::string keycodeToToken(SDL_Keycode key) {
     return "unknown";
 }
 
+bool KeyBinds::isModifierKey(SDL_Keycode key) {
+    switch (key) {
+        case SDLK_LSHIFT:
+        case SDLK_RSHIFT:
+        case SDLK_LCTRL:
+        case SDLK_RCTRL:
+        case SDLK_LALT:
+        case SDLK_RALT:
+        case SDLK_LGUI:
+        case SDLK_RGUI:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::string KeyBinds::chordToString(SDL_Keycode key, Uint16 mods) {
+    // NOTE: We intentionally ignore GUI/CAPS/NUM modifiers to match the bind parser.
+    const Uint16 nm = normalizeMods(mods);
+
+    std::string out;
+    if (nm & KMOD_CTRL) out += "ctrl+";
+    if (nm & KMOD_ALT) out += "alt+";
+    if (nm & KMOD_SHIFT) out += "shift+";
+    out += keycodeToToken(key);
+    return out;
+}
+
 static std::string chordToString(const KeyChord& c) {
     std::string out;
     if (c.mods & KMOD_CTRL) out += "ctrl+";

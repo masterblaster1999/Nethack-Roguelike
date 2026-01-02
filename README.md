@@ -247,9 +247,16 @@ Exports (written to your save/config directory):
 
 See `docs/BUILDING.md`.
 
-To build the unit tests:
+To build the unit tests (SDL-free):
 ```bash
-cmake -S . -B build -DPROCROGUE_BUILD_TESTS=ON
+cmake -S . -B build -DPROCROGUE_BUILD_GAME=OFF -DPROCROGUE_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
+```
+
+To verify a replay headlessly (no SDL2 required), build the headless tool:
+```bash
+cmake -S . -B build -DPROCROGUE_BUILD_GAME=OFF -DPROCROGUE_BUILD_HEADLESS=ON
+cmake --build build --target ProcRogueHeadless
+./ProcRogueHeadless --replay your_run.prr
 ```

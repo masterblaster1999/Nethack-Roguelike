@@ -12,6 +12,7 @@
 #include <array>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 enum class EntityKind : uint8_t {
@@ -120,69 +121,10 @@ struct MonsterBaseStats {
 };
 
 // Baseline (unscaled) monster stats/flags per kind.
-inline MonsterBaseStats baseMonsterStatsFor(EntityKind k) {
-    MonsterBaseStats s;
-    switch (k) {
-        case EntityKind::Goblin: s.hpMax = 7; s.baseAtk = 1; s.baseDef = 0; s.willFlee = true; break;
-        case EntityKind::Orc: s.hpMax = 10; s.baseAtk = 2; s.baseDef = 1; s.willFlee = false; break;
-        case EntityKind::Bat: s.hpMax = 5; s.baseAtk = 1; s.baseDef = 0; s.willFlee = true; break;
-        case EntityKind::Slime: s.hpMax = 12; s.baseAtk = 2; s.baseDef = 1; s.willFlee = false; break;
-        case EntityKind::SkeletonArcher:
-            s.hpMax = 9; s.baseAtk = 2; s.baseDef = 1; s.willFlee = false;
-            s.canRanged = true;
-            s.rangedRange = 8;
-            s.rangedAtk = 6;
-            s.rangedProjectile = ProjectileKind::Arrow;
-            s.rangedAmmo = AmmoKind::Arrow;
-            break;
-        case EntityKind::KoboldSlinger:
-            s.hpMax = 8; s.baseAtk = 2; s.baseDef = 0; s.willFlee = true;
-            s.canRanged = true;
-            s.rangedRange = 6;
-            s.rangedAtk = 5;
-            s.rangedProjectile = ProjectileKind::Rock;
-            s.rangedAmmo = AmmoKind::Rock;
-            break;
-        case EntityKind::Wolf:
-            s.hpMax = 6; s.baseAtk = 2; s.baseDef = 0; s.willFlee = false;
-            s.packAI = true;
-            break;
-        case EntityKind::Troll:
-            s.hpMax = 16; s.baseAtk = 4; s.baseDef = 2; s.willFlee = false;
-            s.regenChancePct = 25;
-            s.regenAmount = 1;
-            break;
-        case EntityKind::Wizard:
-            s.hpMax = 12; s.baseAtk = 3; s.baseDef = 1; s.willFlee = false;
-            s.canRanged = true;
-            s.rangedRange = 7;
-            s.rangedAtk = 7;
-            s.rangedProjectile = ProjectileKind::Spark;
-            s.rangedAmmo = AmmoKind::None;
-            break;
-        case EntityKind::Snake: s.hpMax = 7; s.baseAtk = 2; s.baseDef = 0; s.willFlee = false; break;
-        case EntityKind::Spider: s.hpMax = 8; s.baseAtk = 3; s.baseDef = 1; s.willFlee = false; break;
-        case EntityKind::Ogre: s.hpMax = 18; s.baseAtk = 5; s.baseDef = 2; s.willFlee = false; break;
-        case EntityKind::Mimic: s.hpMax = 14; s.baseAtk = 4; s.baseDef = 2; s.willFlee = false; break;
-        case EntityKind::Shopkeeper: s.hpMax = 18; s.baseAtk = 6; s.baseDef = 4; s.willFlee = false; break;
-        case EntityKind::Minotaur: s.hpMax = 38; s.baseAtk = 7; s.baseDef = 3; s.willFlee = false; break;
-        case EntityKind::Dog: s.hpMax = 10; s.baseAtk = 2; s.baseDef = 0; s.willFlee = false; break;
-        case EntityKind::Ghost:
-            s.hpMax = 20; s.baseAtk = 5; s.baseDef = 3; s.willFlee = false;
-            s.regenChancePct = 20;
-            s.regenAmount = 1;
-            break;
-        case EntityKind::Leprechaun:
-            // Fast, fragile thief: relies on stealing and blinking away rather than brawling.
-            s.hpMax = 8; s.baseAtk = 2; s.baseDef = 1; s.willFlee = true;
-            break;
-        default:
-            // Player and unknown kinds fall back to a tame baseline.
-            s.hpMax = 6; s.baseAtk = 1; s.baseDef = 0; s.willFlee = true;
-            break;
-    }
-    return s;
-}
+//
+// NOTE: Implemented in content.cpp so it can be overridden by optional
+// content/balance files at runtime.
+MonsterBaseStats baseMonsterStatsFor(EntityKind k);
 
 inline int monsterDepthScale(EntityKind k, int depth) {
     int d = std::max(0, depth - 1);
@@ -1006,6 +948,24 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     bool isOptionsOpen() const { return optionsOpen; }
     int optionsSelection() const { return optionsSel; }
 
+    // Keybinds overlay (interactive editor; does not consume turns)
+    bool isKeybindsOpen() const { return keybindsOpen; }
+    int keybindsSelection() const { return keybindsSel; }
+    int keybindsScroll() const { return keybindsScroll_; }
+    bool isKeybindsCapturing() const { return keybindsCapture; }
+    bool keybindsCaptureAddMode() const { return keybindsCaptureAdd; }
+    int keybindsCaptureActionIndex() const { return keybindsCaptureIndex; }
+
+    // Cached bindings for the keybinds UI (action name -> chord list).
+    // Filled/updated by the platform layer (main.cpp) after loading keybinds from disk.
+    const std::vector<std::pair<std::string, std::string>>& keybindsDescription() const { return keybindsDesc_; }
+    void setKeybindsDescription(std::vector<std::pair<std::string, std::string>> desc) { keybindsDesc_ = std::move(desc); }
+
+    // Raw keybind editor capture (called by main.cpp while capturing).
+    void keybindsCaptureToken(const std::string& chordToken);
+    void keybindsCancelCapture();
+
+
     // NetHack-like extended command prompt
     bool isCommandOpen() const { return commandOpen; }
     const std::string& commandBuffer() const { return commandBuf; }
@@ -1048,6 +1008,23 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
 
     // Turn counter (increments once per player action that consumes time)
     uint32_t turns() const { return turnCount; }
+
+    // Determinism / replay helpers.
+    // Returns a stable 64-bit hash of simulation-relevant state.
+    //
+    // Intentionally excludes UI-only state, message logs, transient FX animation state,
+    // and real-time timers so it can be used to validate deterministic simulation
+    // across machines/frame rates.
+    uint64_t determinismHash() const;
+
+    // Optional callback invoked once per completed player turn (after the turn counter
+    // increments and end-of-turn logic like monster turns/FOV/effects have been applied).
+    //
+    // Used by the replay recorder/verifier to attach per-turn state hashes without
+    // coupling the core game logic to replay I/O.
+    using TurnHookFn = void(*)(void* user, uint32_t turn, uint64_t stateHash);
+    void setTurnHook(TurnHookFn fn, void* user) { turnHookFn_ = fn; turnHookUser_ = user; }
+    void clearTurnHook() { turnHookFn_ = nullptr; turnHookUser_ = nullptr; }
 
     // Messages + scrollback
     const std::vector<Message>& messages() const { return msgs; }
@@ -1127,6 +1104,8 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     void requestAutoExplore();
     void cancelAutoMove(bool silent = false);
     void setAutoStepDelayMs(int ms);
+    void setAutoExploreSearchEnabled(bool enabled) { autoExploreSearchEnabled_ = enabled; }
+    bool autoExploreSearchEnabled() const { return autoExploreSearchEnabled_; }
 
     // Mouse helpers (do not consume turns directly)
     void beginLookAt(Vec2i p);
@@ -1224,6 +1203,16 @@ private:
     bool optionsOpen = false;
     int optionsSel = 0;
 
+    // Keybinds overlay (interactive editor; does not consume turns)
+    bool keybindsOpen = false;
+    int keybindsSel = 0;
+    int keybindsScroll_ = 0;
+    bool keybindsCapture = false;
+    bool keybindsCaptureAdd = false;
+    int keybindsCaptureIndex = -1;
+    std::vector<std::pair<std::string, std::string>> keybindsDesc_;
+
+
     bool commandOpen = false;
     std::string commandBuf;
     std::string commandDraft;
@@ -1307,6 +1296,14 @@ private:
     bool autoExploreGoalIsLoot = false;
     Vec2i autoExploreGoalPos{-1, -1};
 
+    // Auto-explore: optional secret-hunting pass when the floor appears fully explored.
+    bool autoExploreSearchEnabled_ = false;
+    bool autoExploreGoalIsSearch = false;
+    Vec2i autoExploreSearchGoalPos{-1, -1};
+    int autoExploreSearchTurnsLeft = 0;
+    bool autoExploreSearchAnnounced = false; // message shown for the current secret-hunt stretch
+    std::vector<uint8_t> autoExploreSearchTriedTurns; // per-tile number of auto-search turns already spent
+
     // Save path overrides (set by main using SDL_GetPrefPath)
     std::string savePathOverride;
     std::string activeSlot_;
@@ -1317,6 +1314,10 @@ private:
 
     // Time / pacing
     uint32_t turnCount = 0;
+
+    // Optional per-turn hook (used by the replay recorder/verifier).
+    TurnHookFn turnHookFn_ = nullptr;
+    void* turnHookUser_ = nullptr;
     int naturalRegenCounter = 0;
 
     // Haste is handled as "every other player action skips the monster turn".
@@ -1506,6 +1507,7 @@ private:
     bool buildAutoTravelPath(Vec2i goal, bool requireExplored);
     bool buildAutoExplorePath();
     Vec2i findNearestExploreFrontier() const;
+    Vec2i findNearestExploreSearchSpot() const;
     std::vector<Vec2i> findPathBfs(Vec2i start, Vec2i goal, bool requireExplored) const;
     void stopAutoMove(bool silent);
     bool searchForTraps(bool verbose = true, int* foundTrapsOut = nullptr, int* foundSecretsOut = nullptr);

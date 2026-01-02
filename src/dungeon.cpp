@@ -1784,6 +1784,7 @@ void generateBspRooms(Dungeon& d, RNG& rng) {
     const Room& startRoom = d.rooms.front();
     d.stairsUp = { startRoom.cx(), startRoom.cy() };
     if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) {
+        carveFloor(d, d.stairsUp.x, d.stairsUp.y);
         d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
     }
 
@@ -1804,6 +1805,7 @@ void generateBspRooms(Dungeon& d, RNG& rng) {
     const Room& endRoom = d.rooms[static_cast<size_t>(bestRoomIdx)];
     d.stairsDown = { endRoom.cx(), endRoom.cy() };
     if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) {
+        carveFloor(d, d.stairsDown.x, d.stairsDown.y);
         d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
     }
 
@@ -1966,12 +1968,10 @@ void generateCavern(Dungeon& d, RNG& rng, int depth) {
     const Room& startRoom = d.rooms.front();
     d.stairsUp = { startRoom.cx(), startRoom.cy() };
     if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
-    d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
 
     auto dist = bfsDistanceMap(d, d.stairsUp);
     d.stairsDown = farthestPassableTile(d, dist, rng);
     if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) d.stairsDown = {d.width - 2, d.height - 2};
-    d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
 }
 
 void generateMaze(Dungeon& d, RNG& rng, int depth) {
@@ -2088,12 +2088,10 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
     const Room& startRoom = d.rooms.front();
     d.stairsUp = { startRoom.cx(), startRoom.cy() };
     if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
-    d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
 
     auto dist = bfsDistanceMap(d, d.stairsUp);
     d.stairsDown = farthestPassableTile(d, dist, rng);
     if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) d.stairsDown = {d.width - 2, d.height - 2};
-    d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
 
     // Sprinkle some closed doors in corridor chokepoints to make LOS + combat more interesting.
     std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
@@ -2311,7 +2309,6 @@ void generateLabyrinth(Dungeon& d, RNG& rng, int depth) {
     carveRect(d, sx, sy, sw, sh, TileType::Floor);
     d.stairsUp = { best.x, best.y };
     if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
-    d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
 
     auto dist = bfsDistanceMap(d, d.stairsUp);
     d.stairsDown = farthestPassableTile(d, dist, rng);
@@ -2323,7 +2320,6 @@ void generateLabyrinth(Dungeon& d, RNG& rng, int depth) {
     int ex = clampi(d.stairsDown.x - ew / 2, 1, d.width - ew - 1);
     int ey = clampi(d.stairsDown.y - eh / 2, 1, d.height - eh - 1);
     carveRect(d, ex, ey, ew, eh, TileType::Floor);
-    d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
 
     // Shrine chamber somewhere mid-far from the start.
     Room shrine;
@@ -2398,10 +2394,8 @@ void generateSokoban(Dungeon& d, RNG& rng, int depth) {
     carveRect(d, ex, ey, roomW, roomH, TileType::Floor);
 
     d.stairsUp = {sx + roomW / 2, sy + roomH / 2};
-    d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
 
     d.stairsDown = {ex + roomW / 2, ey + roomH / 2};
-    d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
 
     const int corX = sx + roomW;
     const int corY = cy - 1;
@@ -2517,6 +2511,15 @@ void generateSokoban(Dungeon& d, RNG& rng, int depth) {
     d.rooms.push_back({ex, ey, roomW, roomH, RoomType::Normal});
     d.rooms.push_back({storX, storY, storW, storH, RoomType::Normal});
     d.rooms.push_back({rx, ry, rw, rh, RoomType::Treasure});
+
+    // Safety: in small maps, clamped sub-rooms can overlap. Ensure stairs survive any later carving.
+    if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+    if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
+
+
+
+
+
 }
 
 
@@ -2635,7 +2638,6 @@ void generateSanctum(Dungeon& d, RNG& rng, int depth) {
     // Stairs.
     d.stairsUp = {sx + sw / 2, sy + sh / 2};
     if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
-    d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
 
     // No downstairs on the final floor.
     d.stairsDown = {-1, -1};
@@ -2755,6 +2757,10 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     if (depth >= maxDepth) {
         generateSanctum(*this, rng, depth);
         ensureBorders(*this);
+
+    // Final safety: ensure stair tiles survive any later carving/decoration overlap.
+    if (inBounds(stairsUp.x, stairsUp.y)) at(stairsUp.x, stairsUp.y).type = TileType::StairsUp;
+    if (depth < maxDepth && inBounds(stairsDown.x, stairsDown.y)) at(stairsDown.x, stairsDown.y).type = TileType::StairsDown;
         return;
     }
 
@@ -2813,6 +2819,10 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     }
 
     ensureBorders(*this);
+
+    // Final safety: ensure stair tiles survive any later carving/decoration overlap.
+    if (inBounds(stairsUp.x, stairsUp.y)) at(stairsUp.x, stairsUp.y).type = TileType::StairsUp;
+    if (depth < maxDepth && inBounds(stairsDown.x, stairsDown.y)) at(stairsDown.x, stairsDown.y).type = TileType::StairsDown;
 }
 
 bool Dungeon::lineOfSight(int x0, int y0, int x1, int y1) const {

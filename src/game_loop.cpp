@@ -41,16 +41,26 @@ void Game::update(float dt) {
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
-        if (invOpen || chestOpen || targeting || kicking || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || levelUpOpen || optionsOpen || commandOpen || isFinished()) {
+        if (invOpen || chestOpen || targeting || kicking || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen || isFinished()) {
             stopAutoMove(true);
             return;
         }
 
         if (!inputLock) {
             autoStepTimer += dt;
-            if (autoStepTimer >= autoStepDelay) {
-                autoStepTimer = 0.0f;
-                (void)stepAutoMove();
+            int guard = 0;
+            while (autoStepTimer >= autoStepDelay && !inputLock) {
+                autoStepTimer -= autoStepDelay;
+                // stepAutoMove() returns false when auto-move stops (blocked, finished, etc.)
+                if (!stepAutoMove()) break;
+                // If a step spawned FX, stop stepping this frame so animations can play.
+                inputLock = (!fx.empty() || !fxExpl.empty());
+                if (autoMode == AutoMoveMode::None) break;
+                if (++guard >= 32) {
+                    // Safety: avoid spending too long in a single frame if something goes wrong.
+                    autoStepTimer = 0.0f;
+                    break;
+                }
             }
         }
     }
@@ -62,6 +72,92 @@ void Game::handleAction(Action a) {
     // Any manual action stops auto-move (except log scrolling).
     if (autoMode != AutoMoveMode::None && a != Action::LogUp && a != Action::LogDown) {
         stopAutoMove(true);
+    }
+
+    // Keybinds overlay (interactive editor): consumes all actions (including LogUp/LogDown).
+    if (keybindsOpen) {
+        const int n = static_cast<int>(keybindsDesc_.size());
+        if (n <= 0) {
+            // Still allow Cancel to exit even if the cache isn't ready yet.
+            if (a == Action::Cancel) {
+                keybindsOpen = false;
+                keybindsCapture = false;
+                keybindsCaptureIndex = -1;
+                keybindsCaptureAdd = false;
+            }
+            return;
+        }
+
+        keybindsSel = clampi(keybindsSel, 0, n - 1);
+
+        auto clampScroll = [&]() {
+            constexpr int kVisibleRows = 18;
+            const int maxScroll = std::max(0, n - kVisibleRows);
+            if (keybindsSel < keybindsScroll_) keybindsScroll_ = keybindsSel;
+            if (keybindsSel >= keybindsScroll_ + kVisibleRows) keybindsScroll_ = keybindsSel - kVisibleRows + 1;
+            keybindsScroll_ = clampi(keybindsScroll_, 0, maxScroll);
+        };
+
+        clampScroll();
+
+        // While capturing, ignore most actions (keyboard input is routed raw via main.cpp).
+        if (keybindsCapture) {
+            if (a == Action::Cancel) {
+                keybindsCancelCapture();
+            }
+            return;
+        }
+
+        switch (a) {
+            case Action::Cancel:
+                keybindsOpen = false;
+                return;
+            case Action::Up:
+                keybindsSel = clampi(keybindsSel - 1, 0, n - 1);
+                clampScroll();
+                return;
+            case Action::Down:
+                keybindsSel = clampi(keybindsSel + 1, 0, n - 1);
+                clampScroll();
+                return;
+            case Action::LogUp:
+                keybindsSel = clampi(keybindsSel - 10, 0, n - 1);
+                clampScroll();
+                return;
+            case Action::LogDown:
+                keybindsSel = clampi(keybindsSel + 10, 0, n - 1);
+                clampScroll();
+                return;
+            case Action::Confirm:
+                keybindsCapture = true;
+                keybindsCaptureAdd = false;
+                keybindsCaptureIndex = keybindsSel;
+                pushSystemMessage("PRESS A KEY TO REBIND (ESC CANCEL).");
+                return;
+            case Action::Right:
+                keybindsCapture = true;
+                keybindsCaptureAdd = true;
+                keybindsCaptureIndex = keybindsSel;
+                pushSystemMessage("PRESS A KEY TO ADD BINDING (ESC CANCEL).");
+                return;
+            case Action::Left: {
+                const std::string actionName = keybindsDesc_[keybindsSel].first;
+                const std::string bindKey = std::string("bind_") + actionName;
+                if (settingsPath_.empty()) {
+                    pushSystemMessage("NO SETTINGS PATH; CANNOT RESET BIND.");
+                } else {
+                    if (removeIniKey(settingsPath_, bindKey)) {
+                        requestKeyBindsReload();
+                        pushSystemMessage("RESET " + bindKey + " TO DEFAULT.");
+                    } else {
+                        pushSystemMessage("FAILED TO RESET " + bindKey + ".");
+                    }
+                }
+                return;
+            }
+            default:
+                return;
+        }
     }
 
     // Message log scroll works in any mode.
@@ -110,6 +206,11 @@ void Game::handleAction(Action a) {
         minimapOpen = false;
         statsOpen = false;
         optionsOpen = false;
+        keybindsOpen = false;
+        keybindsCapture = false;
+        keybindsCaptureIndex = -1;
+        keybindsCaptureAdd = false;
+        keybindsScroll_ = 0;
 
         msgHistoryOpen = false;
         msgHistorySearchMode = false;
@@ -337,6 +438,11 @@ void Game::handleAction(Action a) {
         case Action::Options:
             if (optionsOpen) {
                 optionsOpen = false;
+        keybindsOpen = false;
+        keybindsCapture = false;
+        keybindsCaptureIndex = -1;
+        keybindsCaptureAdd = false;
+        keybindsScroll_ = 0;
             } else {
                 closeOverlays();
                 optionsOpen = true;
@@ -452,10 +558,15 @@ void Game::handleAction(Action a) {
 
     // Overlay: options menu (does not consume turns)
     if (optionsOpen) {
-        constexpr int kOptionCount = 18;
+        constexpr int kOptionCount = 20;
 
         if (a == Action::Cancel || a == Action::Options) {
             optionsOpen = false;
+        keybindsOpen = false;
+        keybindsCapture = false;
+        keybindsCaptureIndex = -1;
+        keybindsCaptureAdd = false;
+        keybindsScroll_ = 0;
             return;
         }
 
@@ -503,8 +614,17 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 2) Autosave interval
+        // 2) Auto-explore secret search
         if (optionsSel == 2) {
+            if (left || right || confirm) {
+                setAutoExploreSearchEnabled(!autoExploreSearchEnabled());
+                settingsDirtyFlag = true;
+            }
+            return;
+        }
+
+        // 3) Autosave interval
+        if (optionsSel == 3) {
             if (left || right) {
                 int t = autosaveInterval;
                 t += left ? -50 : +50;
@@ -515,8 +635,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 3) Identification helper
-        if (optionsSel == 3) {
+        // 4) Identification helper
+        if (optionsSel == 4) {
             if (left || right || confirm) {
                 setIdentificationEnabled(!identifyItemsEnabled);
                 settingsDirtyFlag = true;
@@ -524,8 +644,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 4) Hunger system
-        if (optionsSel == 4) {
+        // 5) Hunger system
+        if (optionsSel == 5) {
             if (left || right || confirm) {
                 setHungerEnabled(!hungerEnabled_);
                 settingsDirtyFlag = true;
@@ -533,8 +653,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 5) Encumbrance system
-        if (optionsSel == 5) {
+        // 6) Encumbrance system
+        if (optionsSel == 6) {
             if (left || right || confirm) {
                 setEncumbranceEnabled(!encumbranceEnabled_);
                 settingsDirtyFlag = true;
@@ -542,8 +662,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 6) Lighting / darkness
-        if (optionsSel == 6) {
+        // 7) Lighting / darkness
+        if (optionsSel == 7) {
             if (left || right || confirm) {
                 setLightingEnabled(!lightingEnabled_);
                 settingsDirtyFlag = true;
@@ -551,8 +671,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 7) Yendor Doom (endgame escalation)
-        if (optionsSel == 7) {
+        // 8) Yendor Doom (endgame escalation)
+        if (optionsSel == 8) {
             if (left || right || confirm) {
                 setYendorDoomEnabled(!yendorDoomEnabled());
                 settingsDirtyFlag = true;
@@ -560,8 +680,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 8) Effect timers (HUD)
-        if (optionsSel == 8) {
+        // 9) Effect timers (HUD)
+        if (optionsSel == 9) {
             if (left || right || confirm) {
                 showEffectTimers_ = !showEffectTimers_;
                 settingsDirtyFlag = true;
@@ -569,8 +689,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 9) Confirm quit (double-ESC)
-        if (optionsSel == 9) {
+        // 10) Confirm quit (double-ESC)
+        if (optionsSel == 10) {
             if (left || right || confirm) {
                 confirmQuitEnabled_ = !confirmQuitEnabled_;
                 settingsDirtyFlag = true;
@@ -578,8 +698,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 10) Auto mortem (write a dump file on win/death)
-        if (optionsSel == 10) {
+        // 11) Auto mortem (write a dump file on win/death)
+        if (optionsSel == 11) {
             if (left || right || confirm) {
                 autoMortemEnabled_ = !autoMortemEnabled_;
                 settingsDirtyFlag = true;
@@ -587,8 +707,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 11) Bones files (persistent death remnants)
-        if (optionsSel == 11) {
+        // 12) Bones files (persistent death remnants)
+        if (optionsSel == 12) {
             if (left || right || confirm) {
                 bonesEnabled_ = !bonesEnabled_;
                 settingsDirtyFlag = true;
@@ -596,8 +716,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-        // 12) Save backups (0..10)
-        if (optionsSel == 12) {
+        // 13) Save backups (0..10)
+        if (optionsSel == 13) {
             if (left || right) {
                 int n = saveBackups_;
                 n += left ? -1 : +1;
@@ -607,8 +727,8 @@ void Game::handleAction(Action a) {
             return;
         }
 
-// 13) UI Theme (cycle)
-if (optionsSel == 13) {
+// 14) UI Theme (cycle)
+if (optionsSel == 14) {
     if (left || right || confirm) {
         int dir = right ? 1 : -1;
         if (confirm && !left && !right) dir = 1;
@@ -621,8 +741,8 @@ if (optionsSel == 13) {
     return;
 }
 
-// 14) UI Panels (textured / solid)
-if (optionsSel == 14) {
+// 15) UI Panels (textured / solid)
+if (optionsSel == 15) {
     if (left || right || confirm) {
         uiPanelsTextured_ = !uiPanelsTextured_;
         settingsDirtyFlag = true;
@@ -630,8 +750,8 @@ if (optionsSel == 14) {
     return;
 }
 
-// 15) 3D voxel sprites (entities/items/projectiles)
-if (optionsSel == 15) {
+// 16) 3D voxel sprites (entities/items/projectiles)
+if (optionsSel == 16) {
     if (left || right || confirm) {
         voxelSpritesEnabled_ = !voxelSpritesEnabled_;
         settingsDirtyFlag = true;
@@ -639,8 +759,8 @@ if (optionsSel == 15) {
     return;
 }
 
-// 16) Control preset (Modern / NetHack)
-if (optionsSel == 16) {
+// 17) Control preset (Modern / NetHack)
+if (optionsSel == 17) {
     if (left || right || confirm) {
         ControlPreset next = (controlPreset_ == ControlPreset::Modern) ? ControlPreset::Nethack : ControlPreset::Modern;
         setControlPreset(next);
@@ -649,8 +769,22 @@ if (optionsSel == 16) {
     return;
 }
 
-// 17) Close
-if (optionsSel == 17) {
+// 18) Keybinds editor
+if (optionsSel == 18) {
+    if (left || right || confirm) {
+        optionsOpen = false;
+        keybindsOpen = true;
+        keybindsSel = 0;
+        keybindsScroll_ = 0;
+        keybindsCapture = false;
+        keybindsCaptureIndex = -1;
+        keybindsCaptureAdd = false;
+    }
+    return;
+}
+
+// 19) Close
+if (optionsSel == 19) {
     if (left || right || confirm) optionsOpen = false;
     return;
 }
@@ -1406,6 +1540,7 @@ void Game::advanceAfterPlayerAction() {
         // Don't let monsters act after a decisive player action.
         cleanupDead();
         recomputeFov();
+        if (turnHookFn_) turnHookFn_(turnHookUser_, turnCount, determinismHash());
         maybeRecordRun();
         return;
     }
@@ -1483,6 +1618,8 @@ void Game::advanceAfterPlayerAction() {
     // Endgame escalation tick (optional): after the Amulet is acquired, the dungeon
     // starts fighting back with noise pulses and hunter packs.
     tickYendorDoom();
+
+    if (turnHookFn_) turnHookFn_(turnHookUser_, turnCount, determinismHash());
 
     maybeAutosave();
 }
@@ -1591,4 +1728,118 @@ void Game::maybeRecordRun() {
 // ------------------------------------------------------------
 // Auto-move / auto-explore
 // ------------------------------------------------------------
+
+
+// ------------------------------------------------------------
+// Keybinds overlay helpers
+// ------------------------------------------------------------
+
+void Game::keybindsCancelCapture() {
+    if (!keybindsCapture) return;
+    keybindsCapture = false;
+    keybindsCaptureAdd = false;
+    keybindsCaptureIndex = -1;
+    pushSystemMessage("BIND CAPTURE CANCELLED.");
+}
+
+static std::vector<std::string> splitCommaList(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char ch : s) {
+        if (ch == ',') {
+            out.push_back(trim(cur));
+            cur.clear();
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    out.push_back(trim(cur));
+    // Remove empties.
+    out.erase(std::remove_if(out.begin(), out.end(), [](const std::string& t) { return t.empty(); }), out.end());
+    return out;
+}
+
+void Game::keybindsCaptureToken(const std::string& chordToken) {
+    if (!keybindsCapture) return;
+
+    const int idx = keybindsCaptureIndex;
+    const bool addMode = keybindsCaptureAdd;
+
+    keybindsCapture = false;
+    keybindsCaptureAdd = false;
+    keybindsCaptureIndex = -1;
+
+    if (idx < 0 || idx >= static_cast<int>(keybindsDesc_.size())) {
+        pushSystemMessage("INVALID KEYBIND TARGET.");
+        return;
+    }
+
+    const std::string actionName = keybindsDesc_[idx].first;
+    const std::string bindKey = std::string("bind_") + actionName;
+
+    std::string cur = keybindsDesc_[idx].second;
+    std::string next;
+
+    if (addMode) {
+        const std::vector<std::string> curChords = splitCommaList(cur);
+        bool already = false;
+        for (const auto& c : curChords) {
+            if (toLower(c) == toLower(chordToken)) {
+                already = true;
+                break;
+            }
+        }
+
+        if (already) {
+            pushSystemMessage("BINDING ALREADY PRESENT.");
+            return;
+        }
+
+        if (cur.empty() || toLower(trim(cur)) == "none") {
+            next = chordToken;
+        } else {
+            next = cur + ", " + chordToken;
+        }
+    } else {
+        next = chordToken;
+    }
+
+    // Conflict warning (best effort, based on the cached table).
+    std::vector<std::string> conflicts;
+    for (int i = 0; i < static_cast<int>(keybindsDesc_.size()); ++i) {
+        if (i == idx) continue;
+        for (const auto& c : splitCommaList(keybindsDesc_[i].second)) {
+            if (toLower(c) == toLower(chordToken)) {
+                conflicts.push_back(keybindsDesc_[i].first);
+                break;
+            }
+        }
+    }
+
+    if (!conflicts.empty()) {
+        std::string msg = "WARNING: " + chordToken + " ALSO BINDS ";
+        for (size_t i = 0; i < conflicts.size(); ++i) {
+            if (i) msg += ", ";
+            msg += conflicts[i];
+        }
+        msg += ".";
+        pushSystemMessage(msg);
+    }
+
+    if (settingsPath_.empty()) {
+        pushSystemMessage("NO SETTINGS PATH; CANNOT WRITE BIND.");
+        return;
+    }
+
+    if (!updateIniKey(settingsPath_, bindKey, next)) {
+        pushSystemMessage("FAILED TO WRITE " + bindKey + ".");
+        return;
+    }
+
+    // Optimistic UI update; main.cpp will reload and refresh the cache shortly.
+    keybindsDesc_[idx].second = next;
+
+    requestKeyBindsReload();
+    pushSystemMessage("SET " + bindKey + " = " + next);
+}
 

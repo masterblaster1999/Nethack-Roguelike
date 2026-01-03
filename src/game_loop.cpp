@@ -1035,7 +1035,7 @@ if (optionsSel == 19) {
 
     // Chest container (loot/stash) overlay mode
     if (chestOpen) {
-        bool acted = false;
+        bool chestActed = false;
 
         switch (a) {
             case Action::Cancel:
@@ -1060,19 +1060,19 @@ if (optionsSel == 19) {
                 return;
 
             case Action::Confirm:
-                acted = chestMoveSelected(true);
+                chestActed = chestMoveSelected(true);
                 break;
 
             case Action::Drop:
-                acted = chestMoveSelected(false);
+                chestActed = chestMoveSelected(false);
                 break;
 
             case Action::DropAll:
-                acted = chestMoveSelected(true);
+                chestActed = chestMoveSelected(true);
                 break;
 
             case Action::Pickup:
-                acted = chestMoveAll();
+                chestActed = chestMoveAll();
                 break;
 
             case Action::SortInventory:
@@ -1087,7 +1087,7 @@ if (optionsSel == 19) {
                 return;
         }
 
-        if (acted) {
+        if (chestActed) {
             advanceAfterPlayerAction();
         }
         return;

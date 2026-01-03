@@ -650,14 +650,6 @@ std::string KeyBinds::chordToString(SDL_Keycode key, Uint16 mods) {
     return out;
 }
 
-static std::string chordToString(const KeyChord& c) {
-    std::string out;
-    if (c.mods & KMOD_CTRL) out += "ctrl+";
-    if (c.mods & KMOD_ALT) out += "alt+";
-    if (c.mods & KMOD_SHIFT) out += "shift+";
-    out += keycodeToToken(c.key);
-    return out;
-}
 
 std::string KeyBinds::describeAction(Action a) const {
     auto it = binds.find(a);
@@ -666,7 +658,7 @@ std::string KeyBinds::describeAction(Action a) const {
     std::string out;
     const auto& chords = it->second;
     for (size_t i = 0; i < chords.size(); ++i) {
-        out += chordToString(chords[i]);
+        out += KeyBinds::chordToString(chords[i].key, chords[i].mods);
         if (i + 1 < chords.size()) out += ", ";
     }
     return out.empty() ? "none" : out;

@@ -1,6 +1,5 @@
 #pragma once
-#define SDL_MAIN_HANDLED
-#include <SDL.h>
+#include "sdl.hpp"
 
 #include "dungeon.hpp"
 #include "game.hpp"
@@ -299,6 +298,9 @@ private:
     SDL_Texture* tileTexture(TileType t, int x, int y, int level, int frame, int roomStyle);
     SDL_Texture* entityTexture(const Entity& e, int frame);
     SDL_Texture* itemTexture(const Item& it, int frame);
+
+    // Small UI helper: draw a tiny item sprite (used in inventory/chest lists).
+    void drawItemIcon(const Game& game, const Item& it, int x, int y, int px);
     SDL_Texture* projectileTexture(ProjectileKind k, int frame);
 
     // UI skin helpers

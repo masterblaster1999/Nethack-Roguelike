@@ -1,6 +1,6 @@
 #pragma once
 
-#include <SDL.h>
+#include "sdl.hpp"
 
 #include <optional>
 #include <string>

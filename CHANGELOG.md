@@ -54,6 +54,7 @@
 ### Fixed
 - Test/headless builds no longer require SDL2: **keybinds** are compiled only for the game executable.
 - Fixed build-breaking pointer dereferences in **Disarm Trap** and **Shrine prayer** interactions.
+- Fixed MSVC build breaks/warnings: implemented missing chest overlay item icon helper, corrected keybind chord formatting, and centralized SDL includes to avoid SDL_MAIN_HANDLED macro redefinitions.
 
 
 

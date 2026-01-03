@@ -29,18 +29,25 @@
     "src/items.hpp",
     "src/render.cpp",
     "src/spritegen.cpp",
-    "tests/test_main.cpp"
+    "tests/test_main.cpp",
+    "src/main.cpp",
+    "src/render.hpp",
+    "src/keybinds.cpp",
+    "src/keybinds.hpp",
+    "src/ui_font.hpp",
+    "src/sdl.hpp"
   ],
   "patch_info": {
-    "patch_id": "nethack_patch_roundN_plus11",
-    "description": "Cumulative patch: Add a new Scroll of Earth that raises boulders around the reader (and can fill adjacent chasms / pelt adjacent hostile monsters). Also expands the inventory effect-preview text for several identifiable items. Includes a regression test for Scroll of Earth.",
-    "created_utc": "2026-01-03T08:47:48Z"
+    "patch_id": "nethack_patch_roundN_plus12",
+    "description": "Cumulative patch: Fix MSVC build breaks introduced by recent UI/controls changes. Adds a centralized SDL include wrapper (SDL_MAIN_HANDLED, SDL_SetMainReady), implements missing Renderer::drawItemIcon for the chest overlay, fixes CLI optional parsing for --record-hash-interval, and fixes KeyBinds chord string formatting. Also silences two MSVC warnings (shadowed 'acted', constant conditional).",
+    "created_utc": "2026-01-03T09:36:18Z"
   },
-  "patch_id": "roundN_plus11",
-  "created_utc": "2026-01-03T08:47:48Z",
+  "patch_id": "roundN_plus12",
+  "created_utc": "2026-01-03T09:36:18Z",
   "summary": [
-    "Added Scroll of Earth: raises boulders in the 8 surrounding tiles, can fill adjacent chasms, and may pelt adjacent hostile monsters.",
-    "Inventory effect previews now include additional potions/scrolls (e.g., Invisibility/Clarity/Levitation) so identified items show clear EFFECT text.",
-    "Added a unit test verifying Scroll of Earth raises surrounding boulders in a valid open area."
+    "Fixed MSVC build errors: added missing Renderer::drawItemIcon and corrected --record-hash-interval parsing (std::optional).",
+    "Fixed keybind chord formatting by calling KeyBinds::chordToString(key, mods) correctly.",
+    "Centralized SDL includes in src/sdl.hpp (SDL_MAIN_HANDLED) and call SDL_SetMainReady() before SDL_Init(); removed SDL_MAIN_HANDLED redefinition warnings.",
+    "Silenced MSVC warnings: removed shadowed 'acted' in chest overlay input handling, and removed a constant conditional in dungeon generation."
   ]
 }

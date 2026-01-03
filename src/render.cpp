@@ -611,6 +611,52 @@ SDL_Texture* Renderer::itemTexture(const Item& it, int frame) {
     return (*arr)[static_cast<size_t>(frame % FRAMES)];
 }
 
+void Renderer::drawItemIcon(const Game& game, const Item& it, int x, int y, int px) {
+    (void)game;
+    if (!renderer) return;
+
+    SDL_BlendMode prevBlend = SDL_BLENDMODE_NONE;
+    SDL_GetRenderDrawBlendMode(renderer, &prevBlend);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    // Center within a typical UI row (18px) with a slight vertical inset.
+    SDL_Rect dst{ x, y + 1, px, px };
+
+    // Subtle dark backdrop so bright sprites remain readable on any panel theme.
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 55);
+    SDL_RenderFillRect(renderer, &dst);
+
+    SDL_Texture* tex = itemTexture(it, lastFrame);
+    if (tex) {
+        SDL_RenderCopy(renderer, tex, nullptr, &dst);
+    }
+
+    // Stack count label (tiny) for stackable items.
+    if (it.count > 1) {
+        const Color white{240, 240, 240, 255};
+        const int scale = 1;
+
+        // 16px icons can only comfortably fit 2 digits; clamp larger stacks.
+        const int shown = (it.count > 99) ? 99 : it.count;
+        const std::string s = std::to_string(shown);
+
+        const int charW = (5 + 1) * scale;
+        const int textW = static_cast<int>(s.size()) * charW;
+        const int textH = 7 * scale;
+
+        const int tx = dst.x + dst.w - textW;
+        const int ty = dst.y + dst.h - textH;
+
+        SDL_Rect bg{ tx - 1, ty - 1, textW + 2, textH + 2 };
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 170);
+        SDL_RenderFillRect(renderer, &bg);
+
+        drawText5x7(renderer, tx, ty, scale, white, s);
+    }
+
+    SDL_SetRenderDrawBlendMode(renderer, prevBlend);
+}
+
 SDL_Texture* Renderer::projectileTexture(ProjectileKind k, int frame) {
     const int spritePx = std::clamp(tile, 16, 256);
     const uint64_t key = makeSpriteKey(CAT_PROJECTILE, static_cast<uint8_t>(k), 0u);

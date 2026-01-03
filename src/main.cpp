@@ -1,5 +1,4 @@
-#define SDL_MAIN_HANDLED
-#include <SDL.h>
+#include "sdl.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -181,7 +180,7 @@ int main(int argc, char** argv) {
     if (hasFlag(argc, argv, "--no-record-hashes")) recordHashes = false;
     if (hasFlag(argc, argv, "--record-hashes")) recordHashes = true;
     uint32_t recordHashInterval = 1;
-    if (auto* s = parseStringArg(argc, argv, "--record-hash-interval")) {
+    if (auto s = parseStringArg(argc, argv, "--record-hash-interval")) {
         try {
             const int v = std::stoi(*s);
             if (v > 0) recordHashInterval = static_cast<uint32_t>(v);
@@ -202,6 +201,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
         return 1;

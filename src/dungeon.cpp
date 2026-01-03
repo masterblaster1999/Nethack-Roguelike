@@ -2538,7 +2538,8 @@ void generateSokoban(Dungeon& d, RNG& rng, int depth) {
 
     // Bonus loot spots inside the detour room (spawned as chests by Game::spawnItems).
     d.bonusLootSpots.push_back({rx + rw / 2, ry + rh / 2});
-    if (rw >= 10) d.bonusLootSpots.push_back({rx + rw / 2 - 3, ry + rh / 2});
+    // rw is currently fixed (18), so this secondary spot is always valid.
+    d.bonusLootSpots.push_back({rx + rw / 2 - 3, ry + rh / 2});
 
     // Rooms (for spawns and room-type mechanics).
     d.rooms.push_back({sx, sy, roomW, roomH, RoomType::Normal});

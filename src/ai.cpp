@@ -25,6 +25,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Dog: return "DOG";
         case EntityKind::Ghost: return "GHOST";
         case EntityKind::Leprechaun: return "LEPRECHAUN";
+        case EntityKind::Zombie: return "ZOMBIE";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";
@@ -78,9 +79,13 @@ void Game::monsterTurn() {
     // Some monsters can bash through locked doors while hunting.
     // We model this in pathfinding by treating locked doors as passable
     // with a steep movement cost (representing repeated smash attempts).
+    //
+    // In addition, a few special entities are ethereal and can phase through
+    // terrain entirely (e.g. bones ghosts).
     enum PathMode : int {
         Normal = 0,
         SmashLockedDoors = 1,
+        Phasing = 2,
     };
 
     auto monsterCanBashLockedDoor = [&](EntityKind k) -> bool {
@@ -90,6 +95,10 @@ void Game::monsterTurn() {
 
     auto passableForMode = [&](int x, int y, int mode) -> bool {
         if (!dung.inBounds(x, y)) return false;
+
+        // Ethereal entities ignore terrain restrictions (but still can't leave the map).
+        if (mode == PathMode::Phasing) return true;
+
         if (dung.isPassable(x, y)) return true;
         if (mode == PathMode::SmashLockedDoors && dung.isDoorLocked(x, y)) return true;
         return false;
@@ -97,6 +106,13 @@ void Game::monsterTurn() {
 
     auto stepCostForMode = [&](int x, int y, int mode) -> int {
         if (!dung.inBounds(x, y)) return 0;
+
+        // Phasing movement still consumes time, but we bias the pathfinder
+        // to prefer open corridors over "living" inside solid walls.
+        if (mode == PathMode::Phasing) {
+            return dung.isWalkable(x, y) ? 1 : 2;
+        }
+
         const TileType t = dung.at(x, y).type;
         switch (t) {
             case TileType::DoorClosed:
@@ -110,7 +126,8 @@ void Game::monsterTurn() {
         }
     };
 
-    auto diagOk = [&](int fromX, int fromY, int dx, int dy) -> bool {
+    auto diagOkForMode = [&](int fromX, int fromY, int dx, int dy, int mode) -> bool {
+        if (mode == PathMode::Phasing) return true;
         return diagonalPassable(dung, {fromX, fromY}, dx, dy);
     };
 
@@ -121,12 +138,15 @@ void Game::monsterTurn() {
     costCache.reserve(32);
 
     auto getCostMap = [&](Vec2i target, int mode) -> const std::vector<int>& {
-        const int key = (idx(target.x, target.y) << 1) | (mode & 1);
+        // Key by (target tile index, path mode). We pack the mode in the low bits.
+        // 2 bits are enough for our current modes.
+        const int key = (idx(target.x, target.y) << 2) | (mode & 3);
         auto it = costCache.find(key);
         if (it != costCache.end()) return it->second;
 
         auto passable = [&, mode](int x, int y) -> bool { return passableForMode(x, y, mode); };
         auto stepCost = [&, mode](int x, int y) -> int { return stepCostForMode(x, y, mode); };
+        auto diagOk = [&, mode](int fromX, int fromY, int dx, int dy) -> bool { return diagOkForMode(fromX, fromY, dx, dy, mode); };
 
         auto [it2, inserted] = costCache.emplace(key, dijkstraCostToTarget(W, H, target, passable, stepCost, diagOk));
         (void)inserted;
@@ -141,7 +161,7 @@ void Game::monsterTurn() {
             const int nx = m.pos.x + dx;
             const int ny = m.pos.y + dy;
             if (!dung.inBounds(nx, ny)) continue;
-            if (dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
+            if (mode != PathMode::Phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
             if (!passableForMode(nx, ny, mode)) continue;
             if (entityAt(nx, ny)) continue;
 
@@ -169,7 +189,7 @@ void Game::monsterTurn() {
             const int nx = m.pos.x + dx;
             const int ny = m.pos.y + dy;
             if (!dung.inBounds(nx, ny)) continue;
-            if (dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
+            if (mode != PathMode::Phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
             if (!passableForMode(nx, ny, mode)) continue;
             if (entityAt(nx, ny)) continue;
 
@@ -415,9 +435,7 @@ void Game::monsterTurn() {
                 if (!dung.inBounds(nx, ny)) continue;
                 if (!dung.isWalkable(nx, ny)) continue;
 
-                if (dx != 0 && dy != 0) {
-                    if (!diagOk(m.pos.x, m.pos.y, dx, dy)) continue;
-                }
+                if (dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
 
                 const uint8_t sv = scentAt(nx, ny);
                 if (sv > bestV) {
@@ -499,6 +517,17 @@ void Game::monsterTurn() {
             }
         }
 
+        // Fear makes monsters *want* to run from the player. Ensure they have a meaningful
+        // target to run away from even if they weren't already hunting (e.g. player is
+        // invisible but triggered a fear effect).
+        if (m.effects.fearTurns > 0) {
+            target = p.pos;
+            hunting = true;
+            m.alerted = true;
+            m.lastKnownPlayerPos = p.pos;
+            m.lastKnownPlayerAge = 0;
+        }
+
         if (!hunting) {
             // Idle wander.
             m.alerted = false;
@@ -513,9 +542,13 @@ void Game::monsterTurn() {
             return;
         }
 
-        // Path mode: heavy monsters can bash locked doors while hunting.
+        // Path mode selection:
+        //  - Ethereal monsters (e.g. bones ghosts) can phase through terrain.
+        //  - Heavy bruisers can bash locked doors while hunting.
         int pathMode = PathMode::Normal;
-        if (monsterCanBashLockedDoor(m.kind)) {
+        if (entityCanPhase(m.kind)) {
+            pathMode = PathMode::Phasing;
+        } else if (monsterCanBashLockedDoor(m.kind)) {
             pathMode = PathMode::SmashLockedDoors;
         }
 
@@ -547,6 +580,16 @@ void Game::monsterTurn() {
         // If adjacent, melee attack (with some monster-specific tricks).
         if (isAdjacent8(m.pos, p.pos)) {
             Entity& pm = playerMut();
+
+            // Fear: try to break contact instead of trading blows.
+            // If no escape route exists, the monster will fall back to attacking.
+            if (m.effects.fearTurns > 0 && d0 >= 0) {
+                Vec2i to = bestStepAway(m, costMap, pathMode);
+                if (to != m.pos) {
+                    tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
+                    return;
+                }
+            }
 
             // Leprechaun: try to steal gold and teleport away instead of trading blows.
             if (m.kind == EntityKind::Leprechaun && seesPlayer) {
@@ -833,7 +876,7 @@ void Game::monsterTurn() {
 
         // Minotaur: brutal straight-line charge to close distance quickly.
         // This is intentionally simple (cardinal-only) but creates memorable boss turns.
-        if (m.kind == EntityKind::Minotaur && seesPlayer && man >= 3) {
+        if (m.kind == EntityKind::Minotaur && m.effects.fearTurns <= 0 && seesPlayer && man >= 3) {
             int cdx = 0;
             int cdy = 0;
             if (m.pos.x == p.pos.x) {
@@ -898,12 +941,14 @@ void Game::monsterTurn() {
 
         // Fleeing behavior (away from whatever the monster is currently "hunting").
         const bool fleeLoot = (m.kind == EntityKind::Leprechaun && m.stolenGold > 0 && seesPlayer);
-        if ((fleeLoot || (m.willFlee && m.hp <= std::max(1, m.hpMax / 3))) && d0 >= 0) {
+        const bool feared = (m.effects.fearTurns > 0);
+        const bool lowHpFlee = (m.willFlee && m.hp <= std::max(1, m.hpMax / 3));
+        if ((feared || fleeLoot || lowHpFlee) && d0 >= 0) {
             Vec2i to = bestStepAway(m, costMap, pathMode);
             if (to != m.pos) {
                 tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
+                return;
             }
-            return;
         }
 
         // Ranged behavior (only when the monster can actually see the player).

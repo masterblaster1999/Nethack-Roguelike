@@ -390,6 +390,7 @@ float densityFor(EntityKind k) {
         case EntityKind::Player: return 0.55f;
         case EntityKind::Goblin: return 0.58f;
         case EntityKind::Leprechaun: return 0.50f;
+        case EntityKind::Zombie: return 0.60f;
         case EntityKind::Orc: return 0.62f;
         case EntityKind::Bat: return 0.40f;
         case EntityKind::Slime: return 0.70f;
@@ -415,6 +416,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::Player: return add({ 160, 200, 255, 255 }, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
         case EntityKind::Goblin: return add({ 80, 180, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Leprechaun: return add({ 60, 210, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
+        case EntityKind::Zombie: return add({ 120, 180, 120, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Orc: return add({ 70, 150, 60, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Bat: return add({ 120, 100, 140, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Slime: return add({ 70, 200, 160, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
@@ -1444,6 +1446,25 @@ case ItemKind::Arrow: {
             }
             break;
         }
+        case ItemKind::PotionLevitation: {
+            // Light, airy potion: pale sky fluid + tiny upward arrow shimmer.
+            Color glass = {200,200,220,180};
+            Color fluid = {175,205,255,200};
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+
+            if (frame % 2 == 1) {
+                // Up-arrow sparkle
+                setPx(s, 8, 7, {255,255,255,170});
+                setPx(s, 8, 6, {255,255,255,120});
+                setPx(s, 7, 7, {255,255,255,120});
+                setPx(s, 9, 7, {255,255,255,120});
+                // Glass highlight
+                setPx(s, 9, 6, {255,255,255,170});
+            }
+            break;
+        }
         case ItemKind::ScrollConfusion: {
             Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
             outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
@@ -1456,6 +1477,39 @@ case ItemKind::Arrow: {
             setPx(s, 8, 9, {80,50,30,255});
             setPx(s, 7, 9, {80,50,30,255});
             setPx(s, 7, 8, paper);
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+
+        case ItemKind::ScrollFear: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+
+            // A simple "scared face" glyph.
+            const Color ink = {80,50,30,255};
+            setPx(s, 7, 7, ink);
+            setPx(s, 9, 7, ink);
+            setPx(s, 8, 8, ink);
+            line(s, 7, 9, 9, 9, ink);
+            setPx(s, 8, 10, ink);
+
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+
+        case ItemKind::ScrollEarth: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+
+            // A small "mountain" / boulder glyph.
+            const Color ink = {80,50,30,255};
+            line(s, 6, 10, 8, 7, ink);
+            line(s, 8, 7, 10, 10, ink);
+            line(s, 6, 10, 10, 10, ink);
+            setPx(s, 8, 9, ink);
+
             if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
             break;
         }

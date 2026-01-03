@@ -177,6 +177,18 @@ void Game::recomputeLightMap() {
                 amb = 175;
                 ambTint = Color{ 255, 232, 205, 255 }; // cozy
                 break;
+            case RoomType::Armory:
+                amb = 165;
+                ambTint = Color{ 234, 240, 255, 255 }; // cool steel
+                break;
+            case RoomType::Library:
+                amb = 160;
+                ambTint = Color{ 255, 242, 220, 255 }; // parchment/candles
+                break;
+            case RoomType::Laboratory:
+                amb = 155;
+                ambTint = Color{ 220, 255, 236, 255 }; // odd green
+                break;
             default:
                 amb = 140;
                 ambTint = Color{ 255, 246, 236, 255 };

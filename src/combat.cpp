@@ -21,6 +21,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Dog: return "DOG";
         case EntityKind::Ghost: return "GHOST";
         case EntityKind::Leprechaun: return "LEPRECHAUN";
+        case EntityKind::Zombie: return "ZOMBIE";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";
@@ -236,6 +237,12 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
 
     // Monster special effects.
     if (defender.hp > 0 && defender.kind == EntityKind::Player) {
+        // Ghosts: chilling touch can briefly disorient you.
+        // Uses the existing confusion effect to avoid save-format churn.
+        if (attacker.kind == EntityKind::Ghost && rng.chance(0.25f)) {
+            defender.effects.confusionTurns = std::max(defender.effects.confusionTurns, rng.range(2, 4));
+            pushMsg("AN ICY TOUCH LEAVES YOU DISORIENTED!", MessageKind::Warning, false);
+        }
         if (attacker.kind == EntityKind::Snake && rng.chance(0.35f)) {
             defender.effects.poisonTurns = std::max(defender.effects.poisonTurns, rng.range(4, 8));
             pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);

@@ -12,10 +12,12 @@
 #include "replay_runner.hpp"
 #include "content.hpp"
 #include "version.hpp"
+#include "game.hpp"
 
 #include <cstdint>
 #include <cctype>
 #include <cstdio>
+#include <algorithm>
 #include <fstream>
 #if __has_include(<filesystem>)
 #include <filesystem>
@@ -24,6 +26,19 @@
 #include <queue>
 #include <string>
 #include <vector>
+
+struct GameTestAccess {
+    static std::vector<Item>& inv(Game& g) { return g.inv; }
+    static int& invSel(Game& g) { return g.invSel; }
+    static int& depth(Game& g) { return g.depth_; }
+    static std::array<int, Game::DUNGEON_MAX_DEPTH + 1>& shopLedger(Game& g) { return g.shopDebtLedger_; }
+    static std::vector<Entity>& ents(Game& g) { return g.ents; }
+    static std::vector<Trap>& traps(Game& g) { return g.trapsCur; }
+    static void triggerTrapAt(Game& g, Vec2i pos, Entity& victim, bool fromDisarm = false) { g.triggerTrapAt(pos, victim, fromDisarm); }
+    static void cleanupDead(Game& g) { g.cleanupDead(); }
+    static void changeLevel(Game& g, int newDepth, bool goingDown) { g.changeLevel(newDepth, goingDown); }
+    static bool useSelected(Game& g) { return g.useSelected(); }
+};
 
 namespace {
 
@@ -182,6 +197,11 @@ void test_chasm_and_pillar_tile_rules() {
     expect(!d.isPassable(6, 5), "Pillar should not be passable");
     expect(!d.isWalkable(6, 5), "Pillar should not be walkable");
     expect(d.isOpaque(6, 5), "Pillar should block FOV/LOS");
+
+    d.at(7, 5).type = TileType::Boulder;
+    expect(!d.isPassable(7, 5), "Boulder should not be passable");
+    expect(!d.isWalkable(7, 5), "Boulder should not be walkable");
+    expect(!d.isOpaque(7, 5), "Boulder should not block FOV/LOS (current design)");
 
     // LOS sanity: a chasm tile shouldn't block visibility.
     // Carve a 1x5 corridor with a chasm in the middle.
@@ -1601,6 +1621,387 @@ void test_wand_display_shows_charges() {
     expect(name.find("(3/8)") != std::string::npos, "Wand of digging should show charges in display name");
 }
 
+void test_shop_debt_ledger_persists_after_consumption() {
+    Game g;
+    g.newGame(123u);
+
+    // Start from a clean inventory and no prior shop ledger.
+    GameTestAccess::inv(g).clear();
+    GameTestAccess::shopLedger(g).fill(0);
+    GameTestAccess::depth(g) = 1;
+
+    Item p{};
+    p.id = 1;
+    p.kind = ItemKind::PotionHealing;
+    p.count = 1;
+    p.shopPrice = 50;
+    p.shopDepth = 1;
+
+    GameTestAccess::inv(g).push_back(p);
+    GameTestAccess::invSel(g) = 0;
+
+    expect(g.shopDebtThisDepth() == 50, "Unpaid shop potion should contribute to shop debt (pre-consumption)");
+    expect(GameTestAccess::shopLedger(g)[1] == 0, "Shop debt ledger should start empty");
+
+    expect(GameTestAccess::useSelected(g) == true, "Using a potion should succeed");
+    expect(GameTestAccess::inv(g).empty(), "Potion should be removed from inventory after use");
+
+    // Even though the item is gone, we should still owe the shopkeeper.
+    expect(GameTestAccess::shopLedger(g)[1] == 50, "Consumed unpaid shop goods should be moved into the shop debt ledger");
+    expect(g.shopDebtThisDepth() == 50, "Shop debt should remain after consuming unpaid goods");
+}
+
+void test_shop_debt_ledger_save_load_roundtrip() {
+    const std::string path = "test_shop_debt_ledger_tmp.sav";
+    (void)std::remove(path.c_str());
+
+    Game g;
+    g.newGame(321u);
+    GameTestAccess::shopLedger(g).fill(0);
+    GameTestAccess::shopLedger(g)[2] = 77;
+
+    expect(g.saveToFile(path, true), "Saving should succeed");
+    Game g2;
+    expect(g2.loadFromFile(path), "Loading should succeed");
+
+    expect(GameTestAccess::shopLedger(g2)[2] == 77, "Shop debt ledger should round-trip through save/load");
+    expect(g2.shopDebtTotal() >= 77, "shopDebtTotal should include the shop debt ledger");
+
+    (void)std::remove(path.c_str());
+}
+
+void test_scroll_fear_applies_fear_to_visible_monsters() {
+    Game g;
+    g.newGame(123u);
+
+    // Give the player a scroll of fear.
+    GameTestAccess::inv(g).clear();
+    Item s;
+    s.id = 9001;
+    s.kind = ItemKind::ScrollFear;
+    s.count = 1;
+    GameTestAccess::inv(g).push_back(s);
+    GameTestAccess::invSel(g) = 0;
+
+    // Place a hostile monster on a visible, walkable adjacent tile.
+    const Dungeon& d = g.dungeon();
+    const Vec2i ppos = g.player().pos;
+
+    Vec2i mpos = ppos;
+    bool found = false;
+    for (int dy = -1; dy <= 1 && !found; ++dy) {
+        for (int dx = -1; dx <= 1 && !found; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            const Vec2i q{ppos.x + dx, ppos.y + dy};
+            if (!d.inBounds(q.x, q.y)) continue;
+            if (!d.isWalkable(q.x, q.y)) continue;
+
+            bool occupied = false;
+            for (const Entity& e : GameTestAccess::ents(g)) {
+                if (e.hp > 0 && e.pos == q) { occupied = true; break; }
+            }
+            if (occupied) continue;
+
+            mpos = q;
+            found = true;
+        }
+    }
+
+    expect(found, "Should find an empty walkable adjacent tile for monster placement");
+    if (!found) return;
+
+    expect(d.at(mpos.x, mpos.y).visible, "Placed monster tile should be visible to the player");
+
+    Entity m;
+    m.id = 424242;
+    m.kind = EntityKind::Goblin;
+    m.pos = mpos;
+    m.hpMax = 6;
+    m.hp = 6;
+    m.friendly = false;
+    GameTestAccess::ents(g).push_back(m);
+
+    const bool ok = GameTestAccess::useSelected(g);
+    expect(ok, "Using scroll of fear should succeed");
+
+    int fearTurns = 0;
+    for (const Entity& e : GameTestAccess::ents(g)) {
+        if (e.id == 424242) {
+            fearTurns = e.effects.fearTurns;
+            break;
+        }
+    }
+
+    expect(fearTurns > 0, "Scroll of fear should apply fearTurns to a visible hostile monster");
+}
+
+void test_scroll_earth_raises_boulders_around_player() {
+    Game g;
+    g.newGame(123u);
+
+    // Remove non-player entities for a deterministic neighborhood.
+    auto& ents = GameTestAccess::ents(g);
+    const int pid = g.player().id;
+    ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+        return e.id != pid;
+    }), ents.end());
+
+    // Give the player a scroll of earth.
+    GameTestAccess::inv(g).clear();
+    Item s;
+    s.id = 9002;
+    s.kind = ItemKind::ScrollEarth;
+    s.count = 1;
+    GameTestAccess::inv(g).push_back(s);
+    GameTestAccess::invSel(g) = 0;
+
+    // Find a tile with an 8-neighbor walkable ring.
+    const Dungeon& d = g.dungeon();
+    Vec2i spot = g.player().pos;
+    bool found = false;
+    for (int y = 1; y < d.height - 1 && !found; ++y) {
+        for (int x = 1; x < d.width - 1 && !found; ++x) {
+            if (!d.isWalkable(x, y)) continue;
+            if (Vec2i{x, y} == d.stairsUp || Vec2i{x, y} == d.stairsDown) continue;
+
+            bool ok = true;
+            for (int dy = -1; dy <= 1 && ok; ++dy) {
+                for (int dx = -1; dx <= 1 && ok; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
+                    const int xx = x + dx;
+                    const int yy = y + dy;
+                    if (!d.inBounds(xx, yy)) { ok = false; break; }
+                    if (!d.isWalkable(xx, yy)) { ok = false; break; }
+                    if (Vec2i{xx, yy} == d.stairsUp || Vec2i{xx, yy} == d.stairsDown) { ok = false; break; }
+                }
+            }
+            if (!ok) continue;
+
+            spot = {x, y};
+            found = true;
+        }
+    }
+
+    expect(found, "Should find a walkable tile with 8 walkable neighbors for scroll of earth test");
+    if (!found) return;
+
+    g.playerMut().pos = spot;
+
+    const bool ok = GameTestAccess::useSelected(g);
+    expect(ok, "Using scroll of earth should succeed");
+
+    // The scroll should be consumed.
+    expect(GameTestAccess::inv(g).empty(), "Scroll of earth should be removed from inventory after use");
+
+    // All 8 surrounding tiles should now be boulders (we chose a fully-walkable ring).
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            const int x = spot.x + dx;
+            const int y = spot.y + dy;
+            expect(d.at(x, y).type == TileType::Boulder, "Scroll of earth should raise boulders in adjacent tiles");
+        }
+    }
+}
+
+void test_save_load_fear_turns_roundtrip() {
+    const std::string path = "test_fear_effect_tmp.sav";
+    (void)std::remove(path.c_str());
+
+    Game g;
+    g.newGame(321u);
+    g.playerMut().effects.fearTurns = 9;
+
+    expect(g.saveToFile(path, true), "Saving should succeed");
+
+    Game g2;
+    expect(g2.loadFromFile(path), "Loading should succeed");
+    expect(g2.player().effects.fearTurns == 9, "Fear turns should round-trip through save/load");
+
+    (void)std::remove(path.c_str());
+
+}
+
+
+void test_trap_door_drops_player_to_next_depth() {
+    Game g;
+    g.newGame(1337u);
+
+    // Ensure deterministic setup: remove any randomly spawned traps.
+    GameTestAccess::traps(g).clear();
+
+    const int startDepth = GameTestAccess::depth(g);
+    const Vec2i startPos = g.player().pos;
+
+    Trap tr;
+    tr.pos = startPos;
+    tr.kind = TrapKind::TrapDoor;
+    tr.discovered = false;
+    GameTestAccess::traps(g).push_back(tr);
+
+    GameTestAccess::triggerTrapAt(g, startPos, g.playerMut());
+
+    expect(GameTestAccess::depth(g) == startDepth + 1, "Trap door should drop the player one dungeon depth");
+
+    const Dungeon& d = g.dungeon();
+    const Vec2i ppos = g.player().pos;
+    expect(ppos != d.stairsUp, "Trap door landing should not place the player on stairsUp");
+    expect(ppos != d.stairsDown, "Trap door landing should not place the player on stairsDown");
+}
+
+void test_levitation_skips_trap_door_trigger() {
+    Game g;
+    g.newGame(1337u);
+
+    GameTestAccess::traps(g).clear();
+
+    const int startDepth = GameTestAccess::depth(g);
+    const Vec2i startPos = g.player().pos;
+
+    g.playerMut().effects.levitationTurns = 10;
+
+    Trap tr;
+    tr.pos = startPos;
+    tr.kind = TrapKind::TrapDoor;
+    tr.discovered = false;
+    GameTestAccess::traps(g).push_back(tr);
+
+    GameTestAccess::triggerTrapAt(g, startPos, g.playerMut());
+
+    expect(GameTestAccess::depth(g) == startDepth, "Levitating player should float over trap doors");
+}
+
+
+void test_trap_door_monster_falls_to_next_depth_and_persists() {
+    Game g;
+    g.newGame(1337u);
+
+    // Ensure deterministic setup: remove any randomly spawned traps.
+    GameTestAccess::traps(g).clear();
+
+    const int startDepth = GameTestAccess::depth(g);
+    expect(startDepth < Game::DUNGEON_MAX_DEPTH, "Test requires a depth with a level below");
+
+    const Dungeon& d = g.dungeon();
+    const Vec2i ppos = g.player().pos;
+
+    // Find a nearby walkable tile for the monster + trap.
+    Vec2i trapPos = ppos;
+    bool found = false;
+    for (int dy = -1; dy <= 1 && !found; ++dy) {
+        for (int dx = -1; dx <= 1 && !found; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            const Vec2i cand{ppos.x + dx, ppos.y + dy};
+            if (!d.inBounds(cand.x, cand.y)) continue;
+            if (!d.isWalkable(cand.x, cand.y)) continue;
+            trapPos = cand;
+            found = true;
+        }
+    }
+    expect(found, "Found a walkable adjacent tile for trap door test");
+    if (!found) return;
+
+    Entity m{};
+    m.id = 424242;
+    m.kind = EntityKind::Goblin;
+    m.pos = trapPos;
+    m.hp = 30;
+    m.hpMax = 30;
+    m.baseAtk = 1;
+    m.baseDef = 0;
+    m.spriteSeed = 1;
+
+    GameTestAccess::ents(g).push_back(m);
+
+    Trap tr;
+    tr.pos = trapPos;
+    tr.kind = TrapKind::TrapDoor;
+    tr.discovered = false;
+    GameTestAccess::traps(g).push_back(tr);
+
+    // Trigger the trap under the monster.
+    Entity& victim = GameTestAccess::ents(g).back();
+    GameTestAccess::triggerTrapAt(g, trapPos, victim);
+
+    // Mirror the end-of-turn cleanup behavior (trap door removes monster from this level).
+    GameTestAccess::cleanupDead(g);
+
+    // Now visit the level below; the falling monster should be spawned there.
+    GameTestAccess::changeLevel(g, startDepth + 1, true);
+
+    bool foundOnNext = false;
+    for (const Entity& e : GameTestAccess::ents(g)) {
+        if (e.id == 424242) {
+            foundOnNext = true;
+            expect(e.hp > 0, "Fallen monster should still be alive on the destination level");
+            break;
+        }
+    }
+
+    expect(foundOnNext, "Monster that fell through trap door should appear on the next depth");
+}
+
+
+void test_shrine_recharge_replenishes_wand_charges() {
+    Game g;
+    g.newGame(1337u);
+
+    // Move the player to the shrine room.
+    const Dungeon& d = g.dungeon();
+    Vec2i shrinePos = g.player().pos;
+    bool foundShrine = false;
+    for (const auto& r : d.rooms) {
+        if (r.type == RoomType::Shrine) {
+            shrinePos = { r.cx(), r.cy() };
+            foundShrine = true;
+            break;
+        }
+    }
+    expect(foundShrine, "Dungeon should contain a shrine room");
+    if (!foundShrine) return;
+
+    g.playerMut().pos = shrinePos;
+
+    // Ensure plenty of gold for the service.
+    bool foundGold = false;
+    for (auto& it : GameTestAccess::inv(g)) {
+        if (it.kind == ItemKind::Gold) {
+            it.count = 999;
+            foundGold = true;
+        }
+    }
+    expect(foundGold, "Starting inventory should include gold");
+    if (!foundGold) return;
+
+    // Add a depleted wand.
+    Item w;
+    w.id = 999999;
+    w.kind = ItemKind::WandFireball;
+    w.count = 1;
+    w.enchant = 0;
+    w.buc = 0;
+    w.charges = 0;
+    w.shopPrice = 0;
+    w.shopDepth = 0;
+    w.spriteSeed = 1;
+    GameTestAccess::inv(g).push_back(w);
+
+    const int maxCharges = itemDef(ItemKind::WandFireball).maxCharges;
+    expect(maxCharges > 0, "WandFireball should have maxCharges > 0");
+
+    const bool ok = g.prayAtShrine("recharge");
+    expect(ok, "prayAtShrine(recharge) should succeed");
+
+    int foundCharges = -1;
+    for (const auto& it : GameTestAccess::inv(g)) {
+        if (it.kind == ItemKind::WandFireball) {
+            foundCharges = it.charges;
+            break;
+        }
+    }
+    expect(foundCharges == maxCharges, "Shrine recharge should restore wand charges to max");
+}
+
 void test_monster_energy_scheduling_basic() {
     // Basic sanity checks for the monster speed/energy scheduler.
     // Fast monsters should sometimes take 2 actions per player turn; slow monsters should sometimes skip.
@@ -1931,6 +2332,15 @@ int main() {
     // Patch-specific regression tests.
     test_dungeon_digging();
     test_wand_display_shows_charges();
+    test_shop_debt_ledger_persists_after_consumption();
+    test_shop_debt_ledger_save_load_roundtrip();
+    test_scroll_fear_applies_fear_to_visible_monsters();
+    test_scroll_earth_raises_boulders_around_player();
+    test_save_load_fear_turns_roundtrip();
+    test_trap_door_drops_player_to_next_depth();
+    test_levitation_skips_trap_door_trigger();
+    test_trap_door_monster_falls_to_next_depth_and_persists();
+    test_shrine_recharge_replenishes_wand_charges();
     test_monster_energy_scheduling_basic();
     test_replay_roundtrip_basic();
     test_headless_replay_runner_verifies_hashes();

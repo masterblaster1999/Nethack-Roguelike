@@ -57,7 +57,6 @@ set(PROCROGUE_CORE_SOURCES
     src/replay.cpp
     src/replay_runner.cpp
     src/content.cpp
-    src/keybinds.cpp
     src/game.cpp
     src/game_save.cpp
     src/game_loop.cpp
@@ -124,6 +123,7 @@ set(PROCROGUE_TARGET proc_rogue)
 
 add_executable(${PROCROGUE_TARGET}
     src/main.cpp
+    src/keybinds.cpp
     src/render.cpp
     src/spritegen.cpp
     src/spritegen3d.cpp

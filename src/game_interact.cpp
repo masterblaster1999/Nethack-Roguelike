@@ -4,9 +4,12 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     if (e.hp <= 0) return false;
     if (dx == 0 && dy == 0) return false;
 
+    const bool phasing = entityCanPhase(e.kind);
+    const bool levitating = (e.effects.levitationTurns > 0);
+
     // Webbed: you can still act (use items, fire, etc.) but cannot move.
     // Attempting to move consumes a turn (so the web can wear off).
-    if (e.effects.webTurns > 0) {
+    if (!phasing && e.effects.webTurns > 0) {
         if (e.kind == EntityKind::Player) {
             pushMsg("YOU STRUGGLE AGAINST STICKY WEBBING!", MessageKind::Warning, true);
             // Struggling is loud enough to draw attention.
@@ -48,13 +51,13 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     if (!dung.inBounds(nx, ny)) return false;
 
     // Prevent diagonal corner-cutting (no slipping between two blocking tiles).
-    if (dx != 0 && dy != 0 && !diagonalPassable(dung, e.pos, dx, dy)) {
+    if (!phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, e.pos, dx, dy)) {
         if (e.kind == EntityKind::Player) pushMsg("YOU CAN'T SQUEEZE THROUGH.");
         return false;
     }
 
     // Closed door: opening consumes a turn.
-    if (dung.isDoorClosed(nx, ny)) {
+    if (!phasing && dung.isDoorClosed(nx, ny)) {
         dung.openDoor(nx, ny);
         if (e.kind == EntityKind::Player) {
             pushMsg("YOU OPEN THE DOOR.");
@@ -65,7 +68,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     }
 
     // Locked door: keys open it instantly; lockpicks can work as a fallback.
-    if (dung.isDoorLocked(nx, ny)) {
+    if (!phasing && dung.isDoorLocked(nx, ny)) {
         if (e.kind != EntityKind::Player) {
             // Monsters generally can't open locked doors.
             // However, a few heavy bruisers can bash them down while hunting.
@@ -157,7 +160,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     // Pushable boulders (Sokoban-style): stepping into a boulder attempts to push it.
     // This is orthogonal-only (no diagonal pushes). Boulders can also be pushed into chasms
     // to create a rough bridge.
-    if (dung.at(nx, ny).type == TileType::Boulder) {
+    if (!phasing && dung.at(nx, ny).type == TileType::Boulder) {
         if (dx != 0 && dy != 0) {
             if (e.kind == EntityKind::Player) pushMsg("YOU CAN'T PUSH THE BOULDER DIAGONALLY.");
             return false;
@@ -194,8 +197,15 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         }
     }
 
-    if (!dung.isWalkable(nx, ny)) {
+    const TileType tgtType = dung.at(nx, ny).type;
+    const bool canStep = dung.isWalkable(nx, ny) || (tgtType == TileType::Chasm && levitating);
+
+    if (!phasing && !canStep) {
         if (e.kind == EntityKind::Player) {
+            if (tgtType == TileType::Chasm) {
+                pushMsg("YOU CAN'T CROSS THE CHASM.", MessageKind::Warning, true);
+                return false;
+            }
             // Quality-of-life: if you are wielding a pickaxe, bumping into a diggable
             // tile will dig it out instead of just failing to move.
             if (const Item* mw = equippedMelee()) {
@@ -343,15 +353,22 @@ Trap* Game::trapAtMut(int x, int y) {
 }
 
 void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
-    Trap* t = trapAtMut(pos.x, pos.y);
-    if (!t) return;
+    int tIndex = -1;
+    for (size_t i = 0; i < trapsCur.size(); ++i) {
+        if (trapsCur[i].pos == pos) {
+            tIndex = static_cast<int>(i);
+            break;
+        }
+    }
+    if (tIndex < 0) return;
+    Trap& t = trapsCur[static_cast<size_t>(tIndex)];
 
     const bool isPlayer = (victim.kind == EntityKind::Player);
     const bool tileVisible = dung.inBounds(pos.x, pos.y) && dung.at(pos.x, pos.y).visible;
 
     // You only "discover" a trap when you trigger it yourself, or when you can see it happen.
     if (isPlayer || tileVisible) {
-        t->discovered = true;
+        t.discovered = true;
     }
 
     auto msgIfSeen = [&](const std::string& s, MessageKind kind, bool fromPlayer = false) {
@@ -360,7 +377,22 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
         }
     };
 
-    switch (t->kind) {
+    // Levitation lets you drift over some floor-based traps without triggering them.
+    // (We only skip when you actually stepped onto the trap tile; disarm mishaps can still hurt.)
+    if (!fromDisarm && victim.effects.levitationTurns > 0 && victim.pos == pos) {
+        if (t.kind == TrapKind::Spike || t.kind == TrapKind::Web || t.kind == TrapKind::TrapDoor) {
+            if (isPlayer) {
+                pushMsg("YOU FLOAT OVER A TRAP.", MessageKind::Info, true);
+            } else if (tileVisible) {
+                std::ostringstream ss;
+                ss << kindName(victim.kind) << " FLOATS OVER A TRAP.";
+                pushMsg(ss.str(), MessageKind::Info, false);
+            }
+            return;
+        }
+    }
+
+    switch (t.kind) {
         case TrapKind::Spike: {
             int dmg = rng.range(2, 5) + std::min(3, depth_ / 2);
             victim.hp -= dmg;
@@ -527,6 +559,360 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
             emitNoise(pos, 8);
             break;
         }
+        case TrapKind::RollingBoulder: {
+            // Rolling boulder trap: releases a heavy boulder that rolls in a straight line,
+            // potentially crushing anything in its path. For simplicity this trap is single-use.
+
+            if (isPlayer) {
+                if (fromDisarm) pushMsg("CLICK! YOU SET OFF A ROLLING BOULDER TRAP!", MessageKind::Warning, true);
+                else pushMsg("CLICK! YOU TRIGGER A ROLLING BOULDER TRAP!", MessageKind::Warning, true);
+            } else if (tileVisible) {
+                std::ostringstream ss;
+                ss << "CLICK! " << kindName(victim.kind) << " TRIGGERS A ROLLING BOULDER TRAP!";
+                pushMsg(ss.str(), MessageKind::Warning, false);
+            }
+
+            // Loud enough to draw attention.
+            emitNoise(pos, 16);
+
+            auto sgn = [](int v) { return (v > 0) - (v < 0); };
+
+            const Vec2i dirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+            auto rollLenInDir = [&](Vec2i d) -> int {
+                int len = 0;
+                int x = pos.x;
+                int y = pos.y;
+                for (int step = 0; step < 24; ++step) {
+                    x += d.x;
+                    y += d.y;
+                    if (!dung.inBounds(x, y)) break;
+
+                    const TileType tt = dung.at(x, y).type;
+
+                    // Avoid rolling onto stairs (blocking stairs is just annoying).
+                    if (tt == TileType::StairsUp || tt == TileType::StairsDown) break;
+
+                    // Hard blockers.
+                    if (tt == TileType::Wall || tt == TileType::Pillar || tt == TileType::DoorSecret || tt == TileType::Boulder) break;
+
+                    // Doors and chasms are valid next squares but stop the roll.
+                    len += 1;
+                    if (tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::Chasm) break;
+                }
+                return len;
+            };
+
+            // If the victim isn't on the trap tile (e.g. disarm mishap), bias the roll toward them.
+            Vec2i preferred{0,0};
+            if (victim.pos != pos) {
+                if (victim.pos.x == pos.x) preferred = {0, sgn(victim.pos.y - pos.y)};
+                else if (victim.pos.y == pos.y) preferred = {sgn(victim.pos.x - pos.x), 0};
+                else if (std::abs(victim.pos.x - pos.x) >= std::abs(victim.pos.y - pos.y)) preferred = {sgn(victim.pos.x - pos.x), 0};
+                else preferred = {0, sgn(victim.pos.y - pos.y)};
+            }
+
+            std::vector<Vec2i> bestDirs;
+            int bestLen = -1;
+            for (Vec2i d : dirs) {
+                int len = rollLenInDir(d);
+                if (len <= 0) continue;
+                if (len > bestLen) {
+                    bestLen = len;
+                    bestDirs.clear();
+                    bestDirs.push_back(d);
+                } else if (len == bestLen) {
+                    bestDirs.push_back(d);
+                }
+            }
+
+            Vec2i rollDir{0,0};
+            if (preferred.x != 0 || preferred.y != 0) {
+                if (rollLenInDir(preferred) > 0) rollDir = preferred;
+            }
+
+            if (rollDir.x == 0 && rollDir.y == 0) {
+                if (!bestDirs.empty()) {
+                    rollDir = bestDirs[static_cast<size_t>(rng.range(0, static_cast<int>(bestDirs.size()) - 1))];
+                } else {
+                    // Nowhere to roll: drop in place.
+                    rollDir = {1,0};
+                }
+            }
+
+            auto canStand = [&](const Entity& e, Vec2i p) -> bool {
+                if (!dung.inBounds(p.x, p.y)) return false;
+                if (entityAt(p.x, p.y) != nullptr) return false;
+                const TileType tt = dung.at(p.x, p.y).type;
+                if (dung.isWalkable(p.x, p.y)) return true;
+                if (tt == TileType::Chasm && e.effects.levitationTurns > 0) return true;
+                return false;
+            };
+
+            auto scatterFrom = [&](Entity& e, Vec2i from, Vec2i dir) -> bool {
+                // Prefer sideways relative to roll direction.
+                Vec2i left{-dir.y, dir.x};
+                Vec2i right{dir.y, -dir.x};
+                Vec2i back{-dir.x, -dir.y};
+
+                const Vec2i choices[8] = {
+                    {from.x + left.x, from.y + left.y},
+                    {from.x + right.x, from.y + right.y},
+                    {from.x + back.x, from.y + back.y},
+                    {from.x + left.x + back.x, from.y + left.y + back.y},
+                    {from.x + right.x + back.x, from.y + right.y + back.y},
+                    {from.x + left.x + dir.x, from.y + left.y + dir.y},
+                    {from.x + right.x + dir.x, from.y + right.y + dir.y},
+                    {from.x + dir.x, from.y + dir.y},
+                };
+
+                for (const Vec2i& p : choices) {
+                    if (!canStand(e, p)) continue;
+                    e.pos = p;
+                    return true;
+                }
+                return false;
+            };
+
+            auto hitDmg = [&]() -> int {
+                // Keep damage in a NetHack-like range; slightly scale with depth so it stays relevant.
+                return rng.range(1, 20) + std::min(6, depth_);
+            };
+
+            auto applyBoulderHit = [&](Entity& e, bool isP) {
+                const int dmg = hitDmg();
+                e.hp -= dmg;
+
+                if (isP) {
+                    std::ostringstream ss;
+                    ss << "A BOULDER CRUSHES YOU! YOU TAKE " << dmg << ".";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                    if (e.hp <= 0) {
+                        pushMsg("YOU DIE.", MessageKind::Combat, false);
+                        if (endCause_.empty()) endCause_ = "CRUSHED BY BOULDER TRAP";
+                        gameOver = true;
+                    }
+                } else if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << "A BOULDER CRUSHES " << kindName(e.kind) << "!";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                    if (e.hp <= 0) {
+                        std::ostringstream ds;
+                        ds << kindName(e.kind) << " DIES.";
+                        pushMsg(ds.str(), MessageKind::Combat, false);
+                    }
+                }
+            };
+
+            bool playerMoved = false;
+
+            // If the victim is on the trap square, they take the brunt of it and get shoved aside.
+            if (victim.pos == pos) {
+                applyBoulderHit(victim, isPlayer);
+                if (victim.hp > 0) {
+                    if (!scatterFrom(victim, pos, rollDir)) {
+                        // Can't move them off the square: the trap jams after the hit.
+                        trapsCur.erase(trapsCur.begin() + tIndex);
+                        return;
+                    }
+                    if (isPlayer) playerMoved = true;
+                }
+            }
+
+            // Spawn the boulder at the trap location (now empty), then roll it.
+            if (dung.inBounds(pos.x, pos.y) && dung.at(pos.x, pos.y).type == TileType::Floor && entityAt(pos.x, pos.y) == nullptr) {
+                dung.at(pos.x, pos.y).type = TileType::Boulder;
+            }
+
+            Vec2i bpos = pos;
+            const int maxSteps = 24;
+            for (int step = 0; step < maxSteps; ++step) {
+                Vec2i nxt{ bpos.x + rollDir.x, bpos.y + rollDir.y };
+                if (!dung.inBounds(nxt.x, nxt.y)) break;
+
+                TileType tt = dung.at(nxt.x, nxt.y).type;
+
+                if (tt == TileType::StairsUp || tt == TileType::StairsDown) break;
+
+                // Hard blocks.
+                if (tt == TileType::Wall || tt == TileType::Pillar || tt == TileType::DoorSecret || tt == TileType::Boulder) {
+                    break;
+                }
+
+                // Doors: boulders can smash open some doors.
+                if (tt == TileType::DoorClosed || tt == TileType::DoorLocked) {
+                    float smashP = (tt == TileType::DoorClosed) ? 0.90f : 0.65f;
+                    if (rng.chance(smashP)) {
+                        if (tt == TileType::DoorLocked) dung.unlockDoor(nxt.x, nxt.y);
+                        dung.openDoor(nxt.x, nxt.y);
+                        if (dung.at(nxt.x, nxt.y).visible) {
+                            pushMsg("A DOOR BURSTS OPEN!", MessageKind::System, false);
+                        }
+                        emitNoise(nxt, 14);
+                        tt = dung.at(nxt.x, nxt.y).type;
+                    } else {
+                        // Can't break through.
+                        break;
+                    }
+                }
+
+                // Chasm: boulder fills it and disappears.
+                if (tt == TileType::Chasm) {
+                    dung.at(bpos.x, bpos.y).type = TileType::Floor;
+                    dung.at(nxt.x, nxt.y).type = TileType::Floor;
+                    if (dung.at(nxt.x, nxt.y).visible || tileVisible) {
+                        pushMsg("THE BOULDER CRASHES INTO THE CHASM!", MessageKind::Info, false);
+                    }
+                    emitNoise(nxt, 18);
+                    // Consumed.
+                    bpos = nxt;
+                    break;
+                }
+
+                // Check entity collision.
+                Entity* hit = entityAtMut(nxt.x, nxt.y);
+                if (hit) {
+                    const bool hitIsPlayer = (hit->kind == EntityKind::Player);
+                    applyBoulderHit(*hit, hitIsPlayer);
+                    if (hit->hp > 0) {
+                        if (!scatterFrom(*hit, hit->pos, rollDir)) {
+                            // Can't move the victim: boulder stops.
+                            break;
+                        }
+                        if (hitIsPlayer) playerMoved = true;
+                    }
+                }
+
+                // Still blocked (couldn't scatter).
+                if (entityAt(nxt.x, nxt.y) != nullptr) break;
+
+                // Move boulder forward.
+                dung.at(nxt.x, nxt.y).type = TileType::Boulder;
+                dung.at(bpos.x, bpos.y).type = TileType::Floor;
+                bpos = nxt;
+
+                emitNoise(bpos, 12);
+            }
+
+            // Single-use: boulder traps are spent once triggered.
+            trapsCur.erase(trapsCur.begin() + tIndex);
+
+            if (playerMoved) recomputeFov();
+
+            break;
+        }
+
+        case TrapKind::TrapDoor: {
+            // Trap door: a hidden panel gives way, dropping the victim to the next dungeon level.
+            // For simplicity this trap is single-use in this implementation.
+
+            if (isPlayer) {
+                if (fromDisarm) pushMsg("CLICK! A TRAP DOOR OPENS BENEATH YOU!", MessageKind::Warning, true);
+                else pushMsg("A TRAP DOOR OPENS BENEATH YOU!", MessageKind::Warning, true);
+
+                // Single-use: remove before changing levels so it persists correctly on the old floor.
+                trapsCur.erase(trapsCur.begin() + tIndex);
+
+                if (depth_ >= DUNGEON_MAX_DEPTH) {
+                    pushMsg("THE TRAP DOOR SLAMS SHUT.", MessageKind::Info, true);
+                    return;
+                }
+
+                // Falling is loud.
+                emitNoise(pos, 18);
+
+                // Drop the player to the next depth.
+                const int dstDepth = depth_ + 1;
+                changeLevel(dstDepth, true);
+
+                // IMPORTANT: changeLevel may reallocate ents; reacquire the player reference.
+                Entity& p = playerMut();
+
+                // Land somewhere other than the stairs to avoid predictable pile-ups.
+                Vec2i dst = dung.randomFloor(rng, true);
+                for (int tries = 0; tries < 200; ++tries) {
+                    dst = dung.randomFloor(rng, true);
+                    if (dst == dung.stairsUp || dst == dung.stairsDown) continue;
+                    if (entityAt(dst.x, dst.y) != nullptr) continue;
+                    if (fireAt(dst.x, dst.y) > 0u) continue;
+
+                    bool hasTrap = false;
+                    for (const auto& tr : trapsCur) {
+                        if (tr.pos == dst) { hasTrap = true; break; }
+                    }
+                    if (hasTrap) continue;
+
+                    break;
+                }
+
+                p.pos = dst;
+                recomputeFov();
+
+                // Impact damage scales mildly with depth.
+                const int dmg = rng.range(3, 7) + std::min(6, depth_ / 2);
+                p.hp -= dmg;
+                std::ostringstream ss;
+                ss << "YOU LAND HARD! YOU TAKE " << dmg << ".";
+                pushMsg(ss.str(), MessageKind::Combat, true);
+
+                emitNoise(p.pos, 14);
+
+                if (p.hp <= 0) {
+                    pushMsg("YOU DIE.", MessageKind::Combat, false);
+                    if (endCause_.empty()) endCause_ = "FELL THROUGH A TRAP DOOR";
+                    gameOver = true;
+                }
+
+                return;
+            } else {
+                if (tileVisible) {
+                    std::ostringstream ss;
+                    ss << kindName(victim.kind) << " FALLS THROUGH A TRAP DOOR!";
+                    pushMsg(ss.str(), MessageKind::Warning, false);
+                }
+
+                // Single-use.
+                trapsCur.erase(trapsCur.begin() + tIndex);
+
+                // Defensive: trap doors on the bottom floor should act as a dead-end.
+                if (depth_ >= DUNGEON_MAX_DEPTH) {
+                    pushMsg("YOU HEAR THE TRAP DOOR SLAM SHUT.", MessageKind::Info, false);
+                    return;
+                }
+
+                const int dstDepth = depth_ + 1;
+
+                // Falling hurts. (A lighter touch than the player's fall damage.)
+                const int dmg = rng.range(2, 5) + (depth_ / 2);
+
+                // Snapshot the creature before removing it from this level.
+                Entity faller = victim;
+                faller.hp = std::max(0, faller.hp - dmg);
+                faller.pos = {-1, -1}; // resolved on arrival to the destination depth
+                faller.energy = 0;
+
+                const bool survived = (faller.hp > 0);
+
+                if (survived) {
+                    // Queue inter-level travel: the creature will appear on the level below
+                    // the next time that depth is entered.
+                    trapdoorFallers_[static_cast<size_t>(dstDepth)].push_back(faller);
+                }
+
+                // Audible feedback: even if you can't see it, you can hear something fall.
+                if (survived) {
+                    pushMsg("YOU HEAR A MUFFLED CRASH FROM BELOW.", MessageKind::Info, false);
+                } else {
+                    pushMsg("YOU HEAR A SICKENING THUD FROM BELOW.", MessageKind::Info, false);
+                }
+
+                // Remove the creature from this level without loot/corpse drops here.
+                victim.hp = 0;
+                victim.pos = {-1, -1};
+                return;
+            }
+        }
+
         default:
             break;
     }
@@ -676,6 +1062,8 @@ bool Game::disarmTrap() {
             case TrapKind::Alarm: return "ALARM";
             case TrapKind::Web: return "WEB";
             case TrapKind::ConfusionGas: return "CONFUSION GAS";
+            case TrapKind::RollingBoulder: return "ROLLING BOULDER";
+            case TrapKind::TrapDoor: return "TRAP DOOR";
         }
         return "TRAP";
     };
@@ -822,6 +1210,8 @@ bool Game::disarmTrap() {
 
     if (tr.kind == TrapKind::Teleport) chance *= 0.85f;
     if (tr.kind == TrapKind::Alarm) chance *= 0.90f;
+    if (tr.kind == TrapKind::RollingBoulder) chance *= 0.80f;
+    if (tr.kind == TrapKind::TrapDoor) chance *= 0.82f;
 
     chance = std::max(0.05f, chance);
 
@@ -849,6 +1239,8 @@ bool Game::disarmTrap() {
     if (tr.kind == TrapKind::Alarm) setOffChance = 0.25f;
     if (tr.kind == TrapKind::Web) setOffChance = 0.20f;
     if (tr.kind == TrapKind::ConfusionGas) setOffChance = 0.18f;
+    if (tr.kind == TrapKind::RollingBoulder) setOffChance = 0.22f;
+    if (tr.kind == TrapKind::TrapDoor) setOffChance = 0.24f;
 
     if (rng.chance(setOffChance)) {
         pushMsg("YOU SET OFF THE TRAP!", MessageKind::Warning, true);
@@ -1308,183 +1700,226 @@ bool Game::prayAtShrine(const std::string& modeIn) {
 
     Entity& p = playerMut();
 
-    auto hasCursedEquipped = [&]() -> bool {
-        int idx = equippedMeleeIndex();
-        if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
-        idx = equippedRangedIndex();
-        if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
-        idx = equippedArmorIndex();
-        if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
-        idx = equippedRing1Index();
-        if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
-        idx = equippedRing2Index();
-        if (idx >= 0 && inv[static_cast<size_t>(idx)].buc < 0) return true;
+    auto hasCursedEquipped = [&]() {
+        for (const auto& it : inv) {
+            if (it.id != equipMeleeId && it.id != equipRangedId && it.id != equipArmorId && it.id != equipRing1Id && it.id != equipRing2Id) continue;
+            if (it.buc < 0) return true;
+        }
         return false;
     };
-    // Must be standing inside a shrine room.
-    bool inShrine = false;
-    for (const Room& r : dung.rooms) {
-        if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) {
-            inShrine = true;
-            break;
-        }
-    }
 
+    auto rechargeableWandIndices = [&]() {
+        std::vector<int> idxs;
+        idxs.reserve(8);
+        for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+            const Item& it = inv[static_cast<size_t>(i)];
+            if (!isWandKind(it.kind)) continue;
+            const ItemDef& d = itemDef(it.kind);
+            if (d.maxCharges <= 0) continue;
+            if (it.charges < d.maxCharges) idxs.push_back(i);
+        }
+        return idxs;
+    };
+
+    auto hasRechargeableWand = [&]() {
+        auto idxs = rechargeableWandIndices();
+        return !idxs.empty();
+    };
+
+    auto unidentifiedKinds = [&]() {
+        std::vector<ItemKind> out;
+        out.reserve(16);
+        auto seen = [&](ItemKind k) {
+            for (ItemKind x : out) if (x == k) return true;
+            return false;
+        };
+        for (const auto& it : inv) {
+            if (!isIdentifiableKind(it.kind)) continue;
+            if (isIdentified(it.kind)) continue;
+            if (!seen(it.kind)) out.push_back(it.kind);
+        }
+        return out;
+    };
+
+    auto blessableIndices = [&]() {
+        std::vector<int> idxs;
+        idxs.reserve(16);
+        for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+            const Item& it = inv[static_cast<size_t>(i)];
+            if (it.kind == ItemKind::Gold) continue;
+            if (it.kind == ItemKind::AmuletYendor) continue;
+            const ItemDef& d = itemDef(it.kind);
+            const bool gear = (d.slot != EquipSlot::None);
+            const bool consumable = d.consumable;
+            if (gear || consumable) idxs.push_back(i);
+        }
+        return idxs;
+    };
+
+    bool inShrine = false;
+    for (const auto& r : dung.rooms) {
+        if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
+    }
     if (!inShrine) {
-        pushMsg("YOU ARE NOT AT A SHRINE.", MessageKind::System, true);
+        pushMsg("YOU ARE NOT IN A SHRINE.", MessageKind::Info, true);
         return false;
     }
 
     std::string mode = toLower(trim(modeIn));
+    if (mode == "charge") mode = "recharge";
+
     if (!mode.empty()) {
-        if (!(mode == "heal" || mode == "cure" || mode == "identify" || mode == "bless" || mode == "uncurse")) {
-            pushMsg("UNKNOWN PRAYER: " + mode + ". TRY: heal, cure, identify, bless, uncurse.", MessageKind::System, true);
+        if (mode != "heal" && mode != "cure" && mode != "identify" && mode != "bless" && mode != "uncurse" && mode != "recharge") {
+            pushMsg("UNKNOWN PRAYER: " + mode + ". TRY: heal / cure / identify / bless / uncurse / recharge", MessageKind::Info, true);
             return false;
         }
     } else {
-        // Auto-pick the most useful effect right now.
-        if (p.effects.poisonTurns > 0 || p.effects.webTurns > 0 || p.effects.confusionTurns > 0) mode = "cure";
+        // Auto-pick a sensible prayer.
+        if (p.effects.poisonTurns > 0 || p.effects.webTurns > 0 || p.effects.confusionTurns > 0 || p.effects.burnTurns > 0) mode = "cure";
         else if (p.hp < p.hpMax) mode = "heal";
         else if (hasCursedEquipped()) mode = "uncurse";
-        else if (identifyItemsEnabled) {
-            bool hasUnknown = false;
-            for (const auto& it : inv) {
-                if (!isIdentifiableKind(it.kind)) continue;
-                if (isIdentified(it.kind)) continue;
-                hasUnknown = true;
-                break;
-            }
-            mode = hasUnknown ? "identify" : "bless";
-        } else {
-            mode = "bless";
-        }
+        else if (hasRechargeableWand()) mode = "recharge";
+        else if (identifyItemsEnabled && !unidentifiedKinds().empty()) mode = "identify";
+        else mode = "bless";
     }
 
-    // Pricing: scales gently with depth so it stays relevant.
-    const int base = 8 + depth_ * 2;
-    int cost = base;
-    if (mode == "cure") cost = std::max(4, base - 2);
-    else if (mode == "identify") cost = base + 6;
-    else if (mode == "bless") cost = base + 10;
-    else if (mode == "uncurse") cost = base + 12;
-
-    if (goldCount() < cost) {
-        pushMsg("YOU NEED " + std::to_string(cost) + " GOLD TO PRAY HERE.", MessageKind::Warning, true);
+    if (mode == "identify" && !identifyItemsEnabled) {
+        pushMsg("DIVINE IDENTIFICATION IS DISABLED.", MessageKind::Info, true);
         return false;
     }
 
-    // Spend gold from inventory stacks.
-    int remaining = cost;
-    for (auto& it : inv) {
-        if (remaining <= 0) break;
-        if (it.kind != ItemKind::Gold) continue;
-        const int take = std::min(it.count, remaining);
-        it.count -= take;
-        remaining -= take;
+    // If the player explicitly requests a service that can't do anything, don't charge them.
+    if (mode == "identify") {
+        if (unidentifiedKinds().empty()) {
+            pushMsg("YOU LEARN NOTHING NEW.", MessageKind::Info, true);
+            return false;
+        }
     }
-    inv.erase(std::remove_if(inv.begin(), inv.end(),
-                             [](const Item& it) { return it.kind == ItemKind::Gold && it.count <= 0; }),
-              inv.end());
+    if (mode == "recharge") {
+        if (rechargeableWandIndices().empty()) {
+            pushMsg("YOU HAVE NOTHING TO RECHARGE.", MessageKind::Info, true);
+            return false;
+        }
+    }
 
-    pushMsg("YOU OFFER " + std::to_string(cost) + " GOLD.", MessageKind::System);
+    const int base = 10 + depth_ * 2;
+    int cost = 0;
+    if (mode == "heal") cost = base + 6;
+    else if (mode == "cure") cost = base + 8;
+    else if (mode == "identify") cost = base + 10;
+    else if (mode == "bless") cost = base + 12;
+    else if (mode == "uncurse") cost = base + 14;
+    else if (mode == "recharge") cost = base + 16;
+
+    if (goldCount() < cost) {
+        pushMsg("YOU LACK THE GOLD FOR THAT.", MessageKind::Info, true);
+        return false;
+    }
+
+    // Spend gold now; selection prompts (if any) are UI-only and do not consume extra turns.
+    (void)spendGoldFromInv(inv, cost);
+    pushMsg("YOU OFFER " + std::to_string(cost) + " GOLD.", MessageKind::Info, true);
 
     if (mode == "heal") {
-        const int before = p.hp;
-        p.hp = p.hpMax;
-        if (p.hp > before) pushMsg("A WARM LIGHT MENDS YOUR WOUNDS.", MessageKind::Success, true);
-        else pushMsg("YOU FEEL REASSURED.", MessageKind::Info, true);
+        int healed = std::max(8, p.hpMax / 2);
+        p.hp = std::min(p.hp + healed, p.hpMax);
+        pushMsg("DIVINE LIGHT MENDS YOUR WOUNDS.", MessageKind::Success, true);
     } else if (mode == "cure") {
-        const bool hadPoison = (p.effects.poisonTurns > 0);
-        const bool hadWeb = (p.effects.webTurns > 0);
-        const bool hadConf = (p.effects.confusionTurns > 0);
-        const bool hadBurn = (p.effects.burnTurns > 0);
         p.effects.poisonTurns = 0;
         p.effects.webTurns = 0;
         p.effects.confusionTurns = 0;
         p.effects.burnTurns = 0;
-        if (hadPoison || hadWeb || hadConf || hadBurn) pushMsg("YOU FEEL PURIFIED.", MessageKind::Success, true);
-        else pushMsg("NOTHING SEEMS AMISS.", MessageKind::Info, true);
-    } else if (mode == "uncurse") {
-        int uncursed = 0;
-        for (auto& it : inv) {
-            if (!isWearableGear(it.kind)) continue;
-            if (it.buc < 0) { it.buc = 0; uncursed++; }
-        }
-
-        if (uncursed <= 0) {
-            pushMsg("YOU FEEL BRIEFLY UNEASY... THEN FINE.", MessageKind::Info, true);
-        } else if (uncursed == 1) {
-            pushMsg("A MALEVOLENT WEIGHT LIFTS FROM YOUR GEAR.", MessageKind::Success, true);
-        } else {
-            pushMsg("MALEVOLENT WEIGHTS LIFT FROM YOUR GEAR.", MessageKind::Success, true);
-        }
-
+        pushMsg("YOU FEEL PURIFIED.", MessageKind::Success, true);
     } else if (mode == "identify") {
-        if (!identifyItemsEnabled) {
-            pushMsg("THE SHRINE IS SILENT. (IDENTIFY ITEMS IS OFF.)", MessageKind::Info, true);
+        std::vector<ItemKind> c = unidentifiedKinds();
+        if (c.size() == 1) {
+            (void)markIdentified(c[0], false);
+            pushMsg("DIVINE INSIGHT REVEALS THE TRUTH.", MessageKind::Success, true);
         } else {
-            std::vector<ItemKind> candidates;
-            candidates.reserve(inv.size());
-            for (const auto& it : inv) {
-                if (!isIdentifiableKind(it.kind)) continue;
-                if (isIdentified(it.kind)) continue;
-                candidates.push_back(it.kind);
+            openInventory();
+            invPrompt_ = InvPromptKind::ShrineIdentify;
+            // Prefer selecting the first unidentified item.
+            for (size_t i = 0; i < inv.size(); ++i) {
+                if (isIdentifiableKind(inv[i].kind) && !isIdentified(inv[i].kind)) { invSel = static_cast<int>(i); break; }
             }
-
-            if (candidates.empty()) {
-                pushMsg("NOTHING NEW IS REVEALED.", MessageKind::Info, true);
-            } else {
-                ItemKind k = candidates[static_cast<size_t>(rng.range(0, static_cast<int>(candidates.size()) - 1))];
-                (void)markIdentified(k, false);
-                pushMsg("DIVINE INSIGHT REVEALS THE TRUTH.", MessageKind::Info, true);
-            }
+            pushMsg("SELECT AN ITEM TO IDENTIFY (ENTER=CHOOSE, ESC=RANDOM).", MessageKind::System, true);
         }
-    } else { // bless
-        p.effects.shieldTurns = std::max(p.effects.shieldTurns, 18 + depth_ * 2);
-        p.effects.regenTurns = std::max(p.effects.regenTurns, 10 + depth_);
-        // Bless (or uncurse) one equipped item to make shrine blessings feel tangible.
-        Item* target = nullptr;
-        int idx = equippedMeleeIndex();
-        if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
-        else {
-            idx = equippedArmorIndex();
-            if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
-            else {
-                idx = equippedRangedIndex();
-                if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
-                else {
-                    idx = equippedRing1Index();
-                    if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
-                    else {
-                        idx = equippedRing2Index();
-                        if (idx >= 0) target = &inv[static_cast<size_t>(idx)];
-                    }
-                }
-            }
-        }
+    } else if (mode == "bless") {
+        // Defensive buffs.
+        p.effects.shieldTurns = std::max(p.effects.shieldTurns, 80);
+        p.effects.regenTurns  = std::max(p.effects.regenTurns, 120);
 
-        if (target && isWearableGear(target->kind)) {
-            const std::string nm = displayItemName(*target);
-            if (target->buc < 0) {
-                target->buc = 0;
-                pushMsg("THE CURSE ON YOUR " + nm + " IS LIFTED!", MessageKind::Success, true);
-            } else if (target->buc == 0) {
-                target->buc = 1;
-                pushMsg("YOUR " + nm + " GLOWS SOFTLY.", MessageKind::Success, true);
+        auto blessOne = [&](Item& it) {
+            Item named = it;
+            named.buc = 0;
+            const std::string nm = displayItemName(named);
+
+            if (it.buc < 0) {
+                it.buc = 0;
+                pushMsg("A WARMTH LIFTS THE CURSE FROM YOUR " + nm + ".", MessageKind::Success, true);
+            } else if (it.buc == 0) {
+                it.buc = 1;
+                pushMsg("YOUR " + nm + " GLOWS WITH HOLY LIGHT.", MessageKind::Success, true);
             } else {
                 pushMsg("YOUR " + nm + " SHINES BRIEFLY.", MessageKind::Info, true);
             }
+        };
+
+        std::vector<int> idxs = blessableIndices();
+        if (idxs.size() == 1) {
+            blessOne(inv[static_cast<size_t>(idxs[0])]);
+        } else if (!idxs.empty()) {
+            openInventory();
+            invPrompt_ = InvPromptKind::ShrineBless;
+            invSel = idxs[0];
+            pushMsg("SELECT AN ITEM TO BLESS (ENTER=CHOOSE, ESC=EQUIPPED).", MessageKind::System, true);
         }
 
         pushMsg("A HOLY AURA SURROUNDS YOU.", MessageKind::Success, true);
+    } else if (mode == "uncurse") {
+        bool any = false;
+        for (auto& it : inv) {
+            if (it.id != equipMeleeId && it.id != equipRangedId && it.id != equipArmorId && it.id != equipRing1Id && it.id != equipRing2Id) continue;
+            if (it.buc < 0) {
+                it.buc = 0;
+                any = true;
+            }
+        }
+        pushMsg(any ? "A WEIGHT LIFTS FROM YOUR GEAR." : "YOU FEEL REASSURED.", MessageKind::Success, true);
+    } else if (mode == "recharge") {
+        auto rechargeOne = [&](Item& it) {
+            const ItemDef& d = itemDef(it.kind);
+            const int before = it.charges;
+            if (d.maxCharges <= 0) return;
+
+            if (it.buc < 0) it.buc = 0;
+            it.charges = d.maxCharges;
+
+            Item named = it;
+            named.buc = 0;
+            const std::string nm = displayItemName(named);
+
+            if (before < d.maxCharges) {
+                pushMsg("DIVINE ENERGY FLOWS INTO YOUR " + nm + ".", MessageKind::Success, true);
+            } else {
+                pushMsg("YOUR " + nm + " IS ALREADY FULLY CHARGED.", MessageKind::Info, true);
+            }
+        };
+
+        std::vector<int> wands = rechargeableWandIndices();
+        if (wands.size() == 1) {
+            rechargeOne(inv[static_cast<size_t>(wands[0])]);
+        } else {
+            openInventory();
+            invPrompt_ = InvPromptKind::ShrineRecharge;
+            invSel = wands.empty() ? 0 : wands[0];
+            pushMsg("SELECT A WAND TO RECHARGE (ENTER=CHOOSE, ESC=BEST).", MessageKind::System, true);
+        }
     }
 
-    // Praying consumes a turn.
     advanceAfterPlayerAction();
     return true;
 }
-
-
 bool Game::payAtShop() {
     if (gameOver || gameWon) return false;
 
@@ -1560,6 +1995,17 @@ bool Game::payAtShop() {
                 it.shopPrice = 0;
                 it.shopDepth = 0;
             }
+        }
+    }
+
+    // Pay down any additional bill for goods already consumed/destroyed.
+    if (remainingGold > 0 && depth_ >= 1 && depth_ <= DUNGEON_MAX_DEPTH) {
+        int& bill = shopDebtLedger_[depth_];
+        if (bill > 0) {
+            const int pay = std::min(bill, remainingGold);
+            bill -= pay;
+            remainingGold -= pay;
+            spent += pay;
         }
     }
 

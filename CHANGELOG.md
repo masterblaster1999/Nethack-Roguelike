@@ -1,6 +1,61 @@
 # Changelog
 
 
+## [0.21.0] - Unreleased
+
+### Added
+- **Themed rooms**: **Armory**, **Library**, and **Laboratory**. These appear as an extra "moderate" special room on many floors, biasing spawns toward weapons/armor, scrolls/wands, and potions respectively.
+  - Laboratories can also generate **extra volatile traps** inside them (confusion gas / poison darts / etc.) for flavor.
+
+- **Ethereal bones ghosts**: ghosts spawned from **bones files** can now **phase through walls/doors**.
+  - Their chilling touch can also briefly **disorient** the player.
+
+- **Potion of Levitation**: grants temporary **LEV** status.
+  - While levitating, you can **traverse chasms** and **float over** certain floor traps (spikes/webs).
+  - If levitation ends while you’re above a chasm, you’ll **fall**, take damage, and scramble back onto solid ground.
+
+- **Rolling boulder traps**: rare floor traps that release a boulder which **rolls in a straight line**, potentially **crushing** anything in its path.
+  - The boulder can sometimes **smash open doors** and can **fill chasms** (turning them into floor).
+  - After triggering, the trap is **spent**, leaving the boulder as a new obstacle (or consuming it if it falls into a chasm).
+
+- **Shop debt ledger**: consuming/destroying unpaid shop goods now still leaves you owing the shopkeeper (and **#pay** can pay it down).
+
+- **Shrine service improvements**: shrine prayers that target a specific item now open a **modal inventory prompt** so you can choose the target.
+  - **#pray identify**: choose which unidentified item kind to identify (ESC still picks a random unknown).
+  - **#pray bless**: choose which item to bless/uncurse (ESC blesses your currently equipped gear, as before).
+  - New: **#pray recharge**: restores charges on a depleted wand (ESC picks the most depleted).
+
+- **Scroll of Fear**: reading it scares **visible hostile monsters**, applying a temporary **FEAR** status that makes them prioritize fleeing.
+  - Mindless/undead monsters are immune.
+
+- **Scroll of Earth**: reading it makes the dungeon shake, raising **boulders** in the 8 surrounding tiles.
+  - It can also **fill adjacent chasms** and may pelt adjacent hostile creatures with falling rock.
+
+- **Scroll of Taming**: reading it can **charm** nearby creatures into becoming **friendly companions**.
+  - Undead, shopkeepers, and the Minotaur are immune.
+
+- **Trap doors**: rare floor traps that drop you to the **next depth**, dealing **impact damage** on landing.
+  - While levitating, you can **float over** trap doors.
+  - Creatures (including **friendly companions**) that fall through a trap door can now also **tumble to the level below** and may show up later (taking some fall damage).
+
+- **Corpse revival**: **stale corpses** left on the ground may **rise once** as hostile undead.
+  - Special cases: **troll/slime/mimic/wizard corpses** can sometimes reanimate into their original creature.
+  - Rising is **noisy** and can wake nearby monsters.
+
+- New monster: **Zombie** (slow, tough undead).
+  - **Undead** (Ghost/Skeleton/Zombie) are **immune to poison damage**.
+
+### Save compatibility
+- Save version bumped to **v33** (persists queued trapdoor-fall creatures; v32 FEAR timer + v31 shop debt ledger retained).
+
+### Changed
+- **#whistle** now calls **all friendly companions** with **Follow/Fetch** orders (not just the starting dog).
+
+### Fixed
+- Test/headless builds no longer require SDL2: **keybinds** are compiled only for the game executable.
+- Fixed build-breaking pointer dereferences in **Disarm Trap** and **Shrine prayer** interactions.
+
+
 
 
 

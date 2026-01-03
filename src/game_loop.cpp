@@ -1348,52 +1348,86 @@ void Game::whistle() {
     if (isFinished()) return;
 
     Entity& p = playerMut();
-    Entity* d = nullptr;
-    for (auto& e : ents) {
-        if (e.kind == EntityKind::Dog && e.hp > 0) { d = &e; break; }
-    }
 
-    pushMsg("YOU WHISTLE SHARPLY.", MessageKind::Info, true);
+    pushMsg("YOU WHISTLE SHARPLY...", MessageKind::Info, true);
     emitNoise(p.pos, 14);
 
-    if (!d) {
-        pushMsg("...BUT NOTHING ANSWERS.", MessageKind::Info, true);
-        advanceAfterPlayerAction();
-        return;
-    }
+    int totalFriendly = 0;
+    std::vector<Entity*> callable;
+    callable.reserve(8);
 
-    const int dist = chebyshev(d->pos, p.pos);
-    if (dist <= 2) {
-        pushMsg("YOUR DOG LOOKS UP AT YOU.", MessageKind::Info, true);
-        advanceAfterPlayerAction();
-        return;
-    }
-
-    // Try to call the dog to a nearby free tile.
-    Vec2i best = d->pos;
-    bool found = false;
-    for (int r = 1; r <= 3 && !found; ++r) {
-        for (int dy = -r; dy <= r && !found; ++dy) {
-            for (int dx = -r; dx <= r && !found; ++dx) {
-                if (dx == 0 && dy == 0) continue;
-                const int nx = p.pos.x + dx;
-                const int ny = p.pos.y + dy;
-                if (!dung.inBounds(nx, ny)) continue;
-                if (!dung.isWalkable(nx, ny)) continue;
-                if (entityAt(nx, ny)) continue;
-                // Avoid placing the dog directly on stairs when possible.
-                if ((nx == dung.stairsUp.x && ny == dung.stairsUp.y) || (nx == dung.stairsDown.x && ny == dung.stairsDown.y)) {
-                    continue;
-                }
-                best = {nx, ny};
-                found = true;
-            }
+    for (auto& e : ents) {
+        if (e.id == playerId_) continue;
+        if (e.hp <= 0) continue;
+        if (!e.friendly) continue;
+        if (e.kind == EntityKind::Shopkeeper) continue;
+        ++totalFriendly;
+        if (e.allyOrder == AllyOrder::Follow || e.allyOrder == AllyOrder::Fetch) {
+            callable.push_back(&e);
         }
     }
 
-    if (found) {
-        d->pos = best;
-        pushMsg("YOUR DOG COMES RUNNING.", MessageKind::Success, true);
+    if (callable.empty()) {
+        if (totalFriendly == 0) {
+            pushMsg("...BUT NOTHING ANSWERS.", MessageKind::Info, true);
+        } else {
+            pushMsg("...BUT YOUR COMPANIONS HOLD THEIR POSITION.", MessageKind::Info, true);
+        }
+        advanceAfterPlayerAction();
+        return;
+    }
+
+    // Pull stragglers first.
+    std::sort(callable.begin(), callable.end(), [&](Entity* a, Entity* b) {
+        return chebyshev(a->pos, p.pos) > chebyshev(b->pos, p.pos);
+    });
+
+    int moved = 0;
+    int alreadyNear = 0;
+
+    for (Entity* ally : callable) {
+        const int dist = chebyshev(ally->pos, p.pos);
+        if (dist <= 2) {
+            ++alreadyNear;
+            continue;
+        }
+
+        // Try to call the companion to a nearby free tile.
+        Vec2i best = ally->pos;
+        bool found = false;
+        for (int r = 1; r <= 3 && !found; ++r) {
+            for (int dy = -r; dy <= r && !found; ++dy) {
+                for (int dx = -r; dx <= r && !found; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
+                    const int nx = p.pos.x + dx;
+                    const int ny = p.pos.y + dy;
+                    if (!dung.inBounds(nx, ny)) continue;
+                    if (!dung.isWalkable(nx, ny)) continue;
+                    if (entityAt(nx, ny)) continue;
+                    // Avoid placing allies directly on stairs when possible.
+                    if ((nx == dung.stairsUp.x && ny == dung.stairsUp.y) || (nx == dung.stairsDown.x && ny == dung.stairsDown.y)) {
+                        continue;
+                    }
+                    best = {nx, ny};
+                    found = true;
+                }
+            }
+        }
+
+        if (found) {
+            ally->pos = best;
+            ++moved;
+        }
+    }
+
+    if (moved > 0) {
+        if (moved == 1) pushMsg("A COMPANION COMES RUNNING.", MessageKind::Success, true);
+        else pushMsg("YOUR COMPANIONS COME RUNNING.", MessageKind::Success, true);
+    } else if (alreadyNear > 0) {
+        pushMsg("YOUR COMPANIONS LOOK UP AT YOU.", MessageKind::Info, true);
+    } else {
+        // No spots nearby (very crowded), or allies were blocked by stairs constraints.
+        pushMsg("YOU HEAR FOOTSTEPS, BUT THEY CAN'T REACH YOU.", MessageKind::Info, true);
     }
 
     advanceAfterPlayerAction();

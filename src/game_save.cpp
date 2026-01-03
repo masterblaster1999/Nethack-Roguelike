@@ -158,8 +158,15 @@ int Game::shopDebtTotal() const {
         const int n = isStackable(it.kind) ? std::max(0, it.count) : 1;
         total += it.shopPrice * n;
     }
+
+    // Additional debt recorded for consumed/destroyed unpaid goods (per depth).
+    for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
+        total += std::max(0, shopDebtLedger_[d]);
+    }
+
     return total;
 }
+
 
 int Game::shopDebtThisDepth() const {
     const int d = depth_;
@@ -169,8 +176,13 @@ int Game::shopDebtThisDepth() const {
         const int n = isStackable(it.kind) ? std::max(0, it.count) : 1;
         total += it.shopPrice * n;
     }
+
+    if (d >= 1 && d <= DUNGEON_MAX_DEPTH) {
+        total += std::max(0, shopDebtLedger_[d]);
+    }
     return total;
 }
+
 
 bool Game::playerInShop() const {
     const Entity& p = player();
@@ -184,6 +196,16 @@ bool Game::consumeKeys(int n) {
     for (auto& it : inv) {
         if (it.kind != ItemKind::Key) continue;
         int take = std::min(it.count, need);
+        if (take <= 0) continue;
+
+        // Using up unpaid shop goods still leaves you owing the shopkeeper.
+        if (it.shopPrice > 0 && it.shopDepth > 0) {
+            const int sd = it.shopDepth;
+            if (sd >= 1 && sd <= DUNGEON_MAX_DEPTH) {
+                shopDebtLedger_[sd] += take * it.shopPrice;
+            }
+        }
+
         it.count -= take;
         need -= take;
         if (need <= 0) break;
@@ -204,6 +226,16 @@ bool Game::consumeLockpicks(int n) {
     for (auto& it : inv) {
         if (it.kind != ItemKind::Lockpick) continue;
         int take = std::min(it.count, need);
+        if (take <= 0) continue;
+
+        // Using up unpaid shop goods still leaves you owing the shopkeeper.
+        if (it.shopPrice > 0 && it.shopDepth > 0) {
+            const int sd = it.shopDepth;
+            if (sd >= 1 && sd <= DUNGEON_MAX_DEPTH) {
+                shopDebtLedger_[sd] += take * it.shopPrice;
+            }
+        }
+
         it.count -= take;
         need -= take;
         if (need <= 0) break;
@@ -524,7 +556,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 29u;
+constexpr uint32_t SAVE_VERSION = 33u;
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 1u;
@@ -729,6 +761,14 @@ void writeEntity(std::ostream& out, const Entity& e) {
     int32_t burnTurns = e.effects.burnTurns;
     writePod(out, burnTurns);
 
+    // v30+: levitation
+    int32_t levitationTurns = e.effects.levitationTurns;
+    writePod(out, levitationTurns);
+
+    // v32+: fear
+    int32_t fearTurns = e.effects.fearTurns;
+    writePod(out, fearTurns);
+
     // v14+: ranged ammo count (ammo-based ranged monsters)
     int32_t ammoCount = e.rangedAmmoCount;
     writePod(out, ammoCount);
@@ -781,6 +821,9 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     int32_t invisTurns = 0;
     int32_t confusionTurns = 0;
     int32_t burnTurns = 0;
+    int32_t levitationTurns = 0;
+
+    int32_t fearTurns = 0;
 
     int32_t stolenGold = 0;
 
@@ -835,6 +878,14 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
 
         if (version >= 22u) {
             if (!readPod(in, burnTurns)) return false;
+        }
+
+        if (version >= 30u) {
+            if (!readPod(in, levitationTurns)) return false;
+        }
+
+        if (version >= 32u) {
+            if (!readPod(in, fearTurns)) return false;
         }
     }
 
@@ -902,6 +953,8 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     e.effects.invisTurns = invisTurns;
     e.effects.confusionTurns = confusionTurns;
     e.effects.burnTurns = burnTurns;
+    e.effects.levitationTurns = levitationTurns;
+    e.effects.fearTurns = fearTurns;
 
 
     if (version >= 17u) {
@@ -1097,6 +1150,21 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
         writeItem(mem, it);
     }
 
+    // v31+: Shop debt ledger (consumed/destroyed unpaid goods still billed per shop depth).
+    if constexpr (SAVE_VERSION >= 31u) {
+        uint32_t billCount = 0u;
+        for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
+            if (shopDebtLedger_[d] > 0) ++billCount;
+        }
+        writePod(mem, billCount);
+        for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
+            const int amt = shopDebtLedger_[d];
+            if (amt <= 0) continue;
+            writePod(mem, static_cast<int32_t>(d));
+            writePod(mem, static_cast<int32_t>(amt));
+        }
+    }
+
     // Messages (for convenience)
     uint32_t msgCount = static_cast<uint32_t>(msgs.size());
     writePod(mem, msgCount);
@@ -1265,6 +1333,28 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
         }
 
     }
+
+
+// v33+: creatures that fell through trap doors to deeper levels but haven't been placed yet.
+if constexpr (SAVE_VERSION >= 33u) {
+    uint32_t depthCount = 0;
+    for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
+        if (!trapdoorFallers_[static_cast<size_t>(d)].empty()) ++depthCount;
+    }
+    writePod(mem, depthCount);
+
+    for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
+        const auto& vec = trapdoorFallers_[static_cast<size_t>(d)];
+        if (vec.empty()) continue;
+        const int32_t d32 = d;
+        writePod(mem, d32);
+        uint32_t c = static_cast<uint32_t>(vec.size());
+        writePod(mem, c);
+        for (const auto& e : vec) {
+            writeEntity(mem, e);
+        }
+    }
+}
 
     std::string payload = mem.str();
 
@@ -1623,6 +1713,25 @@ bool Game::loadFromFile(const std::string& path) {
             invTmp.push_back(it);
         }
 
+        // v31+: Shop debt ledger (consumed/destroyed unpaid goods billed per shop depth).
+        std::array<int, DUNGEON_MAX_DEPTH + 1> shopDebtLedgerTmp{};
+        shopDebtLedgerTmp.fill(0);
+        if (ver >= 31u) {
+            uint32_t billCount = 0u;
+            if (!readPod(in, billCount)) return fail();
+            // Be resilient to future expansions.
+            if (billCount > 1024u) return fail();
+            for (uint32_t i = 0; i < billCount; ++i) {
+                int32_t sd = 0;
+                int32_t amt = 0;
+                if (!readPod(in, sd)) return fail();
+                if (!readPod(in, amt)) return fail();
+                if (sd >= 1 && sd <= DUNGEON_MAX_DEPTH && amt > 0) {
+                    shopDebtLedgerTmp[static_cast<size_t>(sd)] += amt;
+                }
+            }
+        }
+
         uint32_t msgCount = 0;
         if (!readPod(in, msgCount)) return fail();
         std::vector<Message> msgsTmp;
@@ -1918,6 +2027,41 @@ bool Game::loadFromFile(const std::string& path) {
             levelsTmp[d32] = std::move(st);
         }
 
+// v33+: pending trapdoor fallers (creatures that fell to deeper levels but aren't placed yet).
+std::array<std::vector<Entity>, DUNGEON_MAX_DEPTH + 1> trapdoorFallersTmp;
+for (auto& v : trapdoorFallersTmp) v.clear();
+
+if (ver >= 33u) {
+    uint32_t depthCount = 0;
+    if (!readPod(in, depthCount)) return fail();
+    if (depthCount > 1024u) return fail();
+
+    for (uint32_t di = 0; di < depthCount; ++di) {
+        int32_t fallDepth = 0;
+        uint32_t c = 0;
+        if (!readPod(in, fallDepth)) return fail();
+        if (!readPod(in, c)) return fail();
+        if (c > 8192u) return fail();
+
+        // Skip out-of-range depths for forward/backward compatibility.
+        if (fallDepth < 1 || fallDepth > DUNGEON_MAX_DEPTH) {
+            Entity skip;
+            for (uint32_t i = 0; i < c; ++i) {
+                if (!readEntity(in, skip, ver)) return fail();
+            }
+            continue;
+        }
+
+        auto& vec = trapdoorFallersTmp[static_cast<size_t>(fallDepth)];
+        vec.reserve(vec.size() + c);
+        for (uint32_t i = 0; i < c; ++i) {
+            Entity m;
+            if (!readEntity(in, m, ver)) return fail();
+            vec.push_back(m);
+        }
+    }
+}
+
         // If we got here, we have a fully parsed save. Commit state.
         rng = RNG(rngState);
         depth_ = depth;
@@ -2001,6 +2145,7 @@ bool Game::loadFromFile(const std::string& path) {
         sneakMode_ = (ver >= 18u) ? (sneakEnabledTmp != 0) : false;
 
         inv = std::move(invTmp);
+        shopDebtLedger_ = shopDebtLedgerTmp;
 
         // v21+: Yendor Doom state
         if (ver >= 21u) {
@@ -2045,6 +2190,7 @@ bool Game::loadFromFile(const std::string& path) {
         msgScroll = 0;
 
         levels = std::move(levelsTmp);
+        trapdoorFallers_ = std::move(trapdoorFallersTmp);
 
         // Rebuild entity list: player + monsters for current depth
         ents.clear();
@@ -2059,6 +2205,7 @@ bool Game::loadFromFile(const std::string& path) {
         // Close transient UI and effects.
         invOpen = false;
         invIdentifyMode = false;
+        invPrompt_ = InvPromptKind::None;
         chestOpen = false;
         chestOpenId = 0;
         chestSel = 0;

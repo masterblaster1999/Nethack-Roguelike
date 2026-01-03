@@ -44,9 +44,12 @@ enum class EntityKind : uint8_t {
 
     // Tricksters / thieves (append-only to keep save compatibility)
     Leprechaun,
+
+    // Undead (append-only to keep save compatibility)
+    Zombie,
 };
 
-inline constexpr int ENTITY_KIND_COUNT = static_cast<int>(EntityKind::Leprechaun) + 1;
+inline constexpr int ENTITY_KIND_COUNT = static_cast<int>(EntityKind::Zombie) + 1;
 
 inline const char* entityKindName(EntityKind k) {
     switch (k) {
@@ -69,6 +72,7 @@ inline const char* entityKindName(EntityKind k) {
         case EntityKind::Dog: return "DOG";
         case EntityKind::Ghost: return "GHOST";
         case EntityKind::Leprechaun: return "LEPRECHAUN";
+        case EntityKind::Zombie: return "ZOMBIE";
         default: return "UNKNOWN";
     }
 }
@@ -96,10 +100,23 @@ inline int baseSpeedFor(EntityKind k) {
         case EntityKind::Shopkeeper: return 100;
         case EntityKind::Minotaur: return 105;
         case EntityKind::Dog: return 120;
-        case EntityKind::Ghost: return 110;
+        // Ghosts are dangerous because they are ethereal (can phase through terrain).
+        // Keep their base speed slightly below "normal" so the fight stays fair.
+        case EntityKind::Ghost: return 95;
         case EntityKind::Leprechaun: return 140;
+        case EntityKind::Zombie: return 80;
         default: return 100;
     }
+}
+
+// Ethereal entities can ignore terrain restrictions in pathing/movement.
+// Keep this in a header so both AI and movement logic stay consistent.
+inline bool entityCanPhase(EntityKind k) {
+    return (k == EntityKind::Ghost);
+}
+
+inline bool entityIsUndead(EntityKind k) {
+    return (k == EntityKind::Ghost || k == EntityKind::SkeletonArcher || k == EntityKind::Zombie);
 }
 
 struct MonsterBaseStats {
@@ -495,6 +512,8 @@ enum class TrapKind : uint8_t {
     Web,
     // New traps (append-only)
     ConfusionGas,
+    RollingBoulder,
+    TrapDoor,
 };
 
 struct Trap {
@@ -1112,6 +1131,9 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     void setLookCursor(Vec2i p);
     void setTargetCursor(Vec2i p);
 
+    // Unit-test access hook.
+    friend struct GameTestAccess;
+
 private:
     // Drop an item on the ground, merging into an existing stack when possible.
     // This reduces clutter for stackable items (ammo, gold, potions, scrolls, etc.).
@@ -1129,6 +1151,11 @@ private:
 
     // Persistent visited levels (monsters + items + explored tiles)
     std::map<int, LevelState> levels;
+
+    // Monsters/companions that fell through trap doors into a deeper level.
+    // These are queued by destination depth and spawned when that level is entered.
+    // Index 0 is unused.
+    std::array<std::vector<Entity>, DUNGEON_MAX_DEPTH + 1> trapdoorFallers_{};
 
     std::vector<Entity> ents;
     int nextEntityId = 1;
@@ -1155,6 +1182,10 @@ private:
 
     // Player inventory & equipment
     std::vector<Item> inv;
+    // Shop bills: debt recorded for consumed/destroyed unpaid goods (per depth).
+    // This is additive to per-item shopPrice tagging.
+    std::array<int, DUNGEON_MAX_DEPTH + 1> shopDebtLedger_{};
+
     int equipMeleeId = 0;
     int equipRangedId = 0;
     int equipArmorId = 0;
@@ -1164,6 +1195,15 @@ private:
     int invSel = 0;
     // Temporary inventory sub-mode (used for prompts like selecting an item to identify).
     bool invIdentifyMode = false;
+
+    // Additional modal inventory prompts (e.g., shrine services that need a target item).
+    enum class InvPromptKind : uint8_t {
+        None = 0,
+        ShrineIdentify,
+        ShrineBless,
+        ShrineRecharge,
+    };
+    InvPromptKind invPrompt_ = InvPromptKind::None;
 
     // Chest container overlay (loot/stash).
     bool chestOpen = false;

@@ -853,13 +853,20 @@ MonsterBaseStats baseMonsterStatsFor(EntityKind k) {
         case EntityKind::Minotaur: s.hpMax = 38; s.baseAtk = 7; s.baseDef = 3; s.willFlee = false; break;
         case EntityKind::Dog: s.hpMax = 10; s.baseAtk = 2; s.baseDef = 0; s.willFlee = false; break;
         case EntityKind::Ghost:
-            s.hpMax = 20; s.baseAtk = 5; s.baseDef = 3; s.willFlee = false;
-            s.regenChancePct = 20;
+            // Bones ghosts are meant to be scary, but their new "ethereal" movement
+            // (phasing through walls/doors) is a big power bump. Keep their raw stats
+            // slightly lower so they remain threatening without feeling unfair.
+            s.hpMax = 18; s.baseAtk = 4; s.baseDef = 2; s.willFlee = false;
+            s.regenChancePct = 15;
             s.regenAmount = 1;
             break;
         case EntityKind::Leprechaun:
             // Fast, fragile thief: relies on stealing and blinking away rather than brawling.
             s.hpMax = 8; s.baseAtk = 2; s.baseDef = 1; s.willFlee = true;
+            break;
+        case EntityKind::Zombie:
+            // Slow, tough undead: does not flee. Often created when corpses rise.
+            s.hpMax = 14; s.baseAtk = 3; s.baseDef = 2; s.willFlee = false;
             break;
         default:
             // Player and unknown kinds fall back to a tame baseline.

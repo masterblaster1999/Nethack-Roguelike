@@ -41,6 +41,12 @@ enum class RoomType : uint8_t {
     Vault,
     // Append-only: merchant shop stocked with items for sale.
     Shop,
+
+    // --- Themed rooms (append-only) ---
+    // Moderate loot rooms that bias spawns toward a particular category.
+    Armory,      // weapons / armor / ammo
+    Library,     // scrolls / wands
+    Laboratory,  // potions / strange hazards
 };
 
 struct Room {

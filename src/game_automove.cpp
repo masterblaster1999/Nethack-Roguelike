@@ -811,6 +811,8 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
     const bool hasLockpick = (lockpickCount() > 0);
     const bool canUnlockDoors = hasKey || hasLockpick;
 
+    const bool levitating = (player().effects.levitationTurns > 0);
+
     auto passable = [&](int x, int y) -> bool {
         if (!dung.inBounds(x, y)) return false;
 
@@ -822,7 +824,9 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
         // The actual unlock/open happens in tryMove.
         if (!dung.isPassable(x, y)) {
             const TileType tt = dung.at(x, y).type;
-            if (!(canUnlockDoors && tt == TileType::DoorLocked)) {
+            if (tt == TileType::Chasm && levitating) {
+                // Levitation lets the player auto-path across chasms.
+            } else if (!(canUnlockDoors && tt == TileType::DoorLocked)) {
                 return false;
             }
         }

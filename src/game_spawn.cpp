@@ -189,9 +189,13 @@ void Game::spawnMonsters() {
             }
         }
 
-        // Guards in high-value rooms.
-        if (r.type == RoomType::Secret || r.type == RoomType::Treasure || r.type == RoomType::Vault) {
-            int guardians = (r.type == RoomType::Vault) ? rng.range(0, 1) : rng.range(0, 2);
+        // Guards in high-value rooms (plus some light security in themed rooms).
+        const bool themedRoom = (r.type == RoomType::Armory || r.type == RoomType::Library || r.type == RoomType::Laboratory);
+        if (r.type == RoomType::Secret || r.type == RoomType::Treasure || r.type == RoomType::Vault || themedRoom) {
+            int guardians = 0;
+            if (r.type == RoomType::Vault) guardians = rng.range(0, 1);
+            else if (themedRoom) guardians = rng.range(0, 1);
+            else guardians = rng.range(0, 2);
             for (int i = 0; i < guardians; ++i) {
                 Vec2i p = randomFreeTileInRoom(r);
                 EntityKind k = pickSpawnMonster(SpawnCategory::Guardian, rng, depth_);
@@ -199,9 +203,12 @@ void Game::spawnMonsters() {
                 spawnMonster(k, p, 0);
             }
 
-            // Thieves love high-value rooms.
+            // Thieves love rooms with loot. (Themed rooms are a bit less enticing.)
             if (depth_ >= 2) {
-                const float chance = (r.type == RoomType::Vault) ? 0.35f : 0.20f;
+                float chance = 0.20f;
+                if (r.type == RoomType::Vault) chance = 0.35f;
+                else if (themedRoom) chance = 0.12f;
+
                 if (rng.chance(chance)) {
                     Vec2i tp = randomFreeTileInRoom(r);
                     spawnMonster(EntityKind::Leprechaun, tp, 0);
@@ -342,7 +349,7 @@ void Game::spawnItems() {
     auto dropGoodItem = [&](const Room& r) {
         // Treasure rooms are where you find the "spicy" gear.
         // Expanded table to accommodate new gear (rings).
-        int roll = rng.range(0, 179);
+        int roll = rng.range(0, 183);
 
         if (roll < 18) dropItemAt(ItemKind::Sword, randomFreeTileInRoom(r));
         else if (roll < 30) dropItemAt(ItemKind::Axe, randomFreeTileInRoom(r));
@@ -380,11 +387,20 @@ void Game::spawnItems() {
         else if (roll < 151) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
         else if (roll < 153) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
         else if (roll < 156) dropItemAt(ItemKind::ScrollRemoveCurse, randomFreeTileInRoom(r), 1);
-        else if (roll < 159) dropItemAt(ItemKind::ScrollConfusion, randomFreeTileInRoom(r), 1);
-        else if (roll < 164) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
-        else if (roll < 170) dropItemAt(ItemKind::RingProtection, randomFreeTileInRoom(r), 1);
-        else if (roll < 174) dropItemAt(ItemKind::RingMight, randomFreeTileInRoom(r), 1);
-        else if (roll < 178) dropItemAt(ItemKind::RingAgility, randomFreeTileInRoom(r), 1);
+        else if (roll < 158) dropItemAt(ItemKind::ScrollConfusion, randomFreeTileInRoom(r), 1);
+        else if (roll < 160) dropItemAt(ItemKind::ScrollFear, randomFreeTileInRoom(r), 1);
+        else if (roll < 162) dropItemAt(ItemKind::ScrollEarth, randomFreeTileInRoom(r), 1);
+        else if (roll < 166) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
+        else if (roll < 172) {
+            // Rare traversal utility in treasure rooms.
+            if (depth_ >= 3 && rng.chance(0.33f)) {
+                dropItemAt(ItemKind::PotionLevitation, randomFreeTileInRoom(r), 1);
+            } else {
+                dropItemAt(ItemKind::RingProtection, randomFreeTileInRoom(r), 1);
+            }
+        }
+        else if (roll < 176) dropItemAt(ItemKind::RingMight, randomFreeTileInRoom(r), 1);
+        else if (roll < 180) dropItemAt(ItemKind::RingAgility, randomFreeTileInRoom(r), 1);
         else dropItemAt(ItemKind::RingFocus, randomFreeTileInRoom(r), 1);
     };
 
@@ -545,11 +561,13 @@ void Game::spawnItems() {
                     else if (roll < 33) { k = ItemKind::ScrollTeleport; }
                     else if (roll < 45) { k = ItemKind::ScrollMapping; }
                     else if (roll < 60) { k = ItemKind::ScrollIdentify; }
-                    else if (roll < 68) { k = ItemKind::ScrollRemoveCurse; }
-                    else if (roll < 76) { k = ItemKind::PotionStrength; }
-                    else if (roll < 84) { k = ItemKind::PotionRegeneration; }
-                    else if (roll < 91) { k = ItemKind::PotionHaste; }
-                    else if (roll < 96) {
+                    else if (roll < 66) { k = ItemKind::ScrollRemoveCurse; }
+                    else if (roll < 72) { k = ItemKind::ScrollFear; }
+                    else if (roll < 76) { k = ItemKind::ScrollEarth; }
+                    else if (roll < 80) { k = ItemKind::PotionStrength; }
+                    else if (roll < 88) { k = ItemKind::PotionRegeneration; }
+                    else if (roll < 94) { k = ItemKind::PotionHaste; }
+                    else if (roll < 98) {
                         // A small chance of rings showing up in the magic shop.
                         const int rr = rng.range(0, 99);
                         if (rr < 40) k = ItemKind::RingProtection;
@@ -557,7 +575,11 @@ void Game::spawnItems() {
                         else if (rr < 90) k = ItemKind::RingAgility;
                         else k = ItemKind::RingFocus;
                     }
-                    else { k = (depth_ >= 5 ? ItemKind::PotionInvisibility : ItemKind::PotionVision); }
+                    else {
+                        // Rare traversal utility.
+                        if (depth_ >= 3 && rng.chance(0.25f)) k = ItemKind::PotionLevitation;
+                        else k = (depth_ >= 5 ? ItemKind::PotionInvisibility : ItemKind::PotionVision);
+                    }
                 } else {
                     // Supplies
                     if (roll < 40) { k = ItemKind::FoodRation; count = rng.range(1, 4); }
@@ -641,6 +663,112 @@ void Game::spawnItems() {
             if (rng.chance(0.12f)) dropLockpickAt(randomFreeTileInRoom(r), 1);
             if (rng.chance(hungerEnabled_ ? 0.25f : 0.10f)) dropItemAt(ItemKind::FoodRation, randomFreeTileInRoom(r), 1);
             if (depth_ >= 2 && rng.chance(0.20f)) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r), 1);
+            continue;
+        }
+
+        if (r.type == RoomType::Armory) {
+            // A moderate gear cache: some weapons/armor/ammo. Less "spicy" than Treasure.
+            dropItemAt(ItemKind::Gold, p, rng.range(6, 16) + depth_);
+
+            const int drops = rng.range(2, 3);
+            for (int i = 0; i < drops; ++i) {
+                const int roll = rng.range(0, 99);
+                if (roll < 18) {
+                    dropItemAt(ItemKind::Sword, randomFreeTileInRoom(r), 1);
+                } else if (roll < 34) {
+                    dropItemAt(ItemKind::Axe, randomFreeTileInRoom(r), 1);
+                } else if (roll < 48) {
+                    dropItemAt(ItemKind::Dagger, randomFreeTileInRoom(r), 1);
+                } else if (roll < 58) {
+                    dropItemAt(ItemKind::Bow, randomFreeTileInRoom(r), 1);
+                } else if (roll < 64) {
+                    dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r), 1);
+                } else if (roll < 82) {
+                    ItemKind ak = ItemKind::LeatherArmor;
+                    if (depth_ >= 4 && rng.chance(0.40f)) ak = ItemKind::ChainArmor;
+                    if (depth_ >= 7 && rng.chance(0.18f)) ak = ItemKind::PlateArmor;
+                    dropItemAt(ak, randomFreeTileInRoom(r), 1);
+                } else if (roll < 92) {
+                    dropItemAt(ItemKind::Arrow, randomFreeTileInRoom(r), rng.range(6, 14));
+                } else {
+                    dropItemAt(ItemKind::Rock, randomFreeTileInRoom(r), rng.range(4, 12));
+                }
+            }
+
+            // Small chance of a starter chest.
+            if (rng.chance(0.30f)) {
+                dropChestInRoom(r, 1, 0.40f, 0.30f);
+            }
+            continue;
+        }
+
+        if (r.type == RoomType::Library) {
+            // Utility room: scrolls + the occasional wand.
+            dropItemAt(ItemKind::Gold, p, rng.range(4, 14) + depth_);
+
+            const int drops = rng.range(2, 4);
+            for (int i = 0; i < drops; ++i) {
+                const int roll = rng.range(0, 99);
+                if (roll < 18) dropItemAt(ItemKind::ScrollIdentify, randomFreeTileInRoom(r), 1);
+                else if (roll < 32) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
+                else if (roll < 46) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
+                else if (roll < 56) dropItemAt(ItemKind::ScrollKnock, randomFreeTileInRoom(r), 1);
+                else if (roll < 64) dropItemAt(ItemKind::ScrollDetectTraps, randomFreeTileInRoom(r), 1);
+                else if (roll < 72) dropItemAt(ItemKind::ScrollDetectSecrets, randomFreeTileInRoom(r), 1);
+                else if (roll < 80) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
+                else if (roll < 86) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
+                else if (roll < 90) dropItemAt(ItemKind::ScrollRemoveCurse, randomFreeTileInRoom(r), 1);
+                else if (roll < 93) dropItemAt(ItemKind::ScrollConfusion, randomFreeTileInRoom(r), 1);
+                else if (roll < 95) dropItemAt(ItemKind::ScrollFear, randomFreeTileInRoom(r), 1);
+                else if (roll < 97) dropItemAt(ItemKind::ScrollEarth, randomFreeTileInRoom(r), 1);
+                else {
+                    ItemKind wk = ItemKind::WandSparks;
+                    if (depth_ >= 4 && rng.chance(0.35f)) wk = ItemKind::WandDigging;
+                    if (depth_ >= 7 && rng.chance(0.10f)) wk = ItemKind::WandFireball;
+                    dropItemAt(wk, randomFreeTileInRoom(r), 1);
+                }
+            }
+
+            if (rng.chance(0.22f)) {
+                dropChestInRoom(r, 1, 0.35f, 0.35f);
+            }
+            continue;
+        }
+
+        if (r.type == RoomType::Laboratory) {
+            // Potion-heavy room. Safer than Vault, but with a little "weird" edge.
+            dropItemAt(ItemKind::Gold, p, rng.range(4, 14) + depth_);
+
+            const int drops = rng.range(2, 4);
+            for (int i = 0; i < drops; ++i) {
+                const int roll = rng.range(0, 99);
+                if (roll < 18) dropItemAt(ItemKind::PotionHealing, randomFreeTileInRoom(r), 1);
+                else if (roll < 30) dropItemAt(ItemKind::PotionAntidote, randomFreeTileInRoom(r), 1);
+                else if (roll < 40) dropItemAt(ItemKind::PotionStrength, randomFreeTileInRoom(r), 1);
+                else if (roll < 50) dropItemAt(ItemKind::PotionClarity, randomFreeTileInRoom(r), 1);
+                else if (roll < 60) dropItemAt(ItemKind::PotionRegeneration, randomFreeTileInRoom(r), 1);
+                else if (roll < 70) dropItemAt(ItemKind::PotionShielding, randomFreeTileInRoom(r), 1);
+                else if (roll < 78) dropItemAt(ItemKind::PotionHaste, randomFreeTileInRoom(r), 1);
+                else if (roll < 88) {
+                    const ItemKind pk = rng.chance(0.25f) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
+                    dropItemAt(pk, randomFreeTileInRoom(r), 1);
+                } else if (roll < 94) {
+                    // The occasional utility scroll fits the "lab notes" vibe.
+                    const ItemKind pool[] = { ItemKind::ScrollIdentify, ItemKind::ScrollRemoveCurse, ItemKind::ScrollTeleport };
+                    dropItemAt(pool[rng.range(0, static_cast<int>(sizeof(pool) / sizeof(pool[0])) - 1)], randomFreeTileInRoom(r), 1);
+                } else {
+                    // Rare: a wand (labs have tools).
+                    ItemKind wk = ItemKind::WandSparks;
+                    if (depth_ >= 4 && rng.chance(0.30f)) wk = ItemKind::WandDigging;
+                    if (depth_ >= 8 && rng.chance(0.10f)) wk = ItemKind::WandFireball;
+                    dropItemAt(wk, randomFreeTileInRoom(r), 1);
+                }
+            }
+
+            if (rng.chance(0.28f)) {
+                // Slightly higher trap chance than a library chest.
+                dropChestInRoom(r, 1, 0.45f, 0.45f);
+            }
             continue;
         }
 
@@ -839,27 +967,32 @@ void Game::spawnTraps() {
         TrapKind tk = TrapKind::Spike;
         if (depth_ == QUEST_DEPTH - 1) {
             // Labyrinth: more "tactical" traps than raw damage.
-            if (roll < 25) tk = TrapKind::Spike;
-            else if (roll < 50) tk = TrapKind::PoisonDart;
-            else if (roll < 72) tk = TrapKind::Alarm;
-            else if (roll < 88) tk = TrapKind::Web;
-            else if (roll < 96) tk = TrapKind::ConfusionGas;
+            if (roll < 22) tk = TrapKind::Spike;
+            else if (roll < 44) tk = TrapKind::PoisonDart;
+            else if (roll < 64) tk = TrapKind::Alarm;
+            else if (roll < 80) tk = TrapKind::Web;
+            else if (roll < 90) tk = TrapKind::ConfusionGas;
+            else if (roll < 96) tk = TrapKind::RollingBoulder;
+            else if (depth_ < DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
         } else if (depth_ <= 1) {
             tk = (roll < 70) ? TrapKind::Spike : TrapKind::PoisonDart;
         } else if (depth_ <= 3) {
-            if (roll < 45) tk = TrapKind::Spike;
-            else if (roll < 75) tk = TrapKind::PoisonDart;
-            else if (roll < 87) tk = TrapKind::Alarm;
-            else if (roll < 93) tk = TrapKind::Web;
-            else if (roll < 97) tk = TrapKind::ConfusionGas;
+            if (roll < 43) tk = TrapKind::Spike;
+            else if (roll < 73) tk = TrapKind::PoisonDart;
+            else if (roll < 85) tk = TrapKind::Alarm;
+            else if (roll < 91) tk = TrapKind::Web;
+            else if (roll < 95) tk = TrapKind::ConfusionGas;
+            else if (roll < 97) tk = TrapKind::RollingBoulder;
             else tk = TrapKind::Teleport;
         } else {
-            if (roll < 35) tk = TrapKind::Spike;
-            else if (roll < 64) tk = TrapKind::PoisonDart;
-            else if (roll < 79) tk = TrapKind::Alarm;
-            else if (roll < 89) tk = TrapKind::Web;
-            else if (roll < 96) tk = TrapKind::ConfusionGas;
+            if (roll < 33) tk = TrapKind::Spike;
+            else if (roll < 61) tk = TrapKind::PoisonDart;
+            else if (roll < 76) tk = TrapKind::Alarm;
+            else if (roll < 86) tk = TrapKind::Web;
+            else if (roll < 93) tk = TrapKind::ConfusionGas;
+            else if (roll < 96) tk = TrapKind::RollingBoulder;
+            else if (depth_ < DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
         }
 
@@ -892,6 +1025,32 @@ void Game::spawnTraps() {
             // Bias toward alarm/poison on doors (fits the theme), with occasional gas traps.
             if (rng.chance(0.12f)) t.kind = TrapKind::ConfusionGas;
             else t.kind = rng.chance(0.55f) ? TrapKind::Alarm : TrapKind::PoisonDart;
+            trapsCur.push_back(t);
+        }
+    }
+
+    // Themed hazard: laboratories tend to have extra volatile traps.
+    // This is intentionally light-touch (0-2 extra) so it adds flavor without
+    // turning every floor into a minefield.
+    for (const Room& r : dung.rooms) {
+        if (r.type != RoomType::Laboratory) continue;
+
+        int extra = rng.chance(0.60f) ? 1 : 0;
+        if (depth_ >= 6 && rng.chance(0.25f)) extra += 1;
+
+        for (int i = 0; i < extra; ++i) {
+            Vec2i p = randomFreeTileInRoom(r);
+            if (isBadPos(p)) continue;
+            if (alreadyHasTrap(p)) continue;
+
+            Trap t;
+            t.pos = p;
+            t.discovered = false;
+            const int roll = rng.range(0, 99);
+            if (roll < 55) t.kind = TrapKind::ConfusionGas;
+            else if (roll < 85) t.kind = TrapKind::PoisonDart;
+            else if (roll < 95) t.kind = TrapKind::Alarm;
+            else t.kind = TrapKind::Teleport;
             trapsCur.push_back(t);
         }
     }
@@ -1073,6 +1232,73 @@ void Game::applyEndOfTurnEffects() {
         }
     }
 
+    // Timed levitation: lets you traverse chasms safely while >0.
+    if (p.effects.levitationTurns > 0) {
+        const int before = p.effects.levitationTurns;
+        p.effects.levitationTurns = std::max(0, p.effects.levitationTurns - 1);
+        if (before > 0 && p.effects.levitationTurns == 0) {
+            // If levitation ends while over a chasm, you fall.
+            if (dung.inBounds(p.pos.x, p.pos.y) && dung.at(p.pos.x, p.pos.y).type == TileType::Chasm) {
+                const int dmg = rng.range(4, 8) + std::min(4, depth_ / 2);
+                pushMsg("YOUR LEVITATION ENDS! YOU FALL!", MessageKind::Warning, true);
+
+                // Try to "spill" you onto the nearest solid tile rather than softlocking you in a chasm.
+                Vec2i landing = {-1, -1};
+                for (int r = 1; r <= 8 && landing.x < 0; ++r) {
+                    std::vector<Vec2i> cand;
+                    for (int dy = -r; dy <= r; ++dy) {
+                        for (int dx = -r; dx <= r; ++dx) {
+                            if (std::max(std::abs(dx), std::abs(dy)) != r) continue; // ring
+                            const int x = p.pos.x + dx;
+                            const int y = p.pos.y + dy;
+                            if (!dung.inBounds(x, y)) continue;
+                            if (!dung.isWalkable(x, y)) continue;
+                            if (Entity* o = entityAtMut(x, y)) {
+                                if (o->id != p.id) continue;
+                            }
+                            cand.push_back({x, y});
+                        }
+                    }
+                    if (!cand.empty()) {
+                        landing = cand[static_cast<size_t>(rng.range(0, static_cast<int>(cand.size()) - 1))];
+                    }
+                }
+
+                if (landing.x >= 0) {
+                    p.pos = landing;
+                } else {
+                    // Emergency fallback: collapse the chasm tile into a floor tile.
+                    dung.at(p.pos.x, p.pos.y).type = TileType::Floor;
+                    pushMsg("YOU CRASH DOWN, FILLING IN THE CHASM BENEATH YOU!", MessageKind::Warning, true);
+                }
+
+                emitNoise(p.pos, 18);
+                p.hp -= dmg;
+                {
+                    std::ostringstream ss;
+                    ss << "YOU TAKE " << dmg << ".";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                }
+                if (p.hp <= 0) {
+                    pushMsg("YOU DIE.", MessageKind::Combat, false);
+                    if (endCause_.empty()) endCause_ = "FELL INTO A CHASM";
+                    gameOver = true;
+                    return;
+                }
+            } else {
+                pushMsg(effectEndMessage(EffectKind::Levitation), MessageKind::System, true);
+            }
+        }
+    }
+
+    // Timed fear: primarily affects monster AI, but is tracked generically as a status effect.
+    if (p.effects.fearTurns > 0) {
+        p.effects.fearTurns = std::max(0, p.effects.fearTurns - 1);
+        if (p.effects.fearTurns == 0) {
+            pushMsg(effectEndMessage(EffectKind::Fear), MessageKind::System, true);
+        }
+    }
+
     // Timed webbing: prevents movement.
     if (p.effects.webTurns > 0) {
         p.effects.webTurns = std::max(0, p.effects.webTurns - 1);
@@ -1199,6 +1425,116 @@ void Game::applyEndOfTurnEffects() {
             auto& gi = ground[i];
             if (isCorpseKind(gi.item.kind)) {
                 if (gi.item.charges > 0) gi.item.charges -= 1;
+
+                // Corpse revival: when a corpse becomes stale it may rise once.
+                // NOTE: We use Item::enchant as a tiny per-stack flag for corpses:
+                //   0 = not checked for rising yet
+                //   1 = rising check has been performed (success or failure)
+                //
+                // This avoids growing the save format and is safe because corpses do not
+                // use enchantment gameplay in the inventory UI.
+                if (gi.item.charges > 60 && gi.item.charges <= 160 && gi.item.enchant == 0) {
+                    // Only attempt to spawn something if the corpse is on a valid walkable tile.
+                    if (dung.inBounds(gi.pos.x, gi.pos.y) && dung.isWalkable(gi.pos.x, gi.pos.y)) {
+                        // Only if the tile is empty. (If someone is standing on the corpse,
+                        // it can't get up; we'll try again later.)
+                        if (entityAt(gi.pos.x, gi.pos.y) == nullptr) {
+                            gi.item.enchant = 1;
+
+                            EntityKind riseKind = EntityKind::Zombie;
+                            int bonusHp = 0;
+                            int bonusAtk = 0;
+                            int bonusDef = 0;
+
+                            float chance = 0.06f + 0.01f * std::min(depth_, 20);
+
+                            // A few special cases for "NetHack-ish" flavor.
+                            switch (gi.item.kind) {
+                                case ItemKind::CorpseTroll:
+                                    // Trolls are infamous for regenerating.
+                                    riseKind = EntityKind::Troll;
+                                    chance = 0.20f + 0.02f * std::min(depth_, 15);
+                                    break;
+
+                                case ItemKind::CorpseSlime:
+                                    // Slimes can reconstitute.
+                                    riseKind = EntityKind::Slime;
+                                    chance = 0.18f + 0.02f * std::min(depth_, 12);
+                                    break;
+
+                                case ItemKind::CorpseMimic:
+                                    // Mimics are weird.
+                                    riseKind = EntityKind::Mimic;
+                                    chance = 0.14f + 0.015f * std::min(depth_, 12);
+                                    break;
+
+                                case ItemKind::CorpseWizard:
+                                    // A wizard's spirit may linger.
+                                    riseKind = EntityKind::Ghost;
+                                    chance = 0.12f + 0.015f * std::min(depth_, 12);
+                                    break;
+
+                                case ItemKind::CorpseMinotaur:
+                                    // Big corpse -> beefier zombie.
+                                    riseKind = EntityKind::Zombie;
+                                    chance = 0.10f + 0.015f * std::min(depth_, 12);
+                                    bonusHp = 8;
+                                    bonusAtk = 2;
+                                    bonusDef = 1;
+                                    break;
+
+                                default:
+                                    break;
+                            }
+
+                            chance = std::clamp(chance, 0.02f, 0.40f);
+
+                            if (rng.chance(chance)) {
+                                const bool vis = dung.at(gi.pos.x, gi.pos.y).visible;
+
+                                if (vis) {
+                                    std::ostringstream ss;
+                                    if (riseKind == EntityKind::Zombie) {
+                                        ss << "A CORPSE RISES AS A ZOMBIE!";
+                                    } else {
+                                        ss << "THE " << itemDef(gi.item.kind).name << " RISES!";
+                                    }
+                                    pushMsg(ss.str(), MessageKind::System, true);
+                                }
+
+                                // Loud enough to wake nearby monsters even if the player doesn't see it.
+                                emitNoise(gi.pos, 14);
+
+                                Entity risen = makeMonster(riseKind, gi.pos, 0, false);
+
+                                // If this happened in view, the risen creature is immediately "alerted".
+                                if (vis) {
+                                    risen.alerted = true;
+                                    risen.lastKnownPlayerPos = player().pos;
+                                }
+
+                                // Corpse-specific stat bumps (used for big bodies like Minotaurs).
+                                if (bonusHp > 0) {
+                                    risen.hpMax += bonusHp;
+                                    risen.hp = risen.hpMax;
+                                }
+                                risen.baseAtk += bonusAtk;
+                                risen.baseDef += bonusDef;
+
+                                ents.push_back(risen);
+
+                                // Consume one corpse from the stack (if stacked).
+                                if (gi.item.count > 1) {
+                                    gi.item.count -= 1;
+                                } else {
+                                    ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(i));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (gi.item.charges <= 0) {
                     if (dung.inBounds(gi.pos.x, gi.pos.y) && dung.at(gi.pos.x, gi.pos.y).visible) {
                         ++rottedGroundVis;
@@ -1220,23 +1556,35 @@ void Game::applyEndOfTurnEffects() {
         if (m.id == playerId_) continue;
         if (m.hp <= 0) continue;
 
-        // Timed poison: lose 1 HP per full turn.
+        // Timed poison: lose 1 HP per full turn (except undead).
         if (m.effects.poisonTurns > 0) {
-            m.effects.poisonTurns = std::max(0, m.effects.poisonTurns - 1);
-            m.hp -= 1;
+            const bool vis = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
 
-            if (m.hp <= 0) {
-                // Only message if the monster is currently visible to the player.
-                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+            if (entityIsUndead(m.kind)) {
+                // Undead don't suffer poison damage, but the effect still times out.
+                m.effects.poisonTurns = std::max(0, m.effects.poisonTurns - 1);
+
+                if (m.effects.poisonTurns == 0 && vis) {
                     std::ostringstream ss;
-                    ss << kindName(m.kind) << " SUCCUMBS TO POISON.";
-                    pushMsg(ss.str(), MessageKind::Combat, false);
-                }
-            } else if (m.effects.poisonTurns == 0) {
-                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
-                    std::ostringstream ss;
-                    ss << kindName(m.kind) << " RECOVERS FROM POISON.";
+                    ss << kindName(m.kind) << " SHRUGS OFF THE POISON.";
                     pushMsg(ss.str(), MessageKind::System, false);
+                }
+            } else {
+                m.effects.poisonTurns = std::max(0, m.effects.poisonTurns - 1);
+                m.hp -= 1;
+
+                if (m.hp <= 0) {
+                    if (vis) {
+                        std::ostringstream ss;
+                        ss << kindName(m.kind) << " SUCCUMBS TO POISON.";
+                        pushMsg(ss.str(), MessageKind::Combat, false);
+                    }
+                } else if (m.effects.poisonTurns == 0) {
+                    if (vis) {
+                        std::ostringstream ss;
+                        ss << kindName(m.kind) << " RECOVERS FROM POISON.";
+                        pushMsg(ss.str(), MessageKind::System, false);
+                    }
                 }
             }
         }
@@ -1282,6 +1630,80 @@ void Game::applyEndOfTurnEffects() {
                     std::ostringstream ss;
                     ss << kindName(m.kind) << " SEEMS LESS CONFUSED.";
                     pushMsg(ss.str(), MessageKind::System, false);
+                }
+            }
+        }
+
+        // Timed fear: scared monsters prefer fleeing.
+        if (m.effects.fearTurns > 0) {
+            m.effects.fearTurns = std::max(0, m.effects.fearTurns - 1);
+            if (m.effects.fearTurns == 0) {
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(m.kind) << " REGAINS ITS NERVE.";
+                    pushMsg(ss.str(), MessageKind::System, false);
+                }
+            }
+        }
+
+        // Timed levitation (rare for monsters for now, but kept consistent with player rules).
+        if (m.effects.levitationTurns > 0) {
+            const int before = m.effects.levitationTurns;
+            m.effects.levitationTurns = std::max(0, m.effects.levitationTurns - 1);
+            if (before > 0 && m.effects.levitationTurns == 0) {
+                const bool vis = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).type == TileType::Chasm) {
+                    const int dmg = rng.range(4, 8) + std::min(4, depth_ / 2);
+                    if (vis) {
+                        std::ostringstream ss;
+                        ss << kindName(m.kind) << " FALLS!";
+                        pushMsg(ss.str(), MessageKind::Warning, false);
+                    }
+
+                    Vec2i landing = {-1, -1};
+                    for (int r = 1; r <= 8 && landing.x < 0; ++r) {
+                        std::vector<Vec2i> cand;
+                        for (int dy = -r; dy <= r; ++dy) {
+                            for (int dx = -r; dx <= r; ++dx) {
+                                if (std::max(std::abs(dx), std::abs(dy)) != r) continue;
+                                const int x = m.pos.x + dx;
+                                const int y = m.pos.y + dy;
+                                if (!dung.inBounds(x, y)) continue;
+                                if (!dung.isWalkable(x, y)) continue;
+                                if (Entity* o = entityAtMut(x, y)) {
+                                    if (o->id != m.id) continue;
+                                }
+                                cand.push_back({x, y});
+                            }
+                        }
+                        if (!cand.empty()) {
+                            landing = cand[static_cast<size_t>(rng.range(0, static_cast<int>(cand.size()) - 1))];
+                        }
+                    }
+
+                    if (landing.x >= 0) {
+                        m.pos = landing;
+                    } else {
+                        // Emergency fallback: collapse the chasm tile.
+                        dung.at(m.pos.x, m.pos.y).type = TileType::Floor;
+                    }
+
+                    emitNoise(m.pos, 18);
+                    m.hp -= dmg;
+                    if (m.hp <= 0) {
+                        if (vis) {
+                            std::ostringstream ss;
+                            ss << kindName(m.kind) << " DIES.";
+                            pushMsg(ss.str(), MessageKind::Combat, false);
+                        }
+                    }
+                } else {
+                    if (vis) {
+                        std::ostringstream ss;
+                        ss << kindName(m.kind) << " SINKS TO THE GROUND.";
+                        pushMsg(ss.str(), MessageKind::System, false);
+                    }
                 }
             }
         }
@@ -1448,6 +1870,9 @@ void Game::cleanupDead() {
         if (e.id == playerId_) continue;
         if (e.hp > 0) continue;
 
+        // If an entity died off-map (e.g. fell through a trap door), don't drop loot/corpses here.
+        if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
+
         // Corpse drops (organic remains).
         // These are heavy, rot away over time, and can be eaten.
         {
@@ -1562,7 +1987,11 @@ void Game::cleanupDead() {
             else if (roll < 115) { gi.item.kind = ItemKind::PotionShielding; gi.item.count = 1; }
             else if (roll < 116) { gi.item.kind = ItemKind::PotionHaste; gi.item.count = 1; }
             else {
-                gi.item.kind = (rng.range(1, 4) == 1) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
+                if (depth_ >= 3 && rng.chance(0.20f)) {
+                    gi.item.kind = ItemKind::PotionLevitation;
+                } else {
+                    gi.item.kind = (rng.range(1, 4) == 1) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
+                }
                 gi.item.count = 1;
             }
 

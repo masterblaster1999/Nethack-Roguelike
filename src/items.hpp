@@ -130,10 +130,20 @@ enum class ItemKind : uint8_t {
     RingAgility,
     RingFocus,
     RingProtection,
+
+    // --- Traversal (append-only) ---
+    PotionLevitation,
+
+    // --- Morale / control (append-only) ---
+    ScrollFear,
+
+    // --- Terrain / fortification (append-only) ---
+    // NetHack-inspired utility scroll: raises boulders around the reader.
+    ScrollEarth,
 };
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::RingProtection) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollEarth) + 1;
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;
@@ -171,6 +181,7 @@ inline bool isPotionKind(ItemKind k) {
         case ItemKind::PotionVision:
         case ItemKind::PotionInvisibility:
         case ItemKind::PotionClarity:
+        case ItemKind::PotionLevitation:
             return true;
         default:
             return false;
@@ -188,6 +199,8 @@ inline bool isScrollKind(ItemKind k) {
         case ItemKind::ScrollDetectSecrets:
         case ItemKind::ScrollRemoveCurse:
         case ItemKind::ScrollConfusion:
+        case ItemKind::ScrollFear:
+        case ItemKind::ScrollEarth:
             return true;
         case ItemKind::ScrollKnock:
             return true;

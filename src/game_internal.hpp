@@ -430,6 +430,7 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
             case EntityKind::Dog:    return 'd';
             case EntityKind::Ghost:  return 'G';
             case EntityKind::Leprechaun: return 'l';
+            case EntityKind::Zombie: return 'Z';
             case EntityKind::Troll:  return 'T';
             case EntityKind::Wizard: return 'W';
             case EntityKind::Snake:  return 'n';
@@ -511,10 +512,14 @@ static std::pair<bool, bool> exportRunDumpToFile(const Game& game, const std::fi
     add("POISON", p.effects.poisonTurns);
     add("REGEN", p.effects.regenTurns);
     add("SHIELD", p.effects.shieldTurns);
+    add("HASTE", p.effects.hasteTurns);
     add("VISION", p.effects.visionTurns);
+    add("INVIS", p.effects.invisTurns);
     add("WEB", p.effects.webTurns);
     add("CONF", p.effects.confusionTurns);
-    add("HASTE", p.effects.hasteTurns);
+    add("BURN", p.effects.burnTurns);
+    add("LEV", p.effects.levitationTurns);
+    add("FEAR", p.effects.fearTurns);
     if (!any) f << "(none)";
     f << "\n";
 
@@ -724,6 +729,21 @@ static int rollBucForGear(RNG& rng, int depth, RoomType roomType) {
             // Merchants don't love selling cursed junk.
             cursePct -= 5;
             blessPct += 2;
+            break;
+
+        case RoomType::Armory:
+            // Armories skew toward "usable" gear (but aren't as pristine as shops).
+            cursePct -= 3;
+            blessPct += 1;
+            break;
+        case RoomType::Library:
+            // Libraries are safer/cleaner spaces on average.
+            cursePct -= 1;
+            blessPct += 1;
+            break;
+        case RoomType::Laboratory:
+            // Experiments go wrong.
+            cursePct += 3;
             break;
         default:
             break;
@@ -1025,7 +1045,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.pushSystemMessage("SLOTS: slot [name], save [slot], load [slot], loadauto [slot], saves");
         game.pushSystemMessage("EXPORT: exportlog/exportmap/export/exportall/dump");
         game.pushSystemMessage("MARKS: mark [note|danger|loot] <label> | unmark | marks | travel <index|label>");
-        game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse] (costs gold)");
+        game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse|recharge] (costs gold)");
         game.pushSystemMessage("DIG: dig <dir> (requires wielded pickaxe)");
         game.pushSystemMessage("CURSES: CURSED weapons/armor can't be removed until uncursed (scroll or shrine).");
         game.pushSystemMessage("MORTEM: mortem [on/off]");
@@ -2183,6 +2203,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Dog: return "DOG";
         case EntityKind::Ghost: return "GHOST";
         case EntityKind::Leprechaun: return "LEPRECHAUN";
+        case EntityKind::Zombie: return "ZOMBIE";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
         case EntityKind::Snake: return "SNAKE";
@@ -2231,6 +2252,7 @@ constexpr ItemKind POTION_KINDS[] = {
     ItemKind::PotionVision,
     ItemKind::PotionInvisibility,
     ItemKind::PotionClarity,
+    ItemKind::PotionLevitation,
 };
 
 constexpr ItemKind SCROLL_KINDS[] = {
@@ -2244,6 +2266,8 @@ constexpr ItemKind SCROLL_KINDS[] = {
     ItemKind::ScrollKnock,
     ItemKind::ScrollRemoveCurse,
     ItemKind::ScrollConfusion,
+    ItemKind::ScrollFear,
+    ItemKind::ScrollEarth,
 };
 
 constexpr ItemKind RING_KINDS[] = {

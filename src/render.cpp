@@ -1043,6 +1043,9 @@ void Renderer::render(const Game& game) {
             case RoomType::Secret:   return 4;
             case RoomType::Vault:    return 5;
             case RoomType::Shop:     return 6;
+            case RoomType::Armory:   return 5; // reuse Vault style
+            case RoomType::Library:  return 3; // reuse Shrine style
+            case RoomType::Laboratory: return 4; // reuse Secret style
             case RoomType::Normal:
             default: return 0;
         }
@@ -1648,6 +1651,8 @@ void Renderer::render(const Game& game) {
             case TrapKind::Alarm:    r = 220; g = 220; b = 80;  break;
             case TrapKind::Web:       r = 140; g = 180; b = 255; break;
             case TrapKind::ConfusionGas: r = 200; g = 120; b = 255; break;
+            case TrapKind::RollingBoulder: r = 200; g = 170; b = 90; break;
+            case TrapKind::TrapDoor: r = 180; g = 130; b = 90; break;
         }
 
         const uint8_t a = t.visible ? 220 : 120;
@@ -2090,12 +2095,14 @@ void Renderer::drawHud(const Game& game) {
     addStatus("POISON", p.effects.poisonTurns);
     addStatus("WEB", p.effects.webTurns);
     addStatus("CONF", p.effects.confusionTurns);
+    addStatus("FEAR", p.effects.fearTurns);
     addStatus("BURN", p.effects.burnTurns);
     addStatus("REGEN", p.effects.regenTurns);
     addStatus("SHIELD", p.effects.shieldTurns);
     addStatus("HASTE", p.effects.hasteTurns);
     addStatus("VISION", p.effects.visionTurns);
     addStatus("INVIS", p.effects.invisTurns);
+    addStatus("LEV", p.effects.levitationTurns);
     {
         const std::string ht = game.hungerTag();
         if (!ht.empty()) ss << " | " << ht;
@@ -2255,6 +2262,9 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			case ItemKind::PotionShielding: return "EFFECT: STONESKIN";
             case ItemKind::PotionHaste: return "EFFECT: HASTE";
             case ItemKind::PotionVision: return "EFFECT: VISION";
+            case ItemKind::PotionInvisibility: return "EFFECT: INVISIBILITY";
+            case ItemKind::PotionClarity: return "EFFECT: CLARITY";
+            case ItemKind::PotionLevitation: return "EFFECT: LEVITATION";
             case ItemKind::ScrollTeleport: return "EFFECT: TELEPORT";
             case ItemKind::ScrollMapping: return "EFFECT: MAPPING";
             case ItemKind::ScrollDetectTraps: return "EFFECT: DETECT TRAPS";
@@ -2263,6 +2273,10 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             case ItemKind::ScrollEnchantWeapon: return "EFFECT: ENCHANT WEAPON";
             case ItemKind::ScrollEnchantArmor: return "EFFECT: ENCHANT ARMOR";
             case ItemKind::ScrollIdentify: return "EFFECT: IDENTIFY";
+            case ItemKind::ScrollRemoveCurse: return "EFFECT: REMOVE CURSE";
+            case ItemKind::ScrollConfusion: return "EFFECT: CONFUSION";
+            case ItemKind::ScrollFear: return "EFFECT: FEAR";
+            case ItemKind::ScrollEarth: return "EFFECT: EARTH";
 			case ItemKind::FoodRation:
 				return def.hungerRestore > 0
 					? ("EFFECT: RESTORE HUNGER +" + std::to_string(def.hungerRestore))
@@ -3623,6 +3637,7 @@ void Renderer::drawCodexOverlay(const Game& game) {
                 case EntityKind::Mimic:  note("DISGUISES ITSELF AS LOOT."); break;
                 case EntityKind::Ghost:  note("RARE; CAN REGENERATE."); break;
                 case EntityKind::Leprechaun: note("STEALS GOLD AND BLINKS AWAY."); break;
+                case EntityKind::Zombie: note("SLOW UNDEAD; OFTEN RISES FROM CORPSES. IMMUNE TO POISON."); break;
                 case EntityKind::Minotaur: note("BOSS-LIKE THREAT; SCALES MORE SLOWLY UNTIL DEEPER LEVELS."); break;
                 case EntityKind::Shopkeeper: note("ATTACKING MAY ANGER THE SHOP."); break;
                 default: break;

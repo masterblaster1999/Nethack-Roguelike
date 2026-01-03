@@ -1,0 +1,46 @@
+{
+  "description": "Cumulative patch manifest for iterative ChatGPT patch rounds.",
+  "notes": [
+    "This file exists to make cumulative patch zips deterministic: include every file listed here (latest version) plus any newly changed/added files each round.",
+    "If you do not need cumulative patches, you can ignore this file."
+  ],
+  "files": [
+    "CHANGELOG.md",
+    "CMakeLists.txt",
+    "PATCH_MANIFEST.json",
+    "src/ai.cpp",
+    "src/combat.cpp",
+    "src/content.cpp",
+    "src/dungeon.cpp",
+    "src/dungeon.hpp",
+    "src/effects.hpp",
+    "src/game.cpp",
+    "src/game.hpp",
+    "src/game_automove.cpp",
+    "src/game_interact.cpp",
+    "src/game_internal.hpp",
+    "src/game_inventory.cpp",
+    "src/game_look.cpp",
+    "src/game_loop.cpp",
+    "src/game_save.cpp",
+    "src/game_spawn.cpp",
+    "src/game_world.cpp",
+    "src/items.cpp",
+    "src/items.hpp",
+    "src/render.cpp",
+    "src/spritegen.cpp",
+    "tests/test_main.cpp"
+  ],
+  "patch_info": {
+    "patch_id": "nethack_patch_roundN_plus11",
+    "description": "Cumulative patch: Add a new Scroll of Earth that raises boulders around the reader (and can fill adjacent chasms / pelt adjacent hostile monsters). Also expands the inventory effect-preview text for several identifiable items. Includes a regression test for Scroll of Earth.",
+    "created_utc": "2026-01-03T08:47:48Z"
+  },
+  "patch_id": "roundN_plus11",
+  "created_utc": "2026-01-03T08:47:48Z",
+  "summary": [
+    "Added Scroll of Earth: raises boulders in the 8 surrounding tiles, can fill adjacent chasms, and may pelt adjacent hostile monsters.",
+    "Inventory effect previews now include additional potions/scrolls (e.g., Invisibility/Clarity/Levitation) so identified items show clear EFFECT text.",
+    "Added a unit test verifying Scroll of Earth raises surrounding boulders in a valid open area."
+  ]
+}

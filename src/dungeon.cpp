@@ -1601,6 +1601,40 @@ void markSpecialRooms(Dungeon& d, RNG& rng, int depth) {
 
     int s = pickAndRemove(pool);
     if (s >= 0) d.rooms[static_cast<size_t>(s)].type = RoomType::Shrine;
+
+    // Themed rooms: a light-touch extra specialization to diversify loot/encounters.
+    // These are intentionally "moderate" in value (less than Treasure/Vault), but
+    // they help runs feel less uniform by biasing spawns toward a category.
+    if (!pool.empty() && depth >= 2) {
+        float themeChance = 0.55f;
+        if (depth >= 4) themeChance = 0.70f;
+        if (depth >= 7) themeChance = 0.82f;
+        // Midpoint floor: slightly increase the chance for a themed room.
+        if (depth == 5) themeChance = 0.90f;
+
+        if (rng.chance(std::min(0.95f, themeChance))) {
+            int rr = pickAndRemove(pool);
+            if (rr >= 0) {
+                const float r01 = rng.next01();
+                RoomType rt = RoomType::Armory;
+
+                // Early: more armories (gear stabilizes runs).
+                // Mid: libraries become common (utility scrolls/wands).
+                // Late: laboratories creep in (potions + weirdness).
+                if (depth <= 2) {
+                    rt = (r01 < 0.70f) ? RoomType::Armory : (r01 < 0.90f ? RoomType::Library : RoomType::Laboratory);
+                } else if (depth <= 4) {
+                    rt = (r01 < 0.45f) ? RoomType::Armory : (r01 < 0.82f ? RoomType::Library : RoomType::Laboratory);
+                } else if (depth <= 6) {
+                    rt = (r01 < 0.30f) ? RoomType::Armory : (r01 < 0.72f ? RoomType::Library : RoomType::Laboratory);
+                } else {
+                    rt = (r01 < 0.20f) ? RoomType::Armory : (r01 < 0.58f ? RoomType::Library : RoomType::Laboratory);
+                }
+
+                d.rooms[static_cast<size_t>(rr)].type = rt;
+            }
+        }
+    }
 }
 
 Vec2i farthestPassableTile(const Dungeon& d, const std::vector<int>& dist, RNG& rng) {

@@ -23,6 +23,12 @@ enum class EffectKind : uint8_t {
 
     // Fire damage over time (append-only)
     Burn,
+
+    // Traversal / mobility (append-only)
+    Levitation,
+
+    // Morale / mind (append-only)
+    Fear,
 };
 
 // Human-readable short tag for HUD/status lists.
@@ -37,6 +43,8 @@ inline const char* effectTag(EffectKind k) {
         case EffectKind::Web:       return "WEB";
         case EffectKind::Confusion: return "CONF";
         case EffectKind::Burn:      return "BURN";
+        case EffectKind::Levitation:return "LEV";
+        case EffectKind::Fear:      return "FEAR";
         default:                    return "?";
     }
 }
@@ -53,6 +61,8 @@ inline const char* effectEndMessage(EffectKind k) {
         case EffectKind::Web:       return "YOU BREAK FREE OF THE WEB!";
         case EffectKind::Confusion: return "YOU FEEL LESS CONFUSED.";
         case EffectKind::Burn:      return "THE FLAMES SUBSIDE.";
+        case EffectKind::Levitation:return "YOU SINK BACK TO THE GROUND.";
+        case EffectKind::Fear:      return "YOU FEEL YOUR COURAGE RETURN.";
         default:                    return "";
     }
 }
@@ -73,6 +83,10 @@ struct Effects {
 
     int burnTurns = 0;      // take 1 HP per turn while >0
 
+    int levitationTurns = 0; // can traverse certain hazardous terrain while >0
+
+    int fearTurns = 0;      // monsters prefer fleeing (and avoid attacking) while >0
+
     bool has(EffectKind k) const { return get(k) > 0; }
 
     int get(EffectKind k) const {
@@ -86,6 +100,8 @@ struct Effects {
             case EffectKind::Web:       return webTurns;
             case EffectKind::Confusion: return confusionTurns;
             case EffectKind::Burn:      return burnTurns;
+            case EffectKind::Levitation:return levitationTurns;
+            case EffectKind::Fear:      return fearTurns;
             default:                    return 0;
         }
     }
@@ -101,6 +117,8 @@ struct Effects {
             case EffectKind::Web:       return webTurns;
             case EffectKind::Confusion: return confusionTurns;
             case EffectKind::Burn:      return burnTurns;
+            case EffectKind::Levitation:return levitationTurns;
+            case EffectKind::Fear:      return fearTurns;
             default:                    return poisonTurns; // should be unreachable
         }
     }
@@ -109,4 +127,4 @@ struct Effects {
 };
 
 // Keep in sync with EffectKind (append-only).
-inline constexpr int EFFECT_KIND_COUNT = static_cast<int>(EffectKind::Burn) + 1;
+inline constexpr int EFFECT_KIND_COUNT = static_cast<int>(EffectKind::Fear) + 1;

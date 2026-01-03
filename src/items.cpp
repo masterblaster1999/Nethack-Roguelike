@@ -134,6 +134,15 @@ const ItemDef& itemDef(ItemKind k) {
         { ItemKind::RingAgility,      "RING OF AGILITY",    false, false, false, EquipSlot::Ring,       0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0, 0, 1, 160, 0, 2, 0, 0 },
         { ItemKind::RingFocus,        "RING OF FOCUS",      false, false, false, EquipSlot::Ring,       0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0, 0, 1, 160, 0, 0, 0, 2 },
         { ItemKind::RingProtection,   "RING OF PROTECTION", false, false, false, EquipSlot::Ring,       0, 0, 1, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0, 0, 1, 190, 0, 0, 0, 0 },
+
+        // Traversal (append-only)
+        { ItemKind::PotionLevitation, "POTION OF LEVITATION", true, true, false, EquipSlot::None,       0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,     0, 0, 0, 2, 95 },
+
+        // Morale / control (append-only)
+        { ItemKind::ScrollFear, "SCROLL OF FEAR", true,  true,  false, EquipSlot::None,        0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 90 },
+
+        // Terrain / fortification (append-only)
+        { ItemKind::ScrollEarth, "SCROLL OF EARTH", true,  true,  false, EquipSlot::None,      0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 110 },
     };
 
     static std::vector<ItemDef> defs;

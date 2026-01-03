@@ -85,6 +85,8 @@ std::string Game::describeAt(Vec2i p) const {
             case TrapKind::Alarm: ss << "ALARM"; break;
             case TrapKind::Web: ss << "WEB"; break;
             case TrapKind::ConfusionGas: ss << "CONFUSION GAS"; break;
+            case TrapKind::RollingBoulder: ss << "ROLLING BOULDER"; break;
+            case TrapKind::TrapDoor: ss << "TRAP DOOR"; break;
         }
         break;
     }
@@ -121,8 +123,16 @@ std::string Game::describeAt(Vec2i p) const {
                 }
                 ss << " | XP: " << xpFor(e->kind);
 
+                if (e->kind == EntityKind::Ghost) {
+                    ss << " | ETHEREAL";
+                }
+
                 if (e->kind == EntityKind::Leprechaun && e->stolenGold > 0) {
                     ss << " | STOLEN: " << e->stolenGold << "G";
+                }
+
+                if (e->effects.fearTurns > 0) {
+                    ss << " | FEARED";
                 }
 
                 if (e->gearMelee.id != 0 && isMeleeWeapon(e->gearMelee.kind)) {

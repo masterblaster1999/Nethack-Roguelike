@@ -34,12 +34,14 @@ void Game::openInventory() {
 
     invOpen = true;
     invIdentifyMode = false;
+    invPrompt_ = InvPromptKind::None;
     invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 }
 
 void Game::closeInventory() {
     invOpen = false;
     invIdentifyMode = false;
+    invPrompt_ = InvPromptKind::None;
 }
 
 void Game::moveInventorySelection(int dy) {
@@ -1233,6 +1235,16 @@ bool Game::useSelected() {
 
     auto consumeOneStackable = [&]() {
         if (!isStackable(it.kind)) return;
+
+        // Using up unpaid shop goods still leaves you owing the shopkeeper.
+        // Record the per-unit cost into the shop debt ledger before consuming.
+        if (it.shopPrice > 0 && it.shopDepth > 0) {
+            const int sd = it.shopDepth;
+            if (sd >= 1 && sd <= DUNGEON_MAX_DEPTH) {
+                shopDebtLedger_[sd] += it.shopPrice;
+            }
+        }
+
         it.count -= 1;
         if (it.count <= 0) {
             inv.erase(inv.begin() + invSel);
@@ -1471,6 +1483,144 @@ bool Game::useSelected() {
         return true;
     }
 
+    if (it.kind == ItemKind::ScrollFear) {
+        Entity& p = playerMut();
+
+        auto immuneToFear = [&](EntityKind k) -> bool {
+            // Simple immunity list: mindless or already-dead fear targets.
+            // (Keeps the scroll useful without trivializing undead/bosses.)
+            switch (k) {
+                case EntityKind::SkeletonArcher:
+                case EntityKind::Ghost:
+                case EntityKind::Slime:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+
+        int affected = 0;
+        int immune = 0;
+        for (Entity& e : ents) {
+            if (e.id == p.id) continue;
+            if (e.friendly) continue;
+            if (e.kind == EntityKind::Shopkeeper) continue;
+            if (e.hp <= 0) continue;
+            if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
+            if (!dung.at(e.pos.x, e.pos.y).visible) continue;
+
+            if (immuneToFear(e.kind)) {
+                immune++;
+                continue;
+            }
+
+            const int turns = rng.range(6, 12) + std::min(6, depth_ / 2);
+            e.effects.fearTurns = std::max(e.effects.fearTurns, turns);
+            e.alerted = true;
+            e.lastKnownPlayerPos = p.pos;
+            e.lastKnownPlayerAge = 0;
+            affected++;
+        }
+
+        if (affected > 0) {
+            if (immune > 0) {
+                pushMsg("A WAVE OF TERROR RADIATES OUTWARD. SOME FOES TREMBLE!", MessageKind::Success, true);
+            } else {
+                pushMsg("A WAVE OF TERROR RADIATES OUTWARD. YOUR FOES TREMBLE!", MessageKind::Success, true);
+            }
+        } else if (immune > 0) {
+            pushMsg("A CHILL RUNS THROUGH THE DUNGEON, BUT YOUR FOES STAND FIRM.", MessageKind::Info, true);
+        } else {
+            pushMsg("NOTHING SEEMS TO HAPPEN.", MessageKind::Info, true);
+        }
+
+        emitNoise(p.pos, 4);
+
+        (void)markIdentified(it.kind, false);
+        consumeOneStackable();
+        return true;
+    }
+
+    if (it.kind == ItemKind::ScrollEarth) {
+        Entity& p = playerMut();
+
+        int boulders = 0;
+        int bridged = 0;
+        int slammed = 0;
+
+        // Raise boulders in the 8 surrounding tiles. This is mainly a tactical
+        // fortification tool, but it can also bridge adjacent chasms.
+        const int dirs8[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
+
+        for (int i = 0; i < 8; ++i) {
+            const int x = p.pos.x + dirs8[i][0];
+            const int y = p.pos.y + dirs8[i][1];
+            if (!dung.inBounds(x, y)) continue;
+
+            // Don't clobber stairs.
+            if (Vec2i{x, y} == dung.stairsUp || Vec2i{x, y} == dung.stairsDown) continue;
+
+            Tile& t = dung.at(x, y);
+
+            // If there's a chasm, the "falling earth" fills it in.
+            if (t.type == TileType::Chasm) {
+                t.type = TileType::Floor;
+                bridged++;
+                continue;
+            }
+
+            // Only place boulders on walkable terrain; do not overwrite doors/walls.
+            if (!dung.isWalkable(x, y)) continue;
+
+            // If an enemy is in the way, slam it with falling rock. Friendly units
+            // (including your dog) are spared for QoL.
+            Entity* e = entityAtMut(x, y);
+            if (e && e->id != p.id) {
+                if (!e->friendly && e->kind != EntityKind::Shopkeeper) {
+                    const int dmg = rng.range(6, 10) + std::min(4, depth_ / 3);
+                    e->hp = std::max(0, e->hp - dmg);
+                    slammed++;
+
+                    if (t.visible) {
+                        std::ostringstream ss;
+                        if (e->hp <= 0) {
+                            ss << "A BOULDER CRUSHES " << kindName(e->kind) << "!";
+                        } else {
+                            ss << "ROCKS PELT " << kindName(e->kind) << "!";
+                        }
+                        pushMsg(ss.str(), MessageKind::Combat, false);
+                    }
+
+                    // Only place the boulder if the enemy was killed (so we don't
+                    // create impossible overlaps).
+                    if (e->hp > 0) continue;
+                } else {
+                    continue;
+                }
+            }
+
+            // If the tile is now empty, raise a boulder.
+            if (!entityAt(x, y) && t.type != TileType::Boulder) {
+                t.type = TileType::Boulder;
+                boulders++;
+            }
+        }
+
+        if (boulders == 0 && bridged == 0 && slammed == 0) {
+            pushMsg("THE GROUND RUMBLES, BUT NOTHING HAPPENS.", MessageKind::Info, true);
+        } else {
+            pushMsg("THE EARTH TREMBLES!", MessageKind::Warning, true);
+            if (boulders > 0) pushMsg("BOULDERS RISE FROM THE STONE.", MessageKind::System, true);
+            if (bridged > 0) pushMsg("DEBRIS FILLS IN THE CHASM.", MessageKind::System, true);
+        }
+
+        emitNoise(p.pos, 8);
+
+        (void)markIdentified(it.kind, false);
+        consumeOneStackable();
+        return true;
+    }
+
     if (it.kind == ItemKind::PotionAntidote) {
         Entity& p = playerMut();        if (p.effects.poisonTurns > 0) {
             p.effects.poisonTurns = 0;
@@ -1525,6 +1675,21 @@ bool Game::useSelected() {
         return true;
     }
 
+    if (it.kind == ItemKind::PotionLevitation) {
+        Entity& p = playerMut();
+
+        // Base duration (blessed/cursed can modify in the future, and stacking preserves the longest).
+        int dur = 14 + rng.range(0, 6);
+        if (it.buc > 0) dur += 10;
+        if (it.buc < 0) dur = std::max(4, dur / 2);
+
+        p.effects.levitationTurns = std::max(p.effects.levitationTurns, dur);
+        pushMsg("YOU FEEL LIGHTER THAN AIR!", MessageKind::Success, true);
+        (void)markIdentified(it.kind, false);
+        consumeOneStackable();
+        return true;
+    }
+
     if (it.kind == ItemKind::PotionClarity) {
         Entity& p = playerMut();
         const bool wasConfused = (p.effects.confusionTurns > 0);
@@ -1541,6 +1706,14 @@ bool Game::useSelected() {
         // Light a torch: consumes one TORCH from the stack and creates a LIT TORCH item that burns over time.
         // (The LIT TORCH can be dropped to create a stationary light source.)
         const int fuel = 180 + rng.range(0, 120);
+
+        // Using up unpaid shop goods still leaves you owing the shopkeeper.
+        if (it.shopPrice > 0 && it.shopDepth > 0) {
+            const int sd = it.shopDepth;
+            if (sd >= 1 && sd <= DUNGEON_MAX_DEPTH) {
+                shopDebtLedger_[sd] += it.shopPrice;
+            }
+        }
 
         // Consume one torch from the selected stack first (to avoid reference invalidation from inv push_back).
         if (it.count > 1) {

@@ -529,6 +529,7 @@ int Game::xpFor(EntityKind k) const {
         case EntityKind::Wizard: return 32;
         case EntityKind::Ghost: return 34;
         case EntityKind::Leprechaun: return 18;
+        case EntityKind::Zombie: return 18;
         case EntityKind::Mimic: return 22;
         case EntityKind::Minotaur: return 45;
         case EntityKind::Shopkeeper: return 0;
@@ -593,6 +594,7 @@ void Game::onPlayerLevelUp() {
     // Cancel other UI modes / automation so the player can make a choice.
     invOpen = false;
     invIdentifyMode = false;
+    invPrompt_ = InvPromptKind::None;
     closeChestOverlay();
     targeting = false;
     targetLine.clear();
@@ -1033,6 +1035,7 @@ void Game::newGame(uint32_t seed) {
     seed_ = seed;
     depth_ = 1;
     levels.clear();
+    for (auto& v : trapdoorFallers_) v.clear();
 
     ents.clear();
     ground.clear();
@@ -1043,6 +1046,7 @@ void Game::newGame(uint32_t seed) {
     fireField_.clear();
     scentField_.clear();
     inv.clear();
+    shopDebtLedger_.fill(0);
     fx.clear();
     fxExpl.clear();
 
@@ -1064,6 +1068,7 @@ void Game::newGame(uint32_t seed) {
 
     invOpen = false;
     invIdentifyMode = false;
+    invPrompt_ = InvPromptKind::None;
     invSel = 0;
     targeting = false;
     targetLine.clear();
@@ -1651,6 +1656,72 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         return placed;
     };
 
+    auto placeTrapdoorFallersHere = [&]() -> size_t {
+        // Spawn any monsters/companions that previously fell through trap doors into this depth.
+        const int d = depth_;
+        if (d < 1 || d > DUNGEON_MAX_DEPTH) return 0;
+
+        auto& pending = trapdoorFallers_[static_cast<size_t>(d)];
+        if (pending.empty()) return 0;
+
+        auto isSafeLanding = [&](Vec2i v) -> bool {
+            if (!dung.inBounds(v.x, v.y)) return false;
+            if (!dung.isWalkable(v.x, v.y)) return false;
+            if (v == dung.stairsUp || v == dung.stairsDown) return false;
+            if (entityAt(v.x, v.y) != nullptr) return false;
+            if (fireAt(v.x, v.y) > 0u) return false;
+            for (const auto& tr : trapsCur) {
+                if (tr.pos == v) return false;
+            }
+            return true;
+        };
+
+        size_t placed = 0;
+        std::vector<Entity> stillPending;
+        stillPending.reserve(pending.size());
+
+        for (auto& m : pending) {
+            Vec2i dst{-1, -1};
+            bool ok = false;
+            for (int tries = 0; tries < 250; ++tries) {
+                const Vec2i cand = dung.randomFloor(rng, true);
+                if (!isSafeLanding(cand)) continue;
+                dst = cand;
+                ok = true;
+                break;
+            }
+
+            if (!ok) {
+                stillPending.push_back(m);
+                continue;
+            }
+
+            m.pos = dst;
+            // Landing costs the creature its action budget for the turn.
+            m.energy = 0;
+
+            // The fall is startling and loud: hostiles become alert, allies reset tracking.
+            if (m.friendly) {
+                m.alerted = false;
+                m.lastKnownPlayerPos = {-1, -1};
+                m.lastKnownPlayerAge = 9999;
+            } else {
+                m.alerted = true;
+                m.lastKnownPlayerPos = p.pos;
+                m.lastKnownPlayerAge = 0;
+            }
+
+            ents.push_back(m);
+            ++placed;
+
+            // Impact noise can wake nearby monsters.
+            emitNoise(dst, 14);
+        }
+
+        pending = std::move(stillPending);
+        return placed;
+    };
+
     size_t followedCount = 0;
 
     if (!restored) {
@@ -1707,6 +1778,8 @@ void Game::changeLevel(int newDepth, bool goingDown) {
             }
         }
 
+        placeTrapdoorFallersHere();
+
         spawnMonsters();
         spawnItems();
         spawnTraps();
@@ -1761,6 +1834,8 @@ void Game::changeLevel(int newDepth, bool goingDown) {
                 pushMsg("YOUR COMPANIONS FOLLOW YOU.", MessageKind::System, true);
             }
         }
+
+        placeTrapdoorFallersHere();
 
         // Stair arrival is noisy on visited floors too.
         emitNoise(p.pos, 12);
@@ -1912,6 +1987,8 @@ static void hashEffects(Hash64& hh, const Effects& ef) {
     hh.addI32(ef.webTurns);
     hh.addI32(ef.confusionTurns);
     hh.addI32(ef.burnTurns);
+    hh.addI32(ef.levitationTurns);
+    hh.addI32(ef.fearTurns);
 }
 
 static void hashEntity(Hash64& hh, const Entity& e) {
@@ -2150,6 +2227,13 @@ uint64_t Game::determinismHash() const {
     for (const auto& kv : levels) {
         hh.addI32(kv.first);
         hashLevelState(hh, kv.second);
+    }
+
+    // Pending trapdoor fallers (creatures that fell to deeper levels but aren't placed yet).
+    for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
+        const auto& vec = trapdoorFallers_[static_cast<size_t>(d)];
+        hh.addU32(static_cast<uint32_t>(vec.size()));
+        for (const auto& e : vec) hashEntity(hh, e);
     }
 
     return hh.h;

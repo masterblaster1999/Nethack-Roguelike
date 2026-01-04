@@ -1,6 +1,6 @@
 {
-  "created_utc": "2026-01-04T09:09:03Z",
-  "description": "Round N+30: Expand procedural generation by adding a new multi-chamber \"vault suite\" prefab with interior walls + doors, plus regression tests.",
+  "created_utc": "2026-01-04T11:29:08Z",
+  "description": "Round N+31: Make vault generation reliable by carving partition-style vaults out of existing normal rooms (with fallback), plus regression coverage.",
   "files": [
     "CHANGELOG.md",
     "CMakeLists.txt",
@@ -39,17 +39,17 @@
     "This file exists to make cumulative patch zips deterministic: include every file listed here (latest version) plus any newly changed/added files each round.",
     "If you do not need cumulative patches, you can ignore this file."
   ],
-  "patch_id": "nethack_patch_roundN_plus30",
+  "patch_id": "nethack_patch_roundN_plus31",
   "patch_info": {
-    "patch_id": "nethack_patch_roundN_plus30",
-    "description": "Round N+30: Expand procedural generation by adding a new multi-chamber \"vault suite\" prefab with interior walls + doors, plus regression tests.",
-    "created_utc": "2026-01-04T09:09:03Z"
+    "patch_id": "nethack_patch_roundN_plus31",
+    "description": "Round N+31: Make vault generation reliable by carving partition-style vaults out of existing normal rooms (with fallback), plus regression coverage.",
+    "created_utc": "2026-01-04T11:29:08Z"
   },
-  "previous_patch": "nethack_patch_roundN_plus29",
+  "previous_patch": "nethack_patch_roundN_plus30",
   "summary": [
-    "Added a new advanced vault prefab: \"vault suites\" partition some vault rooms into multiple chambers with interior walls and internal doors (LOS breaks + staged fights).",
-    "Vault suites still place at least one obstacle tile (pillars/chasm/boulders) and request a guaranteed bonus loot cache deep in the final chamber; deeper floors may request a second cache.",
-    "Added a unit test that scans seeds and asserts at least one vault suite appears (interior wall tiles + interior closed doors)."
+    "Vault generation now prefers partition-vaults: it splits an existing normal room with a wall line and places a single locked door into that partition, creating a sealed vault alcove without requiring large solid-wall blocks.",
+    "Falls back to the original wall-carve vault method when no suitable room can be partitioned (e.g., certain maze/cavern layouts).",
+    "Added a regression test that scans seeds and asserts at least one vault entrance is a partition-style locked door embedded in a wall line."
   ],
-  "timestamp": "2026-01-04T09:09:03Z"
+  "timestamp": "2026-01-04T11:29:08Z"
 }

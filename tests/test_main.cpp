@@ -268,6 +268,52 @@ void test_vault_suite_prefab_partitions_room() {
 }
 
 
+void test_partition_vaults_embed_locked_door_in_wall_line() {
+    // Partition-vaults are carved out of an existing normal room using a wall line.
+    // The locked entrance door should sit *in* that wall line, meaning it has wall
+    // neighbors on one axis (N/S or E/W).
+    bool foundPartitionVault = false;
+
+    for (uint32_t seed = 1; seed <= 300; ++seed) {
+        RNG rng(4242u + seed * 31u);
+        Dungeon d(60, 40);
+        d.generate(rng, /*depth=*/5, /*maxDepth=*/10);
+
+        for (const Room& r : d.rooms) {
+            if (r.type != RoomType::Vault) continue;
+
+            for (int y = r.y; y < r.y2(); ++y) {
+                for (int x = r.x; x < r.x2(); ++x) {
+                    if (!d.inBounds(x, y)) continue;
+                    if (d.at(x, y).type != TileType::DoorLocked) continue;
+
+                    const bool wallNS = d.inBounds(x, y - 1) && d.inBounds(x, y + 1)
+                        && d.at(x, y - 1).type == TileType::Wall
+                        && d.at(x, y + 1).type == TileType::Wall;
+
+                    const bool wallEW = d.inBounds(x - 1, y) && d.inBounds(x + 1, y)
+                        && d.at(x - 1, y).type == TileType::Wall
+                        && d.at(x + 1, y).type == TileType::Wall;
+
+                    if (wallNS || wallEW) {
+                        foundPartitionVault = true;
+                        break;
+                    }
+                }
+                if (foundPartitionVault) break;
+            }
+
+            if (foundPartitionVault) break;
+        }
+
+        if (foundPartitionVault) break;
+    }
+
+    expect(foundPartitionVault, "Expected to find at least one partition-style vault entrance (locked door embedded in a wall line) across seeds");
+}
+
+
+
 
 void test_themed_room_prefabs_add_obstacles() {
     // Themed rooms are optional. Scan across many seeds and confirm that at least
@@ -3173,6 +3219,7 @@ int main() {
     test_dungeon_stairs_connected();
     test_vault_room_prefabs_add_obstacles();
     test_vault_suite_prefab_partitions_room();
+    test_partition_vaults_embed_locked_door_in_wall_line();
     test_themed_room_prefabs_add_obstacles();
     test_room_shape_variety_adds_internal_walls();
     test_secret_shortcut_doors_generate();

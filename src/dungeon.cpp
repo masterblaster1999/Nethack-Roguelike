@@ -75,6 +75,7 @@ void carveFloor(Dungeon& d, int x, int y) {
 inline bool isDoorTileType(TileType t);
 bool anyDoorInRadius(const Dungeon& d, int x, int y, int radius);
 const Room* findRoomContaining(const Dungeon& d, int x, int y);
+bool stairsConnected(const Dungeon& d);
 
 // Forward decls: bonus room decoration (vault/secret prefabs).
 void decorateSecretBonusRoom(Dungeon& d, const Room& r, RNG& rng,
@@ -209,7 +210,319 @@ bool tryCarveSecretRoom(Dungeon& d, RNG& rng, int depth) {
 // Doors are visible (TileType::DoorLocked) but require a Key to open.
 // ------------------------------------------------------------
 
+
+static bool tryPartitionVaultFromNormalRoom(Dungeon& d, RNG& rng, int depth) {
+    (void)depth;
+
+    // Partition-style vaults: split an existing normal room with a wall line and
+    // carve a single locked door into that partition. This is far more reliable
+    // than hunting for large solid wall blocks (which may be rare on dense layouts).
+    const int minVaultFloor = 4; // walkable floor thickness (partition wall is an extra tile)
+    const int minRemain = 5;
+
+    std::vector<int> candidates;
+    candidates.reserve(d.rooms.size());
+
+    for (size_t i = 0; i < d.rooms.size(); ++i) {
+        const Room& r = d.rooms[i];
+        if (r.type != RoomType::Normal) continue;
+
+        // Don't split rooms that contain stairs.
+        if (r.contains(d.stairsUp.x, d.stairsUp.y)) continue;
+        if (r.contains(d.stairsDown.x, d.stairsDown.y)) continue;
+
+        // Need enough space to carve (vault floor + partition + remaining).
+        if (r.w < (minVaultFloor + 1 + minRemain) && r.h < (minVaultFloor + 1 + minRemain)) continue;
+
+        // Skip rooms already disrupted by global terrain passes (ravines/lakes),
+        // since partitioning assumes a clean floor interior.
+        bool clean = true;
+        for (int y = r.y + 1; y < r.y2() - 1 && clean; ++y) {
+            for (int x = r.x + 1; x < r.x2() - 1; ++x) {
+                if (!d.inBounds(x, y)) { clean = false; break; }
+                if (d.at(x, y).type != TileType::Floor) { clean = false; break; }
+            }
+        }
+        if (!clean) continue;
+
+        candidates.push_back(static_cast<int>(i));
+    }
+
+    if (candidates.empty()) return false;
+
+    // Shuffle candidates for variety.
+    for (int i = static_cast<int>(candidates.size()) - 1; i > 0; --i) {
+        const int j = rng.range(0, i);
+        std::swap(candidates[static_cast<size_t>(i)], candidates[static_cast<size_t>(j)]);
+    }
+
+    struct SplitOpt { bool vertical = true; bool vaultOnMin = true; }; // vaultOnMin: left/top if true.
+    SplitOpt opts[4] = { {true,true}, {true,false}, {false,true}, {false,false} };
+
+    auto shuffleOpts = [&]() {
+        for (int i = 3; i > 0; --i) {
+            const int j = rng.range(0, i);
+            std::swap(opts[i], opts[j]);
+        }
+    };
+
+    auto gatherBoundaryDoors = [&](const Room& r, std::vector<Vec2i>& out) {
+        out.clear();
+        out.reserve(static_cast<size_t>(r.w + r.h) * 2);
+
+        auto consider = [&](int x, int y) {
+            if (!d.inBounds(x, y)) return;
+            if (!isDoorTileType(d.at(x, y).type)) return;
+            out.push_back({x, y});
+        };
+
+        for (int x = r.x; x < r.x2(); ++x) {
+            consider(x, r.y);
+            consider(x, r.y2() - 1);
+        }
+        for (int y = r.y; y < r.y2(); ++y) {
+            consider(r.x, y);
+            consider(r.x2() - 1, y);
+        }
+    };
+
+    const int maxRoomTries = std::min(12, static_cast<int>(candidates.size()));
+    for (int attemptRoom = 0; attemptRoom < maxRoomTries; ++attemptRoom) {
+        const int roomIdx = candidates[static_cast<size_t>(attemptRoom)];
+        const Room orig = d.rooms[static_cast<size_t>(roomIdx)];
+
+        std::vector<Vec2i> doors;
+        gatherBoundaryDoors(orig, doors);
+        if (doors.empty()) continue;
+
+        shuffleOpts();
+
+        for (const SplitOpt& opt : opts) {
+            const bool vertical = opt.vertical;
+            const bool vaultOnMin = opt.vaultOnMin;
+
+            const int axisLen = vertical ? orig.w : orig.h;
+            const int otherLen = vertical ? orig.h : orig.w;
+
+            // Don't create "slit vaults".
+            if (otherLen < 6) continue;
+
+            const int maxVaultFloor = std::min(9, axisLen - (minRemain + 1));
+            if (maxVaultFloor < minVaultFloor) continue;
+
+            // Try vault sizes in random order (smaller sizes can dodge boundary doors).
+            std::vector<int> sizes;
+            sizes.reserve(static_cast<size_t>(maxVaultFloor - minVaultFloor + 1));
+            for (int s = minVaultFloor; s <= maxVaultFloor; ++s) sizes.push_back(s);
+            for (int i = static_cast<int>(sizes.size()) - 1; i > 0; --i) {
+                const int j = rng.range(0, i);
+                std::swap(sizes[static_cast<size_t>(i)], sizes[static_cast<size_t>(j)]);
+            }
+
+            for (int s = 0; s < static_cast<int>(sizes.size()); ++s) {
+                const int vFloor = sizes[static_cast<size_t>(s)];
+
+                Room vault;
+                Room remain;
+                Vec2i doorPos{0,0};
+                Vec2i doorInside{0,0};
+                Vec2i intoDir{0,0};
+
+                if (vertical) {
+                    if (vaultOnMin) {
+                        // Vault on the left side.
+                        const int wallX = orig.x + vFloor;
+
+                        bool ok = true;
+                        for (const Vec2i& dp : doors) {
+                            if (dp.x <= wallX) { ok = false; break; }
+                        }
+                        if (!ok) continue;
+
+                        vault = {orig.x, orig.y, vFloor + 1, orig.h, RoomType::Vault};
+                        remain = {wallX + 1, orig.y, orig.w - (vFloor + 1), orig.h, RoomType::Normal};
+                        if (remain.w < minRemain) continue;
+
+                        intoDir = {-1, 0};
+
+                        const int minY = orig.y + ((orig.h >= 7) ? 2 : 1);
+                        const int maxY = orig.y2() - 1 - ((orig.h >= 7) ? 3 : 2);
+                        if (minY > maxY) continue;
+                        const int doorY = rng.range(minY, maxY);
+                        doorPos = {wallX, doorY};
+                        doorInside = {wallX - 1, doorY};
+                    } else {
+                        // Vault on the right side.
+                        const int wallX = (orig.x2() - 1) - vFloor;
+
+                        bool ok = true;
+                        for (const Vec2i& dp : doors) {
+                            if (dp.x >= wallX) { ok = false; break; }
+                        }
+                        if (!ok) continue;
+
+                        vault = {wallX, orig.y, vFloor + 1, orig.h, RoomType::Vault};
+                        remain = {orig.x, orig.y, wallX - orig.x, orig.h, RoomType::Normal};
+                        if (remain.w < minRemain) continue;
+
+                        intoDir = {1, 0};
+
+                        const int minY = orig.y + ((orig.h >= 7) ? 2 : 1);
+                        const int maxY = orig.y2() - 1 - ((orig.h >= 7) ? 3 : 2);
+                        if (minY > maxY) continue;
+                        const int doorY = rng.range(minY, maxY);
+                        doorPos = {wallX, doorY};
+                        doorInside = {wallX + 1, doorY};
+                    }
+
+                    // Validate doorway tiles before building the partition.
+                    if (!d.inBounds(doorPos.x, doorPos.y)) continue;
+                    if (!d.inBounds(doorInside.x, doorInside.y)) continue;
+                    const Vec2i outside = {doorPos.x - intoDir.x, doorPos.y - intoDir.y};
+                    if (!d.inBounds(outside.x, outside.y)) continue;
+
+                    if (d.at(doorPos.x, doorPos.y).type != TileType::Floor) continue;
+                    if (d.at(doorInside.x, doorInside.y).type != TileType::Floor) continue;
+                    if (d.at(outside.x, outside.y).type != TileType::Floor) continue;
+                    if (anyDoorInRadius(d, doorPos.x, doorPos.y, 1)) continue;
+
+                    struct LocalChange { int x; int y; TileType prev; };
+                    std::vector<LocalChange> changes;
+                    changes.reserve(static_cast<size_t>(orig.h + 2));
+
+                    auto setTile = [&](int x, int y, TileType t) {
+                        if (!d.inBounds(x, y)) return;
+                        Tile& cur = d.at(x, y);
+                        if (cur.type == t) return;
+                        changes.push_back({x, y, cur.type});
+                        cur.type = t;
+                    };
+
+                    // Full-height partition wall.
+                    for (int y = orig.y; y < orig.y2(); ++y) {
+                        setTile(doorPos.x, y, TileType::Wall);
+                    }
+                    setTile(doorPos.x, doorPos.y, TileType::DoorLocked);
+
+                    const Room saved = d.rooms[static_cast<size_t>(roomIdx)];
+                    const size_t savedCount = d.rooms.size();
+                    d.rooms[static_cast<size_t>(roomIdx)] = remain;
+                    d.rooms.push_back(vault);
+
+                    if (!stairsConnected(d)) {
+                        for (auto it = changes.rbegin(); it != changes.rend(); ++it) {
+                            if (d.inBounds(it->x, it->y)) d.at(it->x, it->y).type = it->prev;
+                        }
+                        d.rooms.resize(savedCount);
+                        d.rooms[static_cast<size_t>(roomIdx)] = saved;
+                        continue;
+                    }
+
+                    decorateVaultBonusRoom(d, vault, rng, doorPos, doorInside, intoDir, depth);
+                    return true;
+                } else {
+                    if (vaultOnMin) {
+                        // Vault on the top side.
+                        const int wallY = orig.y + vFloor;
+
+                        bool ok = true;
+                        for (const Vec2i& dp : doors) {
+                            if (dp.y <= wallY) { ok = false; break; }
+                        }
+                        if (!ok) continue;
+
+                        vault = {orig.x, orig.y, orig.w, vFloor + 1, RoomType::Vault};
+                        remain = {orig.x, wallY + 1, orig.w, orig.h - (vFloor + 1), RoomType::Normal};
+                        if (remain.h < minRemain) continue;
+
+                        intoDir = {0, -1};
+
+                        const int minX = orig.x + ((orig.w >= 7) ? 2 : 1);
+                        const int maxX = orig.x2() - 1 - ((orig.w >= 7) ? 3 : 2);
+                        if (minX > maxX) continue;
+                        const int doorX = rng.range(minX, maxX);
+                        doorPos = {doorX, wallY};
+                        doorInside = {doorX, wallY - 1};
+                    } else {
+                        // Vault on the bottom side.
+                        const int wallY = (orig.y2() - 1) - vFloor;
+
+                        bool ok = true;
+                        for (const Vec2i& dp : doors) {
+                            if (dp.y >= wallY) { ok = false; break; }
+                        }
+                        if (!ok) continue;
+
+                        vault = {orig.x, wallY, orig.w, vFloor + 1, RoomType::Vault};
+                        remain = {orig.x, orig.y, orig.w, wallY - orig.y, RoomType::Normal};
+                        if (remain.h < minRemain) continue;
+
+                        intoDir = {0, 1};
+
+                        const int minX = orig.x + ((orig.w >= 7) ? 2 : 1);
+                        const int maxX = orig.x2() - 1 - ((orig.w >= 7) ? 3 : 2);
+                        if (minX > maxX) continue;
+                        const int doorX = rng.range(minX, maxX);
+                        doorPos = {doorX, wallY};
+                        doorInside = {doorX, wallY + 1};
+                    }
+
+                    if (!d.inBounds(doorPos.x, doorPos.y)) continue;
+                    if (!d.inBounds(doorInside.x, doorInside.y)) continue;
+                    const Vec2i outside = {doorPos.x - intoDir.x, doorPos.y - intoDir.y};
+                    if (!d.inBounds(outside.x, outside.y)) continue;
+
+                    if (d.at(doorPos.x, doorPos.y).type != TileType::Floor) continue;
+                    if (d.at(doorInside.x, doorInside.y).type != TileType::Floor) continue;
+                    if (d.at(outside.x, outside.y).type != TileType::Floor) continue;
+                    if (anyDoorInRadius(d, doorPos.x, doorPos.y, 1)) continue;
+
+                    struct LocalChange { int x; int y; TileType prev; };
+                    std::vector<LocalChange> changes;
+                    changes.reserve(static_cast<size_t>(orig.w + 2));
+
+                    auto setTile = [&](int x, int y, TileType t) {
+                        if (!d.inBounds(x, y)) return;
+                        Tile& cur = d.at(x, y);
+                        if (cur.type == t) return;
+                        changes.push_back({x, y, cur.type});
+                        cur.type = t;
+                    };
+
+                    for (int x = orig.x; x < orig.x2(); ++x) {
+                        setTile(x, doorPos.y, TileType::Wall);
+                    }
+                    setTile(doorPos.x, doorPos.y, TileType::DoorLocked);
+
+                    const Room saved = d.rooms[static_cast<size_t>(roomIdx)];
+                    const size_t savedCount = d.rooms.size();
+                    d.rooms[static_cast<size_t>(roomIdx)] = remain;
+                    d.rooms.push_back(vault);
+
+                    if (!stairsConnected(d)) {
+                        for (auto it = changes.rbegin(); it != changes.rend(); ++it) {
+                            if (d.inBounds(it->x, it->y)) d.at(it->x, it->y).type = it->prev;
+                        }
+                        d.rooms.resize(savedCount);
+                        d.rooms[static_cast<size_t>(roomIdx)] = saved;
+                        continue;
+                    }
+
+                    decorateVaultBonusRoom(d, vault, rng, doorPos, doorInside, intoDir, depth);
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 bool tryCarveVaultRoom(Dungeon& d, RNG& rng, int depth) {
+    // Prefer partition-vaults carved out of existing normal rooms.
+    // This is far more reliable on dense layouts than carving into solid wall blocks.
+    if (tryPartitionVaultFromNormalRoom(d, rng, depth)) return true;
+
     const int maxTries = 350;
 
     const Vec2i dirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };

@@ -127,8 +127,14 @@ std::string Game::describeAt(Vec2i p) const {
                     ss << " | ETHEREAL";
                 }
 
-                if (e->kind == EntityKind::Leprechaun && e->stolenGold > 0) {
-                    ss << " | STOLEN: " << e->stolenGold << "G";
+                if (e->stolenGold > 0) {
+                    if (e->kind == EntityKind::Leprechaun) {
+                        ss << " | STOLEN: " << e->stolenGold << "G";
+                    } else if (e->friendly) {
+                        ss << " | CARRY: " << e->stolenGold << "G";
+                    } else {
+                        ss << " | LOOT: " << e->stolenGold << "G";
+                    }
                 }
 
                 if (e->effects.fearTurns > 0) {

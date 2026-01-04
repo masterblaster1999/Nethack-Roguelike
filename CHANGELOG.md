@@ -1,11 +1,51 @@
 # Changelog
 
 
-## [0.21.0] - Unreleased
+## [0.22.0] - Unreleased
 
 ### Added
+- **Procedural mines floors**: a new dungeon generator that builds **winding tunnel networks** connecting many small chambers.
+  - Appears at **depth 2** and again at **depth 7**, adding mid-run navigational variety.
+  - Tunnels are carved with a **biased random-walk** for more organic shapes (with safe fallback pathing).
+- **Global ravines / fissures**: some procedural floors can now spawn a long, winding **chasm fissure** that slices across the map.
+  - The generator always preserves stairs connectivity (by placing natural stone bridges, or repairing if needed).
+  - **Deep Mines** are guaranteed to have at least one fissure, and may also spawn extra **boulders** near the edge for optional bridge-making.
+
+- **Sinkholes**: a late procedural pass that carves small, irregular **chasm clusters** into corridors/tunnels on deeper floors.
+  - Designed as local navigation puzzles (levitation, boulder-bridging, or detours) while always preserving the core stairs path.
+  - **Deep Mines** now feel extra unstable: they are guaranteed to generate at least one sinkhole cluster, often with nearby boulders.
+
+
+- **Catacombs floor**: depth **8** now uses a new generator that creates a dense grid of small tomb rooms connected by a **cell-maze** (spanning tree + extra loops).
+  - Emphasis on **doors**, short sight-lines, and frequent junctions for more tactical room-to-room play.
+
+- **Grotto lakes**: the cavern-like floor at **depth 4** now carves a blobby **subterranean lake** (chasm terrain) with automatic **stone causeways** placed via BFS to preserve stairs connectivity.
+  - The generator also sometimes places a few **boulders** near the shoreline as optional bridge-making tools.
+
+- **Bonus room prefabs**: vaults and secret rooms now gain internal layouts (moats/trenches/pillar lattices) to make side objectives feel more distinct.
+  - Some layouts generate **boulder-bridge** puzzles over chasms and request extra **bonus loot** caches in hard-to-reach pockets.
+  - Vault room sizes scale gently with depth to support more interesting shapes.
+- **Vault suites**: a new advanced vault prefab that partitions some vault rooms into multiple locked-in chambers using interior **walls + doors**.
+  - Creates short "mini-dungeon" side objectives with staged sight-lines and better tactical pacing.
+  - The generator tracks how many suites were placed via `Dungeon::vaultSuiteCount` (useful for tests/callouts).
+
+
 - **Themed rooms**: **Armory**, **Library**, and **Laboratory**. These appear as an extra "moderate" special room on many floors, biasing spawns toward weapons/armor, scrolls/wands, and potions respectively.
   - Laboratories can also generate **extra volatile traps** inside them (confusion gas / poison darts / etc.) for flavor.
+  - New: the dungeon generator now adds **themed interior prefabs** (armory weapon racks + crates, library shelves + aisles, laboratory spill hazards + lab benches).
+    - Some layouts can request a rare **bonus loot cache** tucked deep behind the furniture.
+
+- **Room shape variety**: some **normal rooms** now get internal wall partitions (L-shaped alcoves, donut blocks, and partition walls with occasional inner doors).
+  - Designed to increase tactical line-of-sight variation while keeping the global stairs path intact.
+
+- **Secret shortcut doors**: some procedural floors now add a small number of **hidden** doors (secret doors) in corridor walls where adjacent passages run alongside each other.
+  - These create optional **loops/shortcuts** that reward searching, without carving disconnected "hidden corridor" pockets.
+
+- **Locked shortcut gates**: some procedural floors now add a small number of **visible locked doors** in corridor walls that connect two adjacent corridor regions already connected elsewhere.
+  - These create optional **key/lockpick-powered shortcuts** without ever blocking stairs progression.
+
+- **Corridor hubs & great halls**: a late procedural pass that widens some hallway junctions and long corridor runs into broader spaces (junction hubs + 2-wide halls, with rare 3-wide flares).
+  - Adds tactical variety outside formal room rectangles, without creating door-less openings into rooms.
 
 - **Ethereal bones ghosts**: ghosts spawned from **bones files** can now **phase through walls/doors**.
   - Their chilling touch can also briefly **disorient** the player.
@@ -32,7 +72,21 @@
   - It can also **fill adjacent chasms** and may pelt adjacent hostile creatures with falling rock.
 
 - **Scroll of Taming**: reading it can **charm** nearby creatures into becoming **friendly companions**.
+  - NetHack-inspired quirk: while confused, the effect expands to an 11x11 area (chebyshev radius 5).
   - Undead, shopkeepers, and the Minotaur are immune.
+
+- **Companion order improvements**:
+  - **FETCH** companions now pick up gold and actually **carry it back**, delivering it when adjacent to you (and dropping it on death).
+  - **STAY/GUARD** now remember an anchor tile so companions can **return** after chasing enemies; **GUARD** will also lightly **patrol** near its anchor.
+
+- **Targeting / ranged QoL**:
+  - While aiming, **TAB / SHIFT+TAB** cycle **shootable** visible hostile targets.
+  - The targeting HUD now shows a compact **hit chance** + **damage dice** preview for your current shot.
+  - Invalid targeting states are now explained more clearly (e.g., **OUT OF RANGE**, **TARGET NOT VISIBLE**, **NO CLEAR SHOT**).
+  - **Boulders** now block projectiles (even though they remain non-opaque for line-of-sight), and projectiles can no longer "cut" perfectly blocked diagonal corners.
+
+- **Rogue homage floor**: depth **6** is now a classic 3x3-room "Rogue level" with **doorless corridors** for a distinctly different tactical feel.
+  - Entering it prints: `YOU ENTER WHAT SEEMS TO BE AN OLDER, MORE PRIMITIVE WORLD.`
 
 - **Trap doors**: rare floor traps that drop you to the **next depth**, dealing **impact damage** on landing.
   - While levitating, you can **float over** trap doors.
@@ -45,11 +99,15 @@
 - New monster: **Zombie** (slow, tough undead).
   - **Undead** (Ghost/Skeleton/Zombie) are **immune to poison damage**.
 
+- **Trap setpieces**: some floors now generate small **corridor gauntlets** (short strips of traps in long straight corridors).
+  - **Bonus loot caches** requested by the dungeon generator may also be guarded by one or more nearby floor traps.
+
 ### Save compatibility
 - Save version bumped to **v33** (persists queued trapdoor-fall creatures; v32 FEAR timer + v31 shop debt ledger retained).
 
 ### Changed
 - **#whistle** now calls **all friendly companions** with **Follow/Fetch** orders (not just the starting dog).
+- Floor trap scatter now avoids **shops** and **shrines** (keeps safe spaces consistent; traps still appear elsewhere).
 
 ### Fixed
 - Test/headless builds no longer require SDL2: **keybinds** are compiled only for the game executable.

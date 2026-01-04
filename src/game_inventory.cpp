@@ -1541,6 +1541,96 @@ bool Game::useSelected() {
         return true;
     }
 
+    if (it.kind == ItemKind::ScrollTaming) {
+        Entity& p = playerMut();
+
+        // NetHack-inspired: tame monsters adjacent to the player. While confused,
+        // the "taming aura" expands to an 11x11 area (chebyshev radius 5).
+        const int radius = (p.effects.confusionTurns > 0) ? 5 : 1;
+
+        auto immuneToTaming = [&](EntityKind k) -> bool {
+            // Undead are immune to charm.
+            if (entityIsUndead(k)) return true;
+            // Shops should remain stable.
+            if (k == EntityKind::Shopkeeper) return true;
+            // Bosses resist mind control.
+            if (k == EntityKind::Minotaur) return true;
+            return false;
+        };
+
+        int candidates = 0;
+        int tamed = 0;
+        int immune = 0;
+        int resisted = 0;
+
+        for (Entity& e : ents) {
+            if (e.id == p.id) continue;
+            if (e.hp <= 0) continue;
+            if (e.friendly) continue;
+
+            const int dist = chebyshev(p.pos, e.pos);
+            if (dist > radius) continue;
+
+            // Only affect monsters the player could plausibly "address".
+            if (!dung.hasLineOfSight(p.pos.x, p.pos.y, e.pos.x, e.pos.y)) continue;
+
+            if (immuneToTaming(e.kind)) {
+                immune++;
+                continue;
+            }
+
+            candidates++;
+
+            // No monster MR in ProcRogue; approximate resistance using XP value + depth.
+            // Higher-focus characters are better at bending wills.
+            int chance = 70;
+            chance += playerFocus() * 4;
+            chance += playerAgility() * 2;
+            chance -= std::min(30, xpFor(e.kind));
+            chance -= depth_ * 2;
+
+            // Clamp so it's never guaranteed at depth, but remains usable as an "escape" item.
+            chance = clampi(chance, 10, 90);
+
+            const int roll = rng.range(1, 100);
+            if (roll <= chance) {
+                e.friendly = true;
+                e.allyOrder = AllyOrder::Follow;
+                // Reset alert state so they immediately flip behavior.
+                e.alerted = false;
+                e.lastKnownPlayerPos = {-1, -1};
+                e.lastKnownPlayerAge = 9999;
+                // Being charmed dispels fear.
+                e.effects.fearTurns = 0;
+                tamed++;
+            } else {
+                // A resisted charm still puts the monster on edge.
+                e.alerted = true;
+                e.lastKnownPlayerPos = p.pos;
+                e.lastKnownPlayerAge = 0;
+                resisted++;
+            }
+        }
+
+        if (tamed > 0) {
+            if (resisted > 0 || immune > 0) {
+                pushMsg("THE NEIGHBORHOOD SEEMS FRIENDLIER.", MessageKind::Success, true);
+            } else {
+                pushMsg("THE NEIGHBORHOOD IS FRIENDLIER.", MessageKind::Success, true);
+            }
+        } else if (candidates > 0 || immune > 0) {
+            pushMsg("NOTHING INTERESTING SEEMS TO HAPPEN.", MessageKind::Info, true);
+        } else {
+            pushMsg("NOTHING INTERESTING HAPPENS.", MessageKind::Info, true);
+        }
+
+        emitNoise(p.pos, 4);
+
+        (void)markIdentified(it.kind, false);
+        consumeOneStackable();
+        return true;
+    }
+
     if (it.kind == ItemKind::ScrollEarth) {
         Entity& p = playerMut();
 

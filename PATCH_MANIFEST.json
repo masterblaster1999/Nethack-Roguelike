@@ -1,9 +1,6 @@
 {
-  "description": "Cumulative patch manifest for iterative ChatGPT patch rounds.",
-  "notes": [
-    "This file exists to make cumulative patch zips deterministic: include every file listed here (latest version) plus any newly changed/added files each round.",
-    "If you do not need cumulative patches, you can ignore this file."
-  ],
+  "created_utc": "2026-01-04T09:09:03Z",
+  "description": "Round N+30: Expand procedural generation by adding a new multi-chamber \"vault suite\" prefab with interior walls + doors, plus regression tests.",
   "files": [
     "CHANGELOG.md",
     "CMakeLists.txt",
@@ -21,6 +18,7 @@
     "src/game_internal.hpp",
     "src/game_inventory.cpp",
     "src/game_look.cpp",
+    "src/game_targeting.cpp",
     "src/game_loop.cpp",
     "src/game_save.cpp",
     "src/game_spawn.cpp",
@@ -37,17 +35,21 @@
     "src/ui_font.hpp",
     "src/sdl.hpp"
   ],
+  "notes": [
+    "This file exists to make cumulative patch zips deterministic: include every file listed here (latest version) plus any newly changed/added files each round.",
+    "If you do not need cumulative patches, you can ignore this file."
+  ],
+  "patch_id": "nethack_patch_roundN_plus30",
   "patch_info": {
-    "patch_id": "nethack_patch_roundN_plus12",
-    "description": "Cumulative patch: Fix MSVC build breaks introduced by recent UI/controls changes. Adds a centralized SDL include wrapper (SDL_MAIN_HANDLED, SDL_SetMainReady), implements missing Renderer::drawItemIcon for the chest overlay, fixes CLI optional parsing for --record-hash-interval, and fixes KeyBinds chord string formatting. Also silences two MSVC warnings (shadowed 'acted', constant conditional).",
-    "created_utc": "2026-01-03T09:36:18Z"
+    "patch_id": "nethack_patch_roundN_plus30",
+    "description": "Round N+30: Expand procedural generation by adding a new multi-chamber \"vault suite\" prefab with interior walls + doors, plus regression tests.",
+    "created_utc": "2026-01-04T09:09:03Z"
   },
-  "patch_id": "roundN_plus12",
-  "created_utc": "2026-01-03T09:36:18Z",
+  "previous_patch": "nethack_patch_roundN_plus29",
   "summary": [
-    "Fixed MSVC build errors: added missing Renderer::drawItemIcon and corrected --record-hash-interval parsing (std::optional).",
-    "Fixed keybind chord formatting by calling KeyBinds::chordToString(key, mods) correctly.",
-    "Centralized SDL includes in src/sdl.hpp (SDL_MAIN_HANDLED) and call SDL_SetMainReady() before SDL_Init(); removed SDL_MAIN_HANDLED redefinition warnings.",
-    "Silenced MSVC warnings: removed shadowed 'acted' in chest overlay input handling, and removed a constant conditional in dungeon generation."
-  ]
+    "Added a new advanced vault prefab: \"vault suites\" partition some vault rooms into multiple chambers with interior walls and internal doors (LOS breaks + staged fights).",
+    "Vault suites still place at least one obstacle tile (pillars/chasm/boulders) and request a guaranteed bonus loot cache deep in the final chamber; deeper floors may request a second cache.",
+    "Added a unit test that scans seeds and asserts at least one vault suite appears (interior wall tiles + interior closed doors)."
+  ],
+  "timestamp": "2026-01-04T09:09:03Z"
 }

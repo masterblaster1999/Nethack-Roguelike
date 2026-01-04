@@ -2323,6 +2323,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             case ItemKind::ScrollConfusion: return "EFFECT: CONFUSION";
             case ItemKind::ScrollFear: return "EFFECT: FEAR";
             case ItemKind::ScrollEarth: return "EFFECT: EARTH";
+            case ItemKind::ScrollTaming: return "EFFECT: TAMING";
 			case ItemKind::FoodRation:
 				return def.hungerRestore > 0
 					? ("EFFECT: RESTORE HUNGER +" + std::to_string(def.hungerRestore))
@@ -3866,7 +3867,34 @@ void Renderer::drawTargetingOverlay(const Game& game) {
     const int scale = 2;
     const Color yellow{ 255, 230, 120, 255 };
     const int hudTop = winH - hudH;
-    drawText5x7(renderer, 10, hudTop - 18, scale, yellow, ok ? "TARGET: ENTER TO FIRE, ESC TO CANCEL" : "TARGET: OUT OF RANGE/NO LOS");
+    auto fitToChars = [](const std::string& s, int maxChars) -> std::string {
+        if (maxChars <= 0) return std::string();
+        if (static_cast<int>(s.size()) <= maxChars) return s;
+        if (maxChars <= 3) return s.substr(0, static_cast<size_t>(maxChars));
+        return s.substr(0, static_cast<size_t>(maxChars - 3)) + "...";
+    };
+
+    const std::string info = game.targetingInfoText();
+    const std::string preview = game.targetingCombatPreviewText();
+    const std::string status = game.targetingStatusText();
+
+    std::string label;
+    if (!info.empty()) label = "TARGET: " + info;
+    else label = "TARGET:";
+
+    if (!preview.empty()) {
+        label += " | " + preview;
+    }
+
+    if (ok) {
+        label += " | ENTER FIRE  ESC CANCEL  TAB NEXT  SHIFT+TAB PREV";
+    } else {
+        label += " | " + (status.empty() ? std::string("NO CLEAR SHOT") : status);
+    }
+
+    const int charW = 6 * scale;
+    const int maxChars = (winW - 20) / std::max(1, charW);
+    drawText5x7(renderer, 10, hudTop - 18, scale, yellow, fitToChars(label, maxChars));
 }
 
 void Renderer::drawLookOverlay(const Game& game) {

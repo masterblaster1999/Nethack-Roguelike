@@ -390,6 +390,7 @@ void Game::spawnItems() {
         else if (roll < 158) dropItemAt(ItemKind::ScrollConfusion, randomFreeTileInRoom(r), 1);
         else if (roll < 160) dropItemAt(ItemKind::ScrollFear, randomFreeTileInRoom(r), 1);
         else if (roll < 162) dropItemAt(ItemKind::ScrollEarth, randomFreeTileInRoom(r), 1);
+        else if (roll < 163) dropItemAt(ItemKind::ScrollTaming, randomFreeTileInRoom(r), 1);
         else if (roll < 166) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
         else if (roll < 172) {
             // Rare traversal utility in treasure rooms.
@@ -564,6 +565,7 @@ void Game::spawnItems() {
                     else if (roll < 66) { k = ItemKind::ScrollRemoveCurse; }
                     else if (roll < 72) { k = ItemKind::ScrollFear; }
                     else if (roll < 76) { k = ItemKind::ScrollEarth; }
+                    else if (roll < 78) { k = ItemKind::ScrollTaming; }
                     else if (roll < 80) { k = ItemKind::PotionStrength; }
                     else if (roll < 88) { k = ItemKind::PotionRegeneration; }
                     else if (roll < 94) { k = ItemKind::PotionHaste; }
@@ -721,6 +723,7 @@ void Game::spawnItems() {
                 else if (roll < 93) dropItemAt(ItemKind::ScrollConfusion, randomFreeTileInRoom(r), 1);
                 else if (roll < 95) dropItemAt(ItemKind::ScrollFear, randomFreeTileInRoom(r), 1);
                 else if (roll < 97) dropItemAt(ItemKind::ScrollEarth, randomFreeTileInRoom(r), 1);
+                else if (roll < 98) dropItemAt(ItemKind::ScrollTaming, randomFreeTileInRoom(r), 1);
                 else {
                     ItemKind wk = ItemKind::WandSparks;
                     if (depth_ >= 4 && rng.chance(0.35f)) wk = ItemKind::WandDigging;
@@ -914,7 +917,8 @@ void Game::spawnItems() {
 
         ground.push_back(GroundItem{ chest, p });
     }
-    dung.bonusLootSpots.clear();
+    // NOTE: do not clear bonusLootSpots here. The trap generator may place guard traps
+    // near these bonus caches, and the list is consumed/cleared in spawnTraps().
 
     // A little extra ammo somewhere on the map.
     if (rng.chance(0.75f)) {
@@ -930,6 +934,8 @@ void Game::spawnTraps() {
     trapsCur.clear();
 
     // A small number of traps per floor, scaling gently with depth.
+    // (Setpieces below may "spend" some of this budget by placing traps in patterns,
+    // so the total density stays roughly stable.)
     const int base = 2;
     const int depthBonus = std::min(6, depth_ / 2);
     int targetCount = base + depthBonus + rng.range(0, 2);
@@ -939,15 +945,6 @@ void Game::spawnTraps() {
         targetCount += 4;
     }
 
-    auto isBadPos = [&](Vec2i p) {
-        if (!dung.inBounds(p.x, p.y)) return true;
-        if (!dung.isWalkable(p.x, p.y)) return true;
-        if (p == dung.stairsUp || p == dung.stairsDown) return true;
-        // Avoid the immediate start area.
-        if (manhattan(p, player().pos) <= 4) return true;
-        return false;
-    };
-
     auto alreadyHasTrap = [&](Vec2i p) {
         for (const auto& t : trapsCur) {
             if (t.pos == p) return true;
@@ -955,13 +952,305 @@ void Game::spawnTraps() {
         return false;
     };
 
-    int attempts = 0;
-    while (static_cast<int>(trapsCur.size()) < targetCount && attempts < targetCount * 60) {
-        ++attempts;
-        Vec2i p = dung.randomFloor(rng, true);
-        if (isBadPos(p)) continue;
-        if (alreadyHasTrap(p)) continue;
+    auto trapNear = [&](Vec2i p, int chebDist) {
+        for (const auto& t : trapsCur) {
+            if (chebyshev(t.pos, p) <= chebDist) return true;
+        }
+        return false;
+    };
 
+    auto isBadFloorPos = [&](Vec2i p) {
+        if (!dung.inBounds(p.x, p.y)) return true;
+        if (!dung.isWalkable(p.x, p.y)) return true;
+        if (p == dung.stairsUp || p == dung.stairsDown) return true;
+
+        // Avoid the immediate start area.
+        if (manhattan(p, player().pos) <= 4) return true;
+
+        // Don't place floor traps inside shops (keeps shopping from feeling punitive).
+        // Shrines are also treated as relatively safe spaces.
+        const RoomType rt = roomTypeAt(dung, p);
+        if (rt == RoomType::Shop) return true;
+        if (rt == RoomType::Shrine) return true;
+
+        return false;
+    };
+
+    auto addFloorTrap = [&](Vec2i p, TrapKind tk, bool discovered = false, bool allowAdjacent = false) -> bool {
+        if (isBadFloorPos(p)) return false;
+        if (alreadyHasTrap(p)) return false;
+
+        // Default: keep traps slightly spaced so floors aren't accidentally "minefields".
+        if (!allowAdjacent && trapNear(p, 1)) return false;
+
+        Trap t;
+        t.kind = tk;
+        t.pos = p;
+        t.discovered = discovered;
+        trapsCur.push_back(t);
+        return true;
+    };
+
+    // ------------------------------------------------------------
+    // Cache guards: bonus loot caches (requested by the dungeon generator)
+    // get an extra little sting. These caches are always optional side objectives,
+    // so guarding them increases risk/reward without blocking progression.
+    // ------------------------------------------------------------
+    auto hasChestAt = [&](Vec2i p) {
+        for (const auto& gi : ground) {
+            if (gi.pos == p && gi.item.kind == ItemKind::Chest) return true;
+        }
+        return false;
+    };
+
+    auto pickCacheGuardTrap = [&]() -> TrapKind {
+        // Bias toward "security" traps rather than raw damage.
+        // (The chest itself may also be trapped.)
+        int r = rng.range(0, 99);
+        if (depth_ <= 2) {
+            if (r < 55) return TrapKind::Alarm;
+            if (r < 88) return TrapKind::PoisonDart;
+            return TrapKind::Web;
+        }
+        if (depth_ <= 5) {
+            if (r < 40) return TrapKind::Alarm;
+            if (r < 68) return TrapKind::PoisonDart;
+            if (r < 88) return TrapKind::Web;
+            return TrapKind::ConfusionGas;
+        }
+        // Deep floors: a touch more chaos.
+        if (r < 30) return TrapKind::Alarm;
+        if (r < 56) return TrapKind::PoisonDart;
+        if (r < 74) return TrapKind::Web;
+        if (r < 90) return TrapKind::ConfusionGas;
+        return TrapKind::Teleport;
+    };
+
+    for (const Vec2i& c : dung.bonusLootSpots) {
+        if (!dung.inBounds(c.x, c.y)) continue;
+        if (!hasChestAt(c)) continue;
+
+        // Don't "ambush" the player in the start area even if a cache spawns close.
+        if (manhattan(c, player().pos) <= 6) continue;
+
+        // Try to place 1-2 guard traps around the cache.
+        int want = 1;
+        if (depth_ >= 6 && rng.chance(0.35f)) want = 2;
+        if (depth_ == QUEST_DEPTH - 1 && rng.chance(0.40f)) want += 1;
+
+        std::vector<Vec2i> adj;
+        adj.reserve(8);
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                Vec2i p{c.x + dx, c.y + dy};
+                if (!dung.inBounds(p.x, p.y)) continue;
+                adj.push_back(p);
+            }
+        }
+
+        // Shuffle adjacency list for variety.
+        for (int i = static_cast<int>(adj.size()) - 1; i > 0; --i) {
+            const int j = rng.range(0, i);
+            std::swap(adj[static_cast<size_t>(i)], adj[static_cast<size_t>(j)]);
+        }
+
+        int placed = 0;
+        for (const Vec2i& p : adj) {
+            if (placed >= want) break;
+            // Allow adjacent guards here (cache rooms can get spicy).
+            if (addFloorTrap(p, pickCacheGuardTrap(), false, true)) {
+                placed += 1;
+            }
+        }
+    }
+
+
+    // ------------------------------------------------------------
+    // Corridor gauntlets: sometimes place a short "strip" of traps along a
+    // long straight corridor segment. This creates readable, avoidable hazards
+    // and makes corridor navigation feel less uniform.
+    // ------------------------------------------------------------
+    const int W = dung.width;
+    const int H = dung.height;
+    auto idx = [&](int x, int y) -> size_t {
+        return static_cast<size_t>(y * W + x);
+    };
+
+    std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), 0u);
+    for (const Room& r : dung.rooms) {
+        for (int y = r.y; y < r.y2(); ++y) {
+            for (int x = r.x; x < r.x2(); ++x) {
+                if (!dung.inBounds(x, y)) continue;
+                inRoom[idx(x, y)] = 1u;
+            }
+        }
+    }
+
+    auto inAnyRoom = [&](int x, int y) -> bool {
+        if (!dung.inBounds(x, y)) return false;
+        return inRoom[idx(x, y)] != 0u;
+    };
+
+    auto isCorridorFloor = [&](int x, int y) -> bool {
+        if (!dung.inBounds(x, y)) return false;
+        if (inAnyRoom(x, y)) return false;
+        if (!dung.isWalkable(x, y)) return false;
+        const TileType tt = dung.at(x, y).type;
+        return tt == TileType::Floor;
+    };
+
+    auto pickStripTrap = [&]() -> TrapKind {
+        // Strips lean toward classic damage/control traps.
+        int r = rng.range(0, 99);
+        if (depth_ <= 2) {
+            return (r < 70) ? TrapKind::Spike : TrapKind::PoisonDart;
+        }
+        if (depth_ <= 5) {
+            if (r < 45) return TrapKind::Spike;
+            if (r < 78) return TrapKind::PoisonDart;
+            if (r < 90) return TrapKind::Web;
+            return TrapKind::Alarm;
+        }
+        if (r < 33) return TrapKind::Spike;
+        if (r < 61) return TrapKind::PoisonDart;
+        if (r < 74) return TrapKind::Web;
+        if (r < 86) return TrapKind::Alarm;
+        return TrapKind::ConfusionGas;
+    };
+
+    struct StraightCorr {
+        Vec2i p;
+        int axis; // 0 = horizontal, 1 = vertical
+    };
+
+    std::vector<StraightCorr> straight;
+    straight.reserve(512);
+
+    std::vector<Vec2i> candidatesAll;
+    candidatesAll.reserve(static_cast<size_t>(W * H / 3));
+
+    std::vector<Vec2i> chokepoints;
+    chokepoints.reserve(512);
+
+    auto walk4 = [&](int x, int y) -> bool {
+        return dung.inBounds(x, y) && dung.isWalkable(x, y);
+    };
+
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            Vec2i p{x, y};
+            if (isBadFloorPos(p)) continue;
+
+            // Keep the candidate pool to true floor-like tiles.
+            const TileType tt = dung.at(x, y).type;
+            if (!(tt == TileType::Floor || tt == TileType::DoorOpen)) continue;
+
+            candidatesAll.push_back(p);
+
+            if (isCorridorFloor(x, y)) {
+                const bool L = walk4(x - 1, y);
+                const bool R = walk4(x + 1, y);
+                const bool U = walk4(x, y - 1);
+                const bool D = walk4(x, y + 1);
+                const int deg = (L ? 1 : 0) + (R ? 1 : 0) + (U ? 1 : 0) + (D ? 1 : 0);
+
+                // Corridor chokepoints are good trap candidates.
+                if (deg <= 2) chokepoints.push_back(p);
+
+                // Identify straight 1-wide corridor segments for trap strips.
+                if (deg == 2) {
+                    if (L && R && !U && !D) straight.push_back(StraightCorr{p, 0});
+                    else if (U && D && !L && !R) straight.push_back(StraightCorr{p, 1});
+                }
+            }
+        }
+    }
+
+    int gauntletsWanted = 0;
+    if (depth_ >= 3 && rng.chance(0.22f)) gauntletsWanted = 1;
+    if (depth_ == QUEST_DEPTH - 1) gauntletsWanted = 1;
+
+    for (int gk = 0; gk < gauntletsWanted; ++gk) {
+        if (straight.empty()) break;
+
+        bool placed = false;
+        for (int tries = 0; tries < 120 && !placed; ++tries) {
+            const StraightCorr sc = straight[static_cast<size_t>(rng.range(0, static_cast<int>(straight.size()) - 1))];
+
+            // Avoid the start area.
+            if (manhattan(sc.p, player().pos) <= 7) continue;
+
+            Vec2i a = sc.p;
+            Vec2i b = sc.p;
+
+            auto stepBack = [&](Vec2i v) {
+                if (sc.axis == 0) return Vec2i{v.x - 1, v.y};
+                return Vec2i{v.x, v.y - 1};
+            };
+            auto stepFwd = [&](Vec2i v) {
+                if (sc.axis == 0) return Vec2i{v.x + 1, v.y};
+                return Vec2i{v.x, v.y + 1};
+            };
+
+            // Extend to find the corridor run.
+            for (int i = 0; i < 32; ++i) {
+                Vec2i na = stepBack(a);
+                if (!dung.inBounds(na.x, na.y)) break;
+                if (!isCorridorFloor(na.x, na.y)) break;
+                a = na;
+            }
+            for (int i = 0; i < 32; ++i) {
+                Vec2i nb = stepFwd(b);
+                if (!dung.inBounds(nb.x, nb.y)) break;
+                if (!isCorridorFloor(nb.x, nb.y)) break;
+                b = nb;
+            }
+
+            const int len = (sc.axis == 0) ? (b.x - a.x + 1) : (b.y - a.y + 1);
+            if (len < 8) continue;
+
+            // Decide how many traps to place along the run.
+            int want = 3;
+            if (depth_ >= 4) want += 1;
+            if (depth_ >= 7 && rng.chance(0.35f)) want += 1;
+            want = std::min(want, 6);
+
+            // Place every other tile to keep it readable (and reduce chain triggers).
+            const int stride = 2;
+            const int maxSlots = (len - 2) / stride;
+            if (maxSlots < want) want = std::max(3, maxSlots);
+            if (want <= 0) continue;
+
+            int placedHere = 0;
+            int startOff = 1 + rng.range(0, 1); // 1 or 2
+
+            for (int i = 0; i < want; ++i) {
+                int step = startOff + i * stride;
+                if (step <= 0) continue;
+                if (step >= len - 1) break;
+
+                Vec2i p = a;
+                if (sc.axis == 0) p.x += step;
+                else p.y += step;
+
+                if (addFloorTrap(p, pickStripTrap(), false, true)) {
+                    placedHere += 1;
+                }
+            }
+
+            if (placedHere >= 3) {
+                placed = true;
+            }
+        }
+    }
+
+
+    // ------------------------------------------------------------
+    // Baseline trap scatter: fill the remaining budget, biased toward
+    // corridors and junction-y spaces.
+    // ------------------------------------------------------------
+    auto pickBaseTrap = [&]() -> TrapKind {
         // Choose trap type (deeper floors skew deadlier).
         int roll = rng.range(0, 99);
         TrapKind tk = TrapKind::Spike;
@@ -995,13 +1284,35 @@ void Game::spawnTraps() {
             else if (depth_ < DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
         }
+        return tk;
+    };
 
-        Trap t;
-        t.kind = tk;
-        t.pos = p;
-        t.discovered = false;
-        trapsCur.push_back(t);
+    auto pickFrom = [&](const std::vector<Vec2i>& v) -> Vec2i {
+        return v[static_cast<size_t>(rng.range(0, static_cast<int>(v.size()) - 1))];
+    };
+
+    int attempts = 0;
+    while (static_cast<int>(trapsCur.size()) < targetCount && attempts < targetCount * 90) {
+        ++attempts;
+
+        Vec2i p{-1, -1};
+        const float r = rng.next01();
+
+        // Bias toward corridor chokepoints when available.
+        if (r < 0.55f && !chokepoints.empty()) {
+            p = pickFrom(chokepoints);
+        } else if (!candidatesAll.empty()) {
+            p = pickFrom(candidatesAll);
+        } else {
+            p = dung.randomFloor(rng, true);
+        }
+
+        if (alreadyHasTrap(p)) continue;
+
+        // Note: addFloorTrap() handles spacing + shop/shrine avoidance.
+        (void)addFloorTrap(p, pickBaseTrap(), false, false);
     }
+
 
     // Vault security: some locked doors are trapped.
     // Traps are attached to the door tile and will trigger when you step through.
@@ -1040,7 +1351,7 @@ void Game::spawnTraps() {
 
         for (int i = 0; i < extra; ++i) {
             Vec2i p = randomFreeTileInRoom(r);
-            if (isBadPos(p)) continue;
+            if (isBadFloorPos(p)) continue;
             if (alreadyHasTrap(p)) continue;
 
             Trap t;
@@ -1054,6 +1365,9 @@ void Game::spawnTraps() {
             trapsCur.push_back(t);
         }
     }
+
+    // Consume generator hints (bonus cache locations) now that traps have been placed.
+    dung.bonusLootSpots.clear();
 
 }
 

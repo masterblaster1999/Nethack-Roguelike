@@ -1151,6 +1151,14 @@ if (optionsSel == 19) {
             case Action::UpRight:   moveTargetCursor(1, -1); break;
             case Action::DownLeft:  moveTargetCursor(-1, 1); break;
             case Action::DownRight: moveTargetCursor(1, 1); break;
+            // QoL: while targeting, TAB / SHIFT+TAB cycle between visible hostiles.
+            // These map to Inventory / ToggleStats by default.
+            case Action::Inventory:
+                cycleTargetCursor(+1);
+                break;
+            case Action::ToggleStats:
+                cycleTargetCursor(-1);
+                break;
             case Action::Confirm:
             case Action::Fire:
                 endTargeting(true);
@@ -1440,6 +1448,15 @@ void Game::setAlliesOrder(AllyOrder order, bool verbose) {
         if (e.hp <= 0) continue;
         if (!e.friendly) continue;
         e.allyOrder = order;
+
+        // For STAY/GUARD orders, remember the current tile as an anchor so
+        // companions can return after chasing enemies or being displaced.
+        if (order == AllyOrder::Stay || order == AllyOrder::Guard) {
+            e.allyHomePos = e.pos;
+        } else {
+            e.allyHomePos = {-1, -1};
+        }
+
         ++n;
     }
 

@@ -34,6 +34,26 @@ const char* kindName(EntityKind k) {
     }
 }
 
+// A player-facing description for what a projectile collided with.
+// Keep this intentionally vague for secret doors to avoid spoiling hidden content.
+const char* projectileBlockerNoun(TileType t) {
+    switch (t) {
+        case TileType::DoorClosed:
+        case TileType::DoorLocked:
+            return "A DOOR";
+        case TileType::Pillar:
+            return "A PILLAR";
+        case TileType::Boulder:
+            return "A BOULDER";
+        // Secret doors should look/sound like walls until discovered.
+        case TileType::DoorSecret:
+            return "A WALL";
+        case TileType::Wall:
+        default:
+            return "A WALL";
+    }
+}
+
 struct HitCheck {
     bool hit = false;
     bool crit = false;
@@ -510,6 +530,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
     }
 
     bool hitWall = false;
+    TileType hitWallTile = TileType::Wall;
     bool hitAny = false;
     Entity* hit = nullptr;
     size_t stopIdx = line.size() - 1;
@@ -522,9 +543,32 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
         Vec2i p = line[i];
         if (!dung.inBounds(p.x, p.y)) { stopIdx = i - 1; break; }
 
-        // Walls/closed doors block projectiles.
-        if (dung.isOpaque(p.x, p.y)) {
+        // Corner blocking: don't allow shots to "thread" a diagonal gap when both orthogonal
+        // neighbors are solid projectile blockers.
+        {
+            const Vec2i prev = line[i - 1];
+            const int dx = (p.x > prev.x) ? 1 : (p.x < prev.x) ? -1 : 0;
+            const int dy = (p.y > prev.y) ? 1 : (p.y < prev.y) ? -1 : 0;
+            if (dx != 0 && dy != 0) {
+                const int ax = prev.x + dx;
+                const int ay = prev.y;
+                const int bx = prev.x;
+                const int by = prev.y + dy;
+
+                if (dung.inBounds(ax, ay) && dung.inBounds(bx, by) &&
+                    dung.blocksProjectiles(ax, ay) && dung.blocksProjectiles(bx, by)) {
+                    hitWall = true;
+                    hitWallTile = TileType::Wall;
+                    stopIdx = i;
+                    break;
+                }
+            }
+        }
+
+        // Solid terrain blocks projectiles.
+        if (dung.blocksProjectiles(p.x, p.y)) {
             hitWall = true;
+            hitWallTile = dung.at(p.x, p.y).type;
             stopIdx = i;
             break;
         }
@@ -643,7 +687,9 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
         // Minimal feedback when the bolt doesn't connect with a creature.
         if (!hitAny) {
             if (hitWall) {
-                if (fromPlayer) pushMsg("THE FIREBALL HITS A WALL.", MessageKind::Warning, true);
+                if (fromPlayer) {
+                    pushMsg(std::string("THE FIREBALL HITS ") + projectileBlockerNoun(hitWallTile) + ".", MessageKind::Warning, true);
+                }
             } else {
                 if (fromPlayer) pushMsg("YOU LAUNCH A FIREBALL.", MessageKind::Combat, true);
             }
@@ -862,7 +908,9 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
 
     if (!hitAny) {
         if (hitWall) {
-            if (fromPlayer) pushMsg("THE SHOT HITS A WALL.", MessageKind::Warning, true);
+            if (fromPlayer) {
+                pushMsg(std::string("THE SHOT HITS ") + projectileBlockerNoun(hitWallTile) + ".", MessageKind::Warning, true);
+            }
         } else {
             if (fromPlayer) pushMsg("YOU FIRE.", MessageKind::Combat, true);
         }

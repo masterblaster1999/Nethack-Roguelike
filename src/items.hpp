@@ -140,10 +140,14 @@ enum class ItemKind : uint8_t {
     // --- Terrain / fortification (append-only) ---
     // NetHack-inspired utility scroll: raises boulders around the reader.
     ScrollEarth,
+
+    // --- Pets / companions (append-only) ---
+    // Charms nearby creatures into friendly companions.
+    ScrollTaming,
 };
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollEarth) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollTaming) + 1;
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;
@@ -201,6 +205,7 @@ inline bool isScrollKind(ItemKind k) {
         case ItemKind::ScrollConfusion:
         case ItemKind::ScrollFear:
         case ItemKind::ScrollEarth:
+        case ItemKind::ScrollTaming:
             return true;
         case ItemKind::ScrollKnock:
             return true;

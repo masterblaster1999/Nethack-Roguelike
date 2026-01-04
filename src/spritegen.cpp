@@ -1514,6 +1514,28 @@ case ItemKind::Arrow: {
             break;
         }
 
+        case ItemKind::ScrollTaming: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+
+            // A tiny heart / charm glyph.
+            const Color ink = {80,50,30,255};
+            // two bumps
+            setPx(s, 7, 7, ink);
+            setPx(s, 9, 7, ink);
+            setPx(s, 6, 8, ink);
+            setPx(s, 8, 8, ink);
+            setPx(s, 10, 8, ink);
+            // point
+            setPx(s, 7, 9, ink);
+            setPx(s, 9, 9, ink);
+            setPx(s, 8, 10, ink);
+
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+
         case ItemKind::Torch: {
             Color wood = add({130,90,45,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
             Color tip = {60,40,25,255};

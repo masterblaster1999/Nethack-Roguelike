@@ -78,6 +78,15 @@ public:
     static constexpr int DEFAULT_W = 105;
     static constexpr int DEFAULT_H = 66;
 
+    // Special floors: fixed-depth handcrafted / alternate generators.
+    // These are expressed here so game logic (callouts) and tests can share them.
+    static constexpr int SOKOBAN_DEPTH = 3;      // Sokoban-style boulder bridge puzzle floor
+    static constexpr int GROTTO_DEPTH = 4;      // Cavern-like floor with a subterranean lake feature
+    static constexpr int ROGUE_LEVEL_DEPTH = 6;  // Classic 3x3-room Rogue homage
+    static constexpr int MINES_DEPTH = 2;        // Procedural mines: winding tunnels + small chambers
+    static constexpr int DEEP_MINES_DEPTH = 7;   // Second mines-style floor deeper in the run
+    static constexpr int CATACOMBS_DEPTH = 8;   // Grid-of-rooms + maze corridors (tomb/catacomb feel)
+
     int width = 0;
     int height = 0;
     std::vector<Tile> tiles;
@@ -87,6 +96,18 @@ public:
     // Generator hints: optional guaranteed bonus loot spawns (e.g. boulder bridge caches).
     // Used only during floor generation; not serialized.
     std::vector<Vec2i> bonusLootSpots;
+    // Generator flags (not serialized): used for callouts/tests.
+    bool hasCavernLake = false;
+    int secretShortcutCount = 0;
+    // Not serialized: visible locked shortcut doors (DoorLocked) connecting adjacent corridors.
+    int lockedShortcutCount = 0;
+    // Not serialized: corridor polish pass that widens some hallway junctions/segments.
+    int corridorHubCount = 0;
+    int corridorHallCount = 0;
+    // Not serialized: micro-terrain hazards (sinkholes) carved as small chasm clusters.
+    int sinkholeCount = 0;
+    // Not serialized: multi-chamber "vault suite" prefab count (vaults with internal walls/doors).
+    int vaultSuiteCount = 0;
     Vec2i stairsUp{ -1, -1 };
     Vec2i stairsDown{ -1, -1 };
 
@@ -103,6 +124,11 @@ public:
     bool isWalkable(int x, int y) const;
     bool isPassable(int x, int y) const; // includes closed doors (AI/path)
     bool isOpaque(int x, int y) const;
+
+    // Returns true if this tile blocks projectiles (ranged attacks, bolts).
+    // Note: some tiles (like boulders) intentionally do NOT block line-of-sight
+    // for readability, but still block projectiles for tactical cover.
+    bool blocksProjectiles(int x, int y) const;
     bool isDoorClosed(int x, int y) const;
     bool isDoorLocked(int x, int y) const;
     bool isDoorOpen(int x, int y) const;

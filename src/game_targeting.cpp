@@ -1,5 +1,261 @@
 #include "game_internal.hpp"
 
+#include "combat_rules.hpp"
+
+namespace {
+
+static std::vector<Vec2i> bresenhamLineLocal(Vec2i a, Vec2i b) {
+    std::vector<Vec2i> pts;
+    int x0 = a.x, y0 = a.y, x1 = b.x, y1 = b.y;
+
+    int dx = std::abs(x1 - x0);
+    int dy = std::abs(y1 - y0);
+    int sx = (x0 < x1) ? 1 : -1;
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx - dy;
+
+    while (true) {
+        pts.push_back({x0, y0});
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = err * 2;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 <  dx) { err += dx; y0 += sy; }
+        if (pts.size() > 512) break;
+    }
+    return pts;
+}
+
+
+static bool isTargetCandidateHostile(const Game& g, const Entity& e) {
+    if (e.id == g.player().id) return false;
+    if (e.hp <= 0) return false;
+    if (e.friendly) return false;
+
+    // Peaceful shopkeepers are intentionally excluded.
+    if (e.kind == EntityKind::Shopkeeper && !e.alerted) return false;
+
+    return true;
+}
+
+static bool projectileCornerBlocked(const Dungeon& dung, const Vec2i& prev, const Vec2i& p) {
+    const int dx = (p.x > prev.x) ? 1 : (p.x < prev.x) ? -1 : 0;
+    const int dy = (p.y > prev.y) ? 1 : (p.y < prev.y) ? -1 : 0;
+    if (dx == 0 || dy == 0) return false;
+
+    const int ax = prev.x + dx;
+    const int ay = prev.y;
+    const int bx = prev.x;
+    const int by = prev.y + dy;
+
+    if (!dung.inBounds(ax, ay) || !dung.inBounds(bx, by)) return false;
+    return dung.blocksProjectiles(ax, ay) && dung.blocksProjectiles(bx, by);
+}
+
+static bool hasClearProjectileLine(const Dungeon& dung, const Vec2i& src, const Vec2i& dst, int range) {
+    std::vector<Vec2i> line = bresenhamLineLocal(src, dst);
+    if (line.size() <= 1) return false;
+
+    if (range > 0 && static_cast<int>(line.size()) > range + 1) {
+        // Out of range.
+        return false;
+    }
+
+    for (size_t i = 1; i < line.size(); ++i) {
+        const Vec2i p = line[i];
+        if (!dung.inBounds(p.x, p.y)) return false;
+
+        if (projectileCornerBlocked(dung, line[i - 1], p)) return false;
+
+        // Terrain blocks the shot unless it's the intended destination.
+        if (dung.blocksProjectiles(p.x, p.y) && p != dst) return false;
+    }
+
+    return true;
+}
+
+static int hitChancePercent(int attackBonus, int targetAC) {
+    int hits = 0;
+    for (int natural = 1; natural <= 20; ++natural) {
+        if (natural == 1) continue;       // always miss
+        if (natural == 20) { ++hits; continue; } // always hit
+        if (natural + attackBonus >= targetAC) ++hits;
+    }
+    // 20-sided die: each face is 5%.
+    return hits * 5;
+}
+
+} // namespace
+
+
+std::string Game::targetingInfoText() const {
+    if (!targeting) return std::string();
+    return describeAt(targetPos);
+}
+
+std::string Game::targetingStatusText() const {
+    if (!targeting) return std::string();
+    return targetStatusText_;
+}
+
+std::string Game::targetingCombatPreviewText() const {
+    if (!targeting) return std::string();
+
+    // Determine what will be used if the player fires right now (equipped ranged weapon vs throw).
+    ProjectileKind projKind = ProjectileKind::Arrow;
+    int range = 0;
+    int atkBonus = 0;
+    int dmgBonus = 0;
+    bool isDigWand = false;
+    std::string tag;
+
+    if (const Item* w = equippedRanged()) {
+        const ItemDef& d = itemDef(w->kind);
+        const bool weaponReady =
+            (d.range > 0) &&
+            ((d.maxCharges <= 0) || (w->charges > 0)) &&
+            ((d.ammo == AmmoKind::None) || (ammoCount(inv, d.ammo) > 0));
+
+        if (weaponReady) {
+            projKind = d.projectile;
+            range = d.range;
+
+            const int bucBonus = (w->buc < 0 ? -1 : (w->buc > 0 ? 1 : 0));
+            const bool isWand = isRangedWeapon(w->kind) && d.maxCharges > 0 && d.ammo == AmmoKind::None;
+
+            // Talents: Agility improves physical ranged weapons; Focus empowers wands.
+            dmgBonus = w->enchant + bucBonus;
+            if (isWand) dmgBonus += playerFocus();
+
+            const int baseSkill = player().baseAtk + (isWand ? playerFocus() : playerAgility());
+            atkBonus = baseSkill + d.rangedAtk + w->enchant + bucBonus;
+
+            tag = itemDef(w->kind).name;
+            isDigWand = (w->kind == ItemKind::WandDigging);
+        }
+    }
+
+    if (range <= 0) {
+        ThrowAmmoSpec spec;
+        if (!choosePlayerThrowAmmo(inv, spec)) {
+            return std::string();
+        }
+
+        projKind = spec.proj;
+        range = throwRangeFor(player(), spec.ammo);
+        atkBonus = player().baseAtk - 1 + playerAgility();
+        dmgBonus = 0;
+        tag = (spec.ammo == AmmoKind::Arrow) ? "THROW ARROW" : "THROW ROCK";
+        isDigWand = false;
+    }
+
+    // Digging wands don't do direct damage; they carve tunnels.
+    if (isDigWand) {
+        return "DIG";
+    }
+
+    // Damage expression (before DR), approximated as base dice + static bonuses.
+    const bool wandPowered = (projKind == ProjectileKind::Spark || projKind == ProjectileKind::Fireball);
+    DiceExpr dice = rangedDiceForProjectile(projKind, wandPowered);
+    dice.bonus += dmgBonus;
+    dice.bonus += statDamageBonusFromAtk(player().baseAtk);
+    const std::string dmgStr = diceToString(dice, true);
+
+    std::ostringstream ss;
+
+    if (!tag.empty()) ss << tag << " ";
+
+    // For an actual hit chance, only show it when the current target is valid and contains a creature.
+    if (targetValid) {
+        if (const Entity* e = entityAt(targetPos.x, targetPos.y)) {
+            if (e->hp > 0 && e->id != player().id) {
+                const int ac = 10 + ((e->kind == EntityKind::Player) ? playerDefense() : e->baseDef);
+
+                const int dist = std::max(1, static_cast<int>(targetLine.size()) - 1);
+                const int penalty = dist / 3;
+
+                int adjAtk = atkBonus - penalty;
+                const bool confused = (player().effects.confusionTurns > 0);
+                if (confused) adjAtk -= 3;
+
+                const int pct = hitChancePercent(adjAtk, ac);
+                ss << "HIT " << pct << "% ";
+            }
+        }
+    }
+
+    if (projKind == ProjectileKind::Fireball) ss << "AOE ";
+    ss << "DMG " << dmgStr;
+
+    if (player().effects.confusionTurns > 0) ss << " CONFUSED";
+
+    return ss.str();
+}
+
+
+void Game::cycleTargetCursor(int dir) {
+    if (!targeting) return;
+
+    // Build a deterministic list of visible hostile targets.
+    const Vec2i src = player().pos;
+    const int range = playerRangedRange();
+
+    std::vector<Vec2i> cands;
+    cands.reserve(16);
+
+    for (const auto& e : ents) {
+        if (!isTargetCandidateHostile(*this, e)) continue;
+        if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
+
+        const Tile& t = dung.at(e.pos.x, e.pos.y);
+        if (!t.visible) continue;
+
+        const int dist = chebyshev(src, e.pos);
+        if (range > 0 && dist > range) continue;
+
+        if (!dung.hasLineOfSight(src.x, src.y, e.pos.x, e.pos.y)) continue;
+        // Skip targets that are visible but not actually shootable (blocked by cover/corners).
+        if (!hasClearProjectileLine(dung, src, e.pos, range)) continue;
+
+        cands.push_back(e.pos);
+    }
+
+    if (cands.empty()) {
+        pushMsg("NO VISIBLE TARGETS.", MessageKind::System, true);
+        return;
+    }
+
+    // Stable deterministic ordering: closest first, then top-to-bottom, left-to-right.
+    std::sort(cands.begin(), cands.end(), [&](const Vec2i& a, const Vec2i& b) {
+        const int da = chebyshev(src, a);
+        const int db = chebyshev(src, b);
+        if (da != db) return da < db;
+        if (a.y != b.y) return a.y < b.y;
+        return a.x < b.x;
+    });
+    cands.erase(std::unique(cands.begin(), cands.end()), cands.end());
+
+    int idx = -1;
+    for (size_t i = 0; i < cands.size(); ++i) {
+        if (cands[i] == targetPos) {
+            idx = static_cast<int>(i);
+            break;
+        }
+    }
+
+    const int n = static_cast<int>(cands.size());
+    int next = 0;
+    if (idx < 0) {
+        // If the cursor isn't on a hostile, jump to first/last depending on direction.
+        next = (dir >= 0) ? 0 : (n - 1);
+    } else {
+        next = idx + dir;
+        while (next < 0) next += n;
+        while (next >= n) next -= n;
+    }
+
+    setTargetCursor(cands[static_cast<size_t>(next)]);
+}
+
 void Game::beginTargeting() {
     std::string reason;
     if (!playerHasRangedReady(&reason)) {
@@ -38,6 +294,7 @@ void Game::beginTargeting() {
     statsOpen = false;
     msgScroll = 0;
     targetPos = player().pos;
+    targetStatusText_.clear();
     recomputeTargetLine();
     pushMsg(msg);
 }
@@ -48,7 +305,8 @@ void Game::endTargeting(bool fire) {
 
     if (fire) {
         if (!targetValid) {
-            pushMsg("NO CLEAR SHOT.");
+            if (!targetStatusText_.empty()) pushMsg(targetStatusText_ + ".");
+            else pushMsg("NO CLEAR SHOT.");
         } else {
             bool didAttack = false;
 
@@ -152,6 +410,7 @@ void Game::endTargeting(bool fire) {
     targeting = false;
     targetLine.clear();
     targetValid = false;
+    targetStatusText_.clear();
 }
 
 
@@ -166,38 +425,66 @@ void Game::moveTargetCursor(int dx, int dy) {
 }
 
 void Game::recomputeTargetLine() {
-    targetLine = bresenhamLine(player().pos, targetPos);
+    targetStatusText_.clear();
+    targetValid = false;
 
-    // Clamp to range
-    int range = playerRangedRange();
+    targetLine = bresenhamLine(player().pos, targetPos);
+    if (targetLine.size() <= 1) {
+        targetStatusText_ = "NO TARGET";
+        return;
+    }
+
+    // Clamp the line to the *current* ranged range. Note: the cursor can still be beyond range;
+    // in that case we render the truncated line but mark the target as invalid.
+    const int range = playerRangedRange();
     if (range > 0 && static_cast<int>(targetLine.size()) > range + 1) {
         targetLine.resize(static_cast<size_t>(range + 1));
     }
 
-    // Determine validity: must have LOS and be within visible tiles (you can't target what you can't see).
-    targetValid = false;
-
-    if (!dung.inBounds(targetPos.x, targetPos.y)) return;
-    if (!dung.at(targetPos.x, targetPos.y).visible) return;
-
-    // Verify LOS along clamped line (stop at opaque).
-    for (size_t i = 1; i < targetLine.size(); ++i) {
-        Vec2i p = targetLine[i];
-        if (dung.isOpaque(p.x, p.y)) {
-            // If the target is behind an opaque tile, invalid.
-            if (p != targetPos) return;
-        }
+    if (!dung.inBounds(targetPos.x, targetPos.y)) {
+        targetStatusText_ = "OUT OF BOUNDS";
+        return;
     }
-
-    // Must be within range (by path length)
-    if (range > 0) {
-        int dist = static_cast<int>(targetLine.size()) - 1;
-        if (dist > range) return;
+    if (!dung.at(targetPos.x, targetPos.y).visible) {
+        targetStatusText_ = "TARGET NOT VISIBLE";
+        return;
     }
 
     // Weapon ready?
     std::string reason;
-    if (!playerHasRangedReady(&reason)) return;
+    if (!playerHasRangedReady(&reason)) {
+        targetStatusText_ = reason;
+        return;
+    }
+
+    // If the truncated line doesn't reach the cursor, we're out of range.
+    if (range > 0 && !targetLine.empty() && targetLine.back() != targetPos) {
+        targetStatusText_ = "OUT OF RANGE";
+        return;
+    }
+
+    // Verify a clear projectile line (no solid blockers; no diagonal corner threading).
+    for (size_t i = 1; i < targetLine.size(); ++i) {
+        const Vec2i p = targetLine[i];
+        if (!dung.inBounds(p.x, p.y)) {
+            targetStatusText_ = "OUT OF BOUNDS";
+            return;
+        }
+
+        if (projectileCornerBlocked(dung, targetLine[i - 1], p)) {
+            // Truncate the drawn line at the collision point for clarity.
+            if (i + 1 < targetLine.size()) targetLine.resize(i + 1);
+            targetStatusText_ = "NO CLEAR SHOT";
+            return;
+        }
+
+        // Solid terrain blocks the shot unless it's the exact cursor tile.
+        if (dung.blocksProjectiles(p.x, p.y) && p != targetPos) {
+            if (i + 1 < targetLine.size()) targetLine.resize(i + 1);
+            targetStatusText_ = "NO CLEAR SHOT";
+            return;
+        }
+    }
 
     targetValid = true;
 }

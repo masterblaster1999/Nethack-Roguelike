@@ -579,6 +579,12 @@ struct Entity {
     bool friendly = false;
     AllyOrder allyOrder = AllyOrder::Follow;
 
+    // When an ally is ordered to STAY or GUARD, remember an anchor tile so it can
+    // return after chasing enemies or being displaced.
+    // NOTE: not serialized; on load, anchors are lazily initialized to the ally's
+    // current position the first time the order is processed.
+    Vec2i allyHomePos{-1, -1};
+
     // Loot carried by monsters (append-only for save compatibility).
     // Used by thieves (e.g., Leprechauns) so stolen gold can be recovered on death.
     int stolenGold = 0;
@@ -947,6 +953,17 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     Vec2i targetingCursor() const { return targetPos; }
     const std::vector<Vec2i>& targetingLine() const { return targetLine; }
     bool targetingIsValid() const { return targetValid; }
+    // HUD-friendly info string describing the current targeting cursor.
+    // Used by the targeting overlay.
+    std::string targetingInfoText() const;
+
+    // Optional extra info for the targeting HUD (hit chance / damage preview).
+    // Returns an empty string when no preview is available.
+    std::string targetingCombatPreviewText() const;
+
+    // When targetingIsValid() is false, this provides a short explanation suitable for the HUD
+    // (e.g. "OUT OF RANGE", "NO CLEAR SHOT"). Empty when valid.
+    std::string targetingStatusText() const;
 
     // Kick prompt (directional)
     bool isKicking() const { return kicking; }
@@ -1218,6 +1235,7 @@ private:
     Vec2i targetPos{0,0};
     std::vector<Vec2i> targetLine;
     bool targetValid = false;
+    std::string targetStatusText_; // reason for invalid targeting (UI-only; not serialized)
 
     // Kick prompt mode (directional)
     bool kicking = false;
@@ -1468,6 +1486,9 @@ private:
     void endTargeting(bool fire);
     void moveTargetCursor(int dx, int dy);
     void recomputeTargetLine();
+    // Cycle between visible hostile targets while in targeting mode.
+    // dir: +1 = next, -1 = previous.
+    void cycleTargetCursor(int dir);
     void zapDiggingWand(int range);
 
     // Level transitions

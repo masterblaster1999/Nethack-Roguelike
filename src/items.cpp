@@ -143,6 +143,9 @@ const ItemDef& itemDef(ItemKind k) {
 
         // Terrain / fortification (append-only)
         { ItemKind::ScrollEarth, "SCROLL OF EARTH", true,  true,  false, EquipSlot::None,      0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 110 },
+
+        // Pets / companions (append-only)
+        { ItemKind::ScrollTaming, "SCROLL OF TAMING", true,  true,  false, EquipSlot::None,   0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 200 },
     };
 
     static std::vector<ItemDef> defs;

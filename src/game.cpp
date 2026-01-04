@@ -1867,11 +1867,58 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         pushMsg("YOU HAVE REACHED THE MIDPOINT OF THE DUNGEON.", MessageKind::System, true);
     }
 
+    
+    // Grotto callout: the cavern-like floor features a subterranean lake carved out of chasms.
+    if (goingDown && depth_ == Dungeon::GROTTO_DEPTH) {
+        pushMsg("A DAMP CHILL RISES FROM BELOW...", MessageKind::System, true);
+        if (dung.hasCavernLake) {
+            pushMsg("THE GROTTO OPENS INTO A SUBTERRANEAN LAKE.", MessageKind::System, true);
+        } else {
+            pushMsg("THE ROCK GIVES WAY TO A NATURAL CAVERN.", MessageKind::System, true);
+        }
+    }
+
+    // Special floor callout: the procedural mines floors are about winding tunnels,
+    // loops, and small chambers (less "architected" than BSP rooms).
+    if (goingDown && (depth_ == Dungeon::MINES_DEPTH || depth_ == Dungeon::DEEP_MINES_DEPTH)) {
+        if (depth_ == Dungeon::MINES_DEPTH) {
+            pushMsg("THE STONE GIVES WAY TO ROUGH-HEWN TUNNELS...", MessageKind::System, true);
+            pushMsg("YOU HAVE ENTERED THE MINES.", MessageKind::System, true);
+        } else {
+            pushMsg("THE AIR GROWS THICK WITH DUST AND ECHOES...", MessageKind::System, true);
+            pushMsg("DEEP MINES: FISSURES CRACK THE EARTH BETWEEN WANDERING TUNNELS.", MessageKind::System, true);
+        }
+    }
+
+    // Fixed-depth generator callout: the Catacombs floor is a dense maze of small tomb rooms.
+    if (goingDown && depth_ == Dungeon::CATACOMBS_DEPTH) {
+        pushMsg("YOU ENTER A MAZE OF NARROW VAULTS AND CRUMBLING TOMBS.", MessageKind::System, true);
+        pushMsg("THE CATACOMBS STRETCH OUT IN EVERY DIRECTION.", MessageKind::System, true);
+    }
+
+
+
+    // Subtle hint: some floors hide secret shortcut doors between adjacent passages.
+    if (goingDown && dung.secretShortcutCount > 0) {
+        pushMsg("YOU FEEL A FAINT DRAFT IN THE WALLS.", MessageKind::System, true);
+    }
+
+    // Hint: some floors also contain visible locked shortcut gates (key/lockpick shortcuts).
+    if (goingDown && dung.lockedShortcutCount > 0) {
+        pushMsg("YOU HEAR THE RATTLE OF CHAINS IN THE DARK.", MessageKind::System, true);
+    }
+
     // Special floor callout: the Sokoban puzzle floor teaches/spotlights the
     // boulder-into-chasm bridging mechanic.
-    if (goingDown && depth_ == 3) {
+    if (goingDown && depth_ == Dungeon::SOKOBAN_DEPTH) {
         pushMsg("THE AIR VIBRATES WITH A LOW RUMBLE...", MessageKind::System, true);
         pushMsg("BOULDERS AND CHASMS AHEAD. BRIDGE THE GAPS BY PUSHING BOULDERS INTO THEM.", MessageKind::System, true);
+    }
+
+    // Special floor callout: the Rogue homage floor is deliberately doorless and grid-based,
+    // echoing classic Rogue/NetHack pacing.
+    if (goingDown && depth_ == Dungeon::ROGUE_LEVEL_DEPTH) {
+        pushMsg("YOU ENTER WHAT SEEMS TO BE AN OLDER, MORE PRIMITIVE WORLD.", MessageKind::System, true);
     }
 
     if (goingDown && depth_ == QUEST_DEPTH - 1) {

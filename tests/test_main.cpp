@@ -34,10 +34,18 @@ struct GameTestAccess {
     static std::array<int, Game::DUNGEON_MAX_DEPTH + 1>& shopLedger(Game& g) { return g.shopDebtLedger_; }
     static std::vector<Entity>& ents(Game& g) { return g.ents; }
     static std::vector<Trap>& traps(Game& g) { return g.trapsCur; }
+    static std::vector<GroundItem>& ground(Game& g) { return g.ground; }
+    static void dropGroundItem(Game& g, Vec2i pos, ItemKind k, int count = 1, int enchant = 0) { g.dropGroundItem(pos, k, count, enchant); }
+    static int playerRangedRange(Game& g) { return g.playerRangedRange(); }
+    static RNG& rng(Game& g) { return g.rng; }
     static void triggerTrapAt(Game& g, Vec2i pos, Entity& victim, bool fromDisarm = false) { g.triggerTrapAt(pos, victim, fromDisarm); }
     static void cleanupDead(Game& g) { g.cleanupDead(); }
+    static void monsterTurn(Game& g) { g.monsterTurn(); }
     static void changeLevel(Game& g, int newDepth, bool goingDown) { g.changeLevel(newDepth, goingDown); }
+    static void spawnTraps(Game& g) { g.spawnTraps(); }
+    static void recomputeFov(Game& g) { g.recomputeFov(); }
     static bool useSelected(Game& g) { return g.useSelected(); }
+    static Dungeon& dungeon(Game& g) { return g.dung; }
 };
 
 namespace {
@@ -74,7 +82,7 @@ void test_rng_reproducible() {
 }
 
 void test_dungeon_stairs_connected() {
-    const int depthsToTest[] = {1, 3, 4, 5};
+    const int depthsToTest[] = {1, 2, 3, 4, 5, 7, 8};
 
     for (int depth : depthsToTest) {
         RNG rng(42u + static_cast<uint32_t>(depth));
@@ -142,6 +150,441 @@ void test_dungeon_stairs_connected() {
             expect(visited[idx(d.stairsDown.x, d.stairsDown.y)] != 0,
                    "stairsDown not reachable from stairsUp (depth " + std::to_string(depth) + ")");
         }
+
+        // Grotto guarantee: the cavern floor at depth 4 should feature a subterranean lake.
+        if (depth == Dungeon::GROTTO_DEPTH) {
+            expect(d.hasCavernLake, "Grotto floor should generate a lake feature");
+        }
+
+        // Catacombs guarantee: depth 8 should generate a dense room-grid with lots of doors.
+        if (depth == Dungeon::CATACOMBS_DEPTH) {
+            expect(d.rooms.size() >= 4, "Catacombs should generate multiple rooms");
+
+            int doors = 0;
+            for (int y = 0; y < d.height; ++y) {
+                for (int x = 0; x < d.width; ++x) {
+                    const TileType tt = d.at(x, y).type;
+                    if (tt == TileType::DoorClosed || tt == TileType::DoorOpen) doors++;
+                }
+            }
+            expect(doors >= 8, "Catacombs should contain many doors (expected at least 8)");
+        }
+
+        // Deep Mines guarantee: the global ravine/fissure feature should create a noticeable
+        // amount of chasm terrain, without breaking stairs connectivity.
+        if (depth == Dungeon::DEEP_MINES_DEPTH) {
+            int chasms = 0;
+            for (int y = 0; y < d.height; ++y) {
+                for (int x = 0; x < d.width; ++x) {
+                    if (d.at(x, y).type == TileType::Chasm) chasms++;
+                }
+            }
+            expect(chasms >= 18, "Deep Mines should feature a major fissure (expected many chasm tiles)");
+        }
+    }
+}
+
+
+
+void test_vault_room_prefabs_add_obstacles() {
+    // Vaults are optional, so search across many seeds and confirm that at least one vault
+    // uses a non-trivial interior layout (chasm/pillars/boulder).
+    bool foundVault = false;
+    bool foundDecoratedVault = false;
+
+    for (uint32_t seed = 1; seed <= 250; ++seed) {
+        RNG rng(seed);
+        Dungeon d(60, 40);
+        d.generate(rng, /*depth=*/5, /*maxDepth=*/10);
+
+        for (const Room& r : d.rooms) {
+            if (r.type != RoomType::Vault) continue;
+            foundVault = true;
+
+            int special = 0;
+            for (int y = r.y; y < r.y2(); ++y) {
+                for (int x = r.x; x < r.x2(); ++x) {
+                    if (!d.inBounds(x, y)) continue;
+                    const TileType t = d.at(x, y).type;
+                    if (t == TileType::Chasm || t == TileType::Pillar || t == TileType::Boulder) {
+                        special++;
+                    }
+                }
+            }
+
+            if (special > 0) {
+                foundDecoratedVault = true;
+                break;
+            }
+        }
+
+        if (foundDecoratedVault) break;
+    }
+
+    expect(foundVault, "Expected at least one vault room across seeds (depth 5)");
+    expect(foundDecoratedVault, "Expected at least one decorated vault (chasm/pillar/boulder) across seeds");
+}
+
+
+void test_vault_suite_prefab_partitions_room() {
+    // The "vault suite" prefab should occasionally produce interior walls + interior doors
+    // inside a vault room (beyond the locked entrance).
+    bool foundVault = false;
+    bool foundSuite = false;
+
+    for (uint32_t seed = 1; seed <= 400; ++seed) {
+        RNG rng(1337u + seed * 101u);
+        Dungeon d(60, 40);
+        d.generate(rng, /*depth=*/5, /*maxDepth=*/10);
+
+        for (const Room& r : d.rooms) {
+            if (r.type != RoomType::Vault) continue;
+            foundVault = true;
+
+            int interiorWalls = 0;
+            int interiorDoors = 0;
+
+            for (int y = r.y + 1; y < r.y2() - 1; ++y) {
+                for (int x = r.x + 1; x < r.x2() - 1; ++x) {
+                    if (!d.inBounds(x, y)) continue;
+                    const TileType t = d.at(x, y).type;
+                    if (t == TileType::Wall) interiorWalls++;
+                    if (t == TileType::DoorClosed) interiorDoors++;
+                }
+            }
+
+            // A partition wall spans most of the room height/width, so we expect multiple wall tiles.
+            if (interiorWalls >= 6 && interiorDoors >= 1) {
+                foundSuite = true;
+                break;
+            }
+        }
+
+        if (foundSuite) break;
+    }
+
+    expect(foundVault, "Expected at least one vault room across seeds (depth 5)");
+    expect(foundSuite, "Expected to find at least one multi-chamber vault suite (internal walls + doors) across seeds");
+}
+
+
+
+void test_themed_room_prefabs_add_obstacles() {
+    // Themed rooms are optional. Scan across many seeds and confirm that at least
+    // one Armory/Library/Laboratory receives an interior prefab (pillars/boulders/chasms).
+    bool foundThemed = false;
+    bool foundDecorated = false;
+
+    for (uint32_t seed = 1; seed <= 250; ++seed) {
+        RNG rng(9001u + seed * 17u);
+        Dungeon d(60, 40);
+        // Depth 5 is a good stress point: it supports themed rooms, optional secret/vault rooms,
+        // and runs the full decoration pipeline.
+        d.generate(rng, /*depth=*/5, /*maxDepth=*/10);
+
+        for (const Room& r : d.rooms) {
+            if (r.type != RoomType::Armory && r.type != RoomType::Library && r.type != RoomType::Laboratory) continue;
+            foundThemed = true;
+
+            int special = 0;
+            for (int y = r.y; y < r.y2(); ++y) {
+                for (int x = r.x; x < r.x2(); ++x) {
+                    if (!d.inBounds(x, y)) continue;
+                    const TileType t = d.at(x, y).type;
+                    if (t == TileType::Chasm || t == TileType::Pillar || t == TileType::Boulder) {
+                        special++;
+                    }
+                }
+            }
+
+            if (special > 0) {
+                foundDecorated = true;
+                break;
+            }
+        }
+
+        if (foundDecorated) break;
+    }
+
+    expect(foundThemed, "Expected at least one themed room across seeds (depth 5)");
+    expect(foundDecorated, "Expected at least one decorated themed room (pillars/boulders/chasms) across seeds");
+}
+
+
+void test_room_shape_variety_adds_internal_walls() {
+    // Room-shaping is semi-random. Scan across seeds and confirm that at least one
+    // normal room gains an interior wall partition (non-rectangular room topology).
+    bool foundCandidate = false;
+    bool foundShaped = false;
+
+    for (uint32_t seed = 1; seed <= 200; ++seed) {
+        RNG rng(4242u + seed * 19u);
+        Dungeon d(60, 40);
+        d.generate(rng, /*depth=*/1, /*maxDepth=*/10);
+
+        for (const Room& r : d.rooms) {
+            if (r.type != RoomType::Normal) continue;
+            if (r.w < 8 || r.h < 8) continue;
+            foundCandidate = true;
+
+            bool hasInteriorWall = false;
+            for (int y = r.y + 1; y < r.y2() - 1 && !hasInteriorWall; ++y) {
+                for (int x = r.x + 1; x < r.x2() - 1; ++x) {
+                    if (!d.inBounds(x, y)) continue;
+                    if (d.at(x, y).type == TileType::Wall) { hasInteriorWall = true; break; }
+                }
+            }
+
+            if (hasInteriorWall) {
+                foundShaped = true;
+                break;
+            }
+        }
+
+        if (foundShaped) break;
+    }
+
+    expect(foundCandidate, "Expected at least one normal room candidate across seeds (depth 1)");
+    expect(foundShaped, "Expected at least one shaped normal room with interior walls across seeds");
+}
+
+
+
+
+void test_secret_shortcut_doors_generate() {
+    // Secret shortcuts are hidden doors placed in corridor walls that connect two adjacent
+    // regions which are already connected elsewhere (creating an optional loop/shortcut).
+    //
+    // Scan across seeds and confirm we see at least one such shortcut on a standard rooms floor.
+    bool foundAny = false;
+
+    for (uint32_t seed = 1; seed <= 250; ++seed) {
+        RNG rng(7777u + seed * 23u);
+        Dungeon d(60, 40);
+        d.generate(rng, /*depth=*/1, /*maxDepth=*/10);
+
+        if (d.secretShortcutCount <= 0) continue;
+        foundAny = true;
+
+        // Shortcut doors are deliberately placed *outside* any room bounds (in corridor walls),
+        // so we can sanity-check that they exist and match the recorded count.
+        int outsideRooms = 0;
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                if (d.at(x, y).type != TileType::DoorSecret) continue;
+
+                bool inRoom = false;
+                for (const Room& r : d.rooms) {
+                    if (r.contains(x, y)) { inRoom = true; break; }
+                }
+
+                if (!inRoom) outsideRooms += 1;
+            }
+        }
+
+        expect(outsideRooms == d.secretShortcutCount,
+               "Expected secretShortcutCount to match DoorSecret tiles outside any room bounds");
+        break;
+    }
+
+    expect(foundAny, "Expected at least one secret shortcut door across seeds (depth 1)");
+}
+
+void test_locked_shortcut_gates_generate() {
+    // Locked shortcuts are visible locked doors placed in corridor walls that connect
+    // two adjacent corridor regions that are already connected elsewhere (optional shortcut).
+    //
+    // Scan across seeds and confirm we see at least one such gate on a mid-run rooms floor.
+    bool foundAny = false;
+
+    for (uint32_t seed = 1; seed <= 300; ++seed) {
+        RNG rng(8888u + seed * 29u);
+        Dungeon d(60, 40);
+        d.generate(rng, /*depth=*/5, /*maxDepth=*/10);
+
+        if (d.lockedShortcutCount <= 0) continue;
+        foundAny = true;
+
+        int outsideRooms = 0;
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                if (d.at(x, y).type != TileType::DoorLocked) continue;
+
+                bool inRoom = false;
+                for (const Room& r : d.rooms) {
+                    if (r.contains(x, y)) { inRoom = true; break; }
+                }
+
+                if (!inRoom) outsideRooms += 1;
+            }
+        }
+
+        expect(outsideRooms == d.lockedShortcutCount,
+               "Expected lockedShortcutCount to match DoorLocked tiles outside any room bounds");
+        break;
+    }
+
+    expect(foundAny, "Expected at least one locked shortcut gate across seeds (depth 5)");
+}
+
+void test_corridor_hubs_and_halls_generate() {
+    // The corridor polish pass is semi-random. Scan across seeds and confirm we see
+    // at least one floor with widened junction hubs and/or a widened hall segment.
+    bool foundAny = false;
+
+    for (uint32_t seed = 1; seed <= 200; ++seed) {
+        RNG rng(9090u + seed * 31u);
+        Dungeon d(60, 40);
+        d.generate(rng, /*depth=*/1, /*maxDepth=*/10);
+
+        const int n = d.corridorHubCount + d.corridorHallCount;
+        if (n <= 0) continue;
+
+        // Sanity: widened corridors should never be recorded on a floor without rooms.
+        expect(!d.rooms.empty(), "Expected corridor hubs/halls only on room-driven floors");
+
+        // Basic geometric smoke test: look for a 2x2 block of outside-room floor.
+        // We don't assume every hub/hall produces a 2x2 (plus-shaped hubs might not),
+        // so we keep scanning until we find a seed where widening clearly manifests.
+        std::vector<uint8_t> roomMask(static_cast<size_t>(d.width * d.height), 0);
+        auto idx = [&](int x, int y) { return static_cast<size_t>(y * d.width + x); };
+        for (const Room& r : d.rooms) {
+            for (int y = r.y; y < r.y2(); ++y) {
+                for (int x = r.x; x < r.x2(); ++x) {
+                    if (d.inBounds(x, y)) roomMask[idx(x, y)] = 1;
+                }
+            }
+        }
+
+        bool foundBlock = false;
+        for (int y = 1; y < d.height - 1 && !foundBlock; ++y) {
+            for (int x = 1; x < d.width - 1; ++x) {
+                if (roomMask[idx(x, y)] != 0) continue;
+                if (roomMask[idx(x + 1, y)] != 0) continue;
+                if (roomMask[idx(x, y + 1)] != 0) continue;
+                if (roomMask[idx(x + 1, y + 1)] != 0) continue;
+
+                if (d.at(x, y).type != TileType::Floor) continue;
+                if (d.at(x + 1, y).type != TileType::Floor) continue;
+                if (d.at(x, y + 1).type != TileType::Floor) continue;
+                if (d.at(x + 1, y + 1).type != TileType::Floor) continue;
+
+                foundBlock = true;
+                break;
+            }
+        }
+
+        if (!foundBlock) continue;
+
+        foundAny = true;
+        break;
+    }
+
+    expect(foundAny, "Expected at least one corridor hub/hall floor across seeds (depth 1)");
+}
+
+
+
+void test_sinkholes_generate_deep_mines() {
+    // Sinkholes are small, irregular chasm clusters carved into corridor/tunnel tiles.
+    // Deep Mines are intentionally unstable, so we expect at least one sinkhole cluster.
+    RNG rng(424242u);
+    Dungeon d(60, 40);
+    d.generate(rng, Dungeon::DEEP_MINES_DEPTH, /*maxDepth=*/10);
+
+    expect(d.sinkholeCount > 0, "Expected at least one sinkhole cluster on Deep Mines");
+
+    auto inBounds = [&](Vec2i p) { return d.inBounds(p.x, p.y); };
+    expect(inBounds(d.stairsUp), "stairsUp out of bounds (deep mines)");
+    expect(inBounds(d.stairsDown), "stairsDown out of bounds (deep mines)");
+
+    if (inBounds(d.stairsUp)) {
+        expect(d.at(d.stairsUp.x, d.stairsUp.y).type == TileType::StairsUp, "stairsUp tile type incorrect (deep mines)");
+    }
+    if (inBounds(d.stairsDown)) {
+        expect(d.at(d.stairsDown.x, d.stairsDown.y).type == TileType::StairsDown, "stairsDown tile type incorrect (deep mines)");
+    }
+
+    // BFS from up to down using passable tiles (match in-game diagonal rules).
+    std::vector<uint8_t> visited(static_cast<size_t>(d.width * d.height), 0);
+    auto idx = [&](int x, int y) { return static_cast<size_t>(y * d.width + x); };
+
+    std::queue<Vec2i> q;
+    if (inBounds(d.stairsUp)) {
+        q.push(d.stairsUp);
+        visited[idx(d.stairsUp.x, d.stairsUp.y)] = 1;
+    }
+
+    const int dirs[8][2] = {
+        {1,0},{-1,0},{0,1},{0,-1},
+        {1,1},{1,-1},{-1,1},{-1,-1},
+    };
+
+    while (!q.empty()) {
+        Vec2i p = q.front();
+        q.pop();
+
+        for (auto& dxy : dirs) {
+            int nx = p.x + dxy[0];
+            int ny = p.y + dxy[1];
+            if (!d.inBounds(nx, ny)) continue;
+
+            // No cutting diagonal corners.
+            if (dxy[0] != 0 && dxy[1] != 0) {
+                int ox = p.x + dxy[0];
+                int oy = p.y;
+                int px = p.x;
+                int py = p.y + dxy[1];
+                if (!d.inBounds(ox, oy) || !d.inBounds(px, py)) continue;
+                if (!d.isWalkable(ox, oy)) continue;
+                if (!d.isWalkable(px, py)) continue;
+            }
+
+            if (!d.isPassable(nx, ny)) continue;
+            size_t id = idx(nx, ny);
+            if (visited[id]) continue;
+            visited[id] = 1;
+            q.push({nx, ny});
+        }
+    }
+
+    if (inBounds(d.stairsDown)) {
+        expect(visited[idx(d.stairsDown.x, d.stairsDown.y)] != 0, "stairsDown not reachable from stairsUp (deep mines)");
+    }
+}
+
+
+
+void test_rogue_level_layout() {
+    RNG rng(1337u);
+    Dungeon d(60, 40);
+    d.generate(rng, Dungeon::ROGUE_LEVEL_DEPTH, /*maxDepth=*/10);
+
+    // The Rogue homage floor should be a simple 3x3 room grid.
+    expect(d.rooms.size() == 9, "Rogue level should generate exactly 9 rooms");
+
+    // It is intentionally doorless: no open/closed/locked/secret doors should be present.
+    bool hasDoor = false;
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const TileType t = d.at(x, y).type;
+            if (t == TileType::DoorClosed || t == TileType::DoorOpen || t == TileType::DoorLocked || t == TileType::DoorSecret) {
+                hasDoor = true;
+                break;
+            }
+        }
+        if (hasDoor) break;
+    }
+    expect(!hasDoor, "Rogue level should contain no doors");
+
+    // Stairs must exist and be correctly typed.
+    expect(d.inBounds(d.stairsUp.x, d.stairsUp.y), "Rogue level has stairsUp");
+    expect(d.inBounds(d.stairsDown.x, d.stairsDown.y), "Rogue level has stairsDown");
+    if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) {
+        expect(d.at(d.stairsUp.x, d.stairsUp.y).type == TileType::StairsUp, "Rogue level stairsUp tile type is correct");
+    }
+    if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) {
+        expect(d.at(d.stairsDown.x, d.stairsDown.y).type == TileType::StairsDown, "Rogue level stairsDown tile type is correct");
     }
 }
 
@@ -1804,6 +2247,370 @@ void test_scroll_earth_raises_boulders_around_player() {
     }
 }
 
+void test_scroll_taming_charms_adjacent_non_undead_monsters() {
+    Game g;
+    g.newGame(123u);
+
+    // Remove non-player entities for a deterministic neighborhood.
+    auto& ents = GameTestAccess::ents(g);
+    const int pid = g.player().id;
+    ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+        return e.id != pid;
+    }), ents.end());
+
+    // Give the player a scroll of taming.
+    GameTestAccess::inv(g).clear();
+    Item s;
+    s.id = 9003;
+    s.kind = ItemKind::ScrollTaming;
+    s.count = 1;
+    GameTestAccess::inv(g).push_back(s);
+    GameTestAccess::invSel(g) = 0;
+
+    // Place a non-undead monster (goblin) and an undead (ghost) adjacent to the player.
+    const Dungeon& d = g.dungeon();
+    const Vec2i ppos = g.player().pos;
+
+    Vec2i gobPos = ppos;
+    Vec2i ghostPos = ppos;
+    bool foundGob = false;
+    bool foundGhost = false;
+
+    for (int dy = -1; dy <= 1 && !(foundGob && foundGhost); ++dy) {
+        for (int dx = -1; dx <= 1 && !(foundGob && foundGhost); ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            const Vec2i q{ppos.x + dx, ppos.y + dy};
+            if (!d.inBounds(q.x, q.y)) continue;
+            if (!d.isWalkable(q.x, q.y)) continue;
+
+            if (!foundGob) {
+                gobPos = q;
+                foundGob = true;
+            } else if (!foundGhost && q != gobPos) {
+                ghostPos = q;
+                foundGhost = true;
+            }
+        }
+    }
+
+    expect(foundGob, "Should find an empty walkable adjacent tile for goblin placement");
+    expect(foundGhost, "Should find a second empty walkable adjacent tile for ghost placement");
+    if (!foundGob || !foundGhost) return;
+
+    Entity gob;
+    gob.id = 424240;
+    gob.kind = EntityKind::Goblin;
+    gob.pos = gobPos;
+    gob.hpMax = 6;
+    gob.hp = 6;
+    gob.friendly = false;
+    ents.push_back(gob);
+
+    Entity ghost;
+    ghost.id = 424241;
+    ghost.kind = EntityKind::Ghost;
+    ghost.pos = ghostPos;
+    ghost.hpMax = 8;
+    ghost.hp = 8;
+    ghost.friendly = false;
+    ents.push_back(ghost);
+
+    // Force deterministic success for the goblin charm roll.
+    GameTestAccess::rng(g).state = 72u;
+
+    const bool ok = GameTestAccess::useSelected(g);
+    expect(ok, "Using scroll of taming should succeed");
+
+    bool gobFriendly = false;
+    bool ghostFriendly = false;
+    AllyOrder gobOrder = AllyOrder::Stay;
+    for (const Entity& e : ents) {
+        if (e.id == 424240) { gobFriendly = e.friendly; gobOrder = e.allyOrder; }
+        if (e.id == 424241) { ghostFriendly = e.friendly; }
+    }
+
+    expect(gobFriendly, "Scroll of taming should make adjacent non-undead monsters friendly");
+    expect(gobOrder == AllyOrder::Follow, "Newly tamed monsters should default to Follow order");
+    expect(!ghostFriendly, "Scroll of taming should not affect undead monsters");
+
+    // The scroll should be consumed.
+    expect(GameTestAccess::inv(g).empty(), "Scroll of taming should be removed from inventory after use");
+}
+
+
+void test_companion_fetch_carries_and_delivers_gold() {
+    Game g;
+    g.newGame(888u);
+
+    auto& ents = GameTestAccess::ents(g);
+    auto& ground = GameTestAccess::ground(g);
+    auto& traps = GameTestAccess::traps(g);
+    Dungeon& d = GameTestAccess::dungeon(g);
+
+    const int pid = g.player().id;
+
+    int dogId = 0;
+    for (const auto& e : ents) {
+        if (e.kind == EntityKind::Dog && e.friendly && e.hp > 0) {
+            dogId = e.id;
+            break;
+        }
+    }
+
+    expect(dogId != 0, "New game should spawn a friendly dog companion");
+    if (dogId == 0) return;
+
+    // Keep only player + dog so behavior is deterministic.
+    ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+        return e.id != pid && e.id != dogId;
+    }), ents.end());
+
+    Entity* player = nullptr;
+    Entity* dog = nullptr;
+    for (auto& e : ents) {
+        if (e.id == pid) player = &e;
+        else if (e.id == dogId) dog = &e;
+    }
+
+    expect(player != nullptr && dog != nullptr, "Should retain player and dog entities");
+    if (!player || !dog) return;
+
+    // Clear clutter that could interfere with the test.
+    ground.clear();
+    traps.clear();
+
+    GameTestAccess::recomputeFov(g);
+
+    auto countGold = [&](const std::vector<Item>& inv) {
+        int sum = 0;
+        for (const auto& it : inv) {
+            if (it.kind == ItemKind::Gold) sum += it.count;
+        }
+        return sum;
+    };
+
+    const int startGold = countGold(GameTestAccess::inv(g));
+
+    const Vec2i ppos = player->pos;
+
+    auto isOccupied = [&](Vec2i p) {
+        for (const auto& e : ents) {
+            if (e.hp <= 0) continue;
+            if (e.pos == p) return true;
+        }
+        return false;
+    };
+
+    // Place the gold somewhere the player can currently see (FETCH only targets visible gold).
+    Vec2i goldPos{-1, -1};
+    for (int r = 1; r <= 10 && goldPos.x < 0; ++r) {
+        for (int dy = -r; dy <= r && goldPos.x < 0; ++dy) {
+            for (int dx = -r; dx <= r && goldPos.x < 0; ++dx) {
+                if (std::abs(dx) + std::abs(dy) != r) continue; // manhattan ring
+                const int x = ppos.x + dx;
+                const int y = ppos.y + dy;
+                if (!d.inBounds(x, y)) continue;
+                if (!d.isWalkable(x, y)) continue;
+                if (!d.at(x, y).visible) continue;
+                if (isOccupied({x, y})) continue;
+                goldPos = {x, y};
+            }
+        }
+    }
+
+    expect(goldPos.x >= 0, "Should find a visible walkable tile for gold placement");
+    if (goldPos.x < 0) return;
+
+    // Put the dog a bit away so it has to path to the gold, then return to the player.
+    Vec2i dogPos{-1, -1};
+    for (int r = 4; r <= 18 && dogPos.x < 0; ++r) {
+        for (int dy = -r; dy <= r && dogPos.x < 0; ++dy) {
+            for (int dx = -r; dx <= r && dogPos.x < 0; ++dx) {
+                if (std::abs(dx) + std::abs(dy) != r) continue;
+                const int x = ppos.x + dx;
+                const int y = ppos.y + dy;
+                if (!d.inBounds(x, y)) continue;
+                if (!d.isWalkable(x, y)) continue;
+                if (isOccupied({x, y})) continue;
+                if (Vec2i{x, y} == goldPos) continue;
+                dogPos = {x, y};
+            }
+        }
+    }
+
+    expect(dogPos.x >= 0, "Should find a walkable tile for dog placement");
+    if (dogPos.x < 0) return;
+
+    dog->pos = dogPos;
+    dog->allyOrder = AllyOrder::Fetch;
+    dog->stolenGold = 0;
+
+    // Make scheduling predictable (one action per monster turn).
+    dog->speed = 100;
+    dog->energy = 0;
+
+    // Drop a gold pile and ensure FOV is up to date.
+    GameTestAccess::dropGroundItem(g, goldPos, ItemKind::Gold, 25);
+    GameTestAccess::recomputeFov(g);
+
+    const int goalGold = startGold + 25;
+    bool delivered = false;
+
+    // Run monster turns until the dog delivers.
+    for (int t = 0; t < 60; ++t) {
+        GameTestAccess::monsterTurn(g);
+        const int curGold = countGold(GameTestAccess::inv(g));
+        if (curGold >= goalGold) {
+            delivered = (curGold == goalGold);
+            break;
+        }
+    }
+
+    expect(delivered, "FETCH companion should deliver carried gold to the player");
+    expect(dog->stolenGold == 0, "After delivery, companion should no longer be carrying gold");
+}
+
+void test_targeting_tab_cycles_visible_hostiles() {
+    Game g;
+    g.newGame(777u);
+
+    // Remove non-player entities to keep the candidate list deterministic.
+    auto& ents = GameTestAccess::ents(g);
+    const int pid = g.player().id;
+    ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+        return e.id != pid;
+    }), ents.end());
+
+    // Find a floor tile where EAST and SOUTH neighbors are walkable so ordering is stable:
+    //  - both targets are distance 1
+    //  - sort tie-break uses y then x, so EAST (same y) comes before SOUTH (y+1)
+    const Dungeon& d = g.dungeon();
+    Vec2i center{-1, -1};
+    Vec2i east{-1, -1};
+    Vec2i south{-1, -1};
+
+    for (int y = 1; y < d.height - 1 && center.x < 0; ++y) {
+        for (int x = 1; x < d.width - 1 && center.x < 0; ++x) {
+            if (!d.isWalkable(x, y)) continue;
+            if (!d.isWalkable(x + 1, y)) continue;
+            if (!d.isWalkable(x, y + 1)) continue;
+
+            // Prefer actual floor (avoid stairs) so the description string is stable-ish.
+            if (d.at(x, y).type != TileType::Floor) continue;
+            if (d.at(x + 1, y).type != TileType::Floor) continue;
+            if (d.at(x, y + 1).type != TileType::Floor) continue;
+
+            center = {x, y};
+            east = {x + 1, y};
+            south = {x, y + 1};
+        }
+    }
+
+    expect(center.x >= 0, "Should find a suitable floor tile for targeting cycle test");
+    if (center.x < 0) return;
+
+    // Move player to the chosen center.
+    ents[0].pos = center;
+    GameTestAccess::recomputeFov(g);
+
+    // Place two visible hostiles.
+    Entity a;
+    a.id = 901;
+    a.kind = EntityKind::Goblin;
+    a.pos = east;
+    a.hpMax = 6;
+    a.hp = 6;
+    a.friendly = false;
+    ents.push_back(a);
+
+    Entity b;
+    b.id = 902;
+    b.kind = EntityKind::Orc;
+    b.pos = south;
+    b.hpMax = 10;
+    b.hp = 10;
+    b.friendly = false;
+    ents.push_back(b);
+
+    // Start targeting.
+    g.handleAction(Action::Fire);
+    expect(g.isTargeting(), "FIRE should enter targeting mode when a ranged option is ready");
+    if (!g.isTargeting()) return;
+
+    // TAB (Inventory) cycles to the first target in sorted order.
+    g.handleAction(Action::Inventory);
+    expect(g.targetingCursor() == east, "TAB in targeting mode should cycle to the nearest visible hostile (east)");
+
+    // TAB again cycles to the next target.
+    g.handleAction(Action::Inventory);
+    expect(g.targetingCursor() == south, "TAB in targeting mode should cycle to the next visible hostile (south)");
+
+    // SHIFT+TAB (ToggleStats) cycles back.
+    g.handleAction(Action::ToggleStats);
+    expect(g.targetingCursor() == east, "SHIFT+TAB in targeting mode should cycle to the previous hostile (east)");
+
+    // Cancel out (should not crash / consume a turn).
+    g.handleAction(Action::Cancel);
+    expect(!g.isTargeting(), "Cancel should exit targeting mode");
+}
+
+void test_boulder_blocks_projectiles_but_not_opaque() {
+    Dungeon d(5, 5);
+    // Initialize all tiles to floor for clarity.
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Floor;
+        }
+    }
+
+    d.at(2, 2).type = TileType::Boulder;
+    expect(!d.isOpaque(2, 2), "Boulder should not be opaque (LOS readability)");
+    expect(d.blocksProjectiles(2, 2), "Boulder should block projectiles (tactical cover)");
+
+    d.at(1, 1).type = TileType::DoorClosed;
+    expect(d.isOpaque(1, 1), "Closed doors should be opaque");
+    expect(d.blocksProjectiles(1, 1), "Closed doors should block projectiles");
+}
+
+void test_targeting_out_of_range_sets_status_text() {
+    Game g;
+    g.setPlayerClass(PlayerClass::Archer);
+    g.newGame(2026u);
+
+    // Archer starts with a bow and arrows.
+    // Create a clear straight hallway to the east so tiles at distance 9 are visible (FOV radius is 9).
+    const Vec2i p = g.player().pos;
+    Dungeon& d = GameTestAccess::dungeon(g);
+
+    for (int dx = 0; dx <= 12; ++dx) {
+        const int x = p.x + dx;
+        const int y = p.y;
+        if (!d.inBounds(x, y)) break;
+        d.at(x, y).type = TileType::Floor;
+    }
+
+    GameTestAccess::recomputeFov(g);
+
+    // Enter targeting mode.
+    g.handleAction(Action::Fire);
+    expect(g.isTargeting(), "FIRE should enter targeting mode when a ranged option is ready");
+    if (!g.isTargeting()) return;
+
+    const int range = GameTestAccess::playerRangedRange(g);
+    expect(range > 0, "Ranged range should be positive for bow");
+    if (range <= 0) return;
+
+    // Aim 1 tile beyond range, but still within FOV.
+    const Vec2i aim{p.x + range + 1, p.y};
+    if (!d.inBounds(aim.x, aim.y)) return;
+
+    g.setTargetCursor(aim);
+    expect(!g.targetingIsValid(), "Aiming beyond weapon range should be invalid");
+    expect(g.targetingStatusText() == "OUT OF RANGE", "Targeting should report OUT OF RANGE status");
+
+    g.handleAction(Action::Cancel);
+}
+
 void test_save_load_fear_turns_roundtrip() {
     const std::string path = "test_fear_effect_tmp.sav";
     (void)std::remove(path.c_str());
@@ -1820,6 +2627,85 @@ void test_save_load_fear_turns_roundtrip() {
 
     (void)std::remove(path.c_str());
 
+}
+
+
+void test_bonus_cache_guards_spawn_adjacent_floor_trap() {
+    Game g;
+    g.newGame(424242u);
+
+    // Start from a known state.
+    GameTestAccess::traps(g).clear();
+    GameTestAccess::ground(g).clear();
+
+    Dungeon& d = GameTestAccess::dungeon(g);
+    const Vec2i start = g.player().pos;
+
+    auto inRoomType = [&](RoomType t, Vec2i p) {
+        for (const auto& r : d.rooms) {
+            if (r.type == t && r.contains(p.x, p.y)) return true;
+        }
+        return false;
+    };
+
+    // Find a walkable floor tile far from the start with at least one valid adjacent tile.
+    Vec2i cache{-1, -1};
+    for (int y = 1; y < d.height - 1; ++y) {
+        for (int x = 1; x < d.width - 1; ++x) {
+            Vec2i p{x, y};
+            if (!d.isWalkable(x, y)) continue;
+            if (d.at(x, y).type != TileType::Floor) continue;
+            if (p == d.stairsUp || p == d.stairsDown) continue;
+            if (manhattan(p, start) <= 10) continue;
+            if (inRoomType(RoomType::Shop, p) || inRoomType(RoomType::Shrine, p)) continue;
+
+            bool hasAdj = false;
+            for (int dy = -1; dy <= 1 && !hasAdj; ++dy) {
+                for (int dx = -1; dx <= 1 && !hasAdj; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
+                    Vec2i q{p.x + dx, p.y + dy};
+                    if (!d.inBounds(q.x, q.y)) continue;
+                    if (!d.isWalkable(q.x, q.y)) continue;
+                    if (q == d.stairsUp || q == d.stairsDown) continue;
+                    if (inRoomType(RoomType::Shop, q) || inRoomType(RoomType::Shrine, q)) continue;
+                    if (manhattan(q, start) <= 4) continue;
+                    hasAdj = true;
+                }
+            }
+
+            if (hasAdj) {
+                cache = p;
+                break;
+            }
+        }
+        if (cache.x != -1) break;
+    }
+
+    expect(cache.x != -1, "Found a suitable cache tile for bonus cache guard trap test");
+    if (cache.x == -1) return;
+
+    // Simulate a bonus cache chest on the ground at that location.
+    Item chest;
+    chest.id = 99999;
+    chest.kind = ItemKind::Chest;
+    chest.count = 1;
+    chest.spriteSeed = 1;
+
+    GameTestAccess::ground(g).push_back(GroundItem{chest, cache});
+    d.bonusLootSpots.clear();
+    d.bonusLootSpots.push_back(cache);
+
+    GameTestAccess::spawnTraps(g);
+
+    bool foundAdjTrap = false;
+    for (const Trap& t : GameTestAccess::traps(g)) {
+        if (chebyshev(t.pos, cache) == 1) {
+            foundAdjTrap = true;
+            break;
+        }
+    }
+
+    expect(foundAdjTrap, "Bonus cache should spawn at least one adjacent floor trap guard when possible");
 }
 
 
@@ -2285,6 +3171,15 @@ int main() {
 
     test_rng_reproducible();
     test_dungeon_stairs_connected();
+    test_vault_room_prefabs_add_obstacles();
+    test_vault_suite_prefab_partitions_room();
+    test_themed_room_prefabs_add_obstacles();
+    test_room_shape_variety_adds_internal_walls();
+    test_secret_shortcut_doors_generate();
+    test_locked_shortcut_gates_generate();
+    test_corridor_hubs_and_halls_generate();
+    test_sinkholes_generate_deep_mines();
+    test_rogue_level_layout();
     test_final_floor_sanctum_layout();
     test_secret_door_tile_rules();
     test_chasm_and_pillar_tile_rules();
@@ -2336,7 +3231,13 @@ int main() {
     test_shop_debt_ledger_save_load_roundtrip();
     test_scroll_fear_applies_fear_to_visible_monsters();
     test_scroll_earth_raises_boulders_around_player();
+    test_scroll_taming_charms_adjacent_non_undead_monsters();
+    test_companion_fetch_carries_and_delivers_gold();
+    test_targeting_tab_cycles_visible_hostiles();
+    test_boulder_blocks_projectiles_but_not_opaque();
+    test_targeting_out_of_range_sets_status_text();
     test_save_load_fear_turns_roundtrip();
+    test_bonus_cache_guards_spawn_adjacent_floor_trap();
     test_trap_door_drops_player_to_next_depth();
     test_levitation_skips_trap_door_trigger();
     test_trap_door_monster_falls_to_next_depth_and_persists();

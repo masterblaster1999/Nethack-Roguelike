@@ -237,19 +237,36 @@ void Game::monsterTurn() {
             const int amt = std::max(0, g.item.count);
             if (amt <= 0) continue;
 
-            // Remove the pile and credit the player.
+            // Remove the pile and have the ally carry it.
             ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(gi));
-            gainGold(amt);
+            ally.stolenGold += amt;
 
             const bool vis = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
             if (vis) {
                 std::ostringstream ss;
-                ss << "YOUR " << kindName(ally.kind) << " FETCHES " << amt << " GOLD.";
+                ss << "YOUR " << kindName(ally.kind) << " PICKS UP " << amt << " GOLD.";
                 pushMsg(ss.str(), MessageKind::Loot, true);
             }
             return true;
         }
         return false;
+    };
+
+    auto depositAllyGold = [&](Entity& ally) -> bool {
+        if (ally.stolenGold <= 0) return false;
+        if (!isAdjacent8(ally.pos, p.pos)) return false;
+
+        const int amt = ally.stolenGold;
+        ally.stolenGold = 0;
+        gainGold(amt);
+
+        const bool vis = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
+        if (vis) {
+            std::ostringstream ss;
+            ss << "YOUR " << kindName(ally.kind) << " BRINGS YOU " << amt << " GOLD.";
+            pushMsg(ss.str(), MessageKind::Loot, true);
+        }
+        return true;
     };
 
     auto findVisibleGoldTarget = [&](const Entity& ally, Vec2i& out) -> bool {
@@ -305,7 +322,18 @@ void Game::monsterTurn() {
 
         // Ally AI: friendly companions (dog, tamed beasts, etc.).
         if (m.friendly) {
-            // FETCH: grab any gold you're standing on first.
+            // Lazily initialize / clear home anchors based on current order.
+            if (m.allyOrder == AllyOrder::Stay || m.allyOrder == AllyOrder::Guard) {
+                if (m.allyHomePos.x < 0) m.allyHomePos = m.pos;
+            } else {
+                if (m.allyHomePos.x >= 0) m.allyHomePos = {-1, -1};
+            }
+
+            // If an ally is adjacent and carrying gold, deliver it immediately.
+            // (This consumes the ally's action for the turn.)
+            if (depositAllyGold(m)) return;
+
+            // FETCH: grab any gold you're standing on.
             if (m.allyOrder == AllyOrder::Fetch) {
                 if (pickupGoldAt(m)) return;
             }
@@ -315,15 +343,25 @@ void Game::monsterTurn() {
             int bestMan = 9999;
 
             int maxChase = LOS_MANHATTAN;
-            if (m.allyOrder == AllyOrder::Stay) maxChase = 8;
-            else if (m.allyOrder == AllyOrder::Fetch) maxChase = 10;
-            else if (m.allyOrder == AllyOrder::Guard) maxChase = LOS_MANHATTAN;
+            if (m.allyOrder == AllyOrder::Stay) {
+                maxChase = 8;
+            } else if (m.allyOrder == AllyOrder::Fetch) {
+                // When carrying loot, prefer returning instead of chasing fights.
+                maxChase = (m.stolenGold > 0) ? 6 : 10;
+            } else if (m.allyOrder == AllyOrder::Guard) {
+                maxChase = LOS_MANHATTAN;
+            }
 
             for (auto& e : ents) {
                 if (e.id == playerId_) continue;
                 if (e.hp <= 0) continue;
                 if (e.friendly) continue;
                 if (e.kind == EntityKind::Shopkeeper && !e.alerted) continue;
+
+                // GUARD: ignore threats far from our anchor.
+                if (m.allyOrder == AllyOrder::Guard && m.allyHomePos.x >= 0) {
+                    if (chebyshev(e.pos, m.allyHomePos) > 8) continue;
+                }
 
                 const int man0 = manhattan(m.pos, e.pos);
                 if (man0 > maxChase) continue;
@@ -350,11 +388,66 @@ void Game::monsterTurn() {
             }
 
             // No visible hostiles: obey orders.
-            if (m.allyOrder == AllyOrder::Stay || m.allyOrder == AllyOrder::Guard) {
+            if (m.allyOrder == AllyOrder::Stay) {
+                // Stay: return to the anchor tile if displaced.
+                if (m.allyHomePos.x >= 0 && m.pos != m.allyHomePos) {
+                    const auto& costMap = getCostMap(m.allyHomePos, PathMode::Normal);
+                    const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                    if (step != m.pos) {
+                        tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
+                    }
+                }
+                return;
+            }
+
+            if (m.allyOrder == AllyOrder::Guard) {
+                // Guard: patrol near the anchor, and return if pulled too far away.
+                const Vec2i home = (m.allyHomePos.x >= 0) ? m.allyHomePos : m.pos;
+                const int guardRadius = 3;
+                const int distHome = chebyshev(m.pos, home);
+
+                if (distHome > guardRadius) {
+                    const auto& costMap = getCostMap(home, PathMode::Normal);
+                    const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                    if (step != m.pos) {
+                        tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
+                    }
+                    return;
+                }
+
+                // Small random patrol step within the guard radius.
+                if (rng.chance(0.22f)) {
+                    Vec2i bestStep = m.pos;
+                    // Try a handful of random directions to avoid deterministic jitter.
+                    for (int tries = 0; tries < 12; ++tries) {
+                        const int di = rng.range(0, 7);
+                        const int nx = m.pos.x + dirs[di][0];
+                        const int ny = m.pos.y + dirs[di][1];
+                        if (!dung.inBounds(nx, ny)) continue;
+                        if (!dung.isWalkable(nx, ny)) continue;
+                        if (entityAt(nx, ny)) continue;
+                        if (chebyshev(Vec2i{nx, ny}, home) > guardRadius) continue;
+                        bestStep = {nx, ny};
+                        break;
+                    }
+                    if (bestStep != m.pos) {
+                        tryMove(m, bestStep.x - m.pos.x, bestStep.y - m.pos.y);
+                    }
+                }
                 return;
             }
 
             if (m.allyOrder == AllyOrder::Fetch) {
+                // If carrying gold, head back to the player to deliver.
+                if (m.stolenGold > 0) {
+                    const auto& costMap = getCostMap(p.pos, PathMode::Normal);
+                    const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                    if (step != m.pos) {
+                        tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
+                    }
+                    return;
+                }
+
                 Vec2i goldPos;
                 if (findVisibleGoldTarget(m, goldPos)) {
                     if (goldPos == m.pos) {

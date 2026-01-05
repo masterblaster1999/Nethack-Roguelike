@@ -161,7 +161,7 @@ Common key names:
 
 - Letters and digits: `w`, `a`, `1`, `9`
 - Directions: `up`, `down`, `left`, `right`
-- Punctuation: `comma`, `period`, `slash`
+- Punctuation: `comma`, `period`, `slash`, `backslash`
 - Other keys: `tab`, `space`, `enter`, `escape`, `pageup`, `pagedown`
 - Numpad: `kp_0` .. `kp_9`, `kp_enter`
 - Function keys: `f1` .. `f24`
@@ -185,9 +185,11 @@ Available actions:
 
 **UI / Meta**
 - `help`, `options`, `command`
+- `message_history`, `codex`, `discoveries`
 - `toggle_minimap`, `toggle_stats`
 - `fullscreen`, `screenshot`
 - `save`, `load`, `load_auto`, `restart`
+- `log_up`, `log_down`
 - `log_up`, `log_down`
 
 Tip: For `<` and `>` on most keyboard layouts, prefer `shift+comma` and `shift+period`.

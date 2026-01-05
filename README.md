@@ -14,10 +14,25 @@ A tiny NetHack-inspired roguelike with:
   - Map tiles + overlays are generated at **tile resolution** to avoid blocky renderer upscaling.
   - 3D voxel sprites also render at the requested resolution.
 
-- **New dungeon generation variety**:
-  - **Depth 3** is a **cavern** (cellular automata)
-  - **Depth 4** is a **maze** (perfect maze + a few loops + door chokepoints)
-  - Deeper depths may randomly mix rooms / caverns / mazes
+- **Dungeon generation variety (10-floor run)**:
+  - **Depth 0**: **Surface Camp** hub (above-ground) — a basic palisade + tent layout with a persistent **STASH** chest.
+  - Reach it by taking the upstairs (`<`) from Depth 1.
+  - Hostile monsters won't follow you up, so it works as a safe-ish staging area.
+
+- **Depth 1**: classic rooms — now with a chance to generate a more scattered **"ruins" graph** layout (packed rooms + MST connectivity + extra loops)
+  - **Depth 2**: **Mines** (winding tunnels + small chambers)
+  - **Depth 3**: **Sokoban** puzzle floor (boulder→chasm bridges)
+  - **Depth 4**: **Grotto** cavern (cellular automata), sometimes with a carved **subterranean lake**
+  - **Depth 5** (midpoint): **Maze** spike *or* a **ruins** floor (varies per run)
+  - **Depth 6**: **Rogue** homage level (doorless grid)
+  - **Depth 7**: **Deep Mines** (fissures/sinkholes in the tunnels)
+  - **Depth 8**: **Catacombs** (dense tomb-grid + lots of doors)
+  - **Depth 9**: **Labyrinth** (boss chase floor)
+  - **Depth 10**: **Sanctum** final floor
+
+- **Dead-end stash closets**: some corridor/tunnel dead ends now hide tiny side closets behind a door (sometimes **secret**), often with a chest — making exploration of dead ends feel rewarding.
+
+- **Special room pacing**: shops now bias closer to the upstairs, while treasure/lairs bias deeper into the floor (using BFS distance), and key rooms avoid disconnected pockets.
 
 - **Inventory hotkeys**: while inventory is open:
   - **E** equip/unequip
@@ -41,7 +56,23 @@ A tiny NetHack-inspired roguelike with:
 
 - **Sound propagation + investigation:** noisy actions (footsteps, doors, combat) now generate dungeon-aware sound; monsters can investigate through corridors, while walls/secret doors block and closed/locked doors muffle.
 - **Potion of Invisibility:** makes you much harder to see (most monsters only notice you when adjacent). Attacking breaks invisibility.
-- **New extended command:** `#shout` (or `#yell`) spends a turn to make a loud noise to lure monsters.
+- **New extended commands (sound tricks):**
+  - `#shout` (or `#yell`) spends a turn to make a loud noise to lure monsters.
+  - `#listen` spends a turn to listen for unseen movement (reports directions of nearby hidden monsters).
+  - `#throwvoice [x y]` throws your voice to a distant tile to misdirect investigators.
+    - Tip: open LOOK (`L`/`V`) and move the cursor, then run `#throwvoice` with no coordinates.
+
+- **Runic sigils (rare magical graffiti):** occasionally you'll find floor inscriptions like `SIGIL: SEER`, `SIGIL: NEXUS`, `SIGIL: MIASMA`, or `SIGIL: EMBER`.
+  - Stepping on a sigil triggers a small local effect (reveal hidden traps/secret doors, teleport, release confusion gas, or flare into fire).
+  - Sigils have limited uses and then **fade**.
+  - Use LOOK (`L`/`V`) to inspect a sigil tile and see remaining uses.
+
+- **Lethe mist (amnesia hazard):** a rare trap that releases a grey mist which scrambles your memory.
+  - Partially erases your map memory (explored tiles, discovered traps, and far-off markers) on the current level.
+  - Unseen monsters may lose track of where you are.
+  - **Obscure twist:** while **Confused**, reading **Scroll of Mapping** causes amnesia instead of mapping, and **Scroll of Teleport** becomes a short-range blink.
+
+- **Command prompt + LOOK cursor:** you can now open `#` while in LOOK mode without losing the cursor, so commands like `#mark` / `#throwvoice` can apply to the tile you're examining.
 
 - **Auto-travel**: enter look mode (`L` / `V` or **right-click**) and press **Enter** to auto-walk to the cursor tile.
 - **Auto-explore**: press **O** to walk to the nearest unexplored frontier until interrupted.
@@ -49,6 +80,7 @@ A tiny NetHack-inspired roguelike with:
 - **Auto-pickup modes**: press **P** to cycle **OFF → GOLD → SMART → ALL → OFF**.
 - **8-way movement**: move diagonally with **Q/E/Z/C** (or numpad 1/3/7/9). (Fully rebindable.)
 - **Monster Codex (bestiary)**: press **F4** to open an in-game bestiary of monsters you've **seen/killed**, with quick stats and behavior notes.
+- **Discoveries (item ID reference)**: press **\\** to open a NetHack-style list of **item appearances** and what you've **identified** so far (filter with Left/Right, sort with Shift+S).
 - **Minimap + stats overlays**:
   - **M** toggles the minimap
   - **Shift+Tab** toggles the stats/high-scores panel
@@ -89,6 +121,9 @@ A tiny NetHack-inspired roguelike with:
 - **NetHack-style item identification**: potions + scrolls start unknown each run (randomized appearances). Using them identifies the item type; you can also find/read a **Scroll of Identify**. (Toggle via `identify_items` in settings.)
 - **New scroll**: **Scroll of Detect Traps** reveals all traps on the current floor (and identifies itself when used).
 - **Shrines**: use **#pray** (`pray heal|cure|identify|bless|uncurse`) to spend gold for a small blessing (consumes a turn).
+
+- **Augury (obscure divination):** use **#augury** at a **shrine** (or the **surface camp**) to spend gold for **cryptic hints** about the *next* floor.
+  - The vision is generated using a copy of the current RNG state so performing augury doesn't change fate directly — but the future can still shift if you do other RNG-consuming actions before you descend.
 - **Curses + blessings (BUC)**: weapons/armor can be **BLESSED**, **UNCURSED**, or **CURSED**.
   - **Cursed** gear can't be unequipped or dropped until uncursed.
   - New **Scroll of Remove Curse** can cleanse cursed gear.
@@ -145,6 +180,7 @@ A tiny NetHack-inspired roguelike with:
 - **Fullscreen**: `F11` (bindable via `bind_fullscreen`)
 - **Message log scroll**: PageUp / PageDown (or mouse wheel)
 - **Monster codex**: `F4` (filter with Left/Right, sort with Tab)
+- **Discoveries**: `\\` (filter with Left/Right or Tab, sort with Shift+S)
 - **Restart**: `F6`
 - **Quit**: Esc (or Esc twice if `confirm_quit` is enabled)
 
@@ -232,6 +268,7 @@ Useful commands:
 - `#stepdelay <ms>` – set auto-step delay (10–500)
 - `#identify on|off` – toggle item identification system
 - `#timers on|off` – toggle status effect timers
+- `#engrave <text>` – engrave text on the floor (NetHack-y wards: try `#engrave ELBERETH`)
 - `#seed` – show the current run seed
 - `#scores [n]` – show top scores (default 10)
 - `#history [n]` – show most recent runs (default 10)

@@ -161,6 +161,8 @@ Entity& Game::spawnMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear)
 }
 
 void Game::spawnMonsters() {
+    if (depth_ <= 0) return;
+
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;
 
@@ -271,6 +273,8 @@ void Game::spawnMonsters() {
 }
 
 void Game::spawnItems() {
+    if (depth_ <= 0) return;
+
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;
 
@@ -375,7 +379,11 @@ void Game::spawnItems() {
             const ItemKind pk = rng.chance(0.25f) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
             dropItemAt(pk, randomFreeTileInRoom(r), 1);
         }
-        else if (roll < 147) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
+        else if (roll < 146) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
+        else if (roll < 147) {
+            // A strange (mostly cosmetic) potion; keep it rare.
+            dropItemAt(ItemKind::PotionHallucination, randomFreeTileInRoom(r), 1);
+        }
         else if (roll < 149) {
             int pick = rng.range(0, 3);
             ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
@@ -579,8 +587,13 @@ void Game::spawnItems() {
                     }
                     else {
                         // Rare traversal utility.
-                        if (depth_ >= 3 && rng.chance(0.25f)) k = ItemKind::PotionLevitation;
-                        else k = (depth_ >= 5 ? ItemKind::PotionInvisibility : ItemKind::PotionVision);
+                        if (rng.chance(0.18f)) {
+                            k = ItemKind::PotionHallucination;
+                        } else if (depth_ >= 3 && rng.chance(0.25f)) {
+                            k = ItemKind::PotionLevitation;
+                        } else {
+                            k = (depth_ >= 5 ? ItemKind::PotionInvisibility : ItemKind::PotionVision);
+                        }
                     }
                 } else {
                     // Supplies
@@ -755,10 +768,13 @@ void Game::spawnItems() {
                 else if (roll < 88) {
                     const ItemKind pk = rng.chance(0.25f) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
                     dropItemAt(pk, randomFreeTileInRoom(r), 1);
-                } else if (roll < 94) {
+                } else if (roll < 92) {
                     // The occasional utility scroll fits the "lab notes" vibe.
                     const ItemKind pool[] = { ItemKind::ScrollIdentify, ItemKind::ScrollRemoveCurse, ItemKind::ScrollTeleport };
                     dropItemAt(pool[rng.range(0, static_cast<int>(sizeof(pool) / sizeof(pool[0])) - 1)], randomFreeTileInRoom(r), 1);
+                } else if (roll < 94) {
+                    // Rare "experimental" potion.
+                    dropItemAt(ItemKind::PotionHallucination, randomFreeTileInRoom(r), 1);
                 } else {
                     // Rare: a wand (labs have tools).
                     ItemKind wk = ItemKind::WandSparks;
@@ -931,6 +947,8 @@ void Game::spawnItems() {
 }
 
 void Game::spawnTraps() {
+    if (depth_ <= 0) return;
+
     trapsCur.clear();
 
     // A small number of traps per floor, scaling gently with depth.
@@ -1022,7 +1040,8 @@ void Game::spawnTraps() {
         if (r < 30) return TrapKind::Alarm;
         if (r < 56) return TrapKind::PoisonDart;
         if (r < 74) return TrapKind::Web;
-        if (r < 90) return TrapKind::ConfusionGas;
+        if (r < 88) return TrapKind::ConfusionGas;
+        if (r < 92) return TrapKind::LetheMist;
         return TrapKind::Teleport;
     };
 
@@ -1260,7 +1279,8 @@ void Game::spawnTraps() {
             else if (roll < 44) tk = TrapKind::PoisonDart;
             else if (roll < 64) tk = TrapKind::Alarm;
             else if (roll < 80) tk = TrapKind::Web;
-            else if (roll < 90) tk = TrapKind::ConfusionGas;
+            else if (roll < 88) tk = TrapKind::ConfusionGas;
+            else if (roll < 92) tk = TrapKind::LetheMist;
             else if (roll < 96) tk = TrapKind::RollingBoulder;
             else if (depth_ < DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
@@ -1279,9 +1299,10 @@ void Game::spawnTraps() {
             else if (roll < 61) tk = TrapKind::PoisonDart;
             else if (roll < 76) tk = TrapKind::Alarm;
             else if (roll < 86) tk = TrapKind::Web;
-            else if (roll < 93) tk = TrapKind::ConfusionGas;
-            else if (roll < 96) tk = TrapKind::RollingBoulder;
-            else if (depth_ < DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
+            else if (roll < 92) tk = TrapKind::ConfusionGas;
+            else if (roll < 95) tk = TrapKind::LetheMist;
+            else if (roll < 97) tk = TrapKind::RollingBoulder;
+            else if (depth_ < DUNGEON_MAX_DEPTH && roll < 99) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
         }
         return tk;
@@ -1629,6 +1650,29 @@ void Game::applyEndOfTurnEffects() {
         }
     }
 
+    // Timed hallucinations: mostly a perception hazard.
+    if (p.effects.hallucinationTurns > 0) {
+        p.effects.hallucinationTurns = std::max(0, p.effects.hallucinationTurns - 1);
+        if (p.effects.hallucinationTurns == 0) {
+            pushMsg(effectEndMessage(EffectKind::Hallucination), MessageKind::System, true);
+        } else {
+            // Occasional deterministic flavor without consuming RNG state.
+            static constexpr const char* kMsgs[] = {
+                "THE WALLS BREATHE.",
+                "YOU HEAR COLORS AND SEE SOUNDS.",
+                "A DISTANT LAUGH ECHOES THROUGH THE STONE.",
+                "THE AIR TASTES LIKE LIGHTNING.",
+                "YOUR SHADOW MOVES A LITTLE LATE.",
+            };
+
+            const uint32_t h = hashCombine(hash32(seed_ ^ 0xC0FFEEu), hashCombine(turnCount, 0xHALLu));
+            if ((h % 37u) == 0u) {
+                const size_t idx = (h / 37u) % (sizeof(kMsgs) / sizeof(kMsgs[0]));
+                pushMsg(kMsgs[idx], MessageKind::Info, true);
+            }
+        }
+    }
+
     // Natural regeneration (slow baseline healing).
     // Intentionally disabled while poisoned to keep poison meaningful.
     if (p.effects.poisonTurns > 0 || p.effects.burnTurns > 0 || p.hp >= p.hpMax) {
@@ -1958,6 +2002,11 @@ void Game::applyEndOfTurnEffects() {
                     pushMsg(ss.str(), MessageKind::System, false);
                 }
             }
+        }
+
+        // Timed hallucination: currently does not affect monster AI, but decays for consistency.
+        if (m.effects.hallucinationTurns > 0) {
+            m.effects.hallucinationTurns = std::max(0, m.effects.hallucinationTurns - 1);
         }
 
         // Timed levitation (rare for monsters for now, but kept consistent with player rules).

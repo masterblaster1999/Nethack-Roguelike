@@ -10,6 +10,7 @@ enum class ProjectileKind : uint8_t {
     Spark,
     // New projectile kinds (append-only)
     Fireball,
+    Torch,
 };
 
 enum class AmmoKind : uint8_t {
@@ -144,10 +145,13 @@ enum class ItemKind : uint8_t {
     // --- Pets / companions (append-only) ---
     // Charms nearby creatures into friendly companions.
     ScrollTaming,
+
+    // --- Perception / weirdness (append-only) ---
+    PotionHallucination,
 };
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollTaming) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::PotionHallucination) + 1;
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;
@@ -186,6 +190,7 @@ inline bool isPotionKind(ItemKind k) {
         case ItemKind::PotionInvisibility:
         case ItemKind::PotionClarity:
         case ItemKind::PotionLevitation:
+        case ItemKind::PotionHallucination:
             return true;
         default:
             return false;

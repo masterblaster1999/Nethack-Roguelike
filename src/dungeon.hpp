@@ -47,6 +47,9 @@ enum class RoomType : uint8_t {
     Armory,      // weapons / armor / ammo
     Library,     // scrolls / wands
     Laboratory,  // potions / strange hazards
+
+    // Append-only: surface hub / above-ground camp (depth 0).
+    Camp,
 };
 
 struct Room {
@@ -108,6 +111,10 @@ public:
     int sinkholeCount = 0;
     // Not serialized: multi-chamber "vault suite" prefab count (vaults with internal walls/doors).
     int vaultSuiteCount = 0;
+    // Not serialized: small stash closets carved into dead-end corridors.
+    int deadEndClosetCount = 0;
+    // Not serialized: surface camp stash anchor (depth 0).
+    Vec2i campStashSpot{ -1, -1 };
     Vec2i stairsUp{ -1, -1 };
     Vec2i stairsDown{ -1, -1 };
 

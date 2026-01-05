@@ -684,6 +684,78 @@ void Game::monsterTurn() {
                 }
             }
 
+            // Floor wards (NetHack-style): if the player is standing on a warding
+            // engraving (e.g. "ELBERETH"), some monsters may hesitate and try to
+            // break contact instead of attacking.
+            if (seesPlayer) {
+                // Find a ward on the player's tile (sparse list; linear scan is fine).
+                size_t wardIdx = static_cast<size_t>(-1);
+                for (size_t ii = 0; ii < engravings_.size(); ++ii) {
+                    const Engraving& eg = engravings_[ii];
+                    if (eg.isWard && eg.strength > 0 && eg.pos.x == pm.pos.x && eg.pos.y == pm.pos.y) {
+                        wardIdx = ii;
+                        break;
+                    }
+                }
+
+                if (wardIdx != static_cast<size_t>(-1)) {
+                    auto wardImmune = [&](EntityKind k) {
+                        switch (k) {
+                            // Undead and "boss" monsters ignore wards.
+                            case EntityKind::SkeletonArcher:
+                            case EntityKind::Ghost:
+                            case EntityKind::Zombie:
+                            case EntityKind::Wizard:
+                            case EntityKind::Minotaur:
+                            case EntityKind::Shopkeeper:
+                                return true;
+                            default:
+                                return false;
+                        }
+                    };
+
+                    if (!wardImmune(m.kind)) {
+                        Engraving& eg = engravings_[wardIdx];
+                        const float repelChance = std::clamp(0.35f + 0.10f * static_cast<float>(eg.strength), 0.35f, 0.85f);
+                        const bool repelled = rng.chance(repelChance);
+
+                        // Wards degrade with contact (finite uses). Permanent graffiti wards
+                        // (strength=255) are treated as non-degrading.
+                        if (eg.strength != 255) {
+                            if (eg.strength > 0) --eg.strength;
+                            if (eg.strength == 0) {
+                                // Erase and optionally message.
+                                const bool visWard = dung.inBounds(pm.pos.x, pm.pos.y) && dung.at(pm.pos.x, pm.pos.y).visible;
+                                engravings_.erase(engravings_.begin() + static_cast<std::ptrdiff_t>(wardIdx));
+                                if (visWard) {
+                                    pushMsg("THE WARDING WORDS FADE!", MessageKind::Info, false);
+                                }
+                            }
+                        }
+
+                        if (repelled) {
+                            const bool vis = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+                            if (vis) {
+                                std::ostringstream ss;
+                                ss << "THE " << kindName(m.kind) << " SHRINKS FROM THE WARD!";
+                                pushMsg(ss.str(), MessageKind::Info, false);
+                            }
+
+                            if (d0 >= 0) {
+                                Vec2i to = bestStepAway(m, costMap, pathMode);
+                                if (to != m.pos) {
+                                    tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
+                                    return;
+                                }
+                            }
+
+                            // No escape route: the monster loses its action.
+                            return;
+                        }
+                    }
+                }
+            }
+
             // Leprechaun: try to steal gold and teleport away instead of trading blows.
             if (m.kind == EntityKind::Leprechaun && seesPlayer) {
                 const int playerGold = countGold(inv);

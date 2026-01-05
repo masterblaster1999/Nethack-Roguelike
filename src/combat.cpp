@@ -646,6 +646,23 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
         }
         pushMsg(ss.str(), MessageKind::Combat, fromPlayer);
 
+        // Special projectile: TORCH can ignite targets on a hit.
+        if (projKind == ProjectileKind::Torch && hit) {
+            const int beforeBurn = hit->effects.burnTurns;
+            const int igniteTurns = clampi(3 + rng.range(0, 2), 2, 10); // 3..5
+            if (beforeBurn < igniteTurns) hit->effects.burnTurns = igniteTurns;
+
+            if (beforeBurn == 0 && hit->effects.burnTurns > 0) {
+                if (hit->kind == EntityKind::Player) {
+                    pushMsg("YOU CATCH FIRE!", MessageKind::Warning, false);
+                } else if (dung.inBounds(hit->pos.x, hit->pos.y) && dung.at(hit->pos.x, hit->pos.y).visible) {
+                    std::ostringstream bs;
+                    bs << kindName(hit->kind) << " CATCHES FIRE!";
+                    pushMsg(bs.str(), MessageKind::Info, fromPlayer);
+                }
+            }
+        }
+
         if (hit->hp <= 0) {
             if (hit->kind == EntityKind::Player) {
                 pushMsg("YOU DIE.", MessageKind::Combat, false);
@@ -909,10 +926,17 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
     if (!hitAny) {
         if (hitWall) {
             if (fromPlayer) {
-                pushMsg(std::string("THE SHOT HITS ") + projectileBlockerNoun(hitWallTile) + ".", MessageKind::Warning, true);
+                if (projKind == ProjectileKind::Torch) {
+                    pushMsg(std::string("THE TORCH HITS ") + projectileBlockerNoun(hitWallTile) + ".", MessageKind::Warning, true);
+                } else {
+                    pushMsg(std::string("THE SHOT HITS ") + projectileBlockerNoun(hitWallTile) + ".", MessageKind::Warning, true);
+                }
             }
         } else {
-            if (fromPlayer) pushMsg("YOU FIRE.", MessageKind::Combat, true);
+            if (fromPlayer) {
+                if (projKind == ProjectileKind::Torch) pushMsg("YOU THROW A TORCH.", MessageKind::Combat, true);
+                else pushMsg("YOU FIRE.", MessageKind::Combat, true);
+            }
         }
     }
     // Recoverable ammo: arrows/rocks may remain on the ground after firing.
@@ -971,6 +995,57 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                     drop.count = 1;
 
                     dropGroundItemItem(land, drop);
+                }
+            }
+        }
+    }
+
+    // Thrown torches: always land on the ground (unless they fall into a chasm) and
+    // leave a small patch of fire on the landing tile (no spread; just a brief hazard + light).
+    if (projKind == ProjectileKind::Torch) {
+        Vec2i land = line[stopIdx];
+        if (hitWall && stopIdx > 0) {
+            land = line[stopIdx - 1];
+        }
+
+        if (dung.inBounds(land.x, land.y) && !dung.isOpaque(land.x, land.y)) {
+            const TileType tt = dung.at(land.x, land.y).type;
+
+            if (tt == TileType::Chasm) {
+                if (fromPlayer && dung.at(land.x, land.y).visible) {
+                    pushMsg("YOUR TORCH PLUMMETS INTO THE CHASM.", MessageKind::Warning, true);
+                }
+            } else {
+                // Preserve the thrown torch's remaining fuel (charges) when possible.
+                Item drop;
+                if (projectileTemplate && projectileTemplate->kind == ItemKind::TorchLit) {
+                    drop = *projectileTemplate;
+                } else {
+                    drop.id = nextItemId++;
+                    drop.kind = ItemKind::TorchLit;
+                    drop.count = 1;
+                    drop.enchant = 0;
+                    drop.charges = 90 + rng.range(0, 60);
+                    drop.spriteSeed = rng.nextU32();
+                }
+                drop.count = 1;
+
+                // Only drop torches that are still burning.
+                if (drop.charges > 0) {
+                    dropGroundItemItem(land, drop);
+
+                    // A small ember patch (won't spread unless boosted by other fire).
+                    const size_t expect = static_cast<size_t>(dung.width * dung.height);
+                    if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+
+                    if (dung.isWalkable(land.x, land.y)) {
+                        const size_t i = static_cast<size_t>(land.y * dung.width + land.x);
+                        if (i < fireField_.size()) {
+                            const uint8_t prev = fireField_[i];
+                            const uint8_t next = static_cast<uint8_t>(std::max<int>(prev, 5));
+                            fireField_[i] = next;
+                        }
+                    }
                 }
             }
         }

@@ -340,7 +340,15 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     }
 
     // Traps trigger on enter (monsters can trigger them too).
-    triggerTrapAt(e.pos, e);
+    const Vec2i enteredPos = e.pos;
+    const int depthBefore = depth_;
+    triggerTrapAt(enteredPos, e);
+
+    // Some traps (trap doors) change dungeon depth. Only trigger sigils if we stayed
+    // on the same depth and the victim survived.
+    if (!gameOver && e.hp > 0 && depth_ == depthBefore) {
+        triggerSigilAt(enteredPos, e);
+    }
 
     return true;
 }
@@ -559,6 +567,38 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
             emitNoise(pos, 8);
             break;
         }
+
+        case TrapKind::LetheMist: {
+            // Lethe mist: a single-use burst of forgetfulness.
+            //
+            // If the player is affected, they forget most of the current level's map memory
+            // (explored tiles, discovered traps, and far-off markers). Additionally, unseen
+            // monsters may lose the thread of where the player is.
+            //
+            // This is intentionally quieter than confusion gas.
+
+            if (isPlayer) {
+                if (fromDisarm) pushMsg("A GREY MIST ERUPTS! YOUR MEMORY SLIPS AWAY...", MessageKind::Warning, true);
+                else pushMsg("A GREY MIST ENVELOPS YOU! YOUR MEMORY SLIPS AWAY...", MessageKind::Warning, true);
+
+                // Keep a small local patch of remembered map.
+                applyAmnesiaShock(6);
+            } else {
+                // Monsters lose the thread.
+                victim.alerted = false;
+                victim.lastKnownPlayerPos = {-1, -1};
+                victim.lastKnownPlayerAge = 9999;
+
+                if (tileVisible) {
+                    pushMsg("A GREY MIST SWIRLS BRIEFLY.", MessageKind::Info, false);
+                }
+            }
+
+            // Single-use: the mist is spent once released.
+            trapsCur.erase(trapsCur.begin() + tIndex);
+            break;
+        }
+
         case TrapKind::RollingBoulder: {
             // Rolling boulder trap: releases a heavy boulder that rolls in a straight line,
             // potentially crushing anything in its path. For simplicity this trap is single-use.
@@ -918,6 +958,244 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
     }
 }
 
+void Game::triggerSigilAt(Vec2i pos, Entity& victim) {
+    if (gameOver) return;
+    if (!dung.inBounds(pos.x, pos.y)) return;
+
+    // Sigils are special graffiti: an engraving whose text begins with "SIGIL".
+    // They are intentionally sparse, limited-use, and a little unpredictable.
+    for (size_t i = 0; i < engravings_.size(); ++i) {
+        Engraving& eg = engravings_[i];
+        if (eg.pos.x != pos.x || eg.pos.y != pos.y) continue;
+
+        std::string key;
+        if (!engravingIsSigil(eg, &key)) return;
+
+        // If a sigil somehow persisted with 0 strength, clean it up.
+        if (eg.strength == 0u) {
+            engravings_.erase(engravings_.begin() + static_cast<std::vector<Engraving>::difference_type>(i));
+            return;
+        }
+
+        const bool isPlayer = (victim.id == playerId_);
+        const bool vis = dung.at(pos.x, pos.y).visible;
+
+        auto say = [&](const std::string& s, MessageKind kind, bool importantWhenUnseen) {
+            if (isPlayer) {
+                pushMsg(s, kind, true);
+            } else if (vis) {
+                pushMsg(s, kind, false);
+            } else if (importantWhenUnseen) {
+                // Even if you can't see it, some sigils have audible/tactile feedback.
+                pushMsg(s, kind, false);
+            }
+        };
+
+        auto consumeUse = [&](bool fadeMessage) {
+            // 255 is reserved for "permanent" graffiti; sigils should never be 255, but
+            // if they are (e.g., via manual save editing), treat it as single-use.
+            if (eg.strength == 255u) {
+                eg.strength = 0u;
+            } else if (eg.strength > 0u) {
+                eg.strength = static_cast<uint8_t>(eg.strength - 1u);
+            }
+
+            if (eg.strength == 0u) {
+                if (fadeMessage) {
+                    say("THE SIGIL FADES.", MessageKind::System, false);
+                }
+                engravings_.erase(engravings_.begin() + static_cast<std::vector<Engraving>::difference_type>(i));
+            }
+        };
+
+        // ------------------------------------------------------------------
+        // SIGIL EFFECTS
+        // ------------------------------------------------------------------
+        // NOTE: Keep effects deterministic and local. We use existing systems
+        // (traps/doors, gas, fire) rather than inventing new persistent formats.
+
+        if (key == "SEER") {
+            // A mild "detect secrets" burst around the sigil's location.
+            // Player-only: monsters don't meaningfully use this information.
+            if (!isPlayer) return;
+
+            constexpr int radius = 5;
+            int revealedTraps = 0;
+            int revealedDoors = 0;
+            int revealedChests = 0;
+
+            for (auto& t : trapsCur) {
+                if (t.discovered) continue;
+                if (chebyshev(t.pos, pos) <= radius) {
+                    t.discovered = true;
+                    revealedTraps += 1;
+                }
+            }
+
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    if (std::max(std::abs(dx), std::abs(dy)) > radius) continue;
+                    const int x = pos.x + dx;
+                    const int y = pos.y + dy;
+                    if (!dung.inBounds(x, y)) continue;
+                    Tile& tt = dung.at(x, y);
+                    if (tt.type == TileType::DoorSecret) {
+                        tt.type = TileType::DoorClosed;
+                        tt.explored = true;
+                        revealedDoors += 1;
+                    }
+                }
+            }
+
+            for (auto& gi : ground) {
+                if (!isChestKind(gi.item.kind)) continue;
+                if (!chestTrapped(gi.item)) continue;
+                if (chestTrapKnown(gi.item)) continue;
+                if (chebyshev(gi.pos, pos) > radius) continue;
+                setChestTrapKnown(gi.item, true);
+                revealedChests += 1;
+            }
+
+            say("THE SIGIL'S LINES REARRANGE IN YOUR MIND.", MessageKind::System, false);
+
+            if (revealedTraps + revealedDoors + revealedChests > 0) {
+                std::ostringstream ss;
+                ss << "YOU GLIMPSE ";
+                bool first = true;
+                if (revealedDoors > 0) {
+                    ss << revealedDoors << " HIDDEN PASSAGE" << (revealedDoors == 1 ? "" : "S");
+                    first = false;
+                }
+                if (revealedTraps > 0) {
+                    if (!first) ss << ", ";
+                    ss << revealedTraps << " TRAP" << (revealedTraps == 1 ? "" : "S");
+                    first = false;
+                }
+                if (revealedChests > 0) {
+                    if (!first) ss << ", ";
+                    ss << revealedChests << " TRAPPED CHEST" << (revealedChests == 1 ? "" : "S");
+                }
+                ss << ".";
+                say(ss.str(), MessageKind::Info, false);
+            } else {
+                say("...BUT NOTHING STIRS.", MessageKind::Info, false);
+            }
+
+            consumeUse(true);
+            return;
+        }
+
+        if (key == "NEXUS") {
+            // Teleport (neutral-chaotic). Works on monsters too.
+            if (isPlayer) {
+                say("SPACE TWISTS AROUND YOU!", MessageKind::Warning, true);
+            } else {
+                std::ostringstream ss;
+                ss << kindName(victim.kind) << " VANISHES!";
+                say(ss.str(), MessageKind::Warning, false);
+            }
+
+            Vec2i dst = dung.randomFloor(rng, true);
+            // Avoid teleporting into stairs or onto another entity.
+            for (int tries = 0; tries < 200; ++tries) {
+                Vec2i cand = dung.randomFloor(rng, true);
+                if (!dung.inBounds(cand.x, cand.y)) continue;
+                TileType tt = dung.at(cand.x, cand.y).type;
+                if (tt == TileType::StairsUp || tt == TileType::StairsDown) continue;
+                if (entityAt(cand.x, cand.y) != nullptr) continue;
+                dst = cand;
+                break;
+            }
+
+            const Vec2i from = victim.pos;
+            victim.pos = dst;
+
+            // Mirrors trap teleport's shop-debt safety (so you can't escape a shop by luck).
+            if (isPlayer) {
+                const bool wasInShop = (roomTypeAt(dung, from) == RoomType::Shop);
+                const bool nowInShop = (roomTypeAt(dung, dst) == RoomType::Shop);
+                if (wasInShop && !nowInShop) {
+                    const int debt = shopDebtThisDepth();
+                    if (debt > 0) {
+                        victim.pos = from;
+                        say("A FORCE YANKS YOU BACK!", MessageKind::Warning, true);
+                    }
+                }
+            }
+
+            // A teleport should wake up the floor a bit.
+            emitNoise(pos, 10);
+
+            consumeUse(true);
+            return;
+        }
+
+        if (key == "MIASMA") {
+            // Spawn a small confusion gas bloom.
+            say("THE SIGIL EXHALES A NOXIOUS MIASMA!", MessageKind::Warning, true);
+
+            const size_t expect = static_cast<size_t>(dung.width * dung.height);
+            if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+            auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * dung.width + x); };
+
+            constexpr int radius = 2;
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int x = pos.x + dx;
+                    const int y = pos.y + dy;
+                    if (!dung.inBounds(x, y)) continue;
+                    if (!dung.isWalkable(x, y)) continue;
+                    const int dist = std::max(std::abs(dx), std::abs(dy));
+                    const int inten = 10 - 3 * dist;
+                    if (inten <= 0) continue;
+                    const size_t ii = idx(x, y);
+                    if (ii >= confusionGas_.size()) continue;
+                    confusionGas_[ii] = std::max(confusionGas_[ii], static_cast<uint8_t>(inten));
+                }
+            }
+
+            victim.effects.confusionTurns = std::max(victim.effects.confusionTurns, 6);
+            emitNoise(pos, 8);
+
+            consumeUse(true);
+            return;
+        }
+
+        if (key == "EMBER") {
+            // Spawn a small fire flare.
+            say("THE SIGIL FLARES WITH EMBERS!", MessageKind::Warning, true);
+
+            const size_t expect = static_cast<size_t>(dung.width * dung.height);
+            if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+            auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * dung.width + x); };
+
+            constexpr int radius = 1;
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int x = pos.x + dx;
+                    const int y = pos.y + dy;
+                    if (!dung.inBounds(x, y)) continue;
+                    if (!dung.isWalkable(x, y)) continue;
+                    const int dist = std::max(std::abs(dx), std::abs(dy));
+                    const int inten = (dist == 0) ? 12 : 6;
+                    const size_t ii = idx(x, y);
+                    if (ii >= fireField_.size()) continue;
+                    fireField_[ii] = std::max(fireField_[ii], static_cast<uint8_t>(inten));
+                }
+            }
+
+            victim.effects.burnTurns = std::max(victim.effects.burnTurns, 6);
+            emitNoise(pos, 10);
+
+            consumeUse(true);
+            return;
+        }
+
+        // Unknown sigil keyword: treat as inert graffiti.
+        return;
+    }
+}
+
 bool Game::searchForTraps(bool verbose, int* foundTrapsOut, int* foundSecretsOut) {
     Entity& p = playerMut();    // Searching is fairly quiet, but not silent.
     emitNoise(p.pos, 3);
@@ -1064,6 +1342,7 @@ bool Game::disarmTrap() {
             case TrapKind::ConfusionGas: return "CONFUSION GAS";
             case TrapKind::RollingBoulder: return "ROLLING BOULDER";
             case TrapKind::TrapDoor: return "TRAP DOOR";
+            case TrapKind::LetheMist: return "LETHE MIST";
         }
         return "TRAP";
     };
@@ -1212,6 +1491,7 @@ bool Game::disarmTrap() {
     if (tr.kind == TrapKind::Alarm) chance *= 0.90f;
     if (tr.kind == TrapKind::RollingBoulder) chance *= 0.80f;
     if (tr.kind == TrapKind::TrapDoor) chance *= 0.82f;
+    if (tr.kind == TrapKind::LetheMist) chance *= 0.83f;
 
     chance = std::max(0.05f, chance);
 
@@ -1241,6 +1521,7 @@ bool Game::disarmTrap() {
     if (tr.kind == TrapKind::ConfusionGas) setOffChance = 0.18f;
     if (tr.kind == TrapKind::RollingBoulder) setOffChance = 0.22f;
     if (tr.kind == TrapKind::TrapDoor) setOffChance = 0.24f;
+    if (tr.kind == TrapKind::LetheMist) setOffChance = 0.23f;
 
     if (rng.chance(setOffChance)) {
         pushMsg("YOU SET OFF THE TRAP!", MessageKind::Warning, true);
@@ -1920,6 +2201,193 @@ bool Game::prayAtShrine(const std::string& modeIn) {
     advanceAfterPlayerAction();
     return true;
 }
+
+bool Game::augury() {
+    if (gameOver || gameWon) return false;
+
+    if (depth_ >= DUNGEON_MAX_DEPTH) {
+        pushMsg("NO DEEPER FUTURE CALLS.", MessageKind::Info, true);
+        return false;
+    }
+
+    Entity& p = playerMut();
+
+    bool inShrine = false;
+    for (const auto& r : dung.rooms) {
+        if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
+    }
+
+    const bool atCamp = (depth_ <= 0);
+    if (!inShrine && !atCamp) {
+        pushMsg("YOU NEED A SHRINE OR YOUR CAMP TO ATTEMPT AUGURY.", MessageKind::Info, true);
+        return false;
+    }
+
+    // Slightly cheaper in shrines (where you're still in danger) than in the safe-ish camp.
+    const int base = 8 + std::max(0, depth_) * 2;
+    const int cost = inShrine ? base : (base + 4);
+
+    if (goldCount() < cost) {
+        pushMsg("YOU LACK THE GOLD FOR AUGURY.", MessageKind::Info, true);
+        return false;
+    }
+
+    (void)spendGoldFromInv(inv, cost);
+    pushMsg("YOU PAY " + std::to_string(cost) + " GOLD AND CAST THE BONES...", MessageKind::Info, true);
+
+    // Preview the next floor using a COPY of the RNG so the vision itself doesn't perturb fate.
+    // NOTE: the vision can still be "wrong" if you do other RNG-consuming actions before descending.
+    RNG previewRng = rng;
+    Dungeon preview(dung.width, dung.height);
+    const int nextDepth = depth_ + 1;
+    preview.generate(previewRng, nextDepth, DUNGEON_MAX_DEPTH);
+
+    auto dirFromDelta = [&](int dx, int dy) -> std::string {
+        if (dx == 0 && dy == 0) return "HERE";
+        const int adx = std::abs(dx);
+        const int ady = std::abs(dy);
+
+        const bool east = (dx > 0);
+        const bool south = (dy > 0);
+
+        // Strong axis bias if one component dominates.
+        if (adx > ady * 2) return east ? "EAST" : "WEST";
+        if (ady > adx * 2) return south ? "SOUTH" : "NORTH";
+
+        if (!south && east) return "NORTHEAST";
+        if (!south && !east) return "NORTHWEST";
+        if (south && east) return "SOUTHEAST";
+        return "SOUTHWEST";
+    };
+
+    // Collect candidate omen lines based on the previewed floor.
+    std::vector<std::string> pool;
+    pool.reserve(16);
+
+    // Floor signature (special depths get a thematic line).
+    if (nextDepth == Dungeon::MINES_DEPTH || nextDepth == Dungeon::DEEP_MINES_DEPTH) {
+        pool.push_back("YOU DREAM OF PICKAXES AND TWISTING TUNNELS.");
+    }
+    if (nextDepth == Dungeon::SOKOBAN_DEPTH) {
+        pool.push_back("YOU SEE BOULDERS WAITING TO BRIDGE AN ABYSS.");
+    }
+    if (nextDepth == Dungeon::GROTTO_DEPTH) {
+        pool.push_back("YOU HEAR WATER DRIPPING IN YOUR DREAMS.");
+    }
+    if (nextDepth == Dungeon::ROGUE_LEVEL_DEPTH) {
+        pool.push_back("NINE CHAMBERS REPEAT, LIKE A FORGOTTEN SONG.");
+    }
+    if (nextDepth == Dungeon::CATACOMBS_DEPTH) {
+        pool.push_back("MANY DOORS. MANY NAMES. MANY BONES.");
+    }
+    if (nextDepth == DUNGEON_MAX_DEPTH) {
+        pool.push_back("A SANCTUM LIES BELOW. IT FEELS AWAKE.");
+    }
+
+    int shops = 0;
+    int shrines = 0;
+    int vaults = 0;
+    int secrets = 0;
+    int armories = 0;
+    int libraries = 0;
+    int labs = 0;
+    for (const auto& r : preview.rooms) {
+        switch (r.type) {
+            case RoomType::Shop: ++shops; break;
+            case RoomType::Shrine: ++shrines; break;
+            case RoomType::Vault: ++vaults; break;
+            case RoomType::Secret: ++secrets; break;
+            case RoomType::Armory: ++armories; break;
+            case RoomType::Library: ++libraries; break;
+            case RoomType::Laboratory: ++labs; break;
+            default: break;
+        }
+    }
+
+    if (shops > 0) {
+        pool.push_back("COINS CLINK BEHIND A COUNTER.");
+    }
+    if (vaults > 0) {
+        pool.push_back("IRON AND GOLD WAIT BEHIND A LOCK.");
+    }
+    if (secrets > 0 || preview.secretShortcutCount > 0) {
+        pool.push_back("A DOOR THAT IS NOT A DOOR HIDES IN STONE.");
+    }
+    if (shrines > 0) {
+        pool.push_back("CANDLELIGHT FLICKERS BELOW.");
+    }
+    if (armories > 0) {
+        pool.push_back("YOU SMELL OIL AND STEEL.");
+    }
+    if (libraries > 0) {
+        pool.push_back("PAGES RUSTLE WITHOUT WIND.");
+    }
+    if (labs > 0) {
+        pool.push_back("ACRID FUMES CURL THROUGH DARK HALLS.");
+    }
+
+    if (preview.hasCavernLake) {
+        pool.push_back("A BLACK LAKE REFLECTS NO SKY.");
+    }
+    if (preview.lockedShortcutCount > 0) {
+        pool.push_back("YOU HEAR KEYS RATTLING SOMEWHERE BELOW.");
+    }
+    if (preview.sinkholeCount > 0) {
+        pool.push_back("THE GROUND FEELS HOLLOW UNDERFOOT.");
+    }
+    if (preview.deadEndClosetCount > 0) {
+        pool.push_back("A BLIND HALL HIDES A SECRET CACHE.");
+    }
+
+    // Direction hint: from the up-stairs spawn to the down-stairs.
+    std::string dirHint;
+    if (preview.stairsDown.x >= 0 && preview.stairsDown.y >= 0 &&
+        preview.inBounds(preview.stairsUp.x, preview.stairsUp.y) &&
+        preview.inBounds(preview.stairsDown.x, preview.stairsDown.y)) {
+
+        const int dx = preview.stairsDown.x - preview.stairsUp.x;
+        const int dy = preview.stairsDown.y - preview.stairsUp.y;
+        const std::string dir = dirFromDelta(dx, dy);
+        if (dir == "HERE") {
+            dirHint = "THE WAY DOWN IS CLOSE... TOO CLOSE.";
+        } else {
+            dirHint = "THE WAY DOWN LEANS " + dir + ".";
+        }
+    } else {
+        // Some special floors (final sanctum) may not have a downward stair.
+        dirHint = "THE VISION SHOWS NO WAY DOWN.";
+    }
+
+    // Pick up to 3 lines: direction + (optionally) 2 more from the pool.
+    std::vector<std::string> chosen;
+    chosen.reserve(3);
+    if (!dirHint.empty()) chosen.push_back(dirHint);
+
+    // Shuffle pool with the preview RNG so we don't consume game RNG.
+    for (int i = static_cast<int>(pool.size()) - 1; i > 0; --i) {
+        int j = previewRng.range(0, i);
+        std::swap(pool[static_cast<size_t>(i)], pool[static_cast<size_t>(j)]);
+    }
+
+    for (const std::string& s : pool) {
+        if (chosen.size() >= 3) break;
+        bool dup = false;
+        for (const auto& c : chosen) {
+            if (c == s) { dup = true; break; }
+        }
+        if (!dup) chosen.push_back(s);
+    }
+
+    pushMsg("...THE SIGNS SWIM INTO PLACE.", MessageKind::Info, true);
+    for (const auto& s : chosen) {
+        pushMsg(s, MessageKind::System, true);
+    }
+    pushMsg("THE VISION FLICKERS. FATE IS NOT FIXED.", MessageKind::Info, true);
+
+    advanceAfterPlayerAction();
+    return true;
+}
+
 bool Game::payAtShop() {
     if (gameOver || gameWon) return false;
 
@@ -2084,3 +2552,123 @@ bool Game::digInDirection(int dx, int dy) {
     advanceAfterPlayerAction();
     return true;
 }
+
+bool Game::throwTorchInDirection(int dx, int dy) {
+    if (gameOver || gameWon) return false;
+
+    if (dx == 0 && dy == 0) {
+        pushMsg("THROW WHERE?", MessageKind::Info, true);
+        return false;
+    }
+
+    // Find a lit torch in inventory.
+    int torchIdx = -1;
+    for (size_t i = 0; i < inv.size(); ++i) {
+        const Item& it = inv[i];
+        if (it.kind == ItemKind::TorchLit && it.charges > 0) {
+            torchIdx = static_cast<int>(i);
+            break;
+        }
+    }
+
+    if (torchIdx < 0) {
+        pushMsg("YOU HAVE NO LIT TORCH.", MessageKind::Warning, true);
+        return false;
+    }
+
+    // Remove the torch from inventory (it becomes the projectile template / will land on the ground).
+    Item thrown = inv[static_cast<size_t>(torchIdx)];
+    inv.erase(inv.begin() + torchIdx);
+    invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+
+    // Range is similar to throwing a rock, but slightly shorter (torches are awkward).
+    const int range = std::max(2, throwRangeFor(player(), AmmoKind::Rock) - 1);
+
+    const Vec2i src = player().pos;
+    const Vec2i dst{ src.x + dx * range, src.y + dy * range };
+
+    // Attack/aim bonuses mimic unarmed throwing (used for rocks/arrows when no ranged weapon is ready).
+    const int atkBonus = player().baseAtk - 1 + playerAgility();
+    const int dmgBonus = 0;
+
+    attackRanged(playerMut(), dst, range, atkBonus, dmgBonus, ProjectileKind::Torch, /*fromPlayer=*/true, &thrown);
+    advanceAfterPlayerAction();
+    return true;
+}
+
+bool Game::engraveHere(const std::string& rawText) {
+    if (gameOver || gameWon) return false;
+
+    const Vec2i pos = player().pos;
+
+    if (!dung.inBounds(pos.x, pos.y) || !dung.isWalkable(pos.x, pos.y)) {
+        pushMsg("YOU CAN'T ENGRAVE HERE.", MessageKind::Warning, true);
+        return false;
+    }
+
+    std::string text = trim(rawText);
+    if (text.empty()) {
+        pushMsg("WHAT DO YOU WANT TO ENGRAVE?", MessageKind::Info, true);
+        return false;
+    }
+
+    // Keep message log and look UI readable.
+    if (text.size() > 72) text.resize(72);
+
+    // Warding word: classic NetHack nod.
+    const std::string canon = toUpper(text);
+    const bool isWard = (canon == "ELBERETH");
+
+    // For wards, durability depends on what you're holding.
+    uint8_t strength = 255; // permanent for non-wards
+    if (isWard) {
+        int uses = 3;
+        if (const Item* w = equippedMelee()) {
+            if (w->kind == ItemKind::Pickaxe) {
+                uses = 7;
+            } else if (isMeleeWeapon(w->kind)) {
+                uses = 5;
+            }
+        }
+        strength = static_cast<uint8_t>(std::clamp(uses, 1, 254));
+    }
+
+    // Replace an existing engraving on this tile, otherwise add a new one.
+    for (auto& e : engravings_) {
+        if (e.pos == pos) {
+            e.text = text;
+            e.isWard = isWard;
+            e.isGraffiti = false;
+            e.strength = strength;
+            pushMsg(isWard ? "YOU ENGRAVE THE WARDING WORD." : "YOU ENGRAVE A MESSAGE INTO THE FLOOR.", MessageKind::Info, true);
+            advanceAfterPlayerAction();
+            return true;
+        }
+    }
+
+    // Keep the list bounded.
+    constexpr size_t kMaxEngravingsPerFloor = 128;
+    if (engravings_.size() >= kMaxEngravingsPerFloor) {
+        // Prefer to drop an old graffiti entry first.
+        auto it = std::find_if(engravings_.begin(), engravings_.end(), [](const Engraving& e) { return e.isGraffiti; });
+        if (it != engravings_.end()) {
+            engravings_.erase(it);
+        } else {
+            engravings_.erase(engravings_.begin());
+        }
+    }
+
+    Engraving e;
+    e.pos = pos;
+    e.text = text;
+    e.isWard = isWard;
+    e.isGraffiti = false;
+    e.strength = strength;
+    engravings_.push_back(std::move(e));
+
+    pushMsg(isWard ? "YOU ENGRAVE THE WARDING WORD." : "YOU ENGRAVE A MESSAGE INTO THE FLOOR.", MessageKind::Info, true);
+    advanceAfterPlayerAction();
+    return true;
+}
+
+

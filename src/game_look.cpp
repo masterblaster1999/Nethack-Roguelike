@@ -87,6 +87,7 @@ std::string Game::describeAt(Vec2i p) const {
             case TrapKind::ConfusionGas: ss << "CONFUSION GAS"; break;
             case TrapKind::RollingBoulder: ss << "ROLLING BOULDER"; break;
             case TrapKind::TrapDoor: ss << "TRAP DOOR"; break;
+            case TrapKind::LetheMist: ss << "LETHE MIST"; break;
         }
         break;
     }
@@ -94,6 +95,21 @@ std::string Game::describeAt(Vec2i p) const {
     // Player map marker / note (persistent on this floor).
     if (const MapMarker* mm = markerAt(p)) {
         ss << " | MARK: " << markerKindName(mm->kind) << " \"" << mm->label << "\"";
+    }
+
+    // Floor engraving / graffiti (persistent on this floor).
+    if (const Engraving* eg = engravingAt(p)) {
+        std::string sk;
+        if (engravingIsSigil(*eg, &sk)) {
+            ss << " | SIGIL: \"" << eg->text << "\"";
+            if (eg->strength != 255) {
+                const int uses = static_cast<int>(eg->strength);
+                ss << " (" << uses << " USE" << (uses == 1 ? "" : "S") << " LEFT)";
+            }
+        } else {
+            ss << " | ENGRAVING: \"" << eg->text << "\"";
+            if (eg->isWard) ss << " (WARD)";
+        }
     }
 
     // Entities/items: only if currently visible.

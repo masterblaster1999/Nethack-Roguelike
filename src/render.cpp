@@ -564,6 +564,33 @@ namespace {
                (static_cast<uint64_t>(kind) << 48) |
                (static_cast<uint64_t>(seed) << 16);
     }
+
+    inline bool isHallucinating(const Game& game) {
+        return game.player().effects.hallucinationTurns > 0;
+    }
+
+    // Keep the hallucinated mapping stable for a few turns to reduce flicker.
+    inline uint32_t hallucinationPhase(const Game& game) {
+        return game.turns() / 3u;
+    }
+
+    inline EntityKind hallucinatedEntityKind(const Game& game, const Entity& e) {
+        // Preserve player readability.
+        if (e.id == game.playerId()) return e.kind;
+
+        const uint32_t base = hashCombine(game.seed() ^ 0x6A09E667u, hallucinationPhase(game));
+        const uint32_t h = hashCombine(base, static_cast<uint32_t>(e.id) ^ hash32(e.spriteSeed));
+        // Exclude Player (0); everything else is fair game.
+        const uint32_t k = 1u + (h % static_cast<uint32_t>(ENTITY_KIND_COUNT - 1));
+        return static_cast<EntityKind>(k);
+    }
+
+    inline ItemKind hallucinatedItemKind(const Game& game, const Item& it) {
+        const uint32_t base = hashCombine(game.seed() ^ 0xBB67AE85u, hallucinationPhase(game));
+        const uint32_t h = hashCombine(base, static_cast<uint32_t>(it.id) ^ hash32(it.spriteSeed));
+        const uint32_t k = (h % static_cast<uint32_t>(ITEM_KIND_COUNT));
+        return static_cast<ItemKind>(k);
+    }
 }
 
 SDL_Texture* Renderer::entityTexture(const Entity& e, int frame) {
@@ -612,7 +639,6 @@ SDL_Texture* Renderer::itemTexture(const Item& it, int frame) {
 }
 
 void Renderer::drawItemIcon(const Game& game, const Item& it, int x, int y, int px) {
-    (void)game;
     if (!renderer) return;
 
     SDL_BlendMode prevBlend = SDL_BLENDMODE_NONE;
@@ -626,7 +652,12 @@ void Renderer::drawItemIcon(const Game& game, const Item& it, int x, int y, int 
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 55);
     SDL_RenderFillRect(renderer, &dst);
 
-    SDL_Texture* tex = itemTexture(it, lastFrame);
+    Item visIt = it;
+    if (isHallucinating(game)) {
+        visIt.kind = hallucinatedItemKind(game, it);
+    }
+
+    SDL_Texture* tex = itemTexture(visIt, lastFrame);
     if (tex) {
         SDL_RenderCopy(renderer, tex, nullptr, &dst);
     }
@@ -1546,7 +1577,12 @@ void Renderer::render(const Game& game) {
         const Tile& t = d.at(gi.pos.x, gi.pos.y);
         if (!t.visible) continue;
 
-        SDL_Texture* tex = itemTexture(gi.item, frame);
+        Item visIt = gi.item;
+        if (isHallucinating(game)) {
+            visIt.kind = hallucinatedItemKind(game, gi.item);
+        }
+
+        SDL_Texture* tex = itemTexture(visIt, frame);
         if (!tex) continue;
 
         SDL_Rect dst = tileDst(gi.pos.x, gi.pos.y);
@@ -1699,6 +1735,7 @@ void Renderer::render(const Game& game) {
             case TrapKind::ConfusionGas: r = 200; g = 120; b = 255; break;
             case TrapKind::RollingBoulder: r = 200; g = 170; b = 90; break;
             case TrapKind::TrapDoor: r = 180; g = 130; b = 90; break;
+            case TrapKind::LetheMist: r = 160; g = 160; b = 210; break;
         }
 
         const uint8_t a = t.visible ? 220 : 120;
@@ -1745,7 +1782,12 @@ void Renderer::render(const Game& game) {
         bool show = (e.id == game.playerId()) || d.at(e.pos.x, e.pos.y).visible;
         if (!show) continue;
 
-        SDL_Texture* tex = entityTexture(e, (frame + e.id) % FRAMES);
+        Entity visE = e;
+        if (isHallucinating(game)) {
+            visE.kind = hallucinatedEntityKind(game, e);
+        }
+
+        SDL_Texture* tex = entityTexture(visE, (frame + e.id) % FRAMES);
         if (!tex) continue;
 
         SDL_Rect dst = tileDst(e.pos.x, e.pos.y);
@@ -1949,6 +1991,10 @@ void Renderer::render(const Game& game) {
         drawCodexOverlay(game);
     }
 
+    if (game.isDiscoveriesOpen()) {
+        drawDiscoveriesOverlay(game);
+    }
+
     if (game.isMessageHistoryOpen()) {
         drawMessageHistoryOverlay(game);
     }
@@ -2112,7 +2158,8 @@ void Renderer::drawHud(const Game& game) {
     const int rocks  = ammoCount(game.inventory(), AmmoKind::Rock);
     if (arrows > 0) ss << " | ARROWS: " << arrows;
     if (rocks > 0)  ss << " | ROCKS: " << rocks;
-    ss << " | DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth();
+    if (game.depth() == 0) ss << " | DEPTH: CAMP";
+    else ss << " | DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth();
     ss << " | DEEPEST: " << game.maxDepthReached();
     ss << " | TURNS: " << game.turns();
     ss << " | KILLS: " << game.kills();
@@ -2149,6 +2196,7 @@ void Renderer::drawHud(const Game& game) {
     addStatus("VISION", p.effects.visionTurns);
     addStatus("INVIS", p.effects.invisTurns);
     addStatus("LEV", p.effects.levitationTurns);
+    addStatus("HALL", p.effects.hallucinationTurns);
     {
         const std::string ht = game.hungerTag();
         if (!ht.empty()) ss << " | " << ht;
@@ -2311,6 +2359,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             case ItemKind::PotionInvisibility: return "EFFECT: INVISIBILITY";
             case ItemKind::PotionClarity: return "EFFECT: CLARITY";
             case ItemKind::PotionLevitation: return "EFFECT: LEVITATION";
+            case ItemKind::PotionHallucination: return "EFFECT: HALLUCINATION";
             case ItemKind::ScrollTeleport: return "EFFECT: TELEPORT";
             case ItemKind::ScrollMapping: return "EFFECT: MAPPING";
             case ItemKind::ScrollDetectTraps: return "EFFECT: DETECT TRAPS";
@@ -2358,7 +2407,12 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, (i == sel) ? 70 : 45);
         SDL_RenderFillRect(renderer, &iconDst);
 
-        SDL_Texture* itex = itemTexture(it, lastFrame);
+        Item visIt = it;
+        if (isHallucinating(game)) {
+            visIt.kind = hallucinatedItemKind(game, it);
+        }
+
+        SDL_Texture* itex = itemTexture(visIt, lastFrame);
         if (itex) {
             SDL_RenderCopy(renderer, itex, nullptr, &iconDst);
         }
@@ -2397,7 +2451,12 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         // Sprite preview
         const int previewPx = std::min(96, infoRect.w);
         SDL_Rect sprDst{ ix, iy, previewPx, previewPx };
-        SDL_Texture* tex = itemTexture(it, lastFrame);
+        Item visIt = it;
+        if (isHallucinating(game)) {
+            visIt.kind = hallucinatedItemKind(game, it);
+        }
+
+        SDL_Texture* tex = itemTexture(visIt, lastFrame);
         if (tex) {
             SDL_RenderCopy(renderer, tex, nullptr, &sprDst);
         }
@@ -2992,6 +3051,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("F11 FULLSCREEN  F12 SCREENSHOT (BINDABLE)");
     lineGray("F3/SHIFT+M MESSAGE HISTORY  (/ SEARCH, CTRL+L CLEAR)");
     lineGray("F4 MONSTER CODEX  (TAB SORT, LEFT/RIGHT FILTER)");
+    lineGray("\\ DISCOVERIES  (TAB/LEFT/RIGHT FILTER, SHIFT+S SORT)");
     lineGray("PGUP/PGDN LOG  ESC CANCEL/QUIT");
 
     y += 6;
@@ -3290,7 +3350,8 @@ void Renderer::drawStatsOverlay(const Game& game) {
     }
     {
         std::stringstream ss;
-        ss << "DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth() << "  (DEEPEST: " << game.maxDepthReached() << ")";
+        if (game.depth() == 0) ss << "DEPTH: CAMP  (DEEPEST: " << game.maxDepthReached() << ")";
+        else ss << "DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth() << "  (DEEPEST: " << game.maxDepthReached() << ")";
         drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
         y += 18;
     }
@@ -3656,6 +3717,7 @@ void Renderer::drawCodexOverlay(const Game& game) {
                     case ProjectileKind::Rock:  r += "ROCKS"; break;
                     case ProjectileKind::Spark: r += "SPARK"; break;
                     case ProjectileKind::Fireball: r += "FIREBALL"; break;
+                    case ProjectileKind::Torch: r += "TORCH"; break;
                     default:                    r += "PROJECTILE"; break;
                 }
                 r += "  (R" + std::to_string(base.rangedRange) + " ATK " + std::to_string(base.rangedAtk) + ")";
@@ -3689,6 +3751,238 @@ void Renderer::drawCodexOverlay(const Game& game) {
                 case EntityKind::Shopkeeper: note("ATTACKING MAY ANGER THE SHOP."); break;
                 default: break;
             }
+        }
+    }
+}
+
+void Renderer::drawDiscoveriesOverlay(const Game& game) {
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    const Color white{240, 240, 240, 255};
+    const Color gray{180, 180, 180, 255};
+    const Color dark{120, 120, 120, 255};
+
+    const int pad = 18;
+    const int titleScale = 2;
+    const int bodyScale = 2;
+    const int lineH = 14;
+
+    const int panelW = std::min(winW - 80, 980);
+    const int panelH = std::min(winH - 80, 600);
+    const int px = (winW - panelW) / 2;
+    const int py = (winH - panelH) / 2;
+    SDL_Rect panel{px, py, panelW, panelH};
+
+    drawPanel(game, panel, 220, lastFrame);
+
+    int x = px + pad;
+    int y = py + pad;
+
+    drawText5x7(renderer, x, y, titleScale, white, "DISCOVERIES");
+    y += 22;
+
+    // Header: filter/sort + known count.
+    const DiscoveryFilter filter = game.discoveriesFilter();
+    const DiscoverySort sort = game.discoveriesSort();
+
+    auto matches = [&](ItemKind k) -> bool {
+        switch (filter) {
+            case DiscoveryFilter::All:     return true;
+            case DiscoveryFilter::Potions: return isPotionKind(k);
+            case DiscoveryFilter::Scrolls: return isScrollKind(k);
+            case DiscoveryFilter::Rings:   return isRingKind(k);
+            case DiscoveryFilter::Wands:   return isWandKind(k);
+            default:                       return true;
+        }
+    };
+
+    int total = 0;
+    int known = 0;
+    for (int i = 0; i < ITEM_KIND_COUNT; ++i) {
+        const ItemKind k = static_cast<ItemKind>(i);
+        if (!isIdentifiableKind(k)) continue;
+        if (!matches(k)) continue;
+        ++total;
+        if (game.isIdentified(k)) ++known;
+    }
+
+    {
+        std::ostringstream ss;
+        ss << "FILTER: " << discoveryFilterDisplayName(filter)
+           << "  SORT: " << discoverySortDisplayName(sort)
+           << "  KNOWN: " << known << "/" << total;
+        drawText5x7(renderer, x, y, bodyScale, gray, ss.str());
+    }
+    y += 16;
+    drawText5x7(renderer, x, y, bodyScale, dark, "LEFT/RIGHT/TAB FILTER  SHIFT+S SORT  ESC CLOSE");
+    y += 18;
+
+    // Build current list.
+    std::vector<ItemKind> list;
+    game.buildDiscoveryList(list);
+
+    int sel = game.discoveriesSelection();
+    if (list.empty()) sel = 0;
+    else sel = clampi(sel, 0, static_cast<int>(list.size()) - 1);
+
+    // Layout.
+    const int innerW = panelW - pad * 2;
+    const int innerH = (py + panelH - pad) - y;
+    const int listW = std::max(260, innerW * 5 / 11);
+    const int detailsW = innerW - listW - pad;
+    const int listX = x;
+    const int listY = y;
+    const int detailsX = listX + listW + pad;
+    const int detailsY = listY;
+    const int maxLines = std::max(1, innerH / lineH);
+
+    // Keep selection visible by auto-scrolling.
+    int first = 0;
+    if (sel >= maxLines) first = sel - maxLines + 1;
+    const int maxFirst = std::max(0, static_cast<int>(list.size()) - maxLines);
+    first = clampi(first, 0, maxFirst);
+
+    // Draw list.
+    {
+        SDL_Rect clip{listX, listY, listW, innerH};
+        SDL_RenderSetClipRect(renderer, &clip);
+
+        for (int row = 0; row < maxLines; ++row) {
+            const int idx = first + row;
+            if (idx >= static_cast<int>(list.size())) break;
+
+            const ItemKind k = list[idx];
+            const bool id = game.isIdentified(k);
+            const int rowY = listY + row * lineH;
+
+            if (idx == sel) {
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 36);
+                SDL_Rect r{listX, rowY - 1, listW, lineH};
+                SDL_RenderFillRect(renderer, &r);
+            }
+
+            const std::string app = game.discoveryAppearanceLabel(k);
+            const std::string prefix = id ? "* " : "  ";
+            drawText5x7(renderer, listX + 4, rowY, bodyScale, id ? white : dark, prefix + app);
+        }
+
+        SDL_RenderSetClipRect(renderer, nullptr);
+
+        // Divider.
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 40);
+        SDL_RenderDrawLine(renderer, listX + listW + pad / 2, listY,
+                           listX + listW + pad / 2, listY + innerH);
+    }
+
+    // Draw details.
+    {
+        int dy = detailsY;
+        auto dline = [&](const std::string& s, const Color& c) {
+            drawText5x7(renderer, detailsX, dy, bodyScale, c, s);
+            dy += 14;
+        };
+
+        if (list.empty()) {
+            dline("NO IDENTIFIABLE ITEMS", gray);
+            dline("(PICK UP POTIONS/SCROLLS/RINGS/WANDS TO START)", dark);
+            return;
+        }
+
+        const ItemKind k = list[sel];
+        const bool id = game.isIdentified(k);
+        const std::string app = game.discoveryAppearanceLabel(k);
+        const std::string trueName = itemDisplayNameSingle(k);
+
+        auto category = [&]() -> const char* {
+            if (isPotionKind(k)) return "POTION";
+            if (isScrollKind(k)) return "SCROLL";
+            if (isRingKind(k))   return "RING";
+            if (isWandKind(k))   return "WAND";
+            return "ITEM";
+        };
+
+        // A lightweight, UI-only summary of the known effect.
+        struct Blurb { const char* a; const char* b; const char* c; };
+        auto blurbFor = [&](ItemKind kk) -> Blurb {
+            switch (kk) {
+                // Potions
+                case ItemKind::PotionHealing:       return {"HEALS YOU.", "", ""};
+                case ItemKind::PotionStrength:      return {"CHANGES MIGHT TALENT.", "(BLESSED STRONGER, CURSED WEAKER)", ""};
+                case ItemKind::PotionAntidote:      return {"CURES POISON.", "", ""};
+                case ItemKind::PotionRegeneration:  return {"GRANTS REGENERATION.", "", ""};
+                case ItemKind::PotionShielding:     return {"GRANTS A TEMPORARY SHIELD.", "", ""};
+                case ItemKind::PotionHaste:         return {"GRANTS HASTE.", "", ""};
+                case ItemKind::PotionVision:        return {"GRANTS SHARPENED VISION.", "(INCREASES FOV TEMPORARILY)", ""};
+                case ItemKind::PotionInvisibility:  return {"MAKES YOU INVISIBLE.", "", ""};
+                case ItemKind::PotionClarity:       return {"CURES CONFUSION.", "(ALSO ENDS HALLUCINATIONS)", ""};
+                case ItemKind::PotionLevitation:    return {"GRANTS LEVITATION.", "(FLOAT OVER TRAPS/CHASMS)", ""};
+                case ItemKind::PotionHallucination: return {"CAUSES HALLUCINATIONS.", "BLESSED: SHORT + VISION.", "CURSED: LONG + CONFUSION."};
+
+                // Scrolls
+                case ItemKind::ScrollTeleport:      return {"TELEPORTS YOU.", "CONFUSED: SHORT-RANGE BLINK.", ""};
+                case ItemKind::ScrollMapping:       return {"REVEALS THE MAP.", "CONFUSED: CAUSES AMNESIA.", ""};
+                case ItemKind::ScrollEnchantWeapon: return {"ENCHANTS YOUR WEAPON.", "", ""};
+                case ItemKind::ScrollEnchantArmor:  return {"ENCHANTS YOUR ARMOR.", "", ""};
+                case ItemKind::ScrollIdentify:      return {"IDENTIFIES AN UNKNOWN ITEM.", "", ""};
+                case ItemKind::ScrollDetectTraps:   return {"DETECTS TRAPS NEARBY.", "", ""};
+                case ItemKind::ScrollDetectSecrets: return {"REVEALS SECRET DOORS.", "", ""};
+                case ItemKind::ScrollKnock:         return {"UNLOCKS DOORS/CONTAINERS.", "", ""};
+                case ItemKind::ScrollRemoveCurse:   return {"REMOVES CURSES (AND CAN BLESS).", "", ""};
+                case ItemKind::ScrollConfusion:     return {"CAUSES CONFUSION AROUND YOU.", "", ""};
+                case ItemKind::ScrollFear:          return {"CAUSES FEAR AROUND YOU.", "", ""};
+                case ItemKind::ScrollEarth:         return {"CREATES BOULDERS.", "", ""};
+                case ItemKind::ScrollTaming:        return {"TAMES A CREATURE.", "", ""};
+
+                // Rings
+                case ItemKind::RingMight:           return {"PASSIVE MIGHT BONUS.", "", ""};
+                case ItemKind::RingAgility:         return {"PASSIVE AGILITY BONUS.", "", ""};
+                case ItemKind::RingFocus:           return {"PASSIVE FOCUS BONUS.", "", ""};
+                case ItemKind::RingProtection:      return {"PASSIVE DEFENSE BONUS.", "", ""};
+
+                // Wands
+                case ItemKind::WandSparks:          return {"FIRES SPARKS.", "(RANGED, USES CHARGES)", ""};
+                case ItemKind::WandDigging:         return {"DIGS THROUGH WALLS.", "(RANGED, USES CHARGES)", ""};
+                case ItemKind::WandFireball:        return {"FIRES AN EXPLOSIVE FIREBALL.", "", ""};
+
+                default:
+                    return {"", "", ""};
+            }
+        };
+
+        // Header.
+        dline(id ? trueName : "UNKNOWN ITEM", white);
+        dline(std::string("CATEGORY: ") + category(), gray);
+        dline(std::string("APPEARANCE: ") + app, gray);
+        dline(std::string("IDENTIFIED: ") + (id ? "YES" : "NO"), gray);
+
+        if (!id) {
+            dline("", gray);
+            dline("USE IT TO IDENTIFY... OR READ A", dark);
+            dline("SCROLL OF IDENTIFY FOR SAFETY.", dark);
+            return;
+        }
+
+        const Blurb b = blurbFor(k);
+        if (b.a && b.a[0]) {
+            dline("", gray);
+            dline(b.a, white);
+            if (b.b && b.b[0]) dline(b.b, dark);
+            if (b.c && b.c[0]) dline(b.c, dark);
+        }
+
+        // If the item has an underlying stat modifier, show it.
+        if (isRingKind(k)) {
+            const ItemDef& d = itemDef(k);
+            std::ostringstream ss;
+            ss << "BONUSES: ";
+            bool any = false;
+            if (d.modMight != 0)   { ss << "MIGHT " << d.modMight << "  "; any = true; }
+            if (d.modAgility != 0) { ss << "AGI " << d.modAgility << "  "; any = true; }
+            if (d.modVigor != 0)   { ss << "VIG " << d.modVigor << "  "; any = true; }
+            if (d.modFocus != 0)   { ss << "FOC " << d.modFocus << "  "; any = true; }
+            if (d.defense != 0)    { ss << "DEF " << d.defense; any = true; }
+            if (!any) ss << "(NONE)";
+            dline(ss.str(), gray);
         }
     }
 }
@@ -3919,7 +4213,9 @@ void Renderer::drawLookOverlay(const Game& game) {
     const Color yellow{ 255, 230, 120, 255 };
     const int hudTop = winH - hudH;
 
-    std::string s = game.lookInfoText();
-    if (s.empty()) s = "LOOK";
-    drawText5x7(renderer, 10, hudTop - 18, scale, yellow, s);
+    if (!game.isCommandOpen()) {
+        std::string s = game.lookInfoText();
+        if (s.empty()) s = "LOOK";
+        drawText5x7(renderer, 10, hudTop - 18, scale, yellow, s);
+    }
 }

@@ -556,7 +556,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 33u;
+constexpr uint32_t SAVE_VERSION = 35u;
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 1u;
@@ -769,6 +769,10 @@ void writeEntity(std::ostream& out, const Entity& e) {
     int32_t fearTurns = e.effects.fearTurns;
     writePod(out, fearTurns);
 
+    // v35+: hallucination
+    int32_t hallucinationTurns = e.effects.hallucinationTurns;
+    writePod(out, hallucinationTurns);
+
     // v14+: ranged ammo count (ammo-based ranged monsters)
     int32_t ammoCount = e.rangedAmmoCount;
     writePod(out, ammoCount);
@@ -824,6 +828,8 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     int32_t levitationTurns = 0;
 
     int32_t fearTurns = 0;
+
+    int32_t hallucinationTurns = 0;
 
     int32_t stolenGold = 0;
 
@@ -886,6 +892,10 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
 
         if (version >= 32u) {
             if (!readPod(in, fearTurns)) return false;
+        }
+
+        if (version >= 35u) {
+            if (!readPod(in, hallucinationTurns)) return false;
         }
     }
 
@@ -955,6 +965,7 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     e.effects.burnTurns = burnTurns;
     e.effects.levitationTurns = levitationTurns;
     e.effects.fearTurns = fearTurns;
+    e.effects.hallucinationTurns = hallucinationTurns;
 
 
     if (version >= 17u) {
@@ -1273,6 +1284,25 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
                 writePod(mem, my);
                 writePod(mem, mk);
                 writeString(mem, m.label);
+            }
+        }
+
+        // Floor engravings / graffiti (v34+)
+        if constexpr (SAVE_VERSION >= 34u) {
+            uint32_t eCount = static_cast<uint32_t>(st.engravings.size());
+            writePod(mem, eCount);
+            for (const auto& e : st.engravings) {
+                int32_t ex = e.pos.x;
+                int32_t ey = e.pos.y;
+                uint8_t strength = e.strength;
+                uint8_t flags = 0u;
+                if (e.isWard) flags |= 0x1u;
+                if (e.isGraffiti) flags |= 0x2u;
+                writePod(mem, ex);
+                writePod(mem, ey);
+                writePod(mem, strength);
+                writePod(mem, flags);
+                writeString(mem, e.text);
             }
         }
 
@@ -1916,6 +1946,47 @@ bool Game::loadFromFile(const std::string& path) {
                     if (dup) continue;
 
                     st.markers.push_back(std::move(m));
+                }
+            }
+
+            // Floor engravings / graffiti (v34+)
+            st.engravings.clear();
+            if (ver >= 34u) {
+                uint32_t eCount = 0;
+                if (!readPod(in, eCount)) return fail();
+                if (eCount > 5000u) eCount = 5000u;
+                st.engravings.reserve(eCount);
+
+                for (uint32_t ei = 0; ei < eCount; ++ei) {
+                    int32_t ex = 0, ey = 0;
+                    uint8_t strength = 0;
+                    uint8_t flags = 0;
+                    std::string text;
+
+                    if (!readPod(in, ex)) return fail();
+                    if (!readPod(in, ey)) return fail();
+                    if (!readPod(in, strength)) return fail();
+                    if (!readPod(in, flags)) return fail();
+                    if (!readString(in, text)) return fail();
+
+                    if (text.empty()) continue;
+                    if (text.size() > 72) text.resize(72);
+                    if (!st.dung.inBounds(ex, ey)) continue;
+
+                    // Avoid duplicate engravings on the same tile (first wins).
+                    bool dup = false;
+                    for (const auto& exi : st.engravings) {
+                        if (exi.pos.x == ex && exi.pos.y == ey) { dup = true; break; }
+                    }
+                    if (dup) continue;
+
+                    Engraving eg;
+                    eg.pos = { ex, ey };
+                    eg.strength = strength;
+                    eg.isWard = (flags & 0x1u) != 0;
+                    eg.isGraffiti = (flags & 0x2u) != 0;
+                    eg.text = std::move(text);
+                    st.engravings.push_back(std::move(eg));
                 }
             }
 

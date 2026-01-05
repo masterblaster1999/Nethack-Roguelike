@@ -118,6 +118,10 @@ bool parseProjectileKind(const std::string& raw, ProjectileKind& out) {
         out = ProjectileKind::Fireball;
         return true;
     }
+    if (v == "torch" || v == "lit_torch" || v == "torchlit") {
+        out = ProjectileKind::Torch;
+        return true;
+    }
     return false;
 }
 

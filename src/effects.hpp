@@ -29,6 +29,9 @@ enum class EffectKind : uint8_t {
 
     // Morale / mind (append-only)
     Fear,
+
+    // Perception / reality (append-only)
+    Hallucination,
 };
 
 // Human-readable short tag for HUD/status lists.
@@ -45,6 +48,7 @@ inline const char* effectTag(EffectKind k) {
         case EffectKind::Burn:      return "BURN";
         case EffectKind::Levitation:return "LEV";
         case EffectKind::Fear:      return "FEAR";
+        case EffectKind::Hallucination: return "HALL";
         default:                    return "?";
     }
 }
@@ -63,6 +67,7 @@ inline const char* effectEndMessage(EffectKind k) {
         case EffectKind::Burn:      return "THE FLAMES SUBSIDE.";
         case EffectKind::Levitation:return "YOU SINK BACK TO THE GROUND.";
         case EffectKind::Fear:      return "YOU FEEL YOUR COURAGE RETURN.";
+        case EffectKind::Hallucination: return "REALITY STOPS SWIMMING.";
         default:                    return "";
     }
 }
@@ -87,6 +92,8 @@ struct Effects {
 
     int fearTurns = 0;      // monsters prefer fleeing (and avoid attacking) while >0
 
+    int hallucinationTurns = 0; // perception distortion (mostly cosmetic) while >0
+
     bool has(EffectKind k) const { return get(k) > 0; }
 
     int get(EffectKind k) const {
@@ -102,6 +109,7 @@ struct Effects {
             case EffectKind::Burn:      return burnTurns;
             case EffectKind::Levitation:return levitationTurns;
             case EffectKind::Fear:      return fearTurns;
+            case EffectKind::Hallucination: return hallucinationTurns;
             default:                    return 0;
         }
     }
@@ -119,6 +127,7 @@ struct Effects {
             case EffectKind::Burn:      return burnTurns;
             case EffectKind::Levitation:return levitationTurns;
             case EffectKind::Fear:      return fearTurns;
+            case EffectKind::Hallucination: return hallucinationTurns;
             default:                    return poisonTurns; // should be unreachable
         }
     }
@@ -127,4 +136,4 @@ struct Effects {
 };
 
 // Keep in sync with EffectKind (append-only).
-inline constexpr int EFFECT_KIND_COUNT = static_cast<int>(EffectKind::Fear) + 1;
+inline constexpr int EFFECT_KIND_COUNT = static_cast<int>(EffectKind::Hallucination) + 1;

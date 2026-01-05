@@ -146,6 +146,9 @@ const ItemDef& itemDef(ItemKind k) {
 
         // Pets / companions (append-only)
         { ItemKind::ScrollTaming, "SCROLL OF TAMING", true,  true,  false, EquipSlot::None,   0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 200 },
+
+        // Perception / weirdness (append-only)
+        { ItemKind::PotionHallucination, "POTION OF HALLUCINATION", true, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 70 },
     };
 
     static std::vector<ItemDef> defs;

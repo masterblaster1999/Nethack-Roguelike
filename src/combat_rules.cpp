@@ -68,6 +68,9 @@ DiceExpr rangedDiceForProjectile(ProjectileKind proj, bool wandPowered) {
             // Explosive AoE: tuned a bit lower per-target than a direct bolt.
             // (The explosion falloff is handled by the caller.)
             return wandPowered ? DiceExpr{2, 4, 2} : DiceExpr{2, 4, 0};
+        case ProjectileKind::Torch:
+            // Thrown torches are weaker than rocks but can ignite targets.
+            return {1, 3, 0};
         default: return {1, 4, 0};
     }
 }

@@ -230,6 +230,77 @@ void Game::buildCodexList(std::vector<EntityKind>& out) const {
     }
 }
 
+std::string Game::discoveryAppearanceLabel(ItemKind k) const {
+    // Build an "unidentified" label without any BUC/enchant prefix noise.
+    // (Discoveries is about appearance -> true name mapping.)
+    Item tmp;
+    tmp.kind = k;
+    tmp.count = 1;
+    tmp.buc = 0;
+    tmp.enchant = 0;
+    tmp.charges = 0;
+    tmp.shopPrice = 0;
+    tmp.shopDepth = 0;
+    return unknownDisplayName(tmp);
+}
+
+void Game::buildDiscoveryList(std::vector<ItemKind>& out) const {
+    buildDiscoveryList(out, discoveriesFilter_, discoveriesSort_);
+}
+
+void Game::buildDiscoveryList(std::vector<ItemKind>& out, DiscoveryFilter filter, DiscoverySort sort) const {
+    out.clear();
+    out.reserve(64);
+
+    auto matches = [&](ItemKind k) -> bool {
+        switch (filter) {
+            case DiscoveryFilter::All:     return true;
+            case DiscoveryFilter::Potions: return isPotionKind(k);
+            case DiscoveryFilter::Scrolls: return isScrollKind(k);
+            case DiscoveryFilter::Rings:   return isRingKind(k);
+            case DiscoveryFilter::Wands:   return isWandKind(k);
+            default:                       return true;
+        }
+    };
+
+    for (int i = 0; i < ITEM_KIND_COUNT; ++i) {
+        const ItemKind k = static_cast<ItemKind>(i);
+        if (!isIdentifiableKind(k)) continue;
+        if (!matches(k)) continue;
+        out.push_back(k);
+    }
+
+    auto catOrder = [&](ItemKind k) -> int {
+        if (isPotionKind(k)) return 0;
+        if (isScrollKind(k)) return 1;
+        if (isRingKind(k))   return 2;
+        if (isWandKind(k))   return 3;
+        return 4;
+    };
+
+    std::stable_sort(out.begin(), out.end(), [&](ItemKind a, ItemKind b) {
+        // When showing "ALL", keep categories grouped in a predictable order.
+        if (filter == DiscoveryFilter::All) {
+            const int ca = catOrder(a);
+            const int cb = catOrder(b);
+            if (ca != cb) return ca < cb;
+        }
+
+        if (sort == DiscoverySort::IdentifiedFirst) {
+            const bool ia = isIdentified(a);
+            const bool ib = isIdentified(b);
+            if (ia != ib) return ia > ib;
+        }
+
+        const std::string sa = discoveryAppearanceLabel(a);
+        const std::string sb = discoveryAppearanceLabel(b);
+        if (sa != sb) return sa < sb;
+
+        // Tie-breaker: stable by true name.
+        return itemDisplayNameSingle(a) < itemDisplayNameSingle(b);
+    });
+}
+
 Entity* Game::entityById(int id) {
     for (auto& e : ents) if (e.id == id) return &e;
     return nullptr;
@@ -1042,6 +1113,7 @@ void Game::newGame(uint32_t seed) {
     chestContainers_.clear();
     trapsCur.clear();
     mapMarkers_.clear();
+    engravings_.clear();
     confusionGas_.clear();
     fireField_.clear();
     scentField_.clear();
@@ -1175,6 +1247,9 @@ void Game::newGame(uint32_t seed) {
     confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
     fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+
+    // Flavor graffiti/engravings are generated once per freshly created floor.
+    spawnGraffiti();
 
     // Create player
     Entity p;
@@ -1388,6 +1463,7 @@ void Game::storeCurrentLevel() {
     st.ground = ground;
     st.traps = trapsCur;
     st.markers = mapMarkers_;
+    st.engravings = engravings_;
     st.chestContainers = chestContainers_;
     st.confusionGas = confusionGas_;
     st.fireField = fireField_;
@@ -1408,6 +1484,7 @@ bool Game::restoreLevel(int depth) {
     ground = it->second.ground;
     trapsCur = it->second.traps;
     mapMarkers_ = it->second.markers;
+    engravings_ = it->second.engravings;
     chestContainers_ = it->second.chestContainers;
 
     // Drop any orphaned containers (e.g., chests that were destroyed).
@@ -1443,8 +1520,336 @@ bool Game::restoreLevel(int depth) {
     return true;
 }
 
+const Engraving* Game::engravingAt(Vec2i p) const {
+    for (const auto& e : engravings_) {
+        if (e.pos.x == p.x && e.pos.y == p.y) return &e;
+    }
+    return nullptr;
+}
+
+void Game::spawnGraffiti() {
+    // Clear any leftover data in case callers forgot.
+    engravings_.clear();
+
+    // Keep graffiti sparse: it's a flavor accent, not a UI spam source.
+    constexpr size_t kMaxGraffitiPerFloor = 8;
+
+    auto addGraffiti = [&](Vec2i pos, const std::string& text) {
+        if (!dung.inBounds(pos.x, pos.y)) return;
+        if (!dung.isWalkable(pos.x, pos.y)) return;
+        if (pos == dung.stairsUp || pos == dung.stairsDown) return; // don't clutter stairs
+        if (text.empty()) return;
+
+        // Replace existing engraving on this tile (rare).
+        for (auto& e : engravings_) {
+            if (e.pos == pos) {
+                e.text = text;
+                e.strength = 255;
+                e.isWard = false;
+                e.isGraffiti = true;
+                return;
+            }
+        }
+
+        if (engravings_.size() >= kMaxGraffitiPerFloor) return;
+
+        Engraving e;
+        e.pos = pos;
+        e.text = text;
+        e.strength = 255;   // permanent flavor
+        e.isWard = false;   // generated graffiti is never a ward (even if it looks like one)
+        e.isGraffiti = true;
+        engravings_.push_back(std::move(e));
+    };
+
+    auto addSigil = [&](Vec2i pos, const std::string& keyword, uint8_t uses) {
+        // Sigils are limited-use magical graffiti that trigger when stepped on.
+        // Keep them rare and avoid stair tiles for readability.
+        if (!dung.inBounds(pos.x, pos.y)) return;
+        if (!dung.isWalkable(pos.x, pos.y)) return;
+        if (pos == dung.stairsUp || pos == dung.stairsDown) return;
+        if (keyword.empty()) return;
+        if (uses == 0u) uses = 1u;
+        if (uses == 255u) uses = 1u;
+
+        std::string text = std::string("SIGIL: ") + keyword;
+
+        // Replace existing engraving on this tile (rare).
+        for (auto& e : engravings_) {
+            if (e.pos == pos) {
+                e.text = text;
+                e.strength = uses;
+                e.isWard = false;
+                e.isGraffiti = true;
+                return;
+            }
+        }
+
+        if (engravings_.size() >= kMaxGraffitiPerFloor) return;
+
+        Engraving e;
+        e.pos = pos;
+        e.text = std::move(text);
+        e.strength = uses;
+        e.isWard = false;
+        e.isGraffiti = true;
+        engravings_.push_back(std::move(e));
+    };
+
+    auto pickMsg = [&](const std::vector<std::string>& msgs) -> std::string {
+        if (msgs.empty()) return std::string();
+        const int idx = rng.range(0, static_cast<int>(msgs.size()) - 1);
+        return msgs[static_cast<size_t>(idx)];
+    };
+
+    auto pickFloorInRoom = [&](const Room& r) -> Vec2i {
+        // Prefer interior tiles (avoid walls).
+        const int x0 = r.x + 1;
+        const int y0 = r.y + 1;
+        const int x1 = r.x + std::max(1, r.w - 2);
+        const int y1 = r.y + std::max(1, r.h - 2);
+
+        for (int tries = 0; tries < 40; ++tries) {
+            Vec2i p{rng.range(x0, x1), rng.range(y0, y1)};
+            if (!dung.inBounds(p.x, p.y)) continue;
+            if (!dung.isWalkable(p.x, p.y)) continue;
+            if (p == dung.stairsUp || p == dung.stairsDown) continue;
+            return p;
+        }
+        // Fall back to the room center.
+        return Vec2i{r.cx(), r.cy()};
+    };
+
+    // --- Message pools ---
+    static const std::vector<std::string> kGeneric = {
+        "DON'T PANIC.",
+        "KICKING DOORS HURTS.",
+        "THE WALLS HAVE EARS.",
+        "THE DEAD CAN SMELL YOU.",
+        "TRUST YOUR NOSE.",
+        "WORDS CAN BE WEAPONS.",
+        "YOU ARE NOT THE FIRST.",
+        "BONES DON'T LIE.",
+        "GREED GETS YOU KILLED.",
+        "THE FLOOR REMEMBERS.",
+        "SOME WORDS SCARE BEASTS.",
+        "WRITE IN THE DUST.",
+    };
+
+    static const std::vector<std::string> kShrine = {
+        "LEAVE AN OFFERING.",
+        "PRAY WITH CLEAN HANDS.",
+        "THE GODS DO NOT FORGET.",
+    };
+
+    static const std::vector<std::string> kLibrary = {
+        "SILENCE, PLEASE.",
+        "WORDS CUT DEEPER.",
+        "READ CAREFULLY.",
+    };
+
+    static const std::vector<std::string> kLaboratory = {
+        "DO NOT MIX POTIONS.",
+        "EYE PROTECTION ADVISED.",
+        "IF IT BUBBLES, RUN.",
+    };
+
+    static const std::vector<std::string> kArmory = {
+        "POINTY END OUT.",
+        "COUNT YOUR ARROWS.",
+        "BLADES RUST, SKILLS DON'T.",
+    };
+
+    static const std::vector<std::string> kVault = {
+        "LOCKS LIE.",
+        "TREASURE BITES.",
+        "NOT WORTH IT.",
+    };
+
+    static const std::vector<std::string> kSecret = {
+        "SHHH.",
+        "YOU FOUND IT.",
+        "LOOK BEHIND THE LOOK.",
+    };
+
+    // Rare runic sigils (glyph-like floor inscriptions) that have small, local effects.
+    // These are deliberately terse so they read well in LOOK mode.
+    static const std::vector<std::string> kSigilAny = {
+        "SEER",
+        "NEXUS",
+        "MIASMA",
+        "EMBER",
+    };
+
+    // Camp-specific: the surface is calmer, so the scribbles are more practical.
+    if (depth_ == 0) {
+        if (dung.inBounds(dung.campStashSpot.x, dung.campStashSpot.y)) {
+            addGraffiti(dung.campStashSpot, "STASH");
+        }
+        addGraffiti(dung.stairsDown, "DUNGEON");
+        // Keep exit uncluttered: the upstairs tile is the real win condition.
+        return;
+    }
+
+    // Special rooms get a higher chance of graffiti.
+    for (const auto& r : dung.rooms) {
+        if (engravings_.size() >= kMaxGraffitiPerFloor) break;
+
+        switch (r.type) {
+            case RoomType::Shrine: {
+                const Vec2i p = pickFloorInRoom(r);
+                if (rng.chance(0.18f)) {
+                    addSigil(p, "SEER", 1);
+                } else if (rng.chance(0.80f)) {
+                    addGraffiti(p, pickMsg(kShrine));
+                }
+            } break;
+            case RoomType::Library: {
+                const Vec2i p = pickFloorInRoom(r);
+                if (rng.chance(0.12f)) {
+                    addSigil(p, "SEER", 1);
+                } else if (rng.chance(0.70f)) {
+                    addGraffiti(p, pickMsg(kLibrary));
+                }
+            } break;
+            case RoomType::Laboratory: {
+                const Vec2i p = pickFloorInRoom(r);
+                if (rng.chance(0.22f)) {
+                    // Labs are where alchemical accidents happen.
+                    addSigil(p, rng.chance(0.50f) ? "MIASMA" : "EMBER", 2);
+                } else if (rng.chance(0.70f)) {
+                    addGraffiti(p, pickMsg(kLaboratory));
+                }
+            } break;
+            case RoomType::Armory: {
+                const Vec2i p = pickFloorInRoom(r);
+                if (rng.chance(0.15f)) {
+                    addSigil(p, "EMBER", 1);
+                } else if (rng.chance(0.60f)) {
+                    addGraffiti(p, pickMsg(kArmory));
+                }
+            } break;
+            case RoomType::Vault: {
+                const Vec2i p = pickFloorInRoom(r);
+                if (rng.chance(0.18f)) {
+                    addSigil(p, "NEXUS", 1);
+                } else if (rng.chance(0.85f)) {
+                    addGraffiti(p, pickMsg(kVault));
+                }
+            } break;
+            case RoomType::Secret: {
+                const Vec2i p = pickFloorInRoom(r);
+                if (rng.chance(0.30f)) {
+                    addSigil(p, "NEXUS", 1);
+                } else if (rng.chance(0.90f)) {
+                    addGraffiti(p, pickMsg(kSecret));
+                }
+            } break;
+            default:
+                break;
+        }
+    }
+
+    // A few generic scribbles across the floor.
+    const int extra = rng.chance(0.35f) ? rng.range(1, 3) : rng.range(0, 1);
+    for (int i = 0; i < extra && engravings_.size() < kMaxGraffitiPerFloor; ++i) {
+        if (dung.rooms.empty()) break;
+        const auto& r = dung.rooms[static_cast<size_t>(rng.range(0, static_cast<int>(dung.rooms.size()) - 1))];
+        const Vec2i p = pickFloorInRoom(r);
+        if (rng.chance(0.08f) && depth_ >= 2) {
+            std::string sk = pickMsg(kSigilAny);
+            uint8_t uses = (sk == "MIASMA" || sk == "EMBER") ? 2 : 1;
+            addSigil(p, sk, uses);
+        } else {
+            addGraffiti(p, pickMsg(kGeneric));
+        }
+    }
+}
+
+void Game::setupSurfaceCampInstallations() {
+    if (depth_ != 0) return;
+
+    // Stash anchor comes from dungeon generation; fall back to the downstairs if needed.
+    Vec2i stash = dung.campStashSpot;
+    if (!dung.inBounds(stash.x, stash.y) || !dung.isWalkable(stash.x, stash.y)) {
+        stash = dung.stairsDown;
+    }
+
+    // If a chest already exists at the stash location, don't duplicate.
+    for (const auto& gi : ground) {
+        if (gi.pos == stash && isChestKind(gi.item.kind)) {
+            // Still add helpful markers if missing.
+            bool haveStashMarker = false;
+            for (const auto& m : mapMarkers_) {
+                if (m.pos == stash && m.label == "STASH") {
+                    haveStashMarker = true;
+                    break;
+                }
+            }
+            if (!haveStashMarker) mapMarkers_.push_back({stash, MarkerKind::Loot, "STASH"});
+            return;
+        }
+    }
+
+    // Place a persistent, already-open chest (so it behaves like storage rather than a loot piñata).
+    const int chestId = nextItemId;
+    Item chest;
+    chest.kind = ItemKind::ChestOpen;
+    chest.charges = CHEST_FLAG_OPENED;
+    chest.enchant = 2; // bigger stack limit than a basic chest
+    chest.spriteSeed = rng.nextU32();
+    dropGroundItemItem(stash, chest);
+
+    // Ensure a container exists for it (and pre-stock a couple of basic supplies).
+    bool haveContainer = false;
+    for (const auto& c : chestContainers_) {
+        if (c.chestId == chestId) {
+            haveContainer = true;
+            break;
+        }
+    }
+
+    if (!haveContainer) {
+        ChestContainer cc;
+        cc.chestId = chestId;
+
+        // A tiny emergency kit (one-time, since the chest persists).
+        Item torch;
+        torch.id = nextItemId++;
+        torch.kind = ItemKind::Torch;
+        torch.count = 2;
+        torch.spriteSeed = rng.nextU32();
+        torch.charges = itemDef(torch.kind).maxCharges;
+
+        Item ration;
+        ration.id = nextItemId++;
+        ration.kind = ItemKind::FoodRation;
+        ration.count = 1;
+        ration.spriteSeed = rng.nextU32();
+
+        cc.items.push_back(torch);
+        cc.items.push_back(ration);
+
+        chestContainers_.push_back(cc);
+    }
+
+    // Add a few default map markers for convenience.
+    auto addMarker = [&](Vec2i pos, MarkerKind kind, const std::string& label) {
+        if (!dung.inBounds(pos.x, pos.y)) return;
+        for (const auto& m : mapMarkers_) {
+            if (m.pos == pos && m.label == label) return;
+        }
+        mapMarkers_.push_back({pos, kind, label});
+    };
+
+    addMarker(stash, MarkerKind::Loot, "STASH");
+    addMarker(dung.stairsDown, MarkerKind::Note, "DUNGEON");
+    addMarker(dung.stairsUp, MarkerKind::Note, "EXIT");
+}
+
+
 void Game::changeLevel(int newDepth, bool goingDown) {
-    if (newDepth < 1) return;
+    if (newDepth < 0) return;
     if (newDepth > DUNGEON_MAX_DEPTH) {
         pushMsg("THE STAIRS END HERE. YOU SENSE YOU ARE AT THE BOTTOM.", MessageKind::System, true);
         return;
@@ -1514,6 +1919,8 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         if (!canMonsterUseStairs(m)) continue;
         if (chebyshev(m.pos, leavePos) > 1) continue;
         if (!m.alerted) continue;
+        // Keep the surface camp (depth 0) as a safe-ish hub: hostile monsters don't follow you up.
+        if (newDepth == 0 && !m.friendly) continue;
         followerIdx.push_back(i);
     }
 
@@ -1732,6 +2139,7 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         ground.clear();
         trapsCur.clear();
         mapMarkers_.clear();
+        engravings_.clear();
         chestContainers_.clear();
         confusionGas_.clear();
         fireField_.clear();
@@ -1741,6 +2149,9 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+
+        // Flavor graffiti/engravings are generated once per freshly created floor.
+        spawnGraffiti();
 
         const Vec2i desiredArrival = goingDown ? dung.stairsUp : dung.stairsDown;
 
@@ -1783,6 +2194,10 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         spawnMonsters();
         spawnItems();
         spawnTraps();
+
+        if (depth_ == 0) {
+            setupSurfaceCampInstallations();
+        }
 
         tryApplyBones();
 
@@ -1845,7 +2260,8 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     p.hp = std::min(p.hpMax, p.hp + 2);
 
     std::ostringstream ss;
-    if (goingDown) ss << "YOU DESCEND TO DEPTH " << depth_ << ".";
+    if (!goingDown && depth_ == 0) ss << "YOU RETURN TO YOUR CAMP.";
+    else if (goingDown) ss << "YOU DESCEND TO DEPTH " << depth_ << ".";
     else ss << "YOU ASCEND TO DEPTH " << depth_ << ".";
     pushMsg(ss.str());
 
@@ -2125,6 +2541,14 @@ static void hashMapMarker(Hash64& hh, const MapMarker& m) {
     hh.addString(m.label);
 }
 
+static void hashEngraving(Hash64& hh, const Engraving& e) {
+    hh.addVec2(e.pos);
+    hh.addString(e.text);
+    hh.addU8(e.strength);
+    hh.addBool(e.isWard);
+    hh.addBool(e.isGraffiti);
+}
+
 static void hashChestContainer(Hash64& hh, const ChestContainer& c) {
     hh.addI32(c.chestId);
     hh.addU32(static_cast<uint32_t>(c.items.size()));
@@ -2146,6 +2570,9 @@ static void hashLevelState(Hash64& hh, const LevelState& ls) {
 
     hh.addU32(static_cast<uint32_t>(ls.markers.size()));
     for (const auto& m : ls.markers) hashMapMarker(hh, m);
+
+    hh.addU32(static_cast<uint32_t>(ls.engravings.size()));
+    for (const auto& e : ls.engravings) hashEngraving(hh, e);
 
     hh.addU32(static_cast<uint32_t>(ls.chestContainers.size()));
     for (const auto& c : ls.chestContainers) hashChestContainer(hh, c);
@@ -2256,6 +2683,9 @@ uint64_t Game::determinismHash() const {
 
     hh.addU32(static_cast<uint32_t>(mapMarkers_.size()));
     for (const auto& m : mapMarkers_) hashMapMarker(hh, m);
+
+    hh.addU32(static_cast<uint32_t>(engravings_.size()));
+    for (const auto& e : engravings_) hashEngraving(hh, e);
 
     hh.addU32(static_cast<uint32_t>(chestContainers_.size()));
     for (const auto& c : chestContainers_) hashChestContainer(hh, c);

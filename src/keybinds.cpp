@@ -203,6 +203,7 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     if (name == "help") return Action::Help;
     if (name == "message_history" || name == "messagehistory" || name == "messages" || name == "msghistory" || name == "msglog") return Action::MessageHistory;
     if (name == "codex" || name == "monster_codex" || name == "bestiary" || name == "monsters") return Action::Codex;
+    if (name == "discoveries" || name == "discovery" || name == "identify_list") return Action::Discoveries;
     if (name == "options") return Action::Options;
     if (name == "command" || name == "extcmd") return Action::Command;
 
@@ -310,6 +311,7 @@ KeyBinds KeyBinds::defaults() {
     add(Action::MessageHistory, SDLK_F3);
     add(Action::MessageHistory, SDLK_m, KMOD_SHIFT);
     add(Action::Codex, SDLK_F4);
+    add(Action::Discoveries, SDLK_BACKSLASH);
     add(Action::ToggleStats, SDLK_TAB, KMOD_SHIFT);
 
     add(Action::ToggleFullscreen, SDLK_F11);
@@ -518,6 +520,7 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
     {Action::Help, "help"},
     {Action::MessageHistory, "message_history"},
     {Action::Codex, "codex"},
+    {Action::Discoveries, "discoveries"},
     {Action::Options, "options"},
     {Action::Command, "command"},
     {Action::ToggleMinimap, "toggle_minimap"},

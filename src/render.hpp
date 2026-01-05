@@ -316,6 +316,7 @@ private:
     void drawHelpOverlay(const Game& game);
     void drawMessageHistoryOverlay(const Game& game);
     void drawCodexOverlay(const Game& game);
+    void drawDiscoveriesOverlay(const Game& game);
     void drawTargetingOverlay(const Game& game);
     void drawLookOverlay(const Game& game);
 

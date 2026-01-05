@@ -1465,6 +1465,42 @@ case ItemKind::Arrow: {
             }
             break;
         }
+        case ItemKind::PotionHallucination: {
+            // Kaleidoscopic potion: prismatic fluid + drifting sparkles.
+            Color glass = {200,200,220,180};
+
+            // Create a shifting rainbow-ish fluid by mixing two colors based on frame + seed.
+            uint32_t h = hash32(seed ^ 0xA11u);
+            Color c1 = { static_cast<uint8_t>(80 + (h & 0x7F)),
+                         static_cast<uint8_t>(80 + ((h >> 7) & 0x7F)),
+                         static_cast<uint8_t>(80 + ((h >> 14) & 0x7F)),
+                         200 };
+            Color c2 = { static_cast<uint8_t>(80 + ((h >> 21) & 0x7F)),
+                         static_cast<uint8_t>(80 + ((h >> 5) & 0x7F)),
+                         static_cast<uint8_t>(80 + ((h >> 12) & 0x7F)),
+                         200 };
+
+            float t = (frame % 4) * 0.25f;
+            Color fluid = {
+                static_cast<uint8_t>(c1.r * (1.0f - t) + c2.r * t),
+                static_cast<uint8_t>(c1.g * (1.0f - t) + c2.g * t),
+                static_cast<uint8_t>(c1.b * (1.0f - t) + c2.b * t),
+                200
+            };
+
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+
+            // Sparkles that drift as the animation frames tick.
+            uint32_t sh = hash32(seed ^ (0xBEEFu + static_cast<uint32_t>(frame)));
+            for (int i = 0; i < 3; ++i) {
+                int sx = 7 + static_cast<int>((sh >> (i * 5)) & 1u);
+                int sy = 6 + static_cast<int>((sh >> (i * 7)) % 6u);
+                setPx(s, sx, sy, {255,255,255,140});
+            }
+            break;
+        }
         case ItemKind::ScrollConfusion: {
             Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
             outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
@@ -1782,6 +1818,25 @@ SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int fr
             } else {
                 setPx(s, 6, 6, {255,210,150,120});
                 setPx(s, 10, 5, {255,200,120,110});
+            }
+            break;
+        }
+        case ProjectileKind::Torch: {
+            // A small stick with a flickering flame.
+            Color wood = {120, 80, 45, 255};
+            // handle
+            line(s, 6, 12, 10, 6, wood);
+            line(s, 6, 13, 9, 7, mul(wood, 0.85f));
+            // flame
+            Color outer = {220, 90, 40, 220};
+            Color core  = {255, 220, 160, 255};
+            circle(s, 10, 5, 2, outer);
+            setPx(s, 10, 4, core);
+            if (frame % 2 == 1) {
+                setPx(s, 11, 4, {255,255,255,140});
+                setPx(s, 9, 5, {255,200,140,140});
+            } else {
+                setPx(s, 9, 4, {255,210,150,120});
             }
             break;
         }
@@ -3503,6 +3558,45 @@ SpritePixels generateEffectIcon(EffectKind kind, int frame, int pxSize) {
             // A couple dark pixels to add contrast
             setPx(s, 7, 12, dk);
             setPx(s, 9, 12, dk);
+            break;
+        }
+        case EffectKind::Levitation: {
+            Color c = pulse(Color{175, 205, 255, 255}, 8);
+            Color c2 = mul(c, 0.70f);
+
+            // Upward arrow + little wind ticks
+            line(s, 8, 3, 8, 12, c);
+            line(s, 8, 3, 5, 6, c);
+            line(s, 8, 3, 11, 6, c);
+
+            line(s, 3, 11, 5, 11, c2);
+            line(s, 11, 9, 13, 9, c2);
+            break;
+        }
+        case EffectKind::Fear: {
+            Color c = pulse(Color{255, 205, 120, 255}, 10);
+            Color dk{50, 25, 10, 255};
+
+            // An exclamation mark inside a little "shiver" halo.
+            rect(s, 7, 3, 2, 7, c);
+            setPx(s, 8, 12, c);
+            circle(s, 8, 8, 5, mul(c, 0.45f));
+
+            setPx(s, 8, 6, dk);
+            setPx(s, 8, 9, dk);
+            break;
+        }
+        case EffectKind::Hallucination: {
+            Color c = pulse(Color{255, 140, 255, 255}, 14);
+            Color c2 = pulse(Color{140, 220, 255, 255}, 10);
+
+            // A tiny "kaleidoscope" star.
+            line(s, 8, 2, 8, 14, mul(c, 0.75f));
+            line(s, 2, 8, 14, 8, mul(c2, 0.75f));
+            line(s, 3, 3, 13, 13, mul(c2, 0.55f));
+            line(s, 13, 3, 3, 13, mul(c, 0.55f));
+            circle(s, 8, 8, 2, add(c, 10, 10, 10));
+            setPx(s, 8, 8, Color{20, 20, 30, 255});
             break;
         }
         default:

@@ -65,6 +65,63 @@ static std::string toLower(std::string s) {
     return s;
 }
 
+// --- Engraving helpers: sigils (rare magical graffiti) ---
+// A sigil is an engraving whose text begins with 'SIGIL' (case-insensitive).
+// We treat it as a keyworded, limited-use floor effect that triggers when stepped on.
+//
+// Examples:
+//   'SIGIL: NEXUS'
+//   'SIGIL OF EMBER'
+//
+// Returns the keyword (e.g., 'NEXUS') or empty string if not a sigil.
+static std::string sigilKeywordFromText(std::string text) {
+    text = trim(toUpper(std::move(text)));
+    if (text.size() < 5) return std::string();
+    if (text.rfind("SIGIL", 0) != 0) return std::string();
+
+    size_t i = 5;
+    // Skip punctuation / whitespace after 'SIGIL'.
+    while (i < text.size()) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c == ':' || c == '-' || std::isspace(c)) {
+            ++i;
+            continue;
+        }
+        break;
+    }
+
+    // Optional 'OF' (as in 'SIGIL OF EMBER').
+    if (i + 1 < text.size() && text[i] == 'O' && text[i + 1] == 'F') {
+        size_t j = i + 2;
+        // Only treat it as 'OF' if followed by delimiter.
+        if (j == text.size() || std::isspace(static_cast<unsigned char>(text[j])) || text[j] == ':' || text[j] == '-') {
+            i = j;
+            while (i < text.size()) {
+                const unsigned char c = static_cast<unsigned char>(text[i]);
+                if (c == ':' || c == '-' || std::isspace(c)) {
+                    ++i;
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+
+    const size_t start = i;
+    while (i < text.size() && std::isalpha(static_cast<unsigned char>(text[i]))) {
+        ++i;
+    }
+    if (i <= start) return std::string();
+    return text.substr(start, i - start);
+}
+
+static bool engravingIsSigil(const Engraving& eg, std::string* keywordOut = nullptr) {
+    std::string k = sigilKeywordFromText(eg.text);
+    if (k.empty()) return false;
+    if (keywordOut) *keywordOut = std::move(k);
+    return true;
+}
+
 struct ThrowAmmoSpec {
     AmmoKind ammo = AmmoKind::None;
     ProjectileKind proj = ProjectileKind::Rock;
@@ -520,6 +577,7 @@ static std::pair<bool, bool> exportRunDumpToFile(const Game& game, const std::fi
     add("BURN", p.effects.burnTurns);
     add("LEV", p.effects.levitationTurns);
     add("FEAR", p.effects.fearTurns);
+    add("HALL", p.effects.hallucinationTurns);
     if (!any) f << "(none)";
     f << "\n";
 
@@ -762,9 +820,11 @@ static std::vector<std::string> extendedCommandList() {
     // Keep these short and stable: they're user-facing and used for completion/prefix matching.
     return {
         "help",
-    "shout",
-    "yell",
-    "whistle",
+        "shout",
+        "yell",
+        "whistle",
+        "listen",
+        "throwvoice",
         "pet",
         "tame",
         "options",
@@ -794,7 +854,7 @@ static std::vector<std::string> extendedCommandList() {
         "seed",
         "version",
         "name",
-    "class",
+        "class",
         "scores",
         "history",
         "messages",
@@ -810,10 +870,14 @@ static std::vector<std::string> extendedCommandList() {
         "unmark",
         "marks",
         "travel",
+        "engrave",
+        "inscribe",
         "search",
         "rest",
         "sneak",
         "dig",
+        "throwtorch",
+        "augury",
         "pray",
         "pay",
     };
@@ -905,6 +969,16 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     std::string cmdIn = toLower(toks[0]);
 
     if (cmdIn == "?" || cmdIn == "commands") cmdIn = "help";
+// Common aliases (kept out of the completion list so it stays short/stable).
+if (cmdIn == "annotate" || cmdIn == "note") cmdIn = "mark";
+else if (cmdIn == "unannotate" || cmdIn == "clearmark") cmdIn = "unmark";
+else if (cmdIn == "notes" || cmdIn == "markers") cmdIn = "marks";
+else if (cmdIn == "msghistory" || cmdIn == "message_history" || cmdIn == "msglog") cmdIn = "messages";
+else if (cmdIn == "controls" || cmdIn == "keyset") cmdIn = "preset";
+else if (cmdIn == "hear") cmdIn = "listen";
+else if (cmdIn == "vent" || cmdIn == "ventriloquism" || cmdIn == "voice" || cmdIn == "decoy") cmdIn = "throwvoice";
+else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn == "prophecy") cmdIn = "augury";
+
     std::vector<std::string> cmds = extendedCommandList();
 
     // Exact match first, else unique prefix match.
@@ -1045,7 +1119,10 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.pushSystemMessage("SLOTS: slot [name], save [slot], load [slot], loadauto [slot], saves");
         game.pushSystemMessage("EXPORT: exportlog/exportmap/export/exportall/dump");
         game.pushSystemMessage("MARKS: mark [note|danger|loot] <label> | unmark | marks | travel <index|label>");
+        game.pushSystemMessage("ENGRAVE: engrave <text> (costs a turn; try 'ELBERETH' for a ward)");
+        game.pushSystemMessage("SOUND: shout | whistle | listen | throwvoice [x y] (TIP: LOOK cursor works)");
         game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse|recharge] (costs gold)");
+        game.pushSystemMessage("AUGURY: augury (costs gold; shrine/camp only; hints can shift)");
         game.pushSystemMessage("DIG: dig <dir> (requires wielded pickaxe)");
         game.pushSystemMessage("CURSES: CURSED weapons/armor can't be removed until uncursed (scroll or shrine).");
         game.pushSystemMessage("MORTEM: mortem [on/off]");
@@ -1649,8 +1726,41 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "throwtorch") {
+        if (toks.size() < 2) {
+            game.pushSystemMessage("USAGE: throwtorch <dir>    (throws your currently lit torch)");
+            return;
+        }
+        int dx = 0, dy = 0;
+        if (!parseDirToken(toks[1], dx, dy)) {
+            game.pushSystemMessage("UNKNOWN DIRECTION: " + toks[1]);
+            return;
+        }
+        (void)game.throwTorchInDirection(dx, dy);
+        return;
+    }
+
+    if (cmd == "engrave" || cmd == "inscribe") {
+        if (toks.size() < 2) {
+            game.pushSystemMessage("USAGE: engrave <text>");
+            return;
+        }
+        std::string text;
+        for (size_t i = 1; i < toks.size(); ++i) {
+            if (!text.empty()) text += " ";
+            text += toks[i];
+        }
+        (void)game.engraveHere(text);
+        return;
+    }
+
     if (cmd == "pray") {
         game.prayAtShrine(arg(1));
+        return;
+    }
+
+    if (cmd == "augury") {
+        game.augury();
         return;
     }
 
@@ -2175,6 +2285,40 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "listen") {
+        game.listen();
+        return;
+    }
+
+    if (cmd == "throwvoice") {
+        // Usage:
+        //   #throwvoice X Y
+        //   #throwvoice            (targets LOOK cursor)
+        const bool wasLooking = game.isLooking();
+
+        Vec2i pos = { -1, -1 };
+        if (wasLooking) {
+            pos = game.lookCursor();
+        } else if (toks.size() >= 3) {
+            try {
+                const int x = std::stoi(toks[1], nullptr, 0);
+                const int y = std::stoi(toks[2], nullptr, 0);
+                pos = { x, y };
+            } catch (...) {
+                // fallthrough to usage
+            }
+        }
+
+        if (pos.x < 0 || pos.y < 0) {
+            game.pushSystemMessage("USAGE: throwvoice X Y");
+            game.pushSystemMessage("TIP: open LOOK (:) and move the cursor, then #throwvoice.");
+            return;
+        }
+
+        (void)game.throwVoiceAt(pos);
+        return;
+    }
+
     if (cmd == "shout" || cmd == "yell") {
         game.shout();
         return;
@@ -2253,6 +2397,7 @@ constexpr ItemKind POTION_KINDS[] = {
     ItemKind::PotionInvisibility,
     ItemKind::PotionClarity,
     ItemKind::PotionLevitation,
+    ItemKind::PotionHallucination,
 };
 
 constexpr ItemKind SCROLL_KINDS[] = {

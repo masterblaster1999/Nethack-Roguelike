@@ -365,7 +365,8 @@ bool Game::openChestAtPlayer() {
         setChestTrapped(chest, false);
         setChestTrapKnown(chest, true);
 
-        Entity& p = playerMut();        switch (tk) {
+        Entity& p = playerMut();
+        switch (tk) {
             case TrapKind::Spike: {
                 int dmg = rng.range(2, 5) + std::min(3, depth_ / 2);
                 p.hp -= dmg;
@@ -1290,19 +1291,64 @@ bool Game::useSelected() {
 
     if (it.kind == ItemKind::ScrollTeleport) {
         // Teleport to a random free floor.
+        //
+        // Obscure twist: while confused, this becomes a short-range blink to a random
+        // *visible* tile (line-of-sight) near the player, instead of a full random teleport.
         Vec2i prevPos = player().pos;
         Vec2i dst = prevPos;
 
-        for (int tries = 0; tries < 2000; ++tries) {
-            Vec2i p = dung.randomFloor(rng, true);
-            if (entityAt(p.x, p.y)) continue;
-            dst = p;
-            break;
+        const bool confused = (player().effects.confusionTurns > 0);
+        if (confused) {
+            constexpr int R = 6;
+            std::vector<uint8_t> mask;
+            dung.computeFovMask(prevPos.x, prevPos.y, R, mask);
+
+            std::vector<Vec2i> opts;
+            opts.reserve((2 * R + 1) * (2 * R + 1));
+
+            const int x0 = std::max(0, prevPos.x - R);
+            const int x1 = std::min(dung.width - 1, prevPos.x + R);
+            const int y0 = std::max(0, prevPos.y - R);
+            const int y1 = std::min(dung.height - 1, prevPos.y + R);
+
+            for (int y = y0; y <= y1; ++y) {
+                for (int x = x0; x <= x1; ++x) {
+                    const int i = y * dung.width + x;
+                    if (i < 0 || i >= static_cast<int>(mask.size())) continue;
+                    if (mask[i] == 0) continue;
+                    if (!dung.isWalkable(x, y)) continue;
+                    if (entityAt(x, y)) continue;
+                    if (x == prevPos.x && y == prevPos.y) continue;
+                    opts.push_back({x, y});
+                }
+            }
+
+            if (!opts.empty()) {
+                dst = opts[rng.range(0, static_cast<int>(opts.size()) - 1)];
+            } else {
+                // Fallback: if somehow boxed in, allow a normal random teleport.
+                for (int tries = 0; tries < 2000; ++tries) {
+                    Vec2i p = dung.randomFloor(rng, true);
+                    if (entityAt(p.x, p.y)) continue;
+                    dst = p;
+                    break;
+                }
+            }
+
+            pushMsg("YOU READ A SCROLL. YOU BLINK ERRATICALLY!", MessageKind::Info, true);
+        } else {
+            for (int tries = 0; tries < 2000; ++tries) {
+                Vec2i p = dung.randomFloor(rng, true);
+                if (entityAt(p.x, p.y)) continue;
+                dst = p;
+                break;
+            }
+
+            pushMsg("YOU READ A SCROLL. YOU VANISH!", MessageKind::Info, true);
         }
 
         playerMut().pos = dst;
 
-        pushMsg("YOU READ A SCROLL. YOU VANISH!", MessageKind::Info, true);
         (void)markIdentified(it.kind, false);
         consumeOneStackable();
         recomputeFov();
@@ -1320,11 +1366,17 @@ bool Game::useSelected() {
     }
 
     if (it.kind == ItemKind::ScrollMapping) {
-        dung.revealAll();
-        pushMsg("THE DUNGEON MAP IS REVEALED.", MessageKind::Info, true);
+        // While confused, your mind mis-reads the patterns: you get the inverse of mapping.
+        if (player().effects.confusionTurns > 0) {
+            pushMsg("THE SIGNS SWIM... AND YOUR MEMORY UNRAVELS!", MessageKind::Warning, true);
+            applyAmnesiaShock(4);
+        } else {
+            dung.revealAll();
+            pushMsg("THE DUNGEON MAP IS REVEALED.", MessageKind::Info, true);
+            recomputeFov();
+        }
         (void)markIdentified(it.kind, false);
         consumeOneStackable();
-        recomputeFov();
         return true;
     }
 
@@ -1783,9 +1835,44 @@ bool Game::useSelected() {
     if (it.kind == ItemKind::PotionClarity) {
         Entity& p = playerMut();
         const bool wasConfused = (p.effects.confusionTurns > 0);
+        const bool wasHallucinating = (p.effects.hallucinationTurns > 0);
         p.effects.confusionTurns = 0;
-        if (wasConfused) pushMsg("YOUR MIND CLEARS.", MessageKind::Success, true);
+        p.effects.hallucinationTurns = 0;
+
+        if (wasConfused || wasHallucinating) pushMsg("YOUR MIND CLEARS.", MessageKind::Success, true);
         else pushMsg("YOU FEEL FOCUSED.", MessageKind::Info, true);
+
+        (void)markIdentified(it.kind, false);
+        consumeOneStackable();
+        return true;
+    }
+
+    if (it.kind == ItemKind::PotionHallucination) {
+        Entity& p = playerMut();
+
+        // Base duration. This effect is mostly a perception hazard, but we still let
+        // blessed/cursed modify it for variety.
+        int dur = 28 + rng.range(0, 24);
+        if (it.buc > 0) {
+            // Blessed: shorter trip, and a brief "lucid" boost.
+            dur = std::max(8, dur / 2);
+            p.effects.visionTurns = std::max(p.effects.visionTurns, 8);
+            pushMsg("REALITY BUCKLES... THEN SNAPS INTO STRANGE CLARITY.", MessageKind::Info, true);
+        } else if (it.buc < 0) {
+            // Cursed: longer, plus some confusion.
+            dur += 18;
+            p.effects.confusionTurns = std::max(p.effects.confusionTurns, 6);
+            pushMsg("THE WORLD TURNS KALEIDOSCOPIC!", MessageKind::Warning, true);
+        } else {
+            pushMsg("THE WORLD SWIMS BEFORE YOUR EYES!", MessageKind::Warning, true);
+        }
+
+        p.effects.hallucinationTurns = std::max(p.effects.hallucinationTurns, dur);
+
+        // Blessed hallucinations also grant a brief Vision boost.
+        if (it.buc > 0) {
+            recomputeFov();
+        }
 
         (void)markIdentified(it.kind, false);
         consumeOneStackable();

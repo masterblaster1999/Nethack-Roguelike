@@ -46,6 +46,7 @@ struct GameTestAccess {
     static void recomputeFov(Game& g) { g.recomputeFov(); }
     static bool useSelected(Game& g) { return g.useSelected(); }
     static Dungeon& dungeon(Game& g) { return g.dung; }
+    static void markIdentified(Game& g, ItemKind k, bool quiet = false) { g.markIdentified(k, quiet); }
 };
 
 namespace {
@@ -82,7 +83,7 @@ void test_rng_reproducible() {
 }
 
 void test_dungeon_stairs_connected() {
-    const int depthsToTest[] = {1, 2, 3, 4, 5, 7, 8};
+    const int depthsToTest[] = {0, 1, 2, 3, 4, 5, 7, 8};
 
     for (int depth : depthsToTest) {
         RNG rng(42u + static_cast<uint32_t>(depth));
@@ -599,6 +600,111 @@ void test_sinkholes_generate_deep_mines() {
     }
 }
 
+void test_dead_end_stash_closets_generate() {
+    // Dead-end stash closets are tiny side rooms carved off corridor/tunnel dead ends.
+    // Mines floors are exploration-heavy, so closets should appear fairly often.
+    bool foundAny = false;
+
+    for (uint32_t seed = 1; seed <= 120; ++seed) {
+        RNG rng(31337u + seed * 97u);
+        Dungeon d(60, 40);
+        d.generate(rng, Dungeon::MINES_DEPTH, /*maxDepth=*/10);
+
+        if (d.deadEndClosetCount > 0) {
+            foundAny = true;
+            // Keep the feature sane: don't explode chest count.
+            expect(d.deadEndClosetCount <= 3, "Expected dead-end closet count to be small (<= 3)");
+            break;
+        }
+    }
+
+    expect(foundAny, "Expected to find at least one dead-end stash closet across seeds (Mines depth)");
+}
+
+
+
+
+
+
+void test_special_rooms_paced_by_distance() {
+    // Special rooms are assigned using a light distance heuristic:
+    //   - Shops tend to be closer to the upstairs (so gold matters earlier)
+    //   - Treasure rooms tend to be deeper (so exploration is rewarded)
+    //
+    // On depth 5, shops are (conditionally) guaranteed when there is room, making
+    // it a good depth to smoke-test pacing.
+
+    int checked = 0;
+
+    for (uint32_t seed = 1; seed <= 40; ++seed) {
+        RNG rng(2026u + seed * 17u);
+        Dungeon d(60, 40);
+        d.generate(rng, /*depth=*/5, /*maxDepth=*/10);
+
+        int shopIdx = -1;
+        int treasureIdx = -1;
+        for (int i = 0; i < static_cast<int>(d.rooms.size()); ++i) {
+            const RoomType rt = d.rooms[static_cast<size_t>(i)].type;
+            if (rt == RoomType::Shop) shopIdx = i;
+            if (rt == RoomType::Treasure && treasureIdx < 0) treasureIdx = i;
+        }
+
+        if (shopIdx < 0 || treasureIdx < 0) continue;
+
+        // BFS passable distance from stairsUp.
+        std::vector<int> dist(static_cast<size_t>(d.width * d.height), -1);
+        auto idx = [&](int x, int y) { return y * d.width + x; };
+
+        if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) continue;
+        std::queue<Vec2i> q;
+        dist[static_cast<size_t>(idx(d.stairsUp.x, d.stairsUp.y))] = 0;
+        q.push(d.stairsUp);
+
+        const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+        while (!q.empty()) {
+            Vec2i p = q.front();
+            q.pop();
+            const int cd = dist[static_cast<size_t>(idx(p.x, p.y))];
+
+            for (auto& dv : dirs) {
+                const int nx = p.x + dv[0];
+                const int ny = p.y + dv[1];
+                if (!d.inBounds(nx, ny)) continue;
+                if (!d.isPassable(nx, ny)) continue;
+                const int ii = idx(nx, ny);
+                if (dist[static_cast<size_t>(ii)] != -1) continue;
+                dist[static_cast<size_t>(ii)] = cd + 1;
+                q.push({nx, ny});
+            }
+        }
+
+        auto roomMinDist = [&](const Room& r) -> int {
+            int best = 1000000000;
+            for (int y = r.y + 1; y < r.y + r.h - 1; ++y) {
+                for (int x = r.x + 1; x < r.x + r.w - 1; ++x) {
+                    if (!d.inBounds(x, y)) continue;
+                    if (!d.isPassable(x, y)) continue;
+                    const int di = dist[static_cast<size_t>(idx(x, y))];
+                    if (di >= 0 && di < best) best = di;
+                }
+            }
+            return (best == 1000000000) ? -1 : best;
+        };
+
+        const int sd = roomMinDist(d.rooms[static_cast<size_t>(shopIdx)]);
+        const int td = roomMinDist(d.rooms[static_cast<size_t>(treasureIdx)]);
+
+        expect(sd >= 0, "Shop room should be reachable from stairsUp (depth 5)");
+        expect(td >= 0, "Treasure room should be reachable from stairsUp (depth 5)");
+
+        if (sd >= 0 && td >= 0) {
+            expect(sd <= td, "Shop should generally be closer to stairsUp than Treasure (pacing)");
+            checked += 1;
+        }
+    }
+
+    expect(checked >= 8, "Expected to validate shop/treasure pacing on many seeds (depth 5)");
+}
 
 
 void test_rogue_level_layout() {
@@ -869,6 +975,40 @@ void test_sound_diagonal_corner_cutting_is_blocked() {
     d.at(2, 1).type = TileType::Floor;
     auto sound2 = d.computeSoundMap(1, 1, 5);
     expect(sound2[2 * d.width + 2] == 1, "Sound should propagate diagonally if a corner is open");
+}
+
+void test_augury_preview_does_not_consume_rng() {
+    Game g;
+    g.newGame(123u);
+
+    // Move to the surface camp so augury is allowed without requiring a shrine to spawn.
+    GameTestAccess::changeLevel(g, 0, false);
+
+    // Remove all monsters so advancing a turn won't consume RNG.
+    {
+        auto& ents = GameTestAccess::ents(g);
+        const int pid = g.playerId();
+        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+            return e.id != pid;
+        }), ents.end());
+    }
+
+    // Ensure we have enough gold to pay the augury cost.
+    {
+        auto& inv = GameTestAccess::inv(g);
+        inv.clear();
+        Item gold;
+        gold.kind = ItemKind::Gold;
+        gold.count = 999;
+        inv.push_back(gold);
+    }
+
+    const uint32_t before = GameTestAccess::rng(g).state;
+    const bool spent = g.augury();
+    const uint32_t after = GameTestAccess::rng(g).state;
+
+    expect(spent, "augury should spend a turn at camp when you have gold");
+    expect(before == after, "augury should not consume the main game RNG state");
 }
 
 void test_weighted_pathfinding_prefers_open_route_over_closed_door() {
@@ -2159,6 +2299,185 @@ void test_shop_debt_ledger_save_load_roundtrip() {
     (void)std::remove(path.c_str());
 }
 
+void test_engravings_basic_and_save_load_roundtrip() {
+    const std::string path = "test_engravings_tmp.sav";
+    (void)std::remove(path.c_str());
+
+    Game g;
+    g.newGame(123u);
+    const Vec2i p = g.player().pos;
+
+    expect(g.engraveHere("Hello World"), "engraveHere should succeed on walkable tiles");
+    {
+        const Engraving* eg = g.engravingAt(p);
+        expect(eg != nullptr, "engravingAt should find the player-engraved text");
+        expect(eg->text == "Hello World", "Engraving text should match");
+        expect(!eg->isGraffiti, "Player engravings should not be flagged as graffiti");
+        expect(!eg->isWard, "Non-ward engravings should not be flagged as ward");
+        expect(eg->strength == 255, "Non-ward engravings should default to permanent strength (255)");
+    }
+
+    expect(g.engraveHere("Elbereth"), "engraveHere should accept the classic warding word");
+    {
+        const Engraving* eg = g.engravingAt(p);
+        expect(eg != nullptr, "Ward engraving should exist");
+        expect(eg->isWard, "Elbereth engraving should be flagged as a ward");
+        expect(eg->strength < 255, "Ward engravings should not be permanent");
+    }
+
+    expect(g.saveToFile(path, true), "Saving should succeed");
+
+    Game g2;
+    expect(g2.loadFromFile(path), "Loading should succeed");
+
+    {
+        const Engraving* eg = g2.engravingAt(p);
+        expect(eg != nullptr, "Engraving should round-trip through save/load");
+        expect(eg->isWard, "Ward flag should round-trip through save/load");
+        expect(eg->text == "Elbereth", "Engraving text should round-trip through save/load");
+    }
+    (void)std::remove(path.c_str());
+}
+
+void test_command_prompt_preserves_look_cursor() {
+    Game g;
+    g.newGame(123u);
+
+    const Vec2i ppos = g.player().pos;
+
+    g.handleAction(Action::Look);
+    expect(g.isLooking(), "LOOK mode should activate");
+
+    const Vec2i start = g.lookCursor();
+    expect(start == ppos, "LOOK cursor should start at the player position");
+
+    g.handleAction(Action::Right);
+    const Vec2i moved = g.lookCursor();
+    expect(moved != start, "LOOK cursor should move");
+    expect(g.player().pos == ppos, "Player should not move while LOOK is active");
+
+    g.handleAction(Action::Command);
+    expect(g.isCommandOpen(), "Command prompt should open from LOOK mode");
+    expect(g.isLooking(), "LOOK mode should remain active while the command prompt is open");
+    expect(g.lookCursor() == moved, "LOOK cursor should be preserved when opening the command prompt");
+
+    g.handleAction(Action::Cancel);
+    expect(!g.isCommandOpen(), "Cancel should close the command prompt");
+    expect(g.isLooking(), "Closing the command prompt should not close LOOK mode");
+
+    g.handleAction(Action::Look);
+    expect(!g.isLooking(), "LOOK should be closable after using the command prompt");
+}
+
+void test_throwvoice_alerts_monster_at_target_tile() {
+    Game g;
+    g.newGame(123u);
+
+    // Make a simple open map so sound propagation is predictable.
+    Dungeon& d = GameTestAccess::dungeon(g);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            auto& t = d.at(x, y);
+            t.type = TileType::Floor;
+            t.visible = false;
+            t.explored = true;
+        }
+    }
+
+    // Reposition the player.
+    Entity* p = nullptr;
+    for (auto& e : GameTestAccess::ents(g)) {
+        if (e.id == g.playerId()) {
+            p = &e;
+            break;
+        }
+    }
+    expect(p != nullptr, "Player entity should exist");
+    if (!p) return;
+
+    p->pos = {5, 5};
+    p->effects.confusionTurns = 0;
+
+    // Spawn a hostile monster.
+    Entity m;
+    m.id = 424242;
+    m.kind = EntityKind::Goblin;
+    m.pos = {8, 5};
+    m.hp = 5;
+    m.hpMax = 5;
+    m.alerted = false;
+    m.friendly = false;
+    m.lastKnownPlayerPos = {-1, -1};
+    GameTestAccess::ents(g).push_back(m);
+
+    const int turns0 = g.turns();
+    const bool spent = g.throwVoiceAt({8, 5});
+    expect(spent, "throwVoiceAt should succeed on in-range, sound-passable tiles");
+    expect(g.turns() == turns0 + 1, "throwVoiceAt should spend a turn");
+
+    Entity* mm = nullptr;
+    for (auto& e : GameTestAccess::ents(g)) {
+        if (e.id == 424242) {
+            mm = &e;
+            break;
+        }
+    }
+    expect(mm != nullptr, "Spawned monster should exist");
+    if (!mm) return;
+
+    expect(mm->alerted, "Monster should become alerted by thrown-voice noise");
+    expect(mm->lastKnownPlayerPos == Vec2i{8, 5},
+           "Monster should investigate the thrown-voice location");
+}
+
+void test_listen_reports_hidden_monster_and_spends_turn() {
+    Game g;
+    g.newGame(123u);
+
+    Dungeon& d = GameTestAccess::dungeon(g);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            auto& t = d.at(x, y);
+            t.type = TileType::Floor;
+            t.visible = false;
+            t.explored = true;
+        }
+    }
+
+    Entity* p = nullptr;
+    for (auto& e : GameTestAccess::ents(g)) {
+        if (e.id == g.playerId()) {
+            p = &e;
+            break;
+        }
+    }
+    expect(p != nullptr, "Player entity should exist");
+    if (!p) return;
+
+    p->pos = {5, 5};
+    p->effects.confusionTurns = 0;
+
+    Entity m;
+    m.id = 777777;
+    m.kind = EntityKind::Goblin;
+    m.pos = {7, 5};
+    m.hp = 5;
+    m.hpMax = 5;
+    m.friendly = false;
+    GameTestAccess::ents(g).push_back(m);
+
+    const int turns0 = g.turns();
+    g.listen();
+    expect(g.turns() == turns0 + 1, "listen should spend a turn");
+
+    const auto& msgs = g.messages();
+    expect(!msgs.empty(), "listen should add at least one message");
+    if (!msgs.empty()) {
+        expect(msgs.back().text.find("YOU HEAR") != std::string::npos,
+               "listen message should mention hearing");
+    }
+}
+
 void test_scroll_fear_applies_fear_to_visible_monsters() {
     Game g;
     g.newGame(123u);
@@ -2175,6 +2494,14 @@ void test_scroll_fear_applies_fear_to_visible_monsters() {
     // Place a hostile monster on a visible, walkable adjacent tile.
     const Dungeon& d = g.dungeon();
     const Vec2i ppos = g.player().pos;
+
+    auto hasEntityAt = [&](int x, int y) -> bool {
+        for (const auto& e : GameTestAccess::ents(g)) {
+            if (e.hp <= 0) continue;
+            if (e.pos.x == x && e.pos.y == y) return true;
+        }
+        return false;
+    };
 
     Vec2i mpos = ppos;
     bool found = false;
@@ -2803,6 +3130,114 @@ void test_levitation_skips_trap_door_trigger() {
     expect(GameTestAccess::depth(g) == startDepth, "Levitating player should float over trap doors");
 }
 
+void test_lethe_mist_triggers_amnesia_and_forgets_far_memory() {
+    Game g;
+    g.newGame(1337u);
+
+    // Ensure deterministic setup: remove any randomly spawned traps.
+    GameTestAccess::traps(g).clear();
+
+    Dungeon& d = GameTestAccess::dungeon(g);
+    d.revealAll();
+    GameTestAccess::recomputeFov(g);
+
+    const Vec2i ppos = g.player().pos;
+
+    auto hasEntityAt = [&](int x, int y) -> bool {
+        for (const auto& e : GameTestAccess::ents(g)) {
+            if (e.hp <= 0) continue;
+            if (e.pos.x == x && e.pos.y == y) return true;
+        }
+        return false;
+    };
+
+    // Find a far, walkable, currently not-visible tile.
+    Vec2i far{-1, -1};
+    for (int y = 0; y < d.height && far.x < 0; ++y) {
+        for (int x = 0; x < d.width && far.x < 0; ++x) {
+            if (!d.isWalkable(x, y)) continue;
+            if (hasEntityAt(x, y)) continue;
+            if (d.at(x, y).visible) continue;
+            if (chebyshev(ppos, {x, y}) <= 8) continue;
+            far = {x, y};
+        }
+    }
+    expect(far.x >= 0, "Found a far non-visible walkable tile for Lethe mist test");
+    if (far.x < 0) return;
+
+    // Find an adjacent walkable tile for a "remembered" marker/trap.
+    Vec2i near = ppos;
+    bool foundNear = false;
+    for (int dy = -1; dy <= 1 && !foundNear; ++dy) {
+        for (int dx = -1; dx <= 1 && !foundNear; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            Vec2i cand{ppos.x + dx, ppos.y + dy};
+            if (!d.inBounds(cand.x, cand.y)) continue;
+            if (!d.isWalkable(cand.x, cand.y)) continue;
+            if (hasEntityAt(cand.x, cand.y)) continue;
+            near = cand;
+            foundNear = true;
+        }
+    }
+    expect(foundNear, "Found an adjacent walkable tile for Lethe mist near-memory test");
+    if (!foundNear) return;
+
+    // Place discovered traps at far and near.
+    GameTestAccess::traps(g).push_back({TrapKind::Spike, far, true});
+    GameTestAccess::traps(g).push_back({TrapKind::Spike, near, true});
+
+    // Place markers at far and near.
+    g.setMarker(far, MarkerKind::Note, "FAR", false);
+    g.setMarker(near, MarkerKind::Note, "NEAR", false);
+
+    // Make an existing monster "alerted" at the far (unseen) position.
+    Entity* m = nullptr;
+    for (auto& e : GameTestAccess::ents(g)) {
+        if (e.id == g.playerId()) continue;
+        if (e.hp <= 0) continue;
+        if (e.friendly) continue;
+        m = &e;
+        break;
+    }
+    expect(m != nullptr, "Found a monster entity for Lethe mist test");
+    if (!m) return;
+    m->pos = far;
+    m->alerted = true;
+    m->lastKnownPlayerPos = ppos;
+    m->lastKnownPlayerAge = 1;
+
+    // Add a Lethe mist trap under the player and trigger it.
+    GameTestAccess::traps(g).push_back({TrapKind::LetheMist, ppos, false});
+
+    expect(d.at(far.x, far.y).explored, "Precondition: far tile should start explored (after revealAll)");
+
+    GameTestAccess::triggerTrapAt(g, ppos, g.playerMut());
+
+    // Far tile should no longer be explored (and marker forgotten).
+    expect(!d.at(far.x, far.y).explored, "Lethe mist should clear explored memory for far tiles");
+    expect(g.markerAt(far) == nullptr, "Lethe mist should forget far map markers");
+
+    // Far trap should be forgotten; near trap should remain discovered.
+    bool farTrapForgotten = false;
+    bool nearTrapStillKnown = false;
+    for (const auto& tr : GameTestAccess::traps(g)) {
+        if (tr.pos == far && tr.kind == TrapKind::Spike) farTrapForgotten = !tr.discovered;
+        if (tr.pos == near && tr.kind == TrapKind::Spike) nearTrapStillKnown = tr.discovered;
+    }
+    expect(farTrapForgotten, "Lethe mist should clear discovered state for far traps");
+    expect(nearTrapStillKnown, "Lethe mist should preserve discovered state for nearby traps");
+
+    // Near marker should remain.
+    expect(g.markerAt(near) != nullptr, "Lethe mist should preserve nearby markers");
+
+    // Monster at far (unseen) should lose alert state and memory.
+    expect(!m->alerted, "Lethe mist should calm unseen monsters (alerted false)");
+    expect(m->lastKnownPlayerPos.x == -1 && m->lastKnownPlayerPos.y == -1,
+           "Lethe mist should clear unseen monster lastKnownPlayerPos");
+    expect(m->lastKnownPlayerAge >= 1000,
+           "Lethe mist should set unseen monster lastKnownPlayerAge to a large value");
+}
+
 
 void test_trap_door_monster_falls_to_next_depth_and_persists() {
     Game g;
@@ -3212,6 +3647,68 @@ void test_content_overrides_basic() {
 }
 
 
+void test_discoveries_list_builds_and_sorts() {
+    Game g;
+    g.newGame(1337u);
+
+    auto catOrder = [](ItemKind k) -> int {
+        if (isPotionKind(k)) return 0;
+        if (isScrollKind(k)) return 1;
+        if (isRingKind(k)) return 2;
+        if (isWandKind(k)) return 3;
+        return 4;
+    };
+
+    // All identifiable items should be present.
+    {
+        std::vector<ItemKind> list;
+        g.buildDiscoveryList(list, DiscoveryFilter::All, DiscoverySort::Appearance);
+
+        int expected = 0;
+        for (int i = 0; i < ITEM_KIND_COUNT; ++i) {
+            const ItemKind k = static_cast<ItemKind>(i);
+            if (isIdentifiableKind(k)) ++expected;
+        }
+        expect(static_cast<int>(list.size()) == expected, "Discovery list should include all identifiable item kinds");
+
+        // Should be grouped by category (potions, scrolls, rings, wands) and sorted by appearance label within group.
+        int prevCat = -1;
+        std::string prevApp;
+        for (ItemKind k : list) {
+            const int c = catOrder(k);
+            expect(c >= 0 && c <= 3, "Discovery list should not contain non-identifiable kinds");
+            expect(c >= prevCat, "Discovery list should be grouped by category");
+
+            const std::string app = g.discoveryAppearanceLabel(k);
+            if (c == prevCat) {
+                expect(app >= prevApp, "Discovery list should be sorted by appearance label within category");
+            } else {
+                prevApp = app;
+                prevCat = c;
+            }
+        }
+    }
+
+    // Filtering should only return the chosen category.
+    {
+        std::vector<ItemKind> list;
+        g.buildDiscoveryList(list, DiscoveryFilter::Potions, DiscoverySort::Appearance);
+        for (ItemKind k : list) {
+            expect(isPotionKind(k), "Potion filter should only include potions");
+        }
+    }
+
+    // Identified-first sort should move identified entries to the top within a category.
+    {
+        GameTestAccess::markIdentified(g, ItemKind::PotionHealing, true);
+        std::vector<ItemKind> list;
+        g.buildDiscoveryList(list, DiscoveryFilter::Potions, DiscoverySort::IdentifiedFirst);
+        expect(!list.empty(), "Potion discovery list should not be empty");
+        expect(list[0] == ItemKind::PotionHealing, "Identified potion should appear first when sorting IdentifiedFirst");
+    }
+}
+
+
 int main() {
     std::cout << "Running ProcRogue tests...\n";
 
@@ -3226,6 +3723,8 @@ int main() {
     test_locked_shortcut_gates_generate();
     test_corridor_hubs_and_halls_generate();
     test_sinkholes_generate_deep_mines();
+    test_dead_end_stash_closets_generate();
+    test_special_rooms_paced_by_distance();
     test_rogue_level_layout();
     test_final_floor_sanctum_layout();
     test_secret_door_tile_rules();
@@ -3237,6 +3736,7 @@ int main() {
     test_los_blocks_diagonal_corner_peek();
     test_sound_propagation_respects_walls_and_muffling_doors();
     test_sound_diagonal_corner_cutting_is_blocked();
+    test_augury_preview_does_not_consume_rng();
     test_weighted_pathfinding_prefers_open_route_over_closed_door();
     test_item_defs_sane();
     test_item_weight_helpers();
@@ -3271,11 +3771,17 @@ int main() {
     test_fov_mask_matches_compute_fov();
     test_fov_mark_explored_flag();
 
+    test_discoveries_list_builds_and_sorts();
+
     // Patch-specific regression tests.
     test_dungeon_digging();
     test_wand_display_shows_charges();
     test_shop_debt_ledger_persists_after_consumption();
     test_shop_debt_ledger_save_load_roundtrip();
+    test_engravings_basic_and_save_load_roundtrip();
+    test_command_prompt_preserves_look_cursor();
+    test_throwvoice_alerts_monster_at_target_tile();
+    test_listen_reports_hidden_monster_and_spends_turn();
     test_scroll_fear_applies_fear_to_visible_monsters();
     test_scroll_earth_raises_boulders_around_player();
     test_scroll_taming_charms_adjacent_non_undead_monsters();
@@ -3287,6 +3793,7 @@ int main() {
     test_bonus_cache_guards_spawn_adjacent_floor_trap();
     test_trap_door_drops_player_to_next_depth();
     test_levitation_skips_trap_door_trigger();
+    test_lethe_mist_triggers_amnesia_and_forgets_far_memory();
     test_trap_door_monster_falls_to_next_depth_and_persists();
     test_shrine_recharge_replenishes_wand_charges();
     test_monster_energy_scheduling_basic();

@@ -41,7 +41,7 @@ void Game::update(float dt) {
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
-        if (invOpen || chestOpen || targeting || kicking || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen || isFinished()) {
+        if (invOpen || chestOpen || targeting || kicking || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || codexOpen || discoveriesOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen || isFinished()) {
             stopAutoMove(true);
             return;
         }
@@ -219,6 +219,7 @@ void Game::handleAction(Action a) {
         msgHistoryScroll = 0;
 
         codexOpen = false;
+        discoveriesOpen = false;
 
         if (commandOpen) {
             commandOpen = false;
@@ -419,6 +420,21 @@ void Game::handleAction(Action a) {
                 }
             }
             return;
+        case Action::Discoveries:
+            if (discoveriesOpen) {
+                discoveriesOpen = false;
+            } else {
+                closeOverlays();
+                discoveriesOpen = true;
+                std::vector<ItemKind> list;
+                buildDiscoveryList(list);
+                if (list.empty()) {
+                    discoveriesSel = 0;
+                } else {
+                    discoveriesSel = clampi(discoveriesSel, 0, static_cast<int>(list.size()) - 1);
+                }
+            }
+            return;
         case Action::ToggleMinimap:
             if (minimapOpen) {
                 minimapOpen = false;
@@ -456,11 +472,21 @@ void Game::handleAction(Action a) {
                 commandDraft.clear();
                 commandHistoryPos = -1;
             } else {
+                // Allow opening the command prompt while in LOOK mode without losing the cursor,
+                // so commands like #mark / #travel / #throwvoice can apply to the looked-at tile.
+                const bool preserveLook = looking;
+                const Vec2i savedLook = lookPos;
+
                 closeOverlays();
                 commandOpen = true;
                 commandBuf.clear();
                 commandDraft.clear();
                 commandHistoryPos = -1;
+
+                if (preserveLook) {
+                    looking = true;
+                    lookPos = savedLook;
+                }
             }
             return;
         default:
@@ -878,6 +904,71 @@ if (optionsSel == 19) {
         return;
     }
 
+    // Overlay: discoveries (identification reference)
+    if (discoveriesOpen) {
+        std::vector<ItemKind> list;
+        buildDiscoveryList(list);
+        const int n = static_cast<int>(list.size());
+        if (n <= 0) {
+            discoveriesSel = 0;
+        } else {
+            discoveriesSel = clampi(discoveriesSel, 0, n - 1);
+        }
+
+        auto cycleFilter = [&](int dir) {
+            const int maxF = static_cast<int>(DiscoveryFilter::Wands);
+            int v = static_cast<int>(discoveriesFilter_);
+            v += dir;
+            if (v < 0) v = maxF;
+            if (v > maxF) v = 0;
+            discoveriesFilter_ = static_cast<DiscoveryFilter>(v);
+            discoveriesSel = 0;
+        };
+
+        switch (a) {
+            case Action::Cancel:
+            case Action::Discoveries:
+            case Action::Confirm:
+                discoveriesOpen = false;
+                return;
+            case Action::Up:
+                discoveriesSel -= 1;
+                break;
+            case Action::Down:
+                discoveriesSel += 1;
+                break;
+            case Action::LogUp:
+                discoveriesSel -= 10;
+                break;
+            case Action::LogDown:
+                discoveriesSel += 10;
+                break;
+            case Action::Left:
+                cycleFilter(-1);
+                return;
+            case Action::Right:
+            case Action::Inventory:
+                // Convenient: Tab cycles forward.
+                cycleFilter(+1);
+                return;
+            case Action::SortInventory:
+                discoveriesSort_ = (discoveriesSort_ == DiscoverySort::Appearance)
+                    ? DiscoverySort::IdentifiedFirst
+                    : DiscoverySort::Appearance;
+                discoveriesSel = 0;
+                return;
+            default:
+                return;
+        }
+
+        if (n <= 0) {
+            discoveriesSel = 0;
+            return;
+        }
+        discoveriesSel = clampi(discoveriesSel, 0, n - 1);
+        return;
+    }
+
     // Overlay: message history (full log viewer)
     if (msgHistoryOpen) {
         auto historyFilteredCount = [&]() -> int {
@@ -1238,7 +1329,7 @@ if (optionsSel == 19) {
                 acted = false;
             } else if (p.pos == dung.stairsUp) {
                 // At depth 1, stairs up is the exit.
-                if (depth_ <= 1) {
+                if (depth_ <= 0) {
                     if (encumbranceEnabled_ && burdenState() == BurdenState::Overloaded) {
                         pushMsg("YOU ARE OVERLOADED!", MessageKind::Warning, true);
                     } else if (playerHasAmulet()) {
@@ -1312,7 +1403,7 @@ if (optionsSel == 19) {
                     acted = false;
                     break;
                 }
-                if (depth_ <= 1) {
+                if (depth_ <= 0) {
                     if (playerHasAmulet()) {
                         gameWon = true;
                         if (endCause_.empty()) endCause_ = "ESCAPED WITH THE AMULET";
@@ -1439,6 +1530,177 @@ void Game::whistle() {
     }
 
     advanceAfterPlayerAction();
+}
+
+void Game::listen() {
+    if (isFinished()) return;
+
+    Entity& p = playerMut();
+
+    // Listening is an intentional, turn-spending action (like searching) but it does NOT make noise.
+    // It reports *unseen* creatures that are close enough to be heard through doors/corridors.
+    int range = 10 + (playerFocus() / 2);
+    if (isSneaking()) range += 2;
+    range = clampi(range, 6, 20);
+
+    const int W = dung.width;
+    auto idx = [&](int x, int y) { return y * W + x; };
+
+    const std::vector<int> sound = dung.computeSoundMap(p.pos.x, p.pos.y, range);
+
+    struct DirInfo {
+        int count = 0;
+        int best = 9999;
+    };
+
+    std::array<DirInfo, 8> dirs{};
+
+    auto dirIndex = [&](int dx, int dy) -> int {
+        const int sx = (dx > 0) - (dx < 0);
+        const int sy = (dy > 0) - (dy < 0);
+        // 0:N, 1:NE, 2:E, 3:SE, 4:S, 5:SW, 6:W, 7:NW
+        if (sx == 0 && sy < 0) return 0;
+        if (sx > 0 && sy < 0) return 1;
+        if (sx > 0 && sy == 0) return 2;
+        if (sx > 0 && sy > 0) return 3;
+        if (sx == 0 && sy > 0) return 4;
+        if (sx < 0 && sy > 0) return 5;
+        if (sx < 0 && sy == 0) return 6;
+        return 7;
+    };
+
+    bool heard = false;
+
+    for (const auto& e : ents) {
+        if (e.id == playerId_) continue;
+        if (e.hp <= 0) continue;
+        if (e.friendly) continue;
+        if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
+
+        // Shopkeepers are special; unalerted ones effectively "ignore" player noise.
+        if (e.kind == EntityKind::Shopkeeper && !e.alerted) continue;
+
+        // Listening only reports things you cannot currently see.
+        if (dung.at(e.pos.x, e.pos.y).visible) continue;
+
+        const int d = sound[static_cast<size_t>(idx(e.pos.x, e.pos.y))];
+        if (d < 0 || d > range) continue;
+
+        heard = true;
+        const int di = dirIndex(e.pos.x - p.pos.x, e.pos.y - p.pos.y);
+        DirInfo& info = dirs[static_cast<size_t>(di)];
+        info.count += 1;
+        info.best = std::min(info.best, d);
+    }
+
+    if (!heard) {
+        pushMsg("YOU HEAR NOTHING UNUSUAL.", MessageKind::Info, true);
+        advanceAfterPlayerAction();
+        return;
+    }
+
+    struct Out {
+        int di = 0;
+        int best = 9999;
+        int count = 0;
+    };
+
+    std::vector<Out> outs;
+    outs.reserve(8);
+    for (int i = 0; i < 8; ++i) {
+        const DirInfo& info = dirs[static_cast<size_t>(i)];
+        if (info.count <= 0) continue;
+        outs.push_back({i, info.best, info.count});
+    }
+
+    std::sort(outs.begin(), outs.end(), [&](const Out& a, const Out& b) {
+        // Prefer closest sounds; tie-break with more activity.
+        if (a.best != b.best) return a.best < b.best;
+        return a.count > b.count;
+    });
+
+    static const char* DIRNAMES[8] = {
+        "NORTH", "NORTHEAST", "EAST", "SOUTHEAST", "SOUTH", "SOUTHWEST", "WEST", "NORTHWEST"
+    };
+
+    const int maxLines = 3;
+    const int n = static_cast<int>(outs.size());
+    for (int i = 0; i < n && i < maxLines; ++i) {
+        const Out& o = outs[static_cast<size_t>(i)];
+        const char* strength = (o.best <= 3) ? "CLOSE" : (o.best <= 7) ? "NEARBY" : "FAINT";
+        std::string msg = std::string("YOU HEAR ") + strength + " SOUNDS TO THE " + DIRNAMES[o.di] + ".";
+        pushMsg(msg, MessageKind::Info, true);
+    }
+
+    if (n > maxLines) {
+        pushMsg("YOU HEAR OTHER DISTANT SOUNDS.", MessageKind::Info, true);
+    }
+
+    advanceAfterPlayerAction();
+}
+
+bool Game::throwVoiceAt(Vec2i target) {
+    if (isFinished()) return false;
+
+    Entity& p = playerMut();
+
+    // Range scales with Focus (same stat used for searching/wands). Sneaking helps a bit too.
+    int range = 8 + playerFocus();
+    if (isSneaking()) range += 2;
+    range = clampi(range, 6, 22);
+
+    if (!dung.inBounds(target.x, target.y)) {
+        pushMsg("THAT'S OUT OF BOUNDS.", MessageKind::Info, true);
+        return false;
+    }
+
+    const int W = dung.width;
+    auto idx = [&](int x, int y) { return y * W + x; };
+
+    // Use the dungeon-aware sound propagation map as the validity check:
+    // you can only throw a voice where sound could plausibly travel.
+    const std::vector<int> sound = dung.computeSoundMap(p.pos.x, p.pos.y, range);
+    const int dist = sound[static_cast<size_t>(idx(target.x, target.y))];
+
+    if (dist < 0 || dist > range) {
+        pushMsg("YOUR VOICE CAN'T REACH THERE.", MessageKind::Info, true);
+        return false;
+    }
+
+    Vec2i actual = target;
+
+    // Confusion makes the illusion drift.
+    if (p.effects.confusionTurns > 0) {
+        std::vector<Vec2i> candidates;
+        candidates.reserve(25);
+
+        for (int dy = -2; dy <= 2; ++dy) {
+            for (int dx = -2; dx <= 2; ++dx) {
+                Vec2i q{target.x + dx, target.y + dy};
+                if (!dung.inBounds(q.x, q.y)) continue;
+                const int dd = sound[static_cast<size_t>(idx(q.x, q.y))];
+                if (dd < 0 || dd > range) continue;
+                candidates.push_back(q);
+            }
+        }
+
+        if (!candidates.empty()) {
+            actual = candidates[static_cast<size_t>(rng.range(0, static_cast<int>(candidates.size()) - 1))];
+        }
+    }
+
+    pushMsg("YOU THROW YOUR VOICE.", MessageKind::Info, true);
+
+    // A tiny whisper still originates from you; the main apparent sound is at the target.
+    emitNoise(p.pos, isSneaking() ? 1 : 2);
+    emitNoise(actual, 14);
+
+    if (actual.x != target.x || actual.y != target.y) {
+        pushMsg("...IT WOBBLES OFF TARGET.", MessageKind::Info, true);
+    }
+
+    advanceAfterPlayerAction();
+    return true;
 }
 
 void Game::setAlliesOrder(AllyOrder order, bool verbose) {

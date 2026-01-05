@@ -837,6 +837,22 @@ VoxelModel buildProjectileModel(ProjectileKind kind, int frame, const SpritePixe
             }
             return m;
         }
+        case ProjectileKind::Torch: {
+            m = makeModel(W,H,D);
+            // Simple rod + flame. Torch projectiles are rendered as a small stick with a glowing head.
+            Color wood = {120, 80, 45, 255};
+            Color outer = {240, 120, 60, 200};
+            Color core  = {255, 235, 170, 220};
+
+            // Diagonal stick
+            addLine3D(m, {4.0f, 9.0f, 1.0f}, {11.5f, 6.5f, 6.5f}, 0.75f, wood);
+
+            // Flame at the leading end
+            const float wob = (frame % 2 == 0) ? -0.15f : 0.15f;
+            addSphere(m, 12.0f + wob, 6.0f - wob, 6.0f, 2.2f, outer, true);
+            addSphere(m, 12.0f + wob, 6.0f - wob, 6.0f, 1.3f, core, true);
+            return m;
+        }
         case ProjectileKind::Arrow:
         default:
             return {};

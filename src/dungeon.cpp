@@ -2641,7 +2641,7 @@ static bool carveVaultMoat(Dungeon& d,
     // Fallback: carve a permanent bridge tile so the island is still reachable.
     // Choose the moat tile closest to the door and open it.
     Vec2i best{-1, -1};
-    int bestD = 1e9;
+    int bestD = 1000000000; // large sentinel; avoids double->int warning
     for (int y = iy - 1; y <= iy + ih; ++y) {
         for (int x = ix - 1; x <= ix + iw; ++x) {
             if (!d.inBounds(x, y)) continue;

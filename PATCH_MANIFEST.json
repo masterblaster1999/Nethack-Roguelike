@@ -1,7 +1,7 @@
 {
-  "patch_id": "roundN_plus43",
-  "previous_patch": "nethack_patch_roundN_plus42.zip",
-  "description": "Adds POTION OF HALLUCINATION + a new Hallucination timed effect. While hallucinating, monster/item sprites are re-mapped into a deterministic kaleidoscope of other kinds (map + inventory), accompanied by rare flavor messages. Blessed potions shorten the trip and grant brief Vision; cursed potions extend it and add Confusion. Also teaches POTION OF CLARITY to cure hallucinations.",
+  "patch_id": "roundN_plus44",
+  "previous_patch": "nethack_patch_roundN_plus43.zip",
+  "description": "Build-fix patch: resolves MSVC compile errors caused by an invalid hex literal salt in hallucination flavor hashing, and cleans up a couple of MSVC warnings (C4458 shadowed member, C4244 double->int sentinel).",
   "files": [
     "PATCH_MANIFEST.json",
     "README.md",
@@ -34,5 +34,5 @@
     "src/items.cpp"
   ],
   "timestamp": "2026-01-05",
-  "summary": "New Hallucination status + POTION OF HALLUCINATION: re-mapped monster/item sprites (map + inventory), subtle flavor messages, and clarity cures."
+  "summary": "Fixes MSVC build break (0xHALLu) + removes C4458/C4244 warnings."
 }

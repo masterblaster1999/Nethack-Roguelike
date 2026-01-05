@@ -1665,7 +1665,9 @@ void Game::applyEndOfTurnEffects() {
                 "YOUR SHADOW MOVES A LITTLE LATE.",
             };
 
-            const uint32_t h = hashCombine(hash32(seed_ ^ 0xC0FFEEu), hashCombine(turnCount, 0xHALLu));
+            // Salt "HALL" in ASCII (0x48 0x41 0x4C 0x4C) to keep the hash deterministic without
+            // consuming RNG state.
+            const uint32_t h = hashCombine(hash32(seed_ ^ 0xC0FFEEu), hashCombine(turnCount, 0x48414C4Cu));
             if ((h % 37u) == 0u) {
                 const size_t idx = (h / 37u) % (sizeof(kMsgs) / sizeof(kMsgs[0]));
                 pushMsg(kMsgs[idx], MessageKind::Info, true);

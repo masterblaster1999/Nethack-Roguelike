@@ -101,15 +101,15 @@ void Game::applyAmnesiaShock(int keepRadiusCheb) {
     // Cancel automation first so we don't immediately re-path based on stale map state.
     stopAutoMove(true);
 
-    Dungeon& dung = this->dung;
+    Dungeon& dungeon = this->dung;
     const Vec2i center = player().pos;
 
     // 1) Forget explored tiles (optionally keeping a local patch).
-    for (int y = 0; y < dung.height; ++y) {
-        for (int x = 0; x < dung.width; ++x) {
+    for (int y = 0; y < dungeon.height; ++y) {
+        for (int x = 0; x < dungeon.width; ++x) {
             const int dist = chebyshev(center, {x, y});
             if (keepRadiusCheb > 0 && dist <= keepRadiusCheb) continue;
-            dung.at(x, y).explored = false;
+            dungeon.at(x, y).explored = false;
         }
     }
 
@@ -128,12 +128,12 @@ void Game::applyAmnesiaShock(int keepRadiusCheb) {
         mapMarkers_.end());
 
     // 4) Reset auto-explore "already tried searching" bookkeeping for forgotten tiles.
-    if (autoExploreSearchTriedTurns.size() == (size_t)dung.width * (size_t)dung.height) {
-        for (int y = 0; y < dung.height; ++y) {
-            for (int x = 0; x < dung.width; ++x) {
+    if (autoExploreSearchTriedTurns.size() == (size_t)dungeon.width * (size_t)dungeon.height) {
+        for (int y = 0; y < dungeon.height; ++y) {
+            for (int x = 0; x < dungeon.width; ++x) {
                 const int dist = chebyshev(center, {x, y});
                 if (keepRadiusCheb > 0 && dist <= keepRadiusCheb) continue;
-                autoExploreSearchTriedTurns[(size_t)y * (size_t)dung.width + (size_t)x] = 0;
+                autoExploreSearchTriedTurns[(size_t)y * (size_t)dungeon.width + (size_t)x] = 0;
             }
         }
     }
@@ -144,7 +144,7 @@ void Game::applyAmnesiaShock(int keepRadiusCheb) {
         if (e.id == playerId_) continue;
         if (e.friendly) continue;
 
-        if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) continue;
+        if (dungeon.inBounds(e.pos.x, e.pos.y) && dungeon.at(e.pos.x, e.pos.y).visible) continue;
 
         e.alerted = false;
         e.lastKnownPlayerPos = {-1, -1};

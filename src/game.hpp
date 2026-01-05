@@ -1184,6 +1184,10 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     DiscoverySort discoveriesSort() const { return discoveriesSort_; }
     int discoveriesSelection() const { return discoveriesSel; }
 
+    // UI helper: whether a given identifiable item kind is currently identified.
+    // Non-identifiable kinds are treated as identified.
+    bool discoveriesIsIdentified(ItemKind k) const { return isIdentified(k); }
+
     // Returns the "appearance label" used when the item is not identified.
     // Examples: "RUBY POTION", "SCROLL 'ZELGO'", "OPAL RING", "OAK WAND".
     std::string discoveryAppearanceLabel(ItemKind k) const;

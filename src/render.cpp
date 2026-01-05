@@ -12,6 +12,34 @@
 #include <ctime>
 #include <iomanip>
 
+namespace {
+
+// Small RAII helper to scope SDL clip rectangles safely (restores previous clip).
+struct ClipRectGuard {
+    SDL_Renderer* r = nullptr;
+    SDL_Rect prev{};
+    bool hadPrev = false;
+
+    ClipRectGuard(SDL_Renderer* renderer, const SDL_Rect* rect) : r(renderer) {
+        if (!r) return;
+        hadPrev = SDL_RenderIsClipEnabled(r) == SDL_TRUE;
+        if (hadPrev) SDL_RenderGetClipRect(r, &prev);
+        SDL_RenderSetClipRect(r, rect);
+    }
+
+    ~ClipRectGuard() {
+        if (!r) return;
+        if (hadPrev) SDL_RenderSetClipRect(r, &prev);
+        else SDL_RenderSetClipRect(r, nullptr);
+    }
+
+    ClipRectGuard(const ClipRectGuard&) = delete;
+    ClipRectGuard& operator=(const ClipRectGuard&) = delete;
+};
+
+} // namespace
+
+
 Renderer::Renderer(int windowW, int windowH, int tileSize, int hudHeight, bool vsync, int textureCacheMB_)
     : winW(windowW), winH(windowH), tile(tileSize), hudH(hudHeight), vsyncEnabled(vsync), textureCacheMB(textureCacheMB_) {
     // Derive viewport size in tiles from the logical window size.
@@ -3661,6 +3689,9 @@ void Renderer::drawCodexOverlay(const Game& game) {
 
     // Draw details.
     {
+        SDL_Rect detailsClip{detailsX, detailsY, detailsW, innerH};
+        ClipRectGuard _clip(renderer, &detailsClip);
+
         auto dline = [&](const std::string& s, const Color& c) {
             drawText5x7(renderer, detailsX, y, bodyScale, c, s);
             y += 14;
@@ -3803,7 +3834,7 @@ void Renderer::drawDiscoveriesOverlay(const Game& game) {
         if (!isIdentifiableKind(k)) continue;
         if (!matches(k)) continue;
         ++total;
-        if (game.isIdentified(k)) ++known;
+        if (game.discoveriesIsIdentified(k)) ++known;
     }
 
     {
@@ -3852,7 +3883,7 @@ void Renderer::drawDiscoveriesOverlay(const Game& game) {
             if (idx >= static_cast<int>(list.size())) break;
 
             const ItemKind k = list[idx];
-            const bool id = game.isIdentified(k);
+            const bool id = game.discoveriesIsIdentified(k);
             const int rowY = listY + row * lineH;
 
             if (idx == sel) {
@@ -3876,6 +3907,9 @@ void Renderer::drawDiscoveriesOverlay(const Game& game) {
 
     // Draw details.
     {
+        SDL_Rect detailsClip{detailsX, detailsY, detailsW, innerH};
+        ClipRectGuard _clip(renderer, &detailsClip);
+
         int dy = detailsY;
         auto dline = [&](const std::string& s, const Color& c) {
             drawText5x7(renderer, detailsX, dy, bodyScale, c, s);
@@ -3889,7 +3923,7 @@ void Renderer::drawDiscoveriesOverlay(const Game& game) {
         }
 
         const ItemKind k = list[sel];
-        const bool id = game.isIdentified(k);
+        const bool id = game.discoveriesIsIdentified(k);
         const std::string app = game.discoveryAppearanceLabel(k);
         const std::string trueName = itemDisplayNameSingle(k);
 

@@ -1,7 +1,7 @@
 {
-  "patch_id": "roundN_plus44",
-  "previous_patch": "nethack_patch_roundN_plus43.zip",
-  "description": "Build-fix patch: resolves MSVC compile errors caused by an invalid hex literal salt in hallucination flavor hashing, and cleans up a couple of MSVC warnings (C4458 shadowed member, C4244 double->int sentinel).",
+  "patch_id": "roundN_plus45",
+  "previous_patch": "nethack_patch_roundN_plus44.zip",
+  "description": "Build-fix patch: resolves MSVC compile errors in render.cpp by exposing a safe public identification query for the Discoveries UI (avoids private Game::isIdentified access), and removes MSVC unused-variable warnings by scoping details-column rendering to a clip rect.",
   "files": [
     "PATCH_MANIFEST.json",
     "README.md",
@@ -34,5 +34,5 @@
     "src/items.cpp"
   ],
   "timestamp": "2026-01-05",
-  "summary": "Fixes MSVC build break (0xHALLu) + removes C4458/C4244 warnings."
+  "summary": "Fixes MSVC C2248 (private isIdentified) + C4189 (unused detailsW) and adds safe details-column clipping."
 }

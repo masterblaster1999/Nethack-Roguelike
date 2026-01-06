@@ -1,6 +1,43 @@
 #include "game_internal.hpp"
 #include "content.hpp"
 
+namespace {
+
+bool canHaveWeaponEgo(ItemKind k) {
+    // Keep egos limited to the "core" melee weapons for now.
+    // (Avoids branding tools like pickaxes, and keeps UI readable.)
+    return k == ItemKind::Dagger || k == ItemKind::Sword || k == ItemKind::Axe;
+}
+
+ItemEgo rollWeaponEgo(RNG& rng, ItemKind k, int depth, RoomType rt, bool fromShop, bool forMonster) {
+    if (!canHaveWeaponEgo(k)) return ItemEgo::None;
+    if (depth < 3) return ItemEgo::None;
+
+    // Base chance grows gently with depth.
+    float chance = 0.04f + 0.01f * static_cast<float>(std::min(10, std::max(0, depth - 3)));
+
+    // Treasure-y rooms are more likely to contain branded gear.
+    if (rt == RoomType::Treasure || rt == RoomType::Vault || rt == RoomType::Secret) chance += 0.06f;
+    if (rt == RoomType::Lair) chance -= 0.03f;
+
+    // Shops occasionally stock a premium item.
+    if (fromShop) chance += 0.05f;
+
+    // Monsters shouldn't carry too many premium weapons.
+    if (forMonster) chance *= 0.60f;
+
+    chance = std::max(0.0f, std::min(0.22f, chance));
+    if (!rng.chance(chance)) return ItemEgo::None;
+
+    // Vampiric is deeper + rarer.
+    const int roll = rng.range(0, 99);
+    if (depth >= 6 && roll >= 92) return ItemEgo::Vampiric;
+    if (roll < 48) return ItemEgo::Flaming;
+    return ItemEgo::Venom;
+}
+
+} // namespace
+
 Vec2i Game::randomFreeTileInRoom(const Room& r, int tries) {
     tries = std::max(10, tries);
 
@@ -101,6 +138,9 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear) {
                     if (depth_ >= 7 && rng.chance(0.07f)) it.enchant = 2;
                 }
             }
+
+            // Rare ego weapons.
+            it.ego = rollWeaponEgo(rng, kind, depth_, rt, /*fromShop=*/false, /*forMonster=*/true);
 
             return it;
         };
@@ -251,6 +291,23 @@ void Game::spawnMonsters() {
             }
         }
 
+        // Deep milestone (roughly 3/4 through the run): introduce an ethereal threat
+        // before the final approach. This keeps longer runs from feeling like a flat
+        // difficulty plateau once the player is geared up.
+        if (QUEST_DEPTH >= 16) {
+            const int deepMilestone = MIDPOINT_DEPTH + std::max(2, (QUEST_DEPTH - MIDPOINT_DEPTH) / 2);
+            if (depth_ == deepMilestone && depth_ < QUEST_DEPTH - 1) {
+                Vec2i p = randomFreeTileInRoom(*treasure);
+                spawnMonster(EntityKind::Ghost, p, 0);
+
+                // A few shambling allies.
+                for (int i = 0; i < 3; ++i) {
+                    Vec2i q = randomFreeTileInRoom(*treasure);
+                    spawnMonster(EntityKind::Zombie, q, nextGroup++);
+                }
+            }
+        }
+
         // Penultimate floor: the Minotaur guards the central hoard.
         if (depth_ == QUEST_DEPTH - 1) {
             Vec2i p = randomFreeTileInRoom(*treasure);
@@ -305,6 +362,9 @@ void Game::spawnItems() {
                     }
                 }
             }
+
+            // Rare ego weapons (brands).
+            it.ego = rollWeaponEgo(rng, k, depth_, rt, /*fromShop=*/false, /*forMonster=*/false);
         }
 
         GroundItem gi;
@@ -339,6 +399,9 @@ void Game::spawnItems() {
                 it.enchant = 1;
                 if (depth_ >= 6 && rng.chance(0.08f)) it.enchant = 2;
             }
+
+            // Rare premium ego weapons.
+            it.ego = rollWeaponEgo(rng, k, depth_, rt, /*fromShop=*/true, /*forMonster=*/false);
         }
 
         it.shopPrice = shopBuyPricePerUnit(it, depth_);

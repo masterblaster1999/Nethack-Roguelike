@@ -698,7 +698,8 @@ bool Game::chestMoveSelected(bool moveAll) {
         const Item& src = chestItems[static_cast<size_t>(chestSel)];
 
         Item moved = src;
-        if (!moveAll && isStackable(moved.kind) && moved.count > 1) {
+        const bool splitOne = (!moveAll && isStackable(moved.kind) && moved.count > 1);
+        if (splitOne) {
             moved.count = 1;
         }
 
@@ -709,6 +710,8 @@ bool Game::chestMoveSelected(bool moveAll) {
                 pushMsg("YOUR PACK IS FULL.", MessageKind::Info, true);
                 return false;
             }
+            // If we split a stack (moving only one unit), ensure the moved stack has a unique id.
+            if (splitOne) moved.id = nextItemId++;
             inv.push_back(moved);
         }
 
@@ -745,7 +748,8 @@ bool Game::chestMoveSelected(bool moveAll) {
         }
 
         Item moved = src;
-        if (!moveAll && isStackable(moved.kind) && moved.count > 1) {
+        const bool splitOne = (!moveAll && isStackable(moved.kind) && moved.count > 1);
+        if (splitOne) {
             moved.count = 1;
         }
 
@@ -756,6 +760,8 @@ bool Game::chestMoveSelected(bool moveAll) {
                 pushMsg("THE CHEST IS FULL.", MessageKind::Info, true);
                 return false;
             }
+            // If we split a stack (moving only one unit), ensure the moved stack has a unique id.
+            if (splitOne) moved.id = nextItemId++;
             chestItems.push_back(moved);
         }
 
@@ -1016,10 +1022,17 @@ bool Game::dropSelected() {
         msg = "YOU DROP " + displayItemName(drop) + ".";
     }
 
-    GroundItem gi;
-    gi.item = drop;
-    gi.pos = player().pos;
-    ground.push_back(gi);
+    // If you're somehow standing over a chasm (levitation), dropped items should fall.
+    // This avoids leaving unreachable loot on a non-walkable tile.
+    const Vec2i pos = player().pos;
+    if (dung.inBounds(pos.x, pos.y) && dung.at(pos.x, pos.y).type == TileType::Chasm) {
+        pushMsg(msg, MessageKind::Loot, true);
+        pushMsg("IT FALLS INTO THE CHASM!", MessageKind::Warning, true);
+        return true;
+    }
+
+    // Use the shared ground-drop helper so stackables merge and item ids remain unique.
+    dropGroundItemItem(pos, drop);
 
     pushMsg(msg);
     return true;
@@ -1081,10 +1094,15 @@ bool Game::dropSelectedAll() {
         msg = "YOU DROP " + displayItemName(drop) + ".";
     }
 
-    GroundItem gi;
-    gi.item = drop;
-    gi.pos = player().pos;
-    ground.push_back(gi);
+    const Vec2i pos = player().pos;
+    if (dung.inBounds(pos.x, pos.y) && dung.at(pos.x, pos.y).type == TileType::Chasm) {
+        pushMsg(msg, MessageKind::Loot, true);
+        pushMsg("IT FALLS INTO THE CHASM!", MessageKind::Warning, true);
+        return true;
+    }
+
+    // Use the shared ground-drop helper so stackables merge and item ids remain unique.
+    dropGroundItemItem(pos, drop);
 
     pushMsg(msg);
     return true;

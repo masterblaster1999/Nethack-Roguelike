@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <filesystem>
 #include <ctime>
@@ -36,6 +37,63 @@ struct ClipRectGuard {
     ClipRectGuard(const ClipRectGuard&) = delete;
     ClipRectGuard& operator=(const ClipRectGuard&) = delete;
 };
+
+// --- Isometric helpers ---
+// mapTileDst() returns the bounding box of the diamond tile in iso mode.
+inline void isoDiamondCorners(const SDL_Rect& base, SDL_Point& top, SDL_Point& right, SDL_Point& bottom, SDL_Point& left) {
+    const int cx = base.x + base.w / 2;
+    const int cy = base.y + base.h / 2;
+
+    top    = SDL_Point{cx, base.y};
+    right  = SDL_Point{base.x + base.w, cy};
+    bottom = SDL_Point{cx, base.y + base.h};
+    left   = SDL_Point{base.x, cy};
+}
+
+inline void drawIsoDiamondOutline(SDL_Renderer* r, const SDL_Rect& base) {
+    if (!r) return;
+    SDL_Point top{}, right{}, bottom{}, left{};
+    isoDiamondCorners(base, top, right, bottom, left);
+    SDL_RenderDrawLine(r, top.x, top.y, right.x, right.y);
+    SDL_RenderDrawLine(r, right.x, right.y, bottom.x, bottom.y);
+    SDL_RenderDrawLine(r, bottom.x, bottom.y, left.x, left.y);
+    SDL_RenderDrawLine(r, left.x, left.y, top.x, top.y);
+}
+
+inline void drawIsoDiamondCross(SDL_Renderer* r, const SDL_Rect& base) {
+    if (!r) return;
+    SDL_Point top{}, right{}, bottom{}, left{};
+    isoDiamondCorners(base, top, right, bottom, left);
+    SDL_RenderDrawLine(r, left.x, left.y, right.x, right.y);
+    SDL_RenderDrawLine(r, top.x, top.y, bottom.x, bottom.y);
+}
+
+inline bool pointInIsoDiamond(int px, int py, const SDL_Rect& base) {
+    // Diamond equation in normalized coordinates:
+    //   |dx|/(w/2) + |dy|/(h/2) <= 1
+    const int hw = std::max(1, base.w / 2);
+    const int hh = std::max(1, base.h / 2);
+    const int cx = base.x + hw;
+    const int cy = base.y + hh;
+
+    const float nx = std::abs(static_cast<float>(px - cx)) / static_cast<float>(hw);
+    const float ny = std::abs(static_cast<float>(py - cy)) / static_cast<float>(hh);
+    return (nx + ny) <= 1.0f;
+}
+
+inline void fillIsoDiamond(SDL_Renderer* r, int cx, int cy, int halfW, int halfH) {
+    if (!r) return;
+    halfW = std::max(1, halfW);
+    halfH = std::max(1, halfH);
+
+    // Rasterize a small diamond using horizontal scanlines.
+    // The width scales linearly with vertical distance from the center.
+    for (int dy = -halfH; dy <= halfH; ++dy) {
+        const float t = 1.0f - (static_cast<float>(std::abs(dy)) / static_cast<float>(halfH));
+        const int w = std::max(0, static_cast<int>(std::round(static_cast<float>(halfW) * t)));
+        SDL_RenderDrawLine(r, cx - w, cy + dy, cx + w, cy + dy);
+    }
+}
 
 } // namespace
 
@@ -261,12 +319,27 @@ for (auto& styleVec : floorThemeVar) {
     }
     styleVec.clear();
 }
+
+// Isometric terrain tiles (generated lazily).
+for (auto& styleVec : floorThemeVarIso) {
+    for (auto& arr : styleVec) {
+        for (SDL_Texture* t : arr) {
+            if (t) SDL_DestroyTexture(t);
+        }
+    }
+    styleVec.clear();
+}
 for (auto& arr : wallVar) {
     for (SDL_Texture* t : arr) {
         if (t) SDL_DestroyTexture(t);
     }
 }
 for (auto& arr : chasmVar) {
+    for (SDL_Texture* t : arr) {
+        if (t) SDL_DestroyTexture(t);
+    }
+}
+for (auto& arr : chasmVarIso) {
     for (SDL_Texture* t : arr) {
         if (t) SDL_DestroyTexture(t);
     }
@@ -281,10 +354,26 @@ for (auto& arr : boulderOverlayVar) {
         if (t) SDL_DestroyTexture(t);
     }
 }
+for (auto& arr : wallBlockVarIso) {
+    for (SDL_Texture* t : arr) {
+        if (t) SDL_DestroyTexture(t);
+    }
+}
 wallVar.clear();
 chasmVar.clear();
 pillarOverlayVar.clear();
 boulderOverlayVar.clear();
+
+chasmVarIso.clear();
+wallBlockVarIso.clear();
+
+for (auto& t : stairsUpOverlayIsoTex) if (t) SDL_DestroyTexture(t);
+for (auto& t : stairsDownOverlayIsoTex) if (t) SDL_DestroyTexture(t);
+for (auto& t : doorOpenOverlayIsoTex) if (t) SDL_DestroyTexture(t);
+stairsUpOverlayIsoTex.fill(nullptr);
+stairsDownOverlayIsoTex.fill(nullptr);
+doorOpenOverlayIsoTex.fill(nullptr);
+isoTerrainAssetsValid = false;
 
 // Decal overlay textures
 for (auto& arr : floorDecalVar) {
@@ -329,8 +418,24 @@ for (auto& anim : gasVar) {
     }
 }
 
+// Confusion gas overlays (isometric)
+for (auto& anim : gasVarIso) {
+    for (SDL_Texture*& t : anim) {
+        if (t) SDL_DestroyTexture(t);
+        t = nullptr;
+    }
+}
+
 // Fire overlays
 for (auto& anim : fireVar) {
+    for (SDL_Texture*& t : anim) {
+        if (t) SDL_DestroyTexture(t);
+        t = nullptr;
+    }
+}
+
+// Fire overlays (isometric)
+for (auto& anim : fireVarIso) {
     for (SDL_Texture*& t : anim) {
         if (t) SDL_DestroyTexture(t);
         t = nullptr;
@@ -388,14 +493,66 @@ void Renderer::toggleFullscreen() {
 }
 
 SDL_Rect Renderer::mapTileDst(int mapX, int mapY) const {
-    // Map-space tiles are drawn relative to the camera (top-left) and then
-    // optionally offset by transient screen shake (mapOffX/Y).
-    return SDL_Rect{ (mapX - camX) * tile + mapOffX, (mapY - camY) * tile + mapOffY, tile, tile };
+    // Map-space tiles are drawn relative to the camera and then optionally offset by transient
+    // screen shake (mapOffX/Y).
+    //
+    // TopDown: camX/camY represents the viewport's top-left map tile.
+    // Isometric: isoCamX/isoCamY represents the camera center tile.
+    if (viewMode_ != ViewMode::Isometric) {
+        return SDL_Rect{ (mapX - camX) * tile + mapOffX, (mapY - camY) * tile + mapOffY, tile, tile };
+    }
+
+    const int tileW = std::max(1, tile);
+    const int tileH = std::max(1, tile / 2);
+
+    const int halfW = std::max(1, tileW / 2);
+    const int halfH = std::max(1, tileH / 2);
+
+    const int mapH = std::max(0, winH - hudH);
+
+    // Anchor the camera tile at the center of the map viewport (not including the HUD).
+    const int cx = winW / 2 + mapOffX;
+    const int cy = mapH / 2 + mapOffY;
+
+    const int dx = mapX - isoCamX;
+    const int dy = mapY - isoCamY;
+
+    // Standard isometric projection (diamond grid).
+    const int centerX = cx + (dx - dy) * halfW;
+    const int centerY = cy + (dx + dy) * halfH;
+
+    return SDL_Rect{ centerX - tileW / 2, centerY - tileH / 2, tileW, tileH };
+}
+
+SDL_Rect Renderer::mapSpriteDst(int mapX, int mapY) const {
+    if (viewMode_ != ViewMode::Isometric) return mapTileDst(mapX, mapY);
+
+    // Place sprites so their "feet" land on the center of the isometric tile.
+    const SDL_Rect base = mapTileDst(mapX, mapY);
+    const int cx = base.x + base.w / 2;
+    const int cy = base.y + base.h / 2;
+
+    const int spriteW = std::max(1, tile);
+    const int spriteH = std::max(1, tile);
+
+    // Nudge the foot point slightly downward so the sprite reads as standing on the tile.
+    const int footY = cy + (base.h / 4);
+
+    return SDL_Rect{ cx - spriteW / 2, footY - spriteH, spriteW, spriteH };
 }
 
 bool Renderer::mapTileInView(int mapX, int mapY) const {
-    return mapX >= camX && mapY >= camY &&
-           mapX < (camX + viewTilesW) && mapY < (camY + viewTilesH);
+    if (viewMode_ != ViewMode::Isometric) {
+        return mapX >= camX && mapY >= camY &&
+               mapX < (camX + viewTilesW) && mapY < (camY + viewTilesH);
+    }
+
+    // In isometric mode, the "viewport" is not axis-aligned in map-space, so we cull by screen rect.
+    const SDL_Rect r = mapTileDst(mapX, mapY);
+    const int mapH = std::max(0, winH - hudH);
+    const int pad = std::max(0, tile); // allow for tall sprites that extend beyond the tile rect
+
+    return !(r.x + r.w < -pad || r.y + r.h < -pad || r.x > (winW + pad) || r.y > (mapH + pad));
 }
 
 void Renderer::updateCamera(const Game& game) {
@@ -428,6 +585,19 @@ void Renderer::updateCamera(const Game& game) {
     } else if (game.isTargeting()) {
         cursorPos = game.targetingCursor();
         usingCursor = true;
+    }
+
+    // Isometric view: first pass is a simple centered camera on the current focus tile.
+    // (TopDown mode retains the existing deadzone + targeting camera logic below.)
+    if (viewMode_ == ViewMode::Isometric) {
+        Vec2i focus = usingCursor ? cursorPos : playerPos;
+
+        focus.x = std::clamp(focus.x, 0, std::max(0, d.width - 1));
+        focus.y = std::clamp(focus.y, 0, std::max(0, d.height - 1));
+
+        isoCamX = focus.x;
+        isoCamY = focus.y;
+        return;
     }
 
     auto clampCam = [&]() {
@@ -491,17 +661,96 @@ bool Renderer::windowToMapTile(int winX, int winY, int& tileX, int& tileY) const
 
     if (x < 0 || y < 0) return false;
 
-    // Map rendering can be temporarily offset (screen shake). Convert clicks in
-    // window coordinates back into stable viewport coordinates.
+    // Map rendering can be temporarily offset (screen shake). Convert clicks in window coordinates
+    // back into stable viewport coordinates.
     const int mx = x - mapOffX;
     const int my = y - mapOffY;
 
     if (mx < 0 || my < 0) return false;
 
+    const int mapH = std::max(0, winH - hudH);
+
+    // Reject clicks outside the map viewport (e.g., HUD area).
+    if (my >= mapH) return false;
+
+    if (viewMode_ == ViewMode::Isometric) {
+        // Invert the isometric projection used by mapTileDst(), then refine by
+        // diamond hit-testing so mouse clicks feel crisp near tile edges.
+        const int tileW = std::max(1, tile);
+        const int tileH = std::max(1, tile / 2);
+
+        const int halfW = std::max(1, tileW / 2);
+        const int halfH = std::max(1, tileH / 2);
+
+        const int cx = winW / 2;
+        const int cy = mapH / 2;
+
+        const float dx = static_cast<float>(mx - cx);
+        const float dy = static_cast<float>(my - cy);
+
+        const float fx = (dx / static_cast<float>(halfW) + dy / static_cast<float>(halfH)) * 0.5f;
+        const float fy = (dy / static_cast<float>(halfH) - dx / static_cast<float>(halfW)) * 0.5f;
+
+        auto roundToInt = [](float v) -> int {
+            // Symmetric rounding for negatives.
+            return (v >= 0.0f) ? static_cast<int>(std::floor(v + 0.5f)) : static_cast<int>(std::ceil(v - 0.5f));
+        };
+
+        const int rx = isoCamX + roundToInt(fx);
+        const int ry = isoCamY + roundToInt(fy);
+
+        // Candidate search: the point should lie within the diamond of one of the
+        // nearby tiles. We check a small neighborhood around the rounded guess.
+        int bestX = rx;
+        int bestY = ry;
+        int bestD2 = std::numeric_limits<int>::max();
+        bool found = false;
+
+        auto isoTileRectStable = [&](int mapX, int mapY) -> SDL_Rect {
+            const int dxm = mapX - isoCamX;
+            const int dym = mapY - isoCamY;
+
+            const int centerX = cx + (dxm - dym) * halfW;
+            const int centerY = cy + (dxm + dym) * halfH;
+
+            return SDL_Rect{ centerX - tileW / 2, centerY - tileH / 2, tileW, tileH };
+        };
+
+        for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -1; ox <= 1; ++ox) {
+                const int candX = rx + ox;
+                const int candY = ry + oy;
+                if (candX < 0 || candY < 0 || candX >= Game::MAP_W || candY >= Game::MAP_H) continue;
+
+                const SDL_Rect rect = isoTileRectStable(candX, candY);
+                if (!pointInIsoDiamond(mx, my, rect)) continue;
+
+                const int ccx = rect.x + rect.w / 2;
+                const int ccy = rect.y + rect.h / 2;
+                const int ddx = mx - ccx;
+                const int ddy = my - ccy;
+                const int d2 = ddx * ddx + ddy * ddy;
+
+                if (d2 < bestD2) {
+                    bestD2 = d2;
+                    bestX = candX;
+                    bestY = candY;
+                    found = true;
+                }
+            }
+        }
+
+        tileX = found ? bestX : rx;
+        tileY = found ? bestY : ry;
+
+        if (tileX < 0 || tileY < 0 || tileX >= Game::MAP_W || tileY >= Game::MAP_H) return false;
+        return true;
+    }
+
     const int localX = mx / std::max(1, tile);
     const int localY = my / std::max(1, tile);
 
-    // Reject clicks outside the map viewport (e.g., HUD area).
+    // Reject clicks outside the map viewport.
     if (localX < 0 || localY < 0 || localX >= viewTilesW || localY >= viewTilesH) return false;
 
     tileX = localX + camX;
@@ -510,6 +759,52 @@ bool Renderer::windowToMapTile(int winX, int winY, int& tileX, int& tileY) const
     if (tileX < 0 || tileY < 0 || tileX >= Game::MAP_W || tileY >= Game::MAP_H) return false;
     return true;
 }
+
+bool Renderer::windowToMinimapTile(const Game& game, int winX, int winY, int& tileX, int& tileY) const {
+    if (!renderer) return false;
+
+    float lx = 0.0f, ly = 0.0f;
+    SDL_RenderWindowToLogical(renderer, winX, winY, &lx, &ly);
+
+    const int x = static_cast<int>(lx);
+    const int y = static_cast<int>(ly);
+    if (x < 0 || y < 0) return false;
+
+    const Dungeon& d = game.dungeon();
+    const int W = d.width;
+    const int H = d.height;
+    if (W <= 0 || H <= 0) return false;
+
+    // Mirror drawMinimapOverlay layout so hit-testing matches visuals.
+    int px = 4;
+    const int pad = 10;
+    const int margin = 10;
+    const int maxW = winW / 2;
+    const int maxH = (winH - hudH) / 2;
+    while (px > 2 && (W * px + pad * 2) > maxW) px--;
+    while (px > 2 && (H * px + pad * 2) > maxH) px--;
+
+    const int titleH = 16;
+    const int panelW = W * px + pad * 2;
+    const int panelH = H * px + pad * 2 + titleH;
+
+    const int x0 = winW - panelW - margin;
+    const int y0 = margin;
+
+    const int mapX = x0 + pad;
+    const int mapY = y0 + pad + titleH;
+
+    if (x < mapX || y < mapY) return false;
+    if (x >= mapX + W * px || y >= mapY + H * px) return false;
+
+    const int tx = (x - mapX) / px;
+    const int ty = (y - mapY) / px;
+
+    tileX = std::clamp(tx, 0, W - 1);
+    tileY = std::clamp(ty, 0, H - 1);
+    return true;
+}
+
 
 
 SDL_Texture* Renderer::textureFromSprite(const SpritePixels& s) {
@@ -539,10 +834,14 @@ SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int fram
     // Slightly decorrelate themed floors between styles.
     h = hashCombine(h, static_cast<uint32_t>(roomStyle));
 
+    const bool iso = (viewMode_ == ViewMode::Isometric);
+
     switch (t) {
         case TileType::Floor: {
             const int s = std::clamp(roomStyle, 0, ROOM_STYLES - 1);
-            const auto& vec = floorThemeVar[static_cast<size_t>(s)];
+            const auto& vec = (iso && !floorThemeVarIso[static_cast<size_t>(s)].empty())
+                                ? floorThemeVarIso[static_cast<size_t>(s)]
+                                : floorThemeVar[static_cast<size_t>(s)];
             if (vec.empty()) return nullptr;
             size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(vec.size()));
             return vec[idx][static_cast<size_t>(frame % FRAMES)];
@@ -553,9 +852,10 @@ SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int fram
             return wallVar[idx][static_cast<size_t>(frame % FRAMES)];
         }
         case TileType::Chasm: {
-            if (chasmVar.empty()) return nullptr;
-            size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(chasmVar.size()));
-            return chasmVar[idx][static_cast<size_t>(frame % FRAMES)];
+            const auto& vec = (iso && !chasmVarIso.empty()) ? chasmVarIso : chasmVar;
+            if (vec.empty()) return nullptr;
+            size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(vec.size()));
+            return vec[idx][static_cast<size_t>(frame % FRAMES)];
         }
         // Pillars/doors/stairs are rendered as overlays layered on top of the underlying floor.
         // Base tile fetch returns nullptr so the caller doesn't accidentally draw a standalone
@@ -618,6 +918,36 @@ namespace {
         const uint32_t h = hashCombine(base, static_cast<uint32_t>(it.id) ^ hash32(it.spriteSeed));
         const uint32_t k = (h % static_cast<uint32_t>(ITEM_KIND_COUNT));
         return static_cast<ItemKind>(k);
+    }
+
+    // For NetHack-style identification, identifiable items have randomized
+    // *appearances* each run (e.g., "ruby potion", "scroll labeled KLAATU").
+    // If we rendered their true item-kind sprites, you'd be able to ID them
+    // visually, which undermines the system.
+    //
+    // To fix this (and to add more procedural art variety), we switch the
+    // sprite seed for identifiable items to a stable per-run "appearance seed"
+    // and set SPRITE_SEED_IDENT_APPEARANCE_FLAG so spritegen can draw
+    // appearance-based art.
+    inline uint32_t identAppearanceSpriteSeed(const Game& game, ItemKind k) {
+        const uint8_t app = game.appearanceFor(k);
+
+        // Category salt keeps potion/scroll/ring/wand appearance id spaces separate.
+        // (These are just arbitrary constants; determinism is all that matters.)
+        uint32_t salt = 0x1D3A3u;
+        if (isPotionKind(k)) salt = 0xA17C0DE1u;
+        else if (isScrollKind(k)) salt = 0x5C2011D5u;
+        else if (isRingKind(k)) salt = 0xBADC0FFEu;
+        else if (isWandKind(k)) salt = 0xC001D00Du;
+
+        const uint32_t mixed = hash32(hashCombine(game.seed() ^ salt, static_cast<uint32_t>(app)));
+        return SPRITE_SEED_IDENT_APPEARANCE_FLAG | (mixed & 0x7FFFFF00u) | static_cast<uint32_t>(app);
+    }
+
+    inline void applyIdentificationVisuals(const Game& game, Item& it) {
+        if (!game.identificationEnabled()) return;
+        if (!isIdentifiableKind(it.kind)) return;
+        it.spriteSeed = identAppearanceSpriteSeed(game, it.kind);
     }
 }
 
@@ -684,6 +1014,8 @@ void Renderer::drawItemIcon(const Game& game, const Item& it, int x, int y, int 
     if (isHallucinating(game)) {
         visIt.kind = hallucinatedItemKind(game, it);
     }
+
+    applyIdentificationVisuals(game, visIt);
 
     SDL_Texture* tex = itemTexture(visIt, lastFrame);
     if (tex) {
@@ -762,6 +1094,129 @@ void Renderer::ensureUIAssets(const Game& game) {
     }
 
     uiAssetsValid = true;
+}
+
+void Renderer::ensureIsoTerrainAssets() {
+    if (isoTerrainAssetsValid) return;
+    if (!renderer || !pixfmt) return;
+
+    // Tile textures are generated in a clamped "sprite" resolution to keep VRAM reasonable
+    // for very large tile sizes. This matches the logic in Renderer::init().
+    const int spritePx = std::max(16, std::min(256, tile));
+    const int tileVars = (spritePx >= 224) ? 8 : (spritePx >= 160) ? 10 : (spritePx >= 96) ? 14 : 18;
+
+    // Defensive cleanup in case we ever re-generate (e.g., future runtime tile-size changes).
+    for (auto& styleVec : floorThemeVarIso) {
+        for (auto& arr : styleVec) {
+            for (SDL_Texture*& t : arr) {
+                if (t) SDL_DestroyTexture(t);
+                t = nullptr;
+            }
+        }
+        styleVec.clear();
+    }
+    for (auto& arr : chasmVarIso) {
+        for (SDL_Texture*& t : arr) {
+            if (t) SDL_DestroyTexture(t);
+            t = nullptr;
+        }
+    }
+    chasmVarIso.clear();
+    for (auto& arr : wallBlockVarIso) {
+        for (SDL_Texture*& t : arr) {
+            if (t) SDL_DestroyTexture(t);
+            t = nullptr;
+        }
+    }
+    wallBlockVarIso.clear();
+
+    for (auto& t : stairsUpOverlayIsoTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+    for (auto& t : stairsDownOverlayIsoTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+    for (auto& t : doorOpenOverlayIsoTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+
+    for (auto& anim : gasVarIso) {
+        for (SDL_Texture*& t : anim) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+    }
+    for (auto& anim : fireVarIso) {
+        for (SDL_Texture*& t : anim) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+    }
+
+    // --- Build isometric terrain ---
+    // Floors/chasm are converted to true 2:1 diamond tiles via projectToIsometricDiamond().
+    for (int st = 0; st < ROOM_STYLES; ++st) {
+        auto& vec = floorThemeVarIso[static_cast<size_t>(st)];
+        vec.resize(static_cast<size_t>(tileVars));
+        for (int i = 0; i < tileVars; ++i) {
+            for (int f = 0; f < FRAMES; ++f) {
+                const uint32_t seed = hashCombine(0xC011Du, static_cast<uint32_t>(i * 1000 + f * 17));
+                const SpritePixels sq = generateThemedFloorTile(seed, static_cast<uint8_t>(st), f, spritePx);
+                const SpritePixels iso = projectToIsometricDiamond(sq, hashCombine(seed, static_cast<uint32_t>(st)), f, /*outline=*/true);
+                vec[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
+            }
+        }
+    }
+
+    chasmVarIso.resize(static_cast<size_t>(tileVars));
+    for (int i = 0; i < tileVars; ++i) {
+        const uint32_t seed = hashCombine(0xC1A500u, static_cast<uint32_t>(i));
+        for (int f = 0; f < FRAMES; ++f) {
+            const SpritePixels sq = generateChasmTile(seed, f, spritePx);
+            const SpritePixels iso = projectToIsometricDiamond(sq, seed, f, /*outline=*/true);
+            chasmVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
+        }
+    }
+
+    // 2.5D walls are drawn as sprites (square textures) so they can extend above the ground plane.
+    wallBlockVarIso.resize(static_cast<size_t>(tileVars));
+    for (int i = 0; i < tileVars; ++i) {
+        const uint32_t seed = hashCombine(0xAA110u ^ 0xB10Cu, static_cast<uint32_t>(i));
+        for (int f = 0; f < FRAMES; ++f) {
+            wallBlockVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] =
+                textureFromSprite(generateIsometricWallBlockTile(seed, f, spritePx));
+        }
+    }
+
+    // Ground-plane overlays that should sit on the diamond.
+    for (int f = 0; f < FRAMES; ++f) {
+        {
+            const uint32_t seed = 0x515A1u;
+            const SpritePixels sq = generateStairsTile(seed, true, f, spritePx);
+            const SpritePixels iso = projectToIsometricDiamond(sq, seed, f, /*outline=*/false);
+            stairsUpOverlayIsoTex[static_cast<size_t>(f)] = textureFromSprite(iso);
+        }
+        {
+            const uint32_t seed = 0x515A2u;
+            const SpritePixels sq = generateStairsTile(seed, false, f, spritePx);
+            const SpritePixels iso = projectToIsometricDiamond(sq, seed, f, /*outline=*/false);
+            stairsDownOverlayIsoTex[static_cast<size_t>(f)] = textureFromSprite(iso);
+        }
+        {
+            const uint32_t seed = 0xD00Du;
+            const SpritePixels sq = generateDoorTile(seed, true, f, spritePx);
+            const SpritePixels iso = projectToIsometricDiamond(sq, seed, f, /*outline=*/false);
+            doorOpenOverlayIsoTex[static_cast<size_t>(f)] = textureFromSprite(iso);
+        }
+    }
+
+    // Isometric environmental overlays (gas/fire) so effects follow the diamond grid.
+    for (int i = 0; i < GAS_VARS; ++i) {
+        const uint32_t gSeed = hashCombine(0x6A5u, static_cast<uint32_t>(i));
+        for (int f = 0; f < FRAMES; ++f) {
+            const SpritePixels sq = generateConfusionGasTile(gSeed, f, spritePx);
+            const SpritePixels iso = projectToIsometricDiamond(sq, gSeed, f, /*outline=*/false);
+            gasVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
+        }
+    }
+    for (int i = 0; i < FIRE_VARS; ++i) {
+        const uint32_t fSeed = hashCombine(0xF17Eu, static_cast<uint32_t>(i));
+        for (int f = 0; f < FRAMES; ++f) {
+            const SpritePixels sq = generateFireTile(fSeed, f, spritePx);
+            const SpritePixels iso = projectToIsometricDiamond(sq, fSeed, f, /*outline=*/false);
+            fireVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
+        }
+    }
+
+    isoTerrainAssetsValid = true;
 }
 
 static Color uiBorderForTheme(UITheme theme) {
@@ -918,6 +1373,9 @@ static void drawVignette(SDL_Renderer* r, const SDL_Rect& area, int thickness, i
 void Renderer::render(const Game& game) {
     if (!initialized) return;
 
+    // Keep renderer-side view mode synced (main also calls setViewMode each frame).
+    viewMode_ = game.viewMode();
+
     const uint32_t ticks = SDL_GetTicks();
     const int frame = static_cast<int>((ticks / 220u) % FRAMES);
     lastFrame = frame;
@@ -970,8 +1428,20 @@ void Renderer::render(const Game& game) {
         }
     }
 
+    const bool isoView = (viewMode_ == ViewMode::Isometric);
+
+    // Build isometric-diamond terrain textures lazily so top-down mode doesn't pay
+    // the VRAM + CPU cost unless it is actually used.
+    if (isoView) {
+        ensureIsoTerrainAssets();
+    }
+
     auto tileDst = [&](int x, int y) -> SDL_Rect {
         return mapTileDst(x, y);
+    };
+
+    auto spriteDst = [&](int x, int y) -> SDL_Rect {
+        return mapSpriteDst(x, y);
     };
 
     // Room type cache (used for themed decals / minimap)
@@ -1220,204 +1690,322 @@ void Renderer::render(const Game& game) {
 
 
 
-    for (int y = 0; y < d.height; ++y) {
-        for (int x = 0; x < d.width; ++x) {
-            const Tile& t = d.at(x, y);
-            SDL_Rect dst = tileDst(x, y);
+    auto drawMapTile = [&](int x, int y) {
+        if (!mapTileInView(x, y)) return;
+        const Tile& t = d.at(x, y);
+        SDL_Rect dst = tileDst(x, y);
 
-            if (!t.explored) {
-                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-                SDL_RenderFillRect(renderer, &dst);
-                continue;
-            }
+        if (!t.explored) {
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+            SDL_RenderFillRect(renderer, &dst);
+            return;
+        }
 
-            // Doors/stairs/pillars are rendered as transparent overlays layered on top of the
-            // underlying floor so they inherit themed room flooring.
-            const bool isOverlay =
-                (t.type == TileType::Pillar) ||
-                (t.type == TileType::Boulder) ||
-                (t.type == TileType::StairsUp) || (t.type == TileType::StairsDown) ||
-                (t.type == TileType::DoorClosed) || (t.type == TileType::DoorLocked) || (t.type == TileType::DoorOpen);
+        // Isometric mode: draw a diamond-projected ground tile, then draw any tall
+        // blocking terrain (walls/doors/pillars/boulders) as sprite-sized overlays.
+        // This keeps the ground plane clean (no square squashing artifacts) and gives
+        // a more convincing 2.5D feel.
+        if (isoView) {
+            // Ground base: chasms keep their own material; everything else gets a themed
+            // floor so wall blocks sit on something consistent.
+            TileType base = (t.type == TileType::Chasm) ? TileType::Chasm : TileType::Floor;
+            const int style = (base == TileType::Floor) ? floorStyleAt(x, y) : 0;
 
-            TileType baseType = t.type;
-            if (isOverlay) baseType = TileType::Floor;
-
-            int floorStyle = (baseType == TileType::Floor) ? floorStyleAt(x, y) : 0;
-
-            SDL_Texture* tex = tileTexture(baseType, x, y, game.depth(), frame, floorStyle);
-            if (!tex) continue;
-
+            SDL_Texture* btex = tileTexture(base, x, y, game.depth(), frame, style);
             const Color mod = tileColorMod(x, y, t.visible);
-            SDL_SetTextureColorMod(tex, mod.r, mod.g, mod.b);
-            SDL_SetTextureAlphaMod(tex, 255);
+            const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 115 : 175);
 
-            SDL_RenderCopy(renderer, tex, nullptr, &dst);
-
-            SDL_SetTextureColorMod(tex, 255, 255, 255);
-            SDL_SetTextureAlphaMod(tex, 255);
-
-            // Themed floor decals add subtle detail and make special rooms stand out.
-            // Applied to any tile whose *base* is floor (including overlay tiles).
-            if (baseType == TileType::Floor && !floorDecalVar.empty()) {
-                const int style = floorStyle;
-
-                const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
-                                               static_cast<uint32_t>(y)) ^ 0xDECA151u;
-                const uint32_t r = hash32(h);
-                const uint8_t roll = static_cast<uint8_t>(r & 0xFFu);
-
-                if (roll < decalChance[static_cast<size_t>(style)]) {
-                    const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(decalsPerStyleUsed));
-                    const size_t di = static_cast<size_t>(style * decalsPerStyleUsed + var);
-
-                    if (di < floorDecalVar.size()) {
-                        SDL_Texture* dtex = floorDecalVar[di][static_cast<size_t>(frame % FRAMES)];
-                        if (dtex) {
-                            const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 120 : 160);
-                            SDL_SetTextureColorMod(dtex, mod.r, mod.g, mod.b);
-                            SDL_SetTextureAlphaMod(dtex, a);
-                            SDL_RenderCopy(renderer, dtex, nullptr, &dst);
-                            SDL_SetTextureColorMod(dtex, 255, 255, 255);
-                            SDL_SetTextureAlphaMod(dtex, 255);
-                        }
-                    }
-                }
+            if (btex) {
+                SDL_SetTextureColorMod(btex, mod.r, mod.g, mod.b);
+                SDL_SetTextureAlphaMod(btex, a);
+                SDL_RenderCopy(renderer, btex, nullptr, &dst);
+                SDL_SetTextureColorMod(btex, 255, 255, 255);
+                SDL_SetTextureAlphaMod(btex, 255);
             }
 
-            // Occasional wall stains/cracks (very low frequency; helps break large flat walls).
-            if ((t.type == TileType::Wall || t.type == TileType::DoorSecret) && !wallDecalVar.empty()) {
-                const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
-                                               static_cast<uint32_t>(y)) ^ 0xBADC0DEu;
-                const uint32_t r = hash32(h);
-                if (static_cast<uint8_t>(r & 0xFFu) < 18u) {
-                    int style = 0;
-                    // If a neighboring floor belongs to a special room, bias the wall decal style.
-                    const int dx[4] = {1,-1,0,0};
-                    const int dy[4] = {0,0,1,-1};
-                    for (int k = 0; k < 4; ++k) {
-                        const int nx = x + dx[k];
-                        const int ny = y + dy[k];
-                        if (!d.inBounds(nx, ny)) continue;
-                        if (d.at(nx, ny).type != TileType::Floor) continue;
-                        const size_t jj = static_cast<size_t>(ny * d.width + nx);
-                        if (jj >= roomTypeCache.size()) continue;
-                        const int s2 = styleForRoomType(roomTypeCache[jj]);
-                        if (s2 != 0) { style = s2; break; }
-                    }
-
-                    const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(decalsPerStyleUsed));
-                    const size_t di = static_cast<size_t>(style * decalsPerStyleUsed + var);
-                    if (di < wallDecalVar.size()) {
-                        SDL_Texture* dtex = wallDecalVar[di][static_cast<size_t>(frame % FRAMES)];
-                        if (dtex) {
-                            const Uint8 a = t.visible ? 220 : 120;
-                            SDL_SetTextureColorMod(dtex, mod.r, mod.g, mod.b);
-                            SDL_SetTextureAlphaMod(dtex, a);
-                            SDL_RenderCopy(renderer, dtex, nullptr, &dst);
-                            SDL_SetTextureColorMod(dtex, 255, 255, 255);
-                            SDL_SetTextureAlphaMod(dtex, 255);
-                        }
-                    }
-                }
-            }
-
-            // Autotile edge/rim overlays add crisp silhouette and depth for large wall/chasm fields.
-            if ((t.type == TileType::Wall || t.type == TileType::DoorSecret)) {
-                const uint8_t mask = wallOpenMaskAt(x, y);
-                if (mask != 0u) {
-                    const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
-                                                   static_cast<uint32_t>(y)) ^ 0xED6E7u ^ static_cast<uint32_t>(mask);
-                    const uint32_t r = hash32(h);
-                    const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(autoVarsUsed));
-
-                    SDL_Texture* etex = wallEdgeVar[static_cast<size_t>(mask)][v][static_cast<size_t>(frame % FRAMES)];
-                    if (etex) {
-                        const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 150 : 190);
-                        SDL_SetTextureColorMod(etex, mod.r, mod.g, mod.b);
-                        SDL_SetTextureAlphaMod(etex, a);
-                        SDL_RenderCopy(renderer, etex, nullptr, &dst);
-                        SDL_SetTextureColorMod(etex, 255, 255, 255);
-                        SDL_SetTextureAlphaMod(etex, 255);
-                    }
-                }
-            } else if (t.type == TileType::Chasm) {
-                const uint8_t mask = chasmOpenMaskAt(x, y);
-                if (mask != 0u) {
-                    const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
-                                                   static_cast<uint32_t>(y)) ^ 0xC11A5u ^ static_cast<uint32_t>(mask);
-                    const uint32_t r = hash32(h);
-                    const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(autoVarsUsed));
-
-                    SDL_Texture* rtex = chasmRimVar[static_cast<size_t>(mask)][v][static_cast<size_t>(frame % FRAMES)];
-                    if (rtex) {
-                        const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 135 : 175);
-                        SDL_SetTextureColorMod(rtex, mod.r, mod.g, mod.b);
-                        SDL_SetTextureAlphaMod(rtex, a);
-                        SDL_RenderCopy(renderer, rtex, nullptr, &dst);
-                        SDL_SetTextureColorMod(rtex, 255, 255, 255);
-                        SDL_SetTextureAlphaMod(rtex, 255);
-                    }
-                }
-            }
-
-            // Render overlays on top of floor base.
-            if (isOverlay) {
-                SDL_Texture* otex = nullptr;
-                switch (t.type) {
-                    case TileType::Pillar: {
-                        if (!pillarOverlayVar.empty()) {
-                            const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
-                                                           static_cast<uint32_t>(y)) ^ 0x9111A0u;
-                            const uint32_t rr = hash32(hh);
-                            const size_t idx = static_cast<size_t>(rr % static_cast<uint32_t>(pillarOverlayVar.size()));
-                            otex = pillarOverlayVar[idx][static_cast<size_t>(frame % FRAMES)];
-                        }
-                        break;
-                    }
-                    case TileType::Boulder: {
-                        if (!boulderOverlayVar.empty()) {
-                            const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
-                                                           static_cast<uint32_t>(y)) ^ 0xB011D3u;
-                            const uint32_t rr = hash32(hh);
-                            const size_t idx = static_cast<size_t>(rr % static_cast<uint32_t>(boulderOverlayVar.size()));
-                            otex = boulderOverlayVar[idx][static_cast<size_t>(frame % FRAMES)];
-                        }
-                        break;
-                    }
-                    case TileType::StairsUp:
-                        otex = stairsUpOverlayTex[static_cast<size_t>(frame % FRAMES)];
-                        break;
-                    case TileType::StairsDown:
-                        otex = stairsDownOverlayTex[static_cast<size_t>(frame % FRAMES)];
-                        break;
-                    case TileType::DoorClosed:
-                        otex = doorClosedOverlayTex[static_cast<size_t>(frame % FRAMES)];
-                        break;
-                    case TileType::DoorLocked:
-                        otex = doorLockedOverlayTex[static_cast<size_t>(frame % FRAMES)];
-                        break;
-                    case TileType::DoorOpen:
-                        otex = doorOpenOverlayTex[static_cast<size_t>(frame % FRAMES)];
-                        break;
-                    default:
-                        break;
-                }
-
+            // Ground-plane overlays that should stay on the diamond tile.
+            if (t.type == TileType::StairsUp) {
+                SDL_Texture* otex = stairsUpOverlayIsoTex[static_cast<size_t>(frame % FRAMES)];
+                if (!otex) otex = stairsUpOverlayTex[static_cast<size_t>(frame % FRAMES)];
                 if (otex) {
                     SDL_SetTextureColorMod(otex, mod.r, mod.g, mod.b);
+                    SDL_SetTextureAlphaMod(otex, a);
+                    SDL_RenderCopy(renderer, otex, nullptr, &dst);
+                    SDL_SetTextureColorMod(otex, 255, 255, 255);
                     SDL_SetTextureAlphaMod(otex, 255);
+                }
+            } else if (t.type == TileType::StairsDown) {
+                SDL_Texture* otex = stairsDownOverlayIsoTex[static_cast<size_t>(frame % FRAMES)];
+                if (!otex) otex = stairsDownOverlayTex[static_cast<size_t>(frame % FRAMES)];
+                if (otex) {
+                    SDL_SetTextureColorMod(otex, mod.r, mod.g, mod.b);
+                    SDL_SetTextureAlphaMod(otex, a);
+                    SDL_RenderCopy(renderer, otex, nullptr, &dst);
+                    SDL_SetTextureColorMod(otex, 255, 255, 255);
+                    SDL_SetTextureAlphaMod(otex, 255);
+                }
+            } else if (t.type == TileType::DoorOpen) {
+                SDL_Texture* otex = doorOpenOverlayIsoTex[static_cast<size_t>(frame % FRAMES)];
+                if (!otex) otex = doorOpenOverlayTex[static_cast<size_t>(frame % FRAMES)];
+                if (otex) {
+                    SDL_SetTextureColorMod(otex, mod.r, mod.g, mod.b);
+                    SDL_SetTextureAlphaMod(otex, a);
                     SDL_RenderCopy(renderer, otex, nullptr, &dst);
                     SDL_SetTextureColorMod(otex, 255, 255, 255);
                     SDL_SetTextureAlphaMod(otex, 255);
                 }
             }
 
+            // Tall blockers & objects.
+            auto drawTall = [&](SDL_Texture* tex, bool outline) {
+                if (!tex) return;
+                SDL_Rect sdst = spriteDst(x, y);
+                // In explored-but-not-visible memory view we draw a bit darker so the
+                // player can still navigate without everything looking "lit".
+                const Uint8 aa = t.visible ? 255 : (game.darknessActive() ? 150 : 190);
+                drawSpriteWithShadowOutline(renderer, tex, sdst, mod, aa, /*shadow=*/false, outline);
+            };
+
+            if (t.type == TileType::Wall || t.type == TileType::DoorSecret) {
+                if (!wallBlockVarIso.empty()) {
+                    const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                                   static_cast<uint32_t>(y)) ^ 0xAA110u ^ 0xB10Cu;
+                    const size_t v = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(wallBlockVarIso.size()));
+                    SDL_Texture* wtex = wallBlockVarIso[v][static_cast<size_t>(frame % FRAMES)];
+                    // Wall blocks are already outlined in their procedural art.
+                    drawTall(wtex, /*outline=*/false);
+                }
+            } else if (t.type == TileType::DoorClosed) {
+                drawTall(doorClosedOverlayTex[static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
+            } else if (t.type == TileType::DoorLocked) {
+                drawTall(doorLockedOverlayTex[static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
+            } else if (t.type == TileType::Pillar) {
+                if (!pillarOverlayVar.empty()) {
+                    const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                                   static_cast<uint32_t>(y)) ^ 0x9111A0u;
+                    const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(pillarOverlayVar.size()));
+                    drawTall(pillarOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
+                }
+            } else if (t.type == TileType::Boulder) {
+                if (!boulderOverlayVar.empty()) {
+                    const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                                   static_cast<uint32_t>(y)) ^ 0xB011D3u;
+                    const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(boulderOverlayVar.size()));
+                    drawTall(boulderOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
+                }
+            }
+
+            return;
+        }
+
+        // Doors/stairs/pillars are rendered as transparent overlays layered on top of the
+        // underlying floor so they inherit themed room flooring.
+        const bool isOverlay =
+            (t.type == TileType::Pillar) ||
+            (t.type == TileType::Boulder) ||
+            (t.type == TileType::StairsUp) || (t.type == TileType::StairsDown) ||
+            (t.type == TileType::DoorClosed) || (t.type == TileType::DoorLocked) || (t.type == TileType::DoorOpen);
+
+        TileType baseType = t.type;
+        if (isOverlay) baseType = TileType::Floor;
+
+        int floorStyle = (baseType == TileType::Floor) ? floorStyleAt(x, y) : 0;
+
+        SDL_Texture* tex = tileTexture(baseType, x, y, game.depth(), frame, floorStyle);
+        if (!tex) return;
+
+        const Color mod = tileColorMod(x, y, t.visible);
+        SDL_SetTextureColorMod(tex, mod.r, mod.g, mod.b);
+        SDL_SetTextureAlphaMod(tex, 255);
+
+        SDL_RenderCopy(renderer, tex, nullptr, &dst);
+
+        SDL_SetTextureColorMod(tex, 255, 255, 255);
+        SDL_SetTextureAlphaMod(tex, 255);
+
+        // Themed floor decals add subtle detail and make special rooms stand out.
+        // Applied to any tile whose *base* is floor (including overlay tiles).
+        if (baseType == TileType::Floor && !floorDecalVar.empty()) {
+            const int style = floorStyle;
+
+            const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                           static_cast<uint32_t>(y)) ^ 0xDECA151u;
+            const uint32_t r = hash32(h);
+            const uint8_t roll = static_cast<uint8_t>(r & 0xFFu);
+
+            if (roll < decalChance[static_cast<size_t>(style)]) {
+                const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(decalsPerStyleUsed));
+                const size_t di = static_cast<size_t>(style * decalsPerStyleUsed + var);
+
+                if (di < floorDecalVar.size()) {
+                    SDL_Texture* dtex = floorDecalVar[di][static_cast<size_t>(frame % FRAMES)];
+                    if (dtex) {
+                        const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 120 : 160);
+                        SDL_SetTextureColorMod(dtex, mod.r, mod.g, mod.b);
+                        SDL_SetTextureAlphaMod(dtex, a);
+                        SDL_RenderCopy(renderer, dtex, nullptr, &dst);
+                        SDL_SetTextureColorMod(dtex, 255, 255, 255);
+                        SDL_SetTextureAlphaMod(dtex, 255);
+                    }
+                }
+            }
+        }
+
+        // Occasional wall stains/cracks (very low frequency; helps break large flat walls).
+        if ((t.type == TileType::Wall || t.type == TileType::DoorSecret) && !wallDecalVar.empty()) {
+            const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                           static_cast<uint32_t>(y)) ^ 0xBADC0DEu;
+            const uint32_t r = hash32(h);
+            if (static_cast<uint8_t>(r & 0xFFu) < 18u) {
+                int style = 0;
+                // If a neighboring floor belongs to a special room, bias the wall decal style.
+                const int dx[4] = {1,-1,0,0};
+                const int dy[4] = {0,0,1,-1};
+                for (int k = 0; k < 4; ++k) {
+                    const int nx = x + dx[k];
+                    const int ny = y + dy[k];
+                    if (!d.inBounds(nx, ny)) continue;
+                    if (d.at(nx, ny).type != TileType::Floor) continue;
+                    const size_t jj = static_cast<size_t>(ny * d.width + nx);
+                    if (jj >= roomTypeCache.size()) continue;
+                    const int s2 = styleForRoomType(roomTypeCache[jj]);
+                    if (s2 != 0) { style = s2; break; }
+                }
+
+                const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(decalsPerStyleUsed));
+                const size_t di = static_cast<size_t>(style * decalsPerStyleUsed + var);
+                if (di < wallDecalVar.size()) {
+                    SDL_Texture* dtex = wallDecalVar[di][static_cast<size_t>(frame % FRAMES)];
+                    if (dtex) {
+                        const Uint8 a = t.visible ? 220 : 120;
+                        SDL_SetTextureColorMod(dtex, mod.r, mod.g, mod.b);
+                        SDL_SetTextureAlphaMod(dtex, a);
+                        SDL_RenderCopy(renderer, dtex, nullptr, &dst);
+                        SDL_SetTextureColorMod(dtex, 255, 255, 255);
+                        SDL_SetTextureAlphaMod(dtex, 255);
+                    }
+                }
+            }
+        }
+
+        // Autotile edge/rim overlays add crisp silhouette and depth for large wall/chasm fields.
+        if ((t.type == TileType::Wall || t.type == TileType::DoorSecret)) {
+            const uint8_t mask = wallOpenMaskAt(x, y);
+            if (mask != 0u) {
+                const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                               static_cast<uint32_t>(y)) ^ 0xED6E7u ^ static_cast<uint32_t>(mask);
+                const uint32_t r = hash32(h);
+                const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(autoVarsUsed));
+
+                SDL_Texture* etex = wallEdgeVar[static_cast<size_t>(mask)][v][static_cast<size_t>(frame % FRAMES)];
+                if (etex) {
+                    const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 150 : 190);
+                    SDL_SetTextureColorMod(etex, mod.r, mod.g, mod.b);
+                    SDL_SetTextureAlphaMod(etex, a);
+                    SDL_RenderCopy(renderer, etex, nullptr, &dst);
+                    SDL_SetTextureColorMod(etex, 255, 255, 255);
+                    SDL_SetTextureAlphaMod(etex, 255);
+                }
+            }
+        } else if (t.type == TileType::Chasm) {
+            const uint8_t mask = chasmOpenMaskAt(x, y);
+            if (mask != 0u) {
+                const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                               static_cast<uint32_t>(y)) ^ 0xC11A5u ^ static_cast<uint32_t>(mask);
+                const uint32_t r = hash32(h);
+                const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(autoVarsUsed));
+
+                SDL_Texture* rtex = chasmRimVar[static_cast<size_t>(mask)][v][static_cast<size_t>(frame % FRAMES)];
+                if (rtex) {
+                    const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 135 : 175);
+                    SDL_SetTextureColorMod(rtex, mod.r, mod.g, mod.b);
+                    SDL_SetTextureAlphaMod(rtex, a);
+                    SDL_RenderCopy(renderer, rtex, nullptr, &dst);
+                    SDL_SetTextureColorMod(rtex, 255, 255, 255);
+                    SDL_SetTextureAlphaMod(rtex, 255);
+                }
+            }
+        }
+
+        // Render overlays on top of floor base.
+        if (isOverlay) {
+            SDL_Texture* otex = nullptr;
+            switch (t.type) {
+                case TileType::Pillar: {
+                    if (!pillarOverlayVar.empty()) {
+                        const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                                       static_cast<uint32_t>(y)) ^ 0x9111A0u;
+                        const uint32_t rr = hash32(hh);
+                        const size_t idx = static_cast<size_t>(rr % static_cast<uint32_t>(pillarOverlayVar.size()));
+                        otex = pillarOverlayVar[idx][static_cast<size_t>(frame % FRAMES)];
+                    }
+                    break;
+                }
+                case TileType::Boulder: {
+                    if (!boulderOverlayVar.empty()) {
+                        const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                                       static_cast<uint32_t>(y)) ^ 0xB011D3u;
+                        const uint32_t rr = hash32(hh);
+                        const size_t idx = static_cast<size_t>(rr % static_cast<uint32_t>(boulderOverlayVar.size()));
+                        otex = boulderOverlayVar[idx][static_cast<size_t>(frame % FRAMES)];
+                    }
+                    break;
+                }
+                case TileType::StairsUp:
+                    otex = stairsUpOverlayTex[static_cast<size_t>(frame % FRAMES)];
+                    break;
+                case TileType::StairsDown:
+                    otex = stairsDownOverlayTex[static_cast<size_t>(frame % FRAMES)];
+                    break;
+                case TileType::DoorClosed:
+                    otex = doorClosedOverlayTex[static_cast<size_t>(frame % FRAMES)];
+                    break;
+                case TileType::DoorLocked:
+                    otex = doorLockedOverlayTex[static_cast<size_t>(frame % FRAMES)];
+                    break;
+                case TileType::DoorOpen:
+                    otex = doorOpenOverlayTex[static_cast<size_t>(frame % FRAMES)];
+                    break;
+                default:
+                    break;
+            }
+
+            if (otex) {
+                SDL_SetTextureColorMod(otex, mod.r, mod.g, mod.b);
+                SDL_SetTextureAlphaMod(otex, 255);
+                SDL_RenderCopy(renderer, otex, nullptr, &dst);
+                SDL_SetTextureColorMod(otex, 255, 255, 255);
+                SDL_SetTextureAlphaMod(otex, 255);
+            }
+        }
+
+
+    };
+
+    if (isoView) {
+        // Painter's order for isometric tiles: back-to-front by diagonal (x+y).
+        const int maxSum = (d.width - 1) + (d.height - 1);
+        for (int s = 0; s <= maxSum; ++s) {
+            for (int y = 0; y < d.height; ++y) {
+                const int x = s - y;
+                if (x < 0 || x >= d.width) continue;
+                drawMapTile(x, y);
+            }
+        }
+    } else {
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                drawMapTile(x, y);
+            }
         }
     }
 
-
+    // Ambient-occlusion + directional shadows are tuned for the top-down tileset.
+    // For isometric mode we rely on the diamond-projected ground tiles + taller
+    // wall blocks for depth/readability.
+    if (!isoView) {
 // Ambient-occlusion style edge shading (walls/pillars/chasm) makes rooms and corridors pop.
-    {
+        {
         auto isOccluder = [&](TileType tt) -> bool {
             switch (tt) {
                 case TileType::Wall:
@@ -1497,7 +2085,7 @@ void Renderer::render(const Game& game) {
         }
 
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
-    }
+        }
 
 
     // Directional occluder shadows: adds a subtle sense of "height" for walls/pillars/closed doors
@@ -1572,6 +2160,8 @@ void Renderer::render(const Game& game) {
         }
 
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        }
+
     }
 
 
@@ -1600,22 +2190,62 @@ void Renderer::render(const Game& game) {
     }
 
     // Draw items (visible only)
-    for (const auto& gi : game.groundItems()) {
-        if (!d.inBounds(gi.pos.x, gi.pos.y)) continue;
-        const Tile& t = d.at(gi.pos.x, gi.pos.y);
-        if (!t.visible) continue;
-
-        Item visIt = gi.item;
-        if (isHallucinating(game)) {
-            visIt.kind = hallucinatedItemKind(game, gi.item);
+    if (isoView) {
+        // Sort by isometric draw order so items layer nicely.
+        std::vector<const GroundItem*> draw;
+        draw.reserve(game.groundItems().size());
+        for (const auto& gi : game.groundItems()) {
+            if (!d.inBounds(gi.pos.x, gi.pos.y)) continue;
+            const Tile& t = d.at(gi.pos.x, gi.pos.y);
+            if (!t.visible) continue;
+            draw.push_back(&gi);
         }
 
-        SDL_Texture* tex = itemTexture(visIt, frame);
-        if (!tex) continue;
+        std::sort(draw.begin(), draw.end(), [](const GroundItem* a, const GroundItem* b) {
+            const int sa = a->pos.x + a->pos.y;
+            const int sb = b->pos.x + b->pos.y;
+            if (sa != sb) return sa < sb;
+            if (a->pos.y != b->pos.y) return a->pos.y < b->pos.y;
+            return a->pos.x < b->pos.x;
+        });
 
-        SDL_Rect dst = tileDst(gi.pos.x, gi.pos.y);
-        const Color mod = tileColorMod(gi.pos.x, gi.pos.y, /*visible*/true);
-        drawSpriteWithShadowOutline(renderer, tex, dst, mod, 255, /*shadow*/false, /*outline*/true);
+        for (const GroundItem* gip : draw) {
+            const GroundItem& gi = *gip;
+
+            Item visIt = gi.item;
+            if (isHallucinating(game)) {
+                visIt.kind = hallucinatedItemKind(game, gi.item);
+            }
+
+            applyIdentificationVisuals(game, visIt);
+
+            SDL_Texture* tex = itemTexture(visIt, frame);
+            if (!tex) continue;
+
+            SDL_Rect dst = spriteDst(gi.pos.x, gi.pos.y);
+            const Color mod = tileColorMod(gi.pos.x, gi.pos.y, /*visible*/true);
+            drawSpriteWithShadowOutline(renderer, tex, dst, mod, 255, /*shadow*/false, /*outline*/true);
+        }
+    } else {
+        for (const auto& gi : game.groundItems()) {
+            if (!d.inBounds(gi.pos.x, gi.pos.y)) continue;
+            const Tile& t = d.at(gi.pos.x, gi.pos.y);
+            if (!t.visible) continue;
+
+            Item visIt = gi.item;
+            if (isHallucinating(game)) {
+                visIt.kind = hallucinatedItemKind(game, gi.item);
+            }
+
+            applyIdentificationVisuals(game, visIt);
+
+            SDL_Texture* tex = itemTexture(visIt, frame);
+            if (!tex) continue;
+
+            SDL_Rect dst = spriteDst(gi.pos.x, gi.pos.y);
+            const Color mod = tileColorMod(gi.pos.x, gi.pos.y, /*visible*/true);
+            drawSpriteWithShadowOutline(renderer, tex, dst, mod, 255, /*shadow*/false, /*outline*/true);
+        }
     }
 
 
@@ -1626,7 +2256,7 @@ void Renderer::render(const Game& game) {
     {
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
-        const bool haveGasTex = (gasVar[0][0] != nullptr);
+        const bool haveGasTex = isoView ? (gasVarIso[0][0] != nullptr) : (gasVar[0][0] != nullptr);
 
         for (int y = 0; y < d.height; ++y) {
             for (int x = 0; x < d.width; ++x) {
@@ -1654,7 +2284,7 @@ void Renderer::render(const Game& game) {
                     const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(GAS_VARS));
                     const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
 
-                    SDL_Texture* gtex = gasVar[vi][fi];
+                    SDL_Texture* gtex = (isoView && gasVarIso[0][0] != nullptr) ? gasVarIso[vi][fi] : gasVar[vi][fi];
                     if (gtex) {
                         // Multiply a "signature" purple by the tile lighting/tint so it feels embedded in the world.
                         const Color lmod = tileColorMod(x, y, /*visible=*/true);
@@ -1751,7 +2381,7 @@ void Renderer::render(const Game& game) {
         // Additive blend gives a nice glow without completely obscuring tiles.
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_ADD);
 
-        const bool haveFireTex = (fireVar[0][0] != nullptr);
+        const bool haveFireTex = isoView ? (fireVarIso[0][0] != nullptr) : (fireVar[0][0] != nullptr);
 
         for (int y = 0; y < d.height; ++y) {
             for (int x = 0; x < d.width; ++x) {
@@ -1779,7 +2409,7 @@ void Renderer::render(const Game& game) {
                     const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(FIRE_VARS));
                     const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
 
-                    SDL_Texture* ftex = fireVar[vi][fi];
+                    SDL_Texture* ftex = (isoView && fireVarIso[0][0] != nullptr) ? fireVarIso[vi][fi] : fireVar[vi][fi];
                     if (ftex) {
                         // Warm fire tint, modulated by world lighting.
                         const Color lmod = tileColorMod(x, y, /*visible=*/true);
@@ -1836,9 +2466,11 @@ void Renderer::render(const Game& game) {
         SDL_Rect base = mapTileDst(tr.pos.x, tr.pos.y);
         const int x0 = base.x;
         const int y0 = base.y;
-        SDL_RenderDrawLine(renderer, x0 + 4, y0 + 4, x0 + tile - 5, y0 + tile - 5);
-        SDL_RenderDrawLine(renderer, x0 + tile - 5, y0 + 4, x0 + 4, y0 + tile - 5);
-        SDL_RenderDrawPoint(renderer, x0 + tile / 2, y0 + tile / 2);
+        const int x1 = x0 + base.w - 5;
+        const int y1 = y0 + base.h - 5;
+        SDL_RenderDrawLine(renderer, x0 + 4, y0 + 4, x1, y1);
+        SDL_RenderDrawLine(renderer, x1, y0 + 4, x0 + 4, y1);
+        SDL_RenderDrawPoint(renderer, x0 + base.w / 2, y0 + base.h / 2);
     }
 
     // Draw player map markers / notes (shown on explored tiles; subtle indicator).
@@ -1867,31 +2499,85 @@ void Renderer::render(const Game& game) {
     }
 
     // Draw entities (only if their tile is visible; player always visible)
-    for (const auto& e : game.entities()) {
-        if (!d.inBounds(e.pos.x, e.pos.y)) continue;
-
-        bool show = (e.id == game.playerId()) || d.at(e.pos.x, e.pos.y).visible;
-        if (!show) continue;
-
-        Entity visE = e;
-        if (isHallucinating(game)) {
-            visE.kind = hallucinatedEntityKind(game, e);
+    if (isoView) {
+        // Sort entities for isometric painter's algorithm (back-to-front).
+        std::vector<const Entity*> draw;
+        draw.reserve(game.entities().size());
+        for (const auto& e : game.entities()) {
+            if (!d.inBounds(e.pos.x, e.pos.y)) continue;
+            const bool show = (e.id == game.playerId()) || d.at(e.pos.x, e.pos.y).visible;
+            if (!show) continue;
+            draw.push_back(&e);
         }
 
-        SDL_Texture* tex = entityTexture(visE, (frame + e.id) % FRAMES);
-        if (!tex) continue;
+        const int playerId = game.playerId();
+        std::sort(draw.begin(), draw.end(), [&](const Entity* a, const Entity* b) {
+            const bool aIsPlayer = (a->id == playerId);
+            const bool bIsPlayer = (b->id == playerId);
 
-        SDL_Rect dst = tileDst(e.pos.x, e.pos.y);
-        const bool tileVis = (e.id == game.playerId()) ? true : d.at(e.pos.x, e.pos.y).visible;
-        const Color mod = tileColorMod(e.pos.x, e.pos.y, tileVis);
-        drawSpriteWithShadowOutline(renderer, tex, dst, mod, 255, /*shadow*/true, /*outline*/true);
+            // Player last so they don't get hidden behind other sprites.
+            if (aIsPlayer != bIsPlayer) return !aIsPlayer && bIsPlayer;
 
-        // Small HP pip for monsters
-        if (e.id != game.playerId() && e.hp > 0) {
-            SDL_Rect bar{ dst.x + 2, dst.y + 2, std::max(1, (tile - 4) * e.hp / std::max(1, e.hpMax)), 4 };
-            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-            SDL_SetRenderDrawColor(renderer, 200, 40, 40, 160);
-            SDL_RenderFillRect(renderer, &bar);
+            const int sa = a->pos.x + a->pos.y;
+            const int sb = b->pos.x + b->pos.y;
+            if (sa != sb) return sa < sb;
+            if (a->pos.y != b->pos.y) return a->pos.y < b->pos.y;
+            if (a->pos.x != b->pos.x) return a->pos.x < b->pos.x;
+            return a->id < b->id;
+        });
+
+        for (const Entity* ep : draw) {
+            const Entity& e = *ep;
+            const bool isPlayer = (e.id == playerId);
+
+            Entity visE = e;
+            if (isHallucinating(game)) {
+                visE.kind = hallucinatedEntityKind(game, e);
+            }
+
+            SDL_Texture* tex = entityTexture(visE, (frame + e.id) % FRAMES);
+            if (!tex) continue;
+
+            SDL_Rect dst = spriteDst(e.pos.x, e.pos.y);
+            const bool tileVis = isPlayer ? true : d.at(e.pos.x, e.pos.y).visible;
+            const Color mod = tileColorMod(e.pos.x, e.pos.y, tileVis);
+            drawSpriteWithShadowOutline(renderer, tex, dst, mod, 255, /*shadow*/true, /*outline*/true);
+
+            // Small HP pip for monsters
+            if (!isPlayer && e.hp > 0) {
+                SDL_Rect bar{ dst.x + 2, dst.y + 2, std::max(1, (tile - 4) * e.hp / std::max(1, e.hpMax)), 4 };
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 200, 40, 40, 160);
+                SDL_RenderFillRect(renderer, &bar);
+            }
+        }
+    } else {
+        for (const auto& e : game.entities()) {
+            if (!d.inBounds(e.pos.x, e.pos.y)) continue;
+
+            bool show = (e.id == game.playerId()) || d.at(e.pos.x, e.pos.y).visible;
+            if (!show) continue;
+
+            Entity visE = e;
+            if (isHallucinating(game)) {
+                visE.kind = hallucinatedEntityKind(game, e);
+            }
+
+            SDL_Texture* tex = entityTexture(visE, (frame + e.id) % FRAMES);
+            if (!tex) continue;
+
+            SDL_Rect dst = spriteDst(e.pos.x, e.pos.y);
+            const bool tileVis = (e.id == game.playerId()) ? true : d.at(e.pos.x, e.pos.y).visible;
+            const Color mod = tileColorMod(e.pos.x, e.pos.y, tileVis);
+            drawSpriteWithShadowOutline(renderer, tex, dst, mod, 255, /*shadow*/true, /*outline*/true);
+
+            // Small HP pip for monsters
+            if (e.id != game.playerId() && e.hp > 0) {
+                SDL_Rect bar{ dst.x + 2, dst.y + 2, std::max(1, (tile - 4) * e.hp / std::max(1, e.hpMax)), 4 };
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 200, 40, 40, 160);
+                SDL_RenderFillRect(renderer, &bar);
+            }
         }
     }
 
@@ -1945,7 +2631,7 @@ void Renderer::render(const Game& game) {
 
         SDL_Texture* tex = projectileTexture(fx.kind, frame);
         if (!tex) continue;
-        SDL_Rect dst = tileDst(p.x, p.y);
+        SDL_Rect dst = spriteDst(p.x, p.y);
         const Color mod = tileColorMod(p.x, p.y, t.visible);
         drawSpriteWithShadowOutline(renderer, tex, dst, mod, 255, /*shadow*/false, /*outline*/true);
     }
@@ -2084,6 +2770,10 @@ void Renderer::render(const Game& game) {
 
     if (game.isDiscoveriesOpen()) {
         drawDiscoveriesOverlay(game);
+    }
+
+    if (game.isScoresOpen()) {
+        drawScoresOverlay(game);
     }
 
     if (game.isMessageHistoryOpen()) {
@@ -2333,7 +3023,7 @@ void Renderer::drawHud(const Game& game) {
             "D DIG | B KICK | F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH (TRAPS/SECRETS)");
     }
     drawText5x7(renderer, 8, controlY3, 2, gray,
-        "F2 OPT | F3 MSGS | # CMD | M MAP | SHIFT+TAB STATS | F5 SAVE | F9 LOAD | PGUP/PGDN LOG | ? HELP");
+        "F2 OPT | F3 MSGS | # CMD | M MAP | SHIFT+TAB STATS | F5 SAVE | F6 SCORES | F9 LOAD | PGUP/PGDN LOG | ? HELP");
 
     // Message log
     const auto& msgs = game.messages();
@@ -2506,6 +3196,8 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             visIt.kind = hallucinatedItemKind(game, it);
         }
 
+        applyIdentificationVisuals(game, visIt);
+
         SDL_Texture* itex = itemTexture(visIt, lastFrame);
         if (itex) {
             SDL_RenderCopy(renderer, itex, nullptr, &iconDst);
@@ -2549,6 +3241,8 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         if (isHallucinating(game)) {
             visIt.kind = hallucinatedItemKind(game, it);
         }
+
+        applyIdentificationVisuals(game, visIt);
 
         SDL_Texture* tex = itemTexture(visIt, lastFrame);
         if (tex) {
@@ -3140,6 +3834,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
         lineGray("D DIG  B KICK  L/V LOOK  SHIFT+C SEARCH  T DISARM  K CLOSE  SHIFT+K LOCK");
     }
     lineGray("O EXPLORE  P AUTOPICKUP  M MINIMAP  SHIFT+TAB STATS");
+    lineGray("MINIMAP: MOVE CURSOR (ARROWS/WASD), ENTER TRAVEL, L/RMB LOOK, LMB TRAVEL");
     lineGray("F2 OPTIONS  # EXTENDED COMMANDS  (TYPE + ENTER)");
     lineGray("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART");
     lineGray("F11 FULLSCREEN  F12 SCREENSHOT (BINDABLE)");
@@ -3236,6 +3931,19 @@ void Renderer::drawMinimapOverlay(const Game& game) {
 
     // Title
     drawText5x7(renderer, x0 + pad, y0 + 4, 2, white, "MINIMAP (M)");
+
+    // Hint line (fit inside the title band).
+    const Color gray{ 160, 160, 160, 255 };
+    drawText5x7(renderer, x0 + pad, y0 + 4 + 14, 1, gray, "LMB/ENTER:TRAVEL  RMB/L:LOOK");
+
+    // Cursor coordinates (right aligned).
+    if (game.minimapCursorActive()) {
+        const Vec2i c = game.minimapCursor();
+        const std::string coords = std::to_string(c.x) + "," + std::to_string(c.y);
+        const int charW = (5 + 1) * 1;
+        const int textW = static_cast<int>(coords.size()) * charW;
+        drawText5x7(renderer, x0 + panelW - pad - textW, y0 + 4 + 14, 1, gray, coords);
+    }
 
     const int mapX = x0 + pad;
     const int mapY = y0 + pad + titleH;
@@ -3397,6 +4105,21 @@ void Renderer::drawMinimapOverlay(const Game& game) {
             // Slightly thicker border for readability (if space allows).
             SDL_Rect vr2 { vr.x - 1, vr.y - 1, vr.w + 2, vr.h + 2 };
             SDL_RenderDrawRect(renderer, &vr2);
+        }
+    }
+
+    // Minimap cursor highlight (UI-only)
+    if (game.minimapCursorActive()) {
+        const Vec2i c = game.minimapCursor();
+        if (d.inBounds(c.x, c.y)) {
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 220);
+            SDL_Rect rc { mapX + c.x * px, mapY + c.y * px, px, px };
+            SDL_RenderDrawRect(renderer, &rc);
+            // Slightly thicker border when the minimap is large enough.
+            if (px >= 4) {
+                SDL_Rect rc2 { rc.x - 1, rc.y - 1, rc.w + 2, rc.h + 2 };
+                SDL_RenderDrawRect(renderer, &rc2);
+            }
         }
     }
 }
@@ -3624,6 +4347,202 @@ void Renderer::drawLevelUpOverlay(const Game& game) {
     drawText5x7(renderer, x0 + 16, y, scale, gray, "UP/DOWN: select  ENTER: spend  ESC: spend all");
 }
 
+
+
+void Renderer::drawScoresOverlay(const Game& game) {
+    const int pad = 14;
+    const int panelW = winW * 9 / 10;
+    const int panelH = winH * 9 / 10;
+    const int panelX = (winW - panelW) / 2;
+    const int panelY = (winH - panelH) / 2;
+
+    drawPanel(panelX, panelY, panelW, panelH);
+
+    const int titleScale = 2;
+    const int bodyScale = 1;
+    const int lineH = 10 * bodyScale;
+
+    const SDL_Color white = {255, 255, 255, 255};
+    const SDL_Color gray = {160, 160, 160, 255};
+    const SDL_Color selCol = {240, 240, 120, 255};
+
+    int x = panelX + pad;
+    int y = panelY + pad;
+
+    drawText5x7(renderer, x, y, titleScale, white, "SCORES");
+    y += 20;
+
+    std::ostringstream header;
+    header << "VIEW: " << scoresViewDisplayName(game.scoresView())
+           << "  (LEFT/RIGHT TO TOGGLE)   UP/DOWN SELECT   PGUP/PGDN JUMP   ESC CLOSE";
+    drawTextWrapped5x7(renderer, x, y, bodyScale, gray, header.str(), panelW - pad * 2);
+    y += 30;
+
+    const int topH = (y - panelY) + 10;
+    const int innerX = panelX + pad;
+    const int innerY = panelY + topH;
+    const int innerW = panelW - pad * 2;
+    const int innerH = panelH - topH - pad;
+
+    const int listW = innerW * 6 / 10;
+    const int detailX = innerX + listW + pad;
+    const int detailW = innerW - listW - pad;
+
+    SDL_SetRenderDrawColor(renderer, 80, 80, 80, 255);
+    SDL_RenderDrawLine(renderer, detailX - pad / 2, innerY, detailX - pad / 2, innerY + innerH);
+
+    std::vector<size_t> order;
+    game.buildScoresList(order);
+    const auto& entries = game.scoreBoard().entries();
+    const int total = static_cast<int>(order.size());
+    const int sel = clampi(game.scoresSelection(), 0, std::max(0, total - 1));
+
+    auto fitToChars = [&](const std::string& s, int maxChars) -> std::string {
+        if (maxChars <= 0) return "";
+        if (static_cast<int>(s.size()) <= maxChars) return s;
+        if (maxChars <= 3) return s.substr(0, maxChars);
+        return s.substr(0, maxChars - 3) + "...";
+    };
+
+    // Left: list
+    {
+        const SDL_Rect clip = {innerX, innerY, listW, innerH};
+        ClipRectGuard g(renderer, clip);
+
+        if (total <= 0) {
+            drawText5x7(renderer, innerX, innerY, bodyScale, gray, "NO RUNS RECORDED YET.");
+        } else {
+            const int rows = std::max(1, innerH / lineH);
+            const int maxScroll = std::max(0, total - rows);
+            const int scroll = clampi(sel - rows / 2, 0, maxScroll);
+
+            for (int row = 0; row < rows; ++row) {
+                const int viewIdx = scroll + row;
+                if (viewIdx >= total) break;
+
+                const ScoreEntry& e = entries[order[viewIdx]];
+                std::ostringstream ss;
+
+                if (game.scoresView() == ScoresView::Top) {
+                    ss << "#" << std::setw(3) << (viewIdx + 1) << "  ";
+                    ss << "S" << std::setw(6) << e.score << "  ";
+                    ss << "D" << std::setw(2) << e.depth << "  ";
+                    ss << (e.won ? "W " : "D ");
+                    ss << e.name;
+                    if (!e.className.empty()) ss << " (" << e.className << ")";
+                } else {
+                    std::string date = e.timestamp;
+                    if (date.size() >= 10) date = date.substr(0, 10);
+                    ss << date << "  " << (e.won ? "W " : "D ");
+                    ss << "S" << e.score << " D" << e.depth << " ";
+                    ss << e.name;
+                    if (!e.className.empty()) ss << " (" << e.className << ")";
+                }
+
+                const int maxChars = std::max(1, (listW - 4) / 6);
+                const std::string line = fitToChars(ss.str(), maxChars);
+                drawText5x7(renderer, innerX, innerY + row * lineH, bodyScale,
+                            (viewIdx == sel) ? selCol : white, line);
+            }
+        }
+    }
+
+    // Right: details
+    {
+        const SDL_Rect clip = {detailX, innerY, detailW, innerH};
+        ClipRectGuard g(renderer, clip);
+
+        if (total > 0) {
+            const ScoreEntry& e = entries[order[sel]];
+
+            int dy = innerY;
+            std::ostringstream title;
+            title << "DETAILS";
+            drawText5x7(renderer, detailX, dy, bodyScale + 1, white, title.str());
+            dy += 18;
+
+            // Rank by score (always meaningful since entries are stored score-sorted)
+            const int rankByScore = static_cast<int>(order[sel]) + 1;
+
+            {
+                std::ostringstream ss;
+                ss << "RANK: #" << rankByScore;
+                if (game.scoresView() == ScoresView::Top) ss << "  (VIEW #" << (sel + 1) << ")";
+                drawText5x7(renderer, detailX, dy, bodyScale, gray, ss.str());
+                dy += lineH;
+            }
+
+            if (!e.timestamp.empty()) {
+                std::ostringstream ss;
+                ss << "WHEN: " << e.timestamp;
+                drawText5x7(renderer, detailX, dy, bodyScale, gray, ss.str());
+                dy += lineH;
+            }
+
+            {
+                std::ostringstream ss;
+                ss << "NAME: " << e.name;
+                drawText5x7(renderer, detailX, dy, bodyScale, white, ss.str());
+                dy += lineH;
+            }
+
+            if (!e.className.empty()) {
+                std::ostringstream ss;
+                ss << "CLASS: " << e.className;
+                drawText5x7(renderer, detailX, dy, bodyScale, white, ss.str());
+                dy += lineH;
+            }
+
+            {
+                std::ostringstream ss;
+                ss << "RESULT: " << (e.won ? "ESCAPED ALIVE" : "DIED");
+                drawText5x7(renderer, detailX, dy, bodyScale, white, ss.str());
+                dy += lineH;
+            }
+
+            {
+                std::ostringstream ss;
+                ss << "SCORE: " << e.score;
+                drawText5x7(renderer, detailX, dy, bodyScale, white, ss.str());
+                dy += lineH;
+            }
+
+            {
+                std::ostringstream ss;
+                ss << "DEPTH: " << e.depth << "   TURNS: " << e.turns;
+                drawText5x7(renderer, detailX, dy, bodyScale, white, ss.str());
+                dy += lineH;
+            }
+
+            {
+                std::ostringstream ss;
+                ss << "KILLS: " << e.kills << "   LVL: " << e.level << "   GOLD: " << e.gold;
+                drawText5x7(renderer, detailX, dy, bodyScale, white, ss.str());
+                dy += lineH;
+            }
+
+            if (e.seed != 0) {
+                std::ostringstream ss;
+                ss << "SEED: " << e.seed << "   SLOT: " << e.slot;
+                drawText5x7(renderer, detailX, dy, bodyScale, gray, ss.str());
+                dy += lineH;
+            }
+
+            if (!e.cause.empty()) {
+                std::ostringstream ss;
+                ss << "CAUSE: " << e.cause;
+                drawTextWrapped5x7(renderer, detailX, dy, bodyScale, gray, ss.str(), detailW);
+            }
+        }
+
+        // Footer: scores file path (handy for backups / sharing)
+        {
+            const std::string path = game.defaultScoresPath();
+            const std::string line = "FILE: " + path;
+            drawTextWrapped5x7(renderer, detailX, innerY + innerH - lineH * 2, bodyScale, gray, line, detailW);
+        }
+    }
+}
 
 void Renderer::drawCodexOverlay(const Game& game) {
     const int pad = 14;
@@ -4239,6 +5158,8 @@ void Renderer::drawMessageHistoryOverlay(const Game& game) {
 void Renderer::drawTargetingOverlay(const Game& game) {
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
+    const bool iso = (viewMode_ == ViewMode::Isometric);
+
     const auto& linePts = game.targetingLine();
     Vec2i cursor = game.targetingCursor();
     bool ok = game.targetingIsValid();
@@ -4248,14 +5169,28 @@ void Renderer::drawTargetingOverlay(const Game& game) {
     for (size_t i = 1; i < linePts.size(); ++i) {
         Vec2i p = linePts[i];
         SDL_Rect base = mapTileDst(p.x, p.y);
-        SDL_Rect r{ base.x + tile/4, base.y + tile/4, tile/2, tile/2 };
-        SDL_RenderFillRect(renderer, &r);
+        if (iso) {
+            const int cx = base.x + base.w / 2;
+            const int cy = base.y + base.h / 2;
+            const int hw = std::max(1, base.w / 8);
+            const int hh = std::max(1, base.h / 4);
+            fillIsoDiamond(renderer, cx, cy, hw, hh);
+        } else {
+            SDL_Rect r{ base.x + tile / 4, base.y + tile / 4, tile / 2, tile / 2 };
+            SDL_RenderFillRect(renderer, &r);
+        }
     }
 
     // Crosshair on cursor
     SDL_Rect c = mapTileDst(cursor.x, cursor.y);
     SDL_SetRenderDrawColor(renderer, ok ? 0 : 255, ok ? 255 : 0, 0, 200);
-    SDL_RenderDrawRect(renderer, &c);
+    if (iso) {
+        drawIsoDiamondOutline(renderer, c);
+        SDL_SetRenderDrawColor(renderer, ok ? 0 : 255, ok ? 255 : 0, 0, 110);
+        drawIsoDiamondCross(renderer, c);
+    } else {
+        SDL_RenderDrawRect(renderer, &c);
+    }
 
     // Small label near bottom HUD
     const int scale = 2;
@@ -4294,6 +5229,8 @@ void Renderer::drawTargetingOverlay(const Game& game) {
 void Renderer::drawLookOverlay(const Game& game) {
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
+    const bool iso = (viewMode_ == ViewMode::Isometric);
+
     const Dungeon& d = game.dungeon();
     Vec2i cursor = game.lookCursor();
     if (!d.inBounds(cursor.x, cursor.y)) return;
@@ -4301,12 +5238,20 @@ void Renderer::drawLookOverlay(const Game& game) {
     // Cursor box
     SDL_Rect c = mapTileDst(cursor.x, cursor.y);
     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 200);
-    SDL_RenderDrawRect(renderer, &c);
+    if (iso) {
+        drawIsoDiamondOutline(renderer, c);
+    } else {
+        SDL_RenderDrawRect(renderer, &c);
+    }
 
     // Crosshair lines (subtle)
     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 90);
-    SDL_RenderDrawLine(renderer, c.x, c.y + tile / 2, c.x + tile, c.y + tile / 2);
-    SDL_RenderDrawLine(renderer, c.x + tile / 2, c.y, c.x + tile / 2, c.y + tile);
+    if (iso) {
+        drawIsoDiamondCross(renderer, c);
+    } else {
+        SDL_RenderDrawLine(renderer, c.x, c.y + c.h / 2, c.x + c.w, c.y + c.h / 2);
+        SDL_RenderDrawLine(renderer, c.x + c.w / 2, c.y, c.x + c.w / 2, c.y + c.h);
+    }
 
     // Label near bottom of map
     const int scale = 2;

@@ -363,7 +363,9 @@ void Game::setHungerEnabled(bool enabled) {
     hungerEnabled_ = enabled;
 
     // Initialize reasonable defaults lazily so older paths don't need to know.
-    if (hungerMax <= 0) hungerMax = 800;
+    if (hungerMax <= 0) {
+        hungerMax = 800 + std::max(0, DUNGEON_MAX_DEPTH - 10) * 40;
+    }
     hunger = clampi(hunger, 0, hungerMax);
 
     hungerStatePrev = hungerStateFor(hunger, hungerMax);
@@ -556,10 +558,10 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 36u;
+constexpr uint32_t SAVE_VERSION = 37u;
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
-constexpr uint32_t BONES_VERSION = 1u;
+constexpr uint32_t BONES_VERSION = 2u;
 
 
 // v13+: append CRC32 of the entire payload (all bytes up to but excluding the CRC field).
@@ -648,6 +650,10 @@ void writeItem(std::ostream& out, const Item& it) {
     int32_t shopDepth = static_cast<int32_t>(std::max(0, it.shopDepth));
     writePod(out, shopPrice);
     writePod(out, shopDepth);
+
+    // v37: item ego/brand (append-only)
+    uint8_t ego = static_cast<uint8_t>(it.ego);
+    writePod(out, ego);
 }
 
 bool readItem(std::istream& in, Item& it, uint32_t version) {
@@ -660,6 +666,7 @@ bool readItem(std::istream& in, Item& it, uint32_t version) {
     int8_t buc = 0;
     int32_t shopPrice = 0;
     int32_t shopDepth = 0;
+    uint8_t ego = 0;
     if (!readPod(in, id)) return false;
     if (!readPod(in, kind)) return false;
     if (!readPod(in, count)) return false;
@@ -675,6 +682,10 @@ bool readItem(std::istream& in, Item& it, uint32_t version) {
         if (!readPod(in, shopPrice)) return false;
         if (!readPod(in, shopDepth)) return false;
     }
+    if (version >= 37u) {
+        if (!readPod(in, ego)) return false;
+        if (ego >= static_cast<uint8_t>(ITEM_EGO_COUNT)) ego = 0;
+    }
     it.id = id;
     it.kind = static_cast<ItemKind>(kind);
     it.count = count;
@@ -684,6 +695,7 @@ bool readItem(std::istream& in, Item& it, uint32_t version) {
     it.buc = static_cast<int>(buc);
     it.shopPrice = static_cast<int>(shopPrice);
     it.shopDepth = static_cast<int>(shopDepth);
+    it.ego = static_cast<ItemEgo>(ego);
     return true;
 }
 
@@ -2326,6 +2338,8 @@ if (ver >= 33u) {
         targeting = false;
         helpOpen = false;
         minimapOpen = false;
+        minimapCursorActive_ = false;
+        minimapCursorPos_ = {0,0};
         statsOpen = false;
         looking = false;
         lookPos = {0,0};

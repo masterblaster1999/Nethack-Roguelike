@@ -101,6 +101,7 @@ public:
     std::vector<Vec2i> bonusLootSpots;
     // Generator flags (not serialized): used for callouts/tests.
     bool hasCavernLake = false;
+    bool hasWarrens = false; // Organic burrow/tunnel generator.
     int secretShortcutCount = 0;
     // Not serialized: visible locked shortcut doors (DoorLocked) connecting adjacent corridors.
     int lockedShortcutCount = 0;

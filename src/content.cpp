@@ -284,10 +284,15 @@ std::vector<SpawnEntry> defaultRoomSpawnTable(int depth) {
         };
     }
 
-    // Deep band (7+)
-    if (depth == 7 || depth == Game::QUEST_DEPTH) {
+    // --- Deeper run support ---
+    // The run is longer now (default 20 floors), so we use broader depth "bands"
+    // rather than a single 7+ table. This keeps the last 10 floors from feeling
+    // like pure filler and introduces undead/ethereal threats gradually.
+
+    // Depth 7-9: early-deep (introduce mimics/wizards; rare Minotaur).
+    if (depth <= 9) {
         return {
-            {EntityKind::Orc, 12},
+            {EntityKind::Orc, 10},
             {EntityKind::SkeletonArcher, 12},
             {EntityKind::Spider, 10},
             {EntityKind::Troll, 12},
@@ -299,25 +304,73 @@ std::vector<SpawnEntry> defaultRoomSpawnTable(int depth) {
             {EntityKind::Slime, 4},
             {EntityKind::Snake, 2},
             {EntityKind::Leprechaun, 1},
-            {EntityKind::Bat, 1},
+            {EntityKind::Minotaur, 1},
         };
     }
 
-    // Depth 8-9 (rare Minotaur).
+    // Depth 10: true midpoint spike (stronger mixed packs + first real undead pressure).
+    if (depth == 10) {
+        return {
+            {EntityKind::SkeletonArcher, 12},
+            {EntityKind::Troll, 14},
+            {EntityKind::Ogre, 14},
+            {EntityKind::Mimic, 12},
+            {EntityKind::Wizard, 12},
+            {EntityKind::Zombie, 6},
+            {EntityKind::Minotaur, 3},
+            {EntityKind::Ghost, 2},
+            {EntityKind::Spider, 6},
+            {EntityKind::Wolf, 6},
+            {EntityKind::KoboldSlinger, 4},
+            {EntityKind::Leprechaun, 1},
+        };
+    }
+
+    // Depth 11-14: late band (undead + heavier elites).
+    if (depth <= 14) {
+        return {
+            {EntityKind::SkeletonArcher, 10},
+            {EntityKind::Troll, 14},
+            {EntityKind::Ogre, 14},
+            {EntityKind::Mimic, 12},
+            {EntityKind::Wizard, 12},
+            {EntityKind::Zombie, 10},
+            {EntityKind::Minotaur, 4},
+            {EntityKind::Ghost, 4},
+            {EntityKind::Spider, 4},
+            {EntityKind::Wolf, 4},
+            {EntityKind::KoboldSlinger, 2},
+            {EntityKind::Leprechaun, 1},
+        };
+    }
+
+    // Depth 15-19: very deep (frequent undead/Minotaurs; rooms are dangerous).
+    if (depth < Game::QUEST_DEPTH) {
+        return {
+            {EntityKind::Wizard, 14},
+            {EntityKind::Mimic, 12},
+            {EntityKind::Troll, 14},
+            {EntityKind::Ogre, 14},
+            {EntityKind::Zombie, 12},
+            {EntityKind::Ghost, 6},
+            {EntityKind::Minotaur, 6},
+            {EntityKind::SkeletonArcher, 8},
+            {EntityKind::Spider, 3},
+            {EntityKind::Wolf, 3},
+            {EntityKind::Leprechaun, 1},
+        };
+    }
+
+    // Final floor: keep Minotaurs off the sanctum (endgame boss is different).
     return {
-        {EntityKind::Orc, 12},
-        {EntityKind::SkeletonArcher, 12},
-        {EntityKind::Spider, 10},
+        {EntityKind::Mimic, 14},
         {EntityKind::Troll, 12},
-        {EntityKind::Ogre, 10},
-        {EntityKind::Mimic, 10},
-        {EntityKind::Wizard, 10},
-        {EntityKind::Wolf, 10},
-        {EntityKind::KoboldSlinger, 6},
-        {EntityKind::Slime, 4},
-        {EntityKind::Snake, 2},
-        {EntityKind::Leprechaun, 1},
-        {EntityKind::Minotaur, 1},
+        {EntityKind::Ogre, 12},
+        {EntityKind::SkeletonArcher, 10},
+        {EntityKind::Zombie, 12},
+        {EntityKind::Ghost, 8},
+        {EntityKind::Wizard, 8},
+        {EntityKind::Spider, 4},
     };
 }
 
@@ -325,17 +378,49 @@ std::vector<SpawnEntry> defaultGuardianSpawnTable(int depth) {
     depth = std::max(1, std::min(depth, Game::DUNGEON_MAX_DEPTH));
 
     if (depth >= 7) {
+        // Deeper floors: guardians skew toward elites and ranged pressure.
         if (depth == Game::QUEST_DEPTH) {
             // Keep Minotaurs off the final floor; the endgame boss is different.
             return {
-                {EntityKind::Wizard, 20},
-                {EntityKind::Ogre, 15},
-                {EntityKind::Troll, 18},
-                {EntityKind::Mimic, 15},
-                {EntityKind::Spider, 7},
-                {EntityKind::SkeletonArcher, 25},
+                {EntityKind::Wizard, 24},
+                {EntityKind::Ogre, 14},
+                {EntityKind::Troll, 14},
+                {EntityKind::Mimic, 16},
+                {EntityKind::SkeletonArcher, 18},
+                {EntityKind::Zombie, 8},
+                {EntityKind::Ghost, 6},
             };
         }
+
+        if (depth >= 15) {
+            return {
+                {EntityKind::Wizard, 22},
+                {EntityKind::Ogre, 12},
+                {EntityKind::Troll, 12},
+                {EntityKind::Mimic, 16},
+                {EntityKind::SkeletonArcher, 16},
+                {EntityKind::Minotaur, 8},
+                {EntityKind::Zombie, 10},
+                {EntityKind::Ghost, 4},
+                {EntityKind::Spider, 4},
+            };
+        }
+
+        if (depth >= 10) {
+            return {
+                {EntityKind::Wizard, 20},
+                {EntityKind::Ogre, 14},
+                {EntityKind::Troll, 14},
+                {EntityKind::Mimic, 16},
+                {EntityKind::SkeletonArcher, 18},
+                {EntityKind::Minotaur, 6},
+                {EntityKind::Zombie, 6},
+                {EntityKind::Ghost, 2},
+                {EntityKind::Spider, 4},
+            };
+        }
+
+        // Depth 7-9: baseline deep guardian mix (rare Minotaur).
         return {
             {EntityKind::Wizard, 20},
             {EntityKind::Ogre, 15},

@@ -22,6 +22,17 @@ struct SpritePixels {
     const Color& at(int x, int y) const { return px[static_cast<size_t>(y * w + x)]; }
 };
 
+// Special seed flag for item sprites.
+//
+// When this bit is set, generateItemSprite() treats the low 8 bits of `seed`
+// as a run-randomized "appearance id" for NetHack-style identification
+// (potions/scrolls/rings/wands), and generates art based on that appearance
+// rather than the true item kind.
+//
+// The renderer sets this when item identification is enabled so players can't
+// visually identify potion/scroll/ring/wand types from their sprite alone.
+inline constexpr uint32_t SPRITE_SEED_IDENT_APPEARANCE_FLAG = 0x80000000u;
+
 // Procedural sprites.
 // The underlying generator operates in a tiny, deterministic 16x16 "design grid" and
 // then upscales to the requested pixel size.
@@ -39,6 +50,22 @@ SpritePixels generateThemedFloorTile(uint32_t seed, uint8_t style, int frame, in
 SpritePixels generateWallTile(uint32_t seed, int frame, int pxSize = 16);
 // New terrain tiles
 SpritePixels generateChasmTile(uint32_t seed, int frame, int pxSize = 16);
+
+// --- Isometric helpers ---
+// Convert a *top-down* square tile sprite into a 2:1 isometric diamond tile.
+// This is used by the renderer when ViewMode::Isometric is enabled so that
+// terrain reads as proper diamonds instead of a vertically-squashed square.
+//
+// The returned sprite has dimensions:
+//   w = src.w
+//   h = max(1, src.h / 2)
+//
+// NOTE: The input is assumed to be a square sprite.
+SpritePixels projectToIsometricDiamond(const SpritePixels& src, uint32_t seed, int frame, bool outline = true);
+
+// Generates a simple 2.5D isometric wall "block" sprite (square output) that can be
+// drawn using the renderer's sprite anchoring (mapSpriteDst) to add verticality.
+SpritePixels generateIsometricWallBlockTile(uint32_t seed, int frame, int pxSize = 16);
 // NOTE: Pillar/door/stairs tiles are generated as *transparent overlays*.
 // The renderer layers them on top of the underlying themed floor tile.
 SpritePixels generatePillarTile(uint32_t seed, int frame, int pxSize = 16);

@@ -172,10 +172,18 @@ public:
     // Window controls
     void toggleFullscreen();
 
+    // View controls
+    void setViewMode(ViewMode mode) { viewMode_ = mode; }
+    ViewMode viewMode() const { return viewMode_; }
+
     // Input helpers
     // Converts a window pixel coordinate to a map tile coordinate.
     // Returns false if the coordinate is outside the map region.
     bool windowToMapTile(int winX, int winY, int& tileX, int& tileY) const;
+
+    // Converts a window pixel coordinate to a minimap tile coordinate.
+    // Returns false if the coordinate is outside the minimap map region.
+    bool windowToMinimapTile(const Game& game, int winX, int winY, int& tileX, int& tileY) const;
 
     // Screenshot helper: saves a BMP of the current frame.
     // Returns the full path written, or an empty string on failure.
@@ -204,6 +212,13 @@ private:
     int camX = 0;
     int camY = 0;
 
+    // Camera/view mode
+    ViewMode viewMode_ = ViewMode::TopDown;
+
+    // Isometric camera center (in map tiles). Used only when viewMode_ == Isometric.
+    int isoCamX = 0;
+    int isoCamY = 0;
+
     bool initialized = false;
 	// Cached animation frame index for overlay/UI draws.
 	int lastFrame = 0;
@@ -229,6 +244,21 @@ private:
     // Boulders are also overlays so they inherit the underlying room floor theme.
     std::vector<AnimTex> boulderOverlayVar;
 
+    // Isometric terrain variants (generated lazily the first time you toggle into
+    // ViewMode::Isometric). These are true 2:1 diamond tiles rather than squashed
+    // square sprites.
+    bool isoTerrainAssetsValid = false;
+    std::array<std::vector<AnimTex>, ROOM_STYLES> floorThemeVarIso;
+    std::vector<AnimTex> chasmVarIso;
+    // 2.5D wall "blocks" (drawn as sprites in isometric view to add verticality).
+    std::vector<AnimTex> wallBlockVarIso;
+
+    // A few ground-plane overlays get isometric diamond variants so they sit properly
+    // on the isometric grid.
+    std::array<SDL_Texture*, FRAMES> stairsUpOverlayIsoTex{};
+    std::array<SDL_Texture*, FRAMES> stairsDownOverlayIsoTex{};
+    std::array<SDL_Texture*, FRAMES> doorOpenOverlayIsoTex{};
+
     // Extra tile overlays / decals (transparent textures)
     static constexpr int DECAL_STYLES = ROOM_STYLES;
     static constexpr int DECALS_PER_STYLE = 6;
@@ -253,6 +283,12 @@ private:
     // Fire overlay (procedurally generated animated tiles)
     static constexpr int FIRE_VARS = 8;
     std::array<AnimTex, FIRE_VARS> fireVar{};
+
+    // Isometric variants for ground-plane environmental overlays.
+    // These are generated lazily (together with floorThemeVarIso/chasmVarIso) so
+    // top-down playthroughs don't pay the VRAM cost.
+    std::array<AnimTex, GAS_VARS> gasVarIso{};
+    std::array<AnimTex, FIRE_VARS> fireVarIso{};
 
     // HUD status icons (procedurally generated)
     std::array<std::array<SDL_Texture*, FRAMES>, EFFECT_KIND_COUNT> effectIconTex{};
@@ -288,6 +324,7 @@ private:
 
     // Map-space -> screen-space helpers (respect camera + screen shake).
     SDL_Rect mapTileDst(int mapX, int mapY) const;
+    SDL_Rect mapSpriteDst(int mapX, int mapY) const;
     bool mapTileInView(int mapX, int mapY) const;
 
     // Updates camera position based on player/cursor and current viewport size.
@@ -305,6 +342,8 @@ private:
 
     // UI skin helpers
     void ensureUIAssets(const Game& game);
+    // Terrain helpers
+    void ensureIsoTerrainAssets();
     void drawPanel(const Game& game, const SDL_Rect& rect, uint8_t alpha, int frame);
 
     void drawHud(const Game& game);
@@ -315,6 +354,7 @@ private:
     void drawCommandOverlay(const Game& game);
     void drawHelpOverlay(const Game& game);
     void drawMessageHistoryOverlay(const Game& game);
+    void drawScoresOverlay(const Game& game);
     void drawCodexOverlay(const Game& game);
     void drawDiscoveriesOverlay(const Game& game);
     void drawTargetingOverlay(const Game& game);

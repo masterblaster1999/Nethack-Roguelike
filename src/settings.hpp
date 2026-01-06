@@ -21,6 +21,10 @@ struct Settings {
     int viewW = 0;
     int viewH = 0;
 
+    // Camera presentation / view mode
+    // view_mode: topdown|isometric
+    ViewMode viewMode = ViewMode::TopDown;
+
     // Player identity (used for the scoreboard and HUD)
     std::string playerName = "PLAYER";
 

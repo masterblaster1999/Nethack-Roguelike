@@ -4,6 +4,7 @@
 #include "items.hpp"     // ItemKind, ProjectileKind
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace {
 
@@ -382,6 +383,306 @@ void finalizeSprite(SpritePixels& s, uint32_t seed, int frame, uint8_t outlineAl
 
     Color rim{255, 255, 255, static_cast<uint8_t>(35 + ((frame % 2) ? 15 : 0))};
     applyRimLight(s, -1, -1, rim);
+}
+
+
+// --- Identification appearance art -----------------------------------------
+//
+// When SPRITE_SEED_IDENT_APPEARANCE_FLAG is set on an *item* sprite seed,
+// generateItemSprite() will draw NetHack-style "randomized appearance" art for
+// potions/scrolls/rings/wands (using seed&0xFF as the appearance id).
+
+struct PotionStyle {
+    Color fluid{120, 180, 255, 220};
+    Color fluidHi{180, 220, 255, 220};
+    bool metallic = false;
+    bool smoky = false;
+    bool murky = false;
+    bool milky = false;
+};
+
+PotionStyle potionStyleFor(uint8_t a) {
+    // Mapping matches Game's POTION_APPEARANCES (16 entries).
+    PotionStyle st;
+    switch (static_cast<int>(a % 16u)) {
+        case 0:  st.fluid = {220, 60, 80, 230};  st.fluidHi = {255, 150, 170, 220}; break; // Ruby
+        case 1:  st.fluid = {60, 200, 90, 230};  st.fluidHi = {150, 255, 190, 220}; break; // Emerald
+        case 2:  st.fluid = {80, 120, 255, 230}; st.fluidHi = {170, 210, 255, 220}; break; // Sapphire
+        case 3:  st.fluid = {255, 170, 70, 230}; st.fluidHi = {255, 230, 160, 220}; break; // Amber
+        case 4:  st.fluid = {240, 220, 80, 230}; st.fluidHi = {255, 250, 185, 220}; break; // Topaz
+        case 5:  st.fluid = {70, 55, 95, 230};   st.fluidHi = {140, 120, 170, 220}; break; // Onyx
+        case 6:  st.fluid = {225, 230, 240, 215}; st.fluidHi = {255, 255, 255, 210}; st.milky = true; break; // Pearl
+        case 7:  st.fluid = {235, 225, 205, 215}; st.fluidHi = {255, 250, 235, 210}; st.milky = true; break; // Ivory
+        case 8:  st.fluid = {80, 220, 220, 230}; st.fluidHi = {175, 255, 255, 220}; break; // Azure
+        case 9:  st.fluid = {190, 90, 230, 230}; st.fluidHi = {235, 190, 255, 220}; break; // Violet
+        case 10: st.fluid = {200, 40, 55, 230};  st.fluidHi = {255, 140, 150, 220}; break; // Crimson
+        case 11: st.fluid = {90, 220, 120, 230}; st.fluidHi = {170, 255, 200, 220}; break; // Verdant
+        case 12: st.fluid = {205, 210, 220, 220}; st.fluidHi = {255, 255, 255, 210}; st.metallic = true; break; // Silver
+        case 13: st.fluid = {235, 200, 70, 230}; st.fluidHi = {255, 245, 170, 220}; st.metallic = true; break; // Golden
+        case 14: st.fluid = {175, 175, 185, 170}; st.fluidHi = {225, 225, 235, 165}; st.smoky = true; break; // Smoke
+        case 15: st.fluid = {120, 110, 85, 230}; st.fluidHi = {165, 150, 120, 220}; st.murky = true; break; // Murky
+        default: break;
+    }
+    return st;
+}
+
+void drawPotionAppearance(SpritePixels& s, uint32_t seed, RNG& rng, uint8_t a, int frame) {
+    const PotionStyle st = potionStyleFor(a);
+
+    // Bottle
+    Color glass = {200, 220, 255, 170};
+    Color glassEdge = {170, 200, 235, 200};
+    Color cork = {140, 95, 55, 255};
+
+    // Body + neck
+    outlineRect(s, 6, 4, 4, 9, glassEdge);
+    rect(s, 7, 5, 2, 7, glass);
+    rect(s, 6, 3, 4, 2, cork);
+
+    // Liquid (slight gradient)
+    rect(s, 7, 7, 2, 5, st.fluid);
+    setPx(s, 7, 7, st.fluidHi);
+    setPx(s, 8, 7, st.fluidHi);
+
+    // Extra vibe: metallic shimmer / smoke / murk.
+    const uint32_t h = hash32(seed ^ (0xC0FFEEu + static_cast<uint32_t>(frame) * 1337u));
+
+    if (st.metallic) {
+        // Dithered sparkle inside the liquid.
+        for (int yy = 7; yy <= 11; ++yy) {
+            for (int xx = 7; xx <= 8; ++xx) {
+                const uint32_t v = hash32(h ^ static_cast<uint32_t>(xx * 31 + yy * 97));
+                if ((v & 7u) == 0u) setPx(s, xx, yy, {255, 255, 255, 210});
+                else if ((v & 7u) == 1u) setPx(s, xx, yy, mul(st.fluid, 0.85f));
+            }
+        }
+    }
+
+    if (st.murky) {
+        // Dark specks.
+        for (int i = 0; i < 3; ++i) {
+            const int xx = 7 + static_cast<int>((h >> (i * 3)) & 1u);
+            const int yy = 8 + static_cast<int>((h >> (i * 4)) & 3u);
+            setPx(s, xx, yy, mul(st.fluid, 0.60f));
+        }
+    }
+
+    if (st.smoky) {
+        // A little smoke curl above the bottle.
+        Color smoke = {190, 190, 205, static_cast<uint8_t>(120 + (frame % 2) * 30)};
+        const int off = (frame % 2);
+        setPx(s, 9 + off, 2, smoke);
+        setPx(s, 10 + off, 3, smoke);
+        setPx(s, 11 + off, 4, {190, 190, 205, 90});
+    }
+
+    if (st.milky) {
+        // Soft swirl highlight.
+        setPx(s, 7, 9, {255,255,255,120});
+        setPx(s, 8, 10, {255,255,255,90});
+    }
+
+    // Glass highlight
+    if (frame % 2 == 1) {
+        setPx(s, 9, 5, {255,255,255,130});
+        setPx(s, 9, 7, {255,255,255,90});
+    }
+
+    // Tiny bubble (stable-ish, but flickers with frame)
+    if ((h & 3u) == 0u) {
+        setPx(s, 8, 9 + (frame % 2), {255,255,255,90});
+    }
+
+    (void)rng; // reserved for future shape variation
+}
+
+// A tiny 3x5 rune alphabet (15-bit masks).
+// Bit i corresponds to x + 3*y (x in [0,2], y in [0,4]).
+constexpr uint16_t RUNE_GLYPHS[] = {
+    0b010'111'010'010'010, // "T"
+    0b111'101'111'101'111, // "A"-ish
+    0b110'101'110'101'110, // "B"-ish
+    0b111'100'100'100'111, // "C"
+    0b110'101'101'101'110, // "O"-ish
+    0b111'100'111'100'111, // "E"-ish
+    0b111'100'110'100'100, // "P"-ish
+    0b101'101'111'001'001, // "Y"-ish
+    0b010'111'101'111'010, // "*" sigil
+    0b100'010'001'010'100, // "X"
+    0b001'010'100'010'001, // mirrored X
+    0b010'101'010'101'010, // "#"-ish
+};
+
+void drawRuneGlyph(SpritePixels& s, int x, int y, uint16_t mask, Color ink) {
+    for (int yy = 0; yy < 5; ++yy) {
+        for (int xx = 0; xx < 3; ++xx) {
+            const int bit = xx + yy * 3;
+            if ((mask >> bit) & 1u) setPx(s, x + xx, y + yy, ink);
+        }
+    }
+}
+
+void drawScrollAppearance(SpritePixels& s, uint32_t seed, RNG& rng, uint8_t a, int frame) {
+    // Paper palette (slight variation per appearance)
+    RNG palRng(hashCombine(seed, 0x5C2011u));
+    Color paper = add({225, 215, 190, 255}, palRng.range(-10,10), palRng.range(-10,10), palRng.range(-10,10));
+    Color paperEdge = mul(paper, 0.80f);
+    Color ink = {70, 55, 45, 220};
+
+    // Scroll body
+    outlineRect(s, 4, 5, 8, 7, paperEdge);
+    rect(s, 5, 6, 6, 5, paper);
+    // curled edges
+    rect(s, 4, 6, 1, 5, mul(paper, 0.75f));
+    rect(s, 11, 6, 1, 5, mul(paper, 0.75f));
+
+    // Wax seal color varies with appearance id.
+    static const Color waxColors[] = {
+        {170, 40, 50, 255}, {70, 90, 190, 255}, {60, 160, 100, 255}, {150, 90, 170, 255},
+        {150, 120, 60, 255}, {70, 70, 70, 255}
+    };
+    Color wax = waxColors[static_cast<size_t>(a % (sizeof(waxColors)/sizeof(waxColors[0])))] ;
+    circle(s, 8, 11, 1, wax);
+    setPx(s, 8, 10, mul(wax, 0.85f));
+
+    // Rune "label" generated from appearance id.
+    RNG r(hashCombine(seed, static_cast<uint32_t>(a) ^ 0xC0DEC0DEu));
+    const int gx0 = 5;
+    const int gy0 = 6;
+    const int cols = 2;
+    const int rows = 2;
+    for (int row = 0; row < rows; ++row) {
+        for (int col = 0; col < cols; ++col) {
+            const uint16_t g = RUNE_GLYPHS[r.nextU32() % (sizeof(RUNE_GLYPHS)/sizeof(RUNE_GLYPHS[0]))];
+            const int x = gx0 + col * 4;
+            const int y = gy0 + row * 3;
+            // draw slightly squashed (top 3 rows of 5) to fit.
+            drawRuneGlyph(s, x, y, g, ink);
+        }
+    }
+
+    // A little magical glint
+    if (frame % 2 == 1) {
+        const int fx = 5 + static_cast<int>((hash32(seed ^ 0x51A11u) % 6u));
+        setPx(s, fx, 7, {255,255,255,120});
+    }
+
+    (void)rng;
+}
+
+Color ringMaterial(uint8_t a) {
+    // Mapping matches Game's RING_APPEARANCES (16 entries).
+    switch (static_cast<int>(a % 16u)) {
+        case 0:  return {190, 120, 70, 255};  // Copper
+        case 1:  return {205, 175, 85, 255};  // Brass
+        case 2:  return {175, 175, 190, 255}; // Steel
+        case 3:  return {220, 220, 235, 255}; // Silver
+        case 4:  return {235, 205, 85, 255};  // Gold
+        case 5:  return {205, 225, 225, 255}; // Platinum
+        case 6:  return {140, 140, 150, 255}; // Iron
+        case 7:  return {170, 170, 175, 255}; // Tin
+        case 8:  return {200, 230, 255, 235}; // Opal
+        case 9:  return {60, 60, 70, 255};    // Onyx
+        case 10: return {60, 180, 100, 255};  // Jade
+        case 11: return {220, 60, 80, 255};   // Ruby
+        case 12: return {80, 120, 255, 255};  // Sapphire
+        case 13: return {60, 200, 90, 255};   // Emerald
+        case 14: return {240, 220, 80, 255};  // Topaz
+        case 15: return {200, 220, 255, 170}; // Glass
+        default: return {235, 205, 85, 255};
+    }
+}
+
+void drawRingAppearance(SpritePixels& s, uint32_t seed, RNG& rng, uint8_t a, int frame) {
+    Color base = ringMaterial(a);
+    base = add(base, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+    Color dark = mul(base, 0.70f);
+
+    // Band
+    circle(s, 8, 9, 4, base);
+    circle(s, 8, 9, 3, dark);
+    circle(s, 8, 9, 2, {0,0,0,0});
+
+    // Some appearances are gem-like; add a stone.
+    const bool gemLike = (a % 16u) >= 8u;
+    if (gemLike) {
+        Color gem = base;
+        // Opal: iridescent shimmer.
+        if ((a % 16u) == 8u) {
+            gem = (frame % 2 == 0) ? Color{200, 255, 240, 235} : Color{255, 210, 255, 235};
+        }
+        circle(s, 8, 5, 2, gem);
+        circle(s, 8, 5, 1, mul(gem, 0.85f));
+    }
+
+    // Highlights
+    if (frame % 2 == 1) {
+        setPx(s, 9, 7, {255,255,255,110});
+        setPx(s, 7, 8, {255,255,255,90});
+    }
+
+    (void)seed;
+}
+
+Color wandMaterial(uint8_t a) {
+    // Mapping matches Game's WAND_APPEARANCES (16 entries).
+    switch (static_cast<int>(a % 16u)) {
+        case 0:  return {145, 105, 65, 255};  // Oak
+        case 1:  return {220, 220, 210, 255}; // Bone
+        case 2:  return {235, 225, 200, 255}; // Ivory
+        case 3:  return {150, 140, 130, 255}; // Ash
+        case 4:  return {55, 45, 40, 255};    // Ebony
+        case 5:  return {185, 155, 95, 255};  // Pine
+        case 6:  return {140, 190, 120, 255}; // Bamboo
+        case 7:  return {160, 90, 60, 255};   // Yew
+        case 8:  return {175, 125, 85, 255};  // Maple
+        case 9:  return {130, 100, 70, 255};  // Elm
+        case 10: return {225, 210, 190, 255}; // Birch
+        case 11: return {130, 150, 120, 255}; // Willow
+        case 12: return {175, 220, 255, 220}; // Crystal
+        case 13: return {50, 40, 60, 255};    // Obsidian
+        case 14: return {130, 130, 140, 255}; // Stone
+        case 15: return {190, 120, 70, 255};  // Copper
+        default: return {145, 105, 65, 255};
+    }
+}
+
+void drawWandAppearance(SpritePixels& s, uint32_t seed, RNG& rng, uint8_t a, int frame) {
+    Color mat = wandMaterial(a);
+    Color mat2 = mul(mat, 0.80f);
+    Color tip = {255, 255, 255, 200};
+    if ((a % 16u) == 12u) tip = {180, 240, 255, 210};      // crystal
+    else if ((a % 16u) == 13u) tip = {200, 120, 255, 200}; // obsidian
+    else if ((a % 16u) == 15u) tip = {255, 200, 120, 210}; // copper
+
+    // Shaft (diagonal) + thickness.
+    line(s, 4, 12, 12, 4, mat);
+    line(s, 4, 13, 13, 4, mat2);
+
+    // Grip / wrap
+    rect(s, 5, 11, 2, 2, mul(mat, 0.70f));
+
+    // Tip ornament
+    circle(s, 12, 4, 1, tip);
+    if (frame % 2 == 1) {
+        setPx(s, 13, 4, {255,255,255,150});
+    }
+
+    // Tiny rune notches along the shaft (deterministic).
+    const uint32_t h = hash32(hashCombine(seed, static_cast<uint32_t>(a) * 0x9E37u));
+    for (int i = 0; i < 3; ++i) {
+        const int t = 2 + i * 3;
+        const int x = 4 + t;
+        const int y = 12 - t;
+        if ((h >> i) & 1u) setPx(s, x, y, {30, 25, 20, 200});
+    }
+
+    // Subtle sparkle for magical materials.
+    if ((a % 16u) >= 12u && (frame % 2 == 1)) {
+        setPx(s, 10, 6, {255,255,255,110});
+    }
+
+    (void)rng;
 }
 
 
@@ -936,6 +1237,39 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
     pxSize = clampSpriteSize(pxSize);
     RNG rng(hash32(seed));
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+
+    // NetHack-style identification visuals:
+    // if the renderer sets SPRITE_SEED_IDENT_APPEARANCE_FLAG, we generate
+    // appearance-based art for identifiable items (potion/scroll/ring/wand)
+    // so the sprite itself doesn't leak the true item kind.
+    if ((seed & SPRITE_SEED_IDENT_APPEARANCE_FLAG) != 0u) {
+        const uint8_t app = static_cast<uint8_t>(seed & 0xFFu);
+        if (isPotionKind(kind)) {
+            drawPotionAppearance(s, seed, rng, app, frame);
+            finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+            return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
+                         : resampleSpriteToSize(s, pxSize);
+        }
+        if (isScrollKind(kind)) {
+            drawScrollAppearance(s, seed, rng, app, frame);
+            finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+            return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
+                         : resampleSpriteToSize(s, pxSize);
+        }
+        if (kind == ItemKind::RingMight || kind == ItemKind::RingAgility || kind == ItemKind::RingFocus ||
+            kind == ItemKind::RingProtection) {
+            drawRingAppearance(s, seed, rng, app, frame);
+            finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+            return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
+                         : resampleSpriteToSize(s, pxSize);
+        }
+        if (kind == ItemKind::WandSparks || kind == ItemKind::WandDigging || kind == ItemKind::WandFireball) {
+            drawWandAppearance(s, seed, rng, app, frame);
+            finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+            return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
+                         : resampleSpriteToSize(s, pxSize);
+        }
+    }
 
     auto sparkle = [&]() {
         if (frame % 2 == 1) {
@@ -1884,6 +2218,13 @@ SpritePixels generateFloorTile(uint32_t seed, int frame, int pxSize) {
             float vy = (y - 7.5f) / 7.5f;
             f *= 1.0f - 0.08f * (vx * vx + vy * vy);
 
+            // Tiny edge darkening reduces the "flat" look and helps tile seams read
+            // without adding hard grid-lines (kept subtle so it doesn't look like a
+            // checkerboard when tiled).
+            if (x == 0 || y == 0 || x == 15 || y == 15) {
+                f *= 0.95f;
+            }
+
             s.at(x, y) = rampShadeTile(base, f * 0.90f, x, y);
         }
     }
@@ -2327,6 +2668,221 @@ SpritePixels generateChasmTile(uint32_t seed, int frame, int pxSize) {
         c = add(c, 15, 18, 30);
         if (frame % 2 == 1 && (i % 2 == 0)) c = add(c, 18, 20, 35);
         s.at(x, y) = c;
+    }
+
+    return resampleSpriteToSize(s, pxSize);
+}
+
+SpritePixels projectToIsometricDiamond(const SpritePixels& src, uint32_t seed, int frame, bool outline) {
+    // NOTE: This is a pure pixel-space transform used by the renderer.
+    // We keep it deterministic (seed + frame) so capture/replay stays stable.
+    if (src.w <= 0 || src.h <= 0) return SpritePixels{};
+
+    const int w = src.w;
+    const int h = std::max(1, src.h / 2);
+
+    // First, vertically squash to a 2:1 tile aspect (nearest-neighbor keeps pixel art crisp).
+    const SpritePixels squashed = resizeNearest(src, w, h);
+
+    SpritePixels out = makeSprite(w, h, {0, 0, 0, 0});
+
+    const float cx = (static_cast<float>(w) - 1.0f) * 0.5f;
+    const float cy = (static_cast<float>(h) - 1.0f) * 0.5f;
+    const float hw = std::max(1.0f, static_cast<float>(w) * 0.5f);
+    const float hh = std::max(1.0f, static_cast<float>(h) * 0.5f);
+
+    // Diamond mask + subtle boundary shading (helps the diamond read against adjacent tiles).
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const float dx = std::abs(static_cast<float>(x) - cx) / hw;
+            const float dy = std::abs(static_cast<float>(y) - cy) / hh;
+            const float d = dx + dy;
+            if (d > 1.0f) continue;
+
+            Color c = squashed.at(x, y);
+
+            // Fade a touch darker toward the boundary so the silhouette stays crisp.
+            if (d > 0.90f) {
+                const float t = std::clamp((d - 0.90f) / 0.10f, 0.0f, 1.0f);
+                c = mul(c, 1.0f - 0.12f * t);
+            }
+
+            // Tiny animated glint along the top ridge (torch shimmer).
+            if ((frame % 2 == 1) && (y <= (h / 3)) && (d > 0.86f) && (d < 0.94f)) {
+                const uint32_t n = hashCombine(seed ^ 0x15C0u, static_cast<uint32_t>(x + y * 131));
+                if ((n & 7u) == 0u) c = add(c, 10, 10, 12);
+            }
+
+            out.at(x, y) = c;
+        }
+    }
+
+    if (outline) {
+        // Outline pass: darken pixels that sit on the diamond edge.
+        SpritePixels edged = out;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const Color c = out.at(x, y);
+                if (c.a == 0) continue;
+
+                // If any 4-neighbor falls outside the diamond, treat as an edge pixel.
+                auto inside = [&](int xx, int yy) -> bool {
+                    const float ddx = std::abs(static_cast<float>(xx) - cx) / hw;
+                    const float ddy = std::abs(static_cast<float>(yy) - cy) / hh;
+                    return (ddx + ddy) <= 1.0f;
+                };
+
+                bool edge = false;
+                if (!inside(x - 1, y)) edge = true;
+                else if (!inside(x + 1, y)) edge = true;
+                else if (!inside(x, y - 1)) edge = true;
+                else if (!inside(x, y + 1)) edge = true;
+
+                if (!edge) continue;
+
+                Color d = mul(c, 0.70f);
+                d.a = c.a;
+
+                // Small highlight bias on the top-left edges for depth.
+                if (x < static_cast<int>(cx) && y < static_cast<int>(cy) && ((x + y) & 1) == 0) {
+                    d = add(d, 6, 6, 8);
+                }
+
+                edged.at(x, y) = d;
+            }
+        }
+        out = std::move(edged);
+    }
+
+    return out;
+}
+
+SpritePixels generateIsometricWallBlockTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+
+    // Build in the 16x16 design grid, then upscale.
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    RNG rng(hash32(seed));
+
+    // Base stone palette (close to wall tiles but with stronger face shading).
+    Color base = { 70, 78, 92, 255 };
+    base = add(base, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
+    Color top = add(mul(base, 1.05f), 10, 10, 14);
+    Color left = mul(base, 0.78f);
+    Color right = mul(base, 0.88f);
+    Color outlineC = mul(base, 0.45f);
+    outlineC.a = 255;
+
+    const int W = 16;
+    const int H = 16;
+    const int topH = 8;
+    const int wallH = 8;
+
+    // Helper: scanline-fill a convex quad.
+    auto fillQuad = [&](Vec2i p0, Vec2i p1, Vec2i p2, Vec2i p3, const Color& c0, float shadeMul) {
+        const Vec2i pts[4] = { p0, p1, p2, p3 };
+        int minY = pts[0].y, maxY = pts[0].y;
+        for (int i = 1; i < 4; ++i) {
+            minY = std::min(minY, pts[i].y);
+            maxY = std::max(maxY, pts[i].y);
+        }
+        minY = std::clamp(minY, 0, H - 1);
+        maxY = std::clamp(maxY, 0, H - 1);
+
+        for (int y = minY; y <= maxY; ++y) {
+            float xInts[8];
+            int nInts = 0;
+            for (int e = 0; e < 4; ++e) {
+                const Vec2i a = pts[e];
+                const Vec2i b = pts[(e + 1) & 3];
+                if (a.y == b.y) continue;
+                const int y0 = a.y;
+                const int y1 = b.y;
+                const bool inRange = (y >= std::min(y0, y1)) && (y < std::max(y0, y1));
+                if (!inRange) continue;
+                const float t = (static_cast<float>(y) - static_cast<float>(y0)) / (static_cast<float>(y1 - y0));
+                xInts[nInts++] = static_cast<float>(a.x) + t * static_cast<float>(b.x - a.x);
+            }
+            if (nInts < 2) continue;
+            float xMin = xInts[0], xMax = xInts[0];
+            for (int i = 1; i < nInts; ++i) {
+                xMin = std::min(xMin, xInts[i]);
+                xMax = std::max(xMax, xInts[i]);
+            }
+            int xi0 = std::clamp(static_cast<int>(std::floor(xMin)), 0, W - 1);
+            int xi1 = std::clamp(static_cast<int>(std::ceil(xMax)), 0, W - 1);
+            for (int x = xi0; x <= xi1; ++x) {
+                // Micro noise so faces don't look like flat fills.
+                const uint32_t n = hashCombine(seed ^ 0xB10Cu, static_cast<uint32_t>(x + y * 37 + frame * 101));
+                const float noise = (n & 0xFFu) / 255.0f;
+                float f = (0.92f + noise * 0.16f) * shadeMul;
+                // Tiny directional bias: upper pixels slightly brighter.
+                f *= (0.94f + 0.06f * ((15.0f - static_cast<float>(y)) / 15.0f));
+                Color cc = rampShadeTile(c0, f, x, y);
+                cc.a = 255;
+                s.at(x, y) = cc;
+            }
+        }
+    };
+
+    // Side faces first.
+    // Left face quad: L(0,4) -> B(8,7) -> BD(8,15) -> LD(0,12)
+    fillQuad({0, 4}, {8, 7}, {8, 15}, {0, 12}, left, 0.95f);
+    // Right face quad: R(15,4) -> RD(15,12) -> BD(8,15) -> B(8,7)
+    fillQuad({15, 4}, {15, 12}, {8, 15}, {8, 7}, right, 1.00f);
+
+    // Add a few darker brick seams on the side faces.
+    for (int y = topH + 1; y < H; ++y) {
+        if ((y % 3) != 0) continue;
+        for (int x = 0; x < W; ++x) {
+            const Color c = s.at(x, y);
+            if (c.a == 0) continue;
+            s.at(x, y) = mul(c, 0.80f);
+        }
+    }
+
+    // Top face (diamond) drawn last.
+    const float cx = (static_cast<float>(W) - 1.0f) * 0.5f;
+    const float cy = (static_cast<float>(topH) - 1.0f) * 0.5f;
+    const float hw = static_cast<float>(W) * 0.5f;
+    const float hh = static_cast<float>(topH) * 0.5f;
+    for (int y = 0; y < topH; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const float dx = std::abs(static_cast<float>(x) - cx) / hw;
+            const float dy = std::abs(static_cast<float>(y) - cy) / hh;
+            if ((dx + dy) > 1.0f) continue;
+
+            const uint32_t n = hashCombine(seed ^ 0x70F1u, static_cast<uint32_t>(x + y * 53 + frame * 97));
+            const float noise = (n & 0xFFu) / 255.0f;
+
+            // Subtle top-left highlight so the block reads as 3D.
+            const float lx = (15.0f - static_cast<float>(x)) / 15.0f;
+            const float ly = (15.0f - static_cast<float>(y)) / 15.0f;
+
+            float f = 0.88f + noise * 0.18f;
+            f *= (0.92f + 0.08f * (0.60f * lx + 0.40f * ly));
+
+            Color cc = rampShadeTile(top, f, x, y);
+            cc.a = 255;
+            s.at(x, y) = cc;
+        }
+    }
+
+    // Outline cube edges.
+    line(s, 8, 0, 0, 4, outlineC);   // top-left
+    line(s, 8, 0, 15, 4, outlineC);  // top-right
+    line(s, 0, 4, 8, 7, outlineC);   // left->bottom (top)
+    line(s, 15, 4, 8, 7, outlineC);  // right->bottom (top)
+    line(s, 0, 4, 0, 12, outlineC);  // left vertical
+    line(s, 15, 4, 15, 12, outlineC);// right vertical
+    line(s, 8, 7, 8, 15, outlineC);  // middle vertical
+    line(s, 0, 12, 8, 15, outlineC); // bottom-left
+    line(s, 15, 12, 8, 15, outlineC);// bottom-right
+
+    // Tiny flicker glint on the top ridge.
+    if (frame % 2 == 1) {
+        setPx(s, 8, 1, add(s.at(8, 1), 18, 18, 22));
+        setPx(s, 9, 2, add(s.at(9, 2), 10, 10, 12));
     }
 
     return resampleSpriteToSize(s, pxSize);

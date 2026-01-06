@@ -150,6 +150,41 @@ enum class ItemKind : uint8_t {
     PotionHallucination,
 };
 
+// Item "egos" (NetHack-style brands / special properties) applied to some gear.
+//
+// Append-only: egos are serialized with items, so keep ids stable.
+enum class ItemEgo : uint8_t {
+    None = 0,
+
+    // Weapon egos
+    Flaming,
+    Venom,
+    Vampiric,
+};
+
+// Keep in sync with ItemEgo (append-only).
+inline constexpr int ITEM_EGO_COUNT = static_cast<int>(ItemEgo::Vampiric) + 1;
+
+inline const char* egoPrefix(ItemEgo e) {
+    switch (e) {
+        case ItemEgo::Flaming:  return "FLAMING";
+        case ItemEgo::Venom:    return "VENOM";
+        case ItemEgo::Vampiric: return "VAMPIRIC";
+        default:                return "";
+    }
+}
+
+// A rough shop/value multiplier for ego gear.
+// Returned as a percentage (100 = no change).
+inline int egoValueMultiplierPct(ItemEgo e) {
+    switch (e) {
+        case ItemEgo::Flaming:  return 160;
+        case ItemEgo::Venom:    return 170;
+        case ItemEgo::Vampiric: return 220;
+        default:                return 100;
+    }
+}
+
 // Keep in sync with the last enum value (append-only).
 inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::PotionHallucination) + 1;
 
@@ -278,6 +313,9 @@ struct Item {
     // In inventory, nonzero shopPrice means the item is UNPAID (debt).
     int shopPrice = 0;
     int shopDepth = 0;
+
+    // Item ego / brand (rare). Used primarily for melee weapons.
+    ItemEgo ego = ItemEgo::None;
 };
 
 struct GroundItem {

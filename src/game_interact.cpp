@@ -2445,6 +2445,9 @@ bool Game::augury() {
     if (preview.hasCavernLake) {
         pool.push_back("A BLACK LAKE REFLECTS NO SKY.");
     }
+    if (preview.hasWarrens) {
+        pool.push_back("THE EARTH BELOW IS HONEYCOMBED WITH BURROWS.");
+    }
     if (preview.lockedShortcutCount > 0) {
         pool.push_back("YOU HEAR KEYS RATTLING SOMEWHERE BELOW.");
     }
@@ -2565,6 +2568,9 @@ bool Game::payAtShop() {
                 paid.shopPrice = 0;
                 paid.shopDepth = 0;
                 if (!tryStackItem(inv, paid)) {
+                    // Splitting a stack into an additional entry must create a new unique id
+                    // (otherwise selection-by-id and other systems can break).
+                    paid.id = nextItemId++;
                     inv.push_back(paid);
                 }
             }

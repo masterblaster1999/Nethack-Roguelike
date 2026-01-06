@@ -34,6 +34,17 @@ Comments start with `#` or `;`.
 
 - `start_fullscreen` (`true/false`, default `false`)
 
+- `view_mode` (string, default `topdown`)
+  - `topdown`: classic 2D grid view
+  - `isometric`: experimental 2.5D isometric camera
+  - You can also toggle this in-game (default keybind: **F7**).
+  - In isometric mode, terrain is rendered using diamond-projected tiles and taller wall blocks.
+
+- `voxel_sprites` (`true/false`, default `true`)
+  - When `true`, entities/items/projectiles are rendered using the voxel (3D) procedural sprite pipeline.
+  - When `false`, those sprites use the 2D procedural pipeline.
+  - You can toggle this at runtime (default keybind: **F8**) or via `#sprites3d on|off`.
+
 - `player_name` (string, default `PLAYER`)
   - Used in the HUD + scoreboard.
 

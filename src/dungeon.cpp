@@ -41,6 +41,7 @@ void fillWalls(Dungeon& d) {
     d.stairsUp = {-1, -1};
     d.stairsDown = {-1, -1};
     d.hasCavernLake = false;
+    d.hasWarrens = false;
     d.secretShortcutCount = 0;
     d.lockedShortcutCount = 0;
     d.corridorHubCount = 0;
@@ -4867,16 +4868,22 @@ enum class GenKind : uint8_t {
     RoomsGraph,
     Cavern,
     Maze,
+    Warrens,
     Mines,
     Catacombs,
 };
 
-GenKind chooseGenKind(int depth, RNG& rng) {
-    // The default run now spans 10 floors, so we can pace out variety:
+GenKind chooseGenKind(int depth, int maxDepth, RNG& rng) {
+    // The default run now spans ~20 floors, so we pace variety in two arcs:
     // - Early: classic rooms (with occasional "ruins" variant)
-    // - Early spike: procedural mines (winding tunnels)
-    // - Mid: first cavern / midpoint spike (maze OR ruins)
-    // - Deep: another mines floor, then catacombs + scripted endgame floors
+    // - Early spikes: mines + grotto + an early maze/warrens band
+    // - Midpoint: a bigger "you are deep now" spike
+    // - Late: a second set of themed generator hits (lower mines/catacombs/cavern)
+    // - Endgame: scripted penultimate labyrinth + final sanctum (handled in Dungeon::generate)
+    if (maxDepth < 1) maxDepth = 1;
+
+    const int midpoint = std::max(1, maxDepth / 2);
+
     if (depth == Dungeon::MINES_DEPTH || depth == Dungeon::DEEP_MINES_DEPTH) return GenKind::Mines;
 
     // Early floors: mostly classic BSP rooms, but occasionally use the graph/packed-rooms variant
@@ -4892,27 +4899,68 @@ GenKind chooseGenKind(int depth, RNG& rng) {
 
     if (depth == Dungeon::GROTTO_DEPTH) return GenKind::Cavern;
 
-    // Midpoint floor: either a maze spike or a "ruins" rooms floor (more doors / loops).
-    // This adds variety without changing the overall difficulty curve.
+    // Early variety spike (originally the 10-floor "midpoint"; now closer to the first quarter).
     if (depth == 5) {
         const float r = rng.next01();
-        if (r < 0.55f) return GenKind::Maze;
-        if (r < 0.85f) return GenKind::RoomsGraph;
+        // Maze spike, organic warrens, or a "ruins" rooms floor.
+        if (r < 0.45f) return GenKind::Maze;
+        if (r < 0.65f) return GenKind::Warrens;
+        if (r < 0.90f) return GenKind::RoomsGraph;
+        return GenKind::RoomsBsp;
+    }
+
+    // True midpoint spike: lean harder into non-room layouts so the run's second half
+    // feels different even if the player has strong gear already.
+    if (depth == midpoint) {
+        const float r = rng.next01();
+        if (r < 0.30f) return GenKind::Maze;
+        if (r < 0.55f) return GenKind::Warrens;
+        if (r < 0.72f) return GenKind::Catacombs;
+        if (r < 0.84f) return GenKind::Cavern;
+        if (r < 0.94f) return GenKind::RoomsGraph;
         return GenKind::RoomsBsp;
     }
 
     // Note: depth 6 is a fixed Rogue homage floor (handled earlier), but keep this for endless/testing.
     if (depth == 6) return GenKind::RoomsBsp;
     if (depth == Dungeon::CATACOMBS_DEPTH) return GenKind::Catacombs;
+
+    // A consistent breather floor before the midpoint spike.
     if (depth == 9) return GenKind::RoomsBsp;
 
-    // Beyond the intended run depth (e.g., in tests or future endless mode), sprinkle variety.
+    // Late-run "second arc" setpieces. These are relative to maxDepth so tests that pass
+    // smaller maxDepth values still behave sensibly.
+    if (depth == midpoint + 2 && depth < maxDepth - 1) return GenKind::Mines;
+    if (depth == midpoint + 4 && depth < maxDepth - 1) return GenKind::Catacombs;
+    if (depth == midpoint + 6 && depth < maxDepth - 1) return GenKind::Cavern;
+
+    // Calm before the penultimate labyrinth (Dungeon::generate will handle maxDepth-1).
+    if (maxDepth >= 8 && depth == maxDepth - 2) {
+        // Slight bias toward the "ruins" generator so the player sees more doors/loops
+        // right before the final approach.
+        return rng.chance(0.35f) ? GenKind::RoomsGraph : GenKind::RoomsBsp;
+    }
+
+    // General case: sprinkle variety, with a slightly "nastier" distribution deeper
+    // than the midpoint.
     const float r = rng.next01();
-    if (r < 0.12f) return GenKind::Maze;
+    if (depth > midpoint) {
+        if (r < 0.14f) return GenKind::Maze;
+        if (r < 0.32f) return GenKind::Warrens;
+        if (r < 0.46f) return GenKind::Catacombs;
+        if (r < 0.58f) return GenKind::Cavern;
+        if (r < 0.70f) return GenKind::Mines;
+        if (r < 0.86f) return GenKind::RoomsGraph;
+        return GenKind::RoomsBsp;
+    }
+
+    // Pre-midpoint band: still mostly rooms, but with occasional spice.
+    if (r < 0.08f) return GenKind::Maze;
+    if (r < 0.18f) return GenKind::Warrens;
     if (r < 0.26f) return GenKind::Catacombs;
-    if (r < 0.44f) return GenKind::Cavern;
-    if (r < 0.62f) return GenKind::Mines;
-    if (r < 0.78f) return GenKind::RoomsGraph;
+    if (r < 0.40f) return GenKind::Cavern;
+    if (r < 0.52f) return GenKind::Mines;
+    if (r < 0.72f) return GenKind::RoomsGraph;
     return GenKind::RoomsBsp;
 }
 
@@ -6584,6 +6632,267 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
 }
 
 
+// Organic "warrens" floor: narrow burrows carved by biased random walkers,
+// then widened with a handful of chambers so navigation has landmarks.
+//
+// Design goals:
+// - Much less rectilinear than BSP/ruins floors.
+// - Less grid-like than the perfect maze floors.
+// - Lots of corridor decisions + dead ends (good for stash closets / secret doors).
+void generateWarrens(Dungeon& d, RNG& rng, int depth) {
+    // Needs some breathing room; fall back gracefully on tiny maps (unit tests, etc).
+    if (d.width < 22 || d.height < 16) {
+        d.hasWarrens = false;
+        generateBspRooms(d, rng);
+        return;
+    }
+
+    d.rooms.clear();
+    d.hasWarrens = true;
+
+    // Start chamber near the middle so the level has an obvious "anchor".
+    const int cx = d.width / 2;
+    const int cy = d.height / 2;
+
+    int sw = rng.range(7, 11);
+    int sh = rng.range(6, 9);
+    sw = std::min(sw, d.width - 6);
+    sh = std::min(sh, d.height - 6);
+    sw = std::max(5, sw);
+    sh = std::max(5, sh);
+
+    int sx = clampi(cx - sw / 2, 1, d.width - sw - 1);
+    int sy = clampi(cy - sh / 2, 1, d.height - sh - 1);
+
+    carveRect(d, sx, sy, sw, sh, TileType::Floor);
+    d.rooms.push_back({sx, sy, sw, sh, RoomType::Normal});
+
+    const int area = std::max(1, d.width * d.height);
+
+    // Target walkable coverage. Keep it moderately low so the burrows feel tight.
+    float frac = 0.30f + 0.01f * static_cast<float>(std::clamp(depth - 1, 0, 10));
+    frac = std::clamp(frac, 0.28f, 0.42f);
+    int targetFloors = static_cast<int>(std::lround(frac * static_cast<float>(area)));
+    targetFloors = std::clamp(targetFloors, area / 6, (area * 3) / 5);
+
+    int floorCount = sw * sh;
+
+    // Helpers.
+    const Vec2i dirs[4] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    auto randDir = [&]() -> Vec2i {
+        return dirs[static_cast<size_t>(rng.range(0, 3))];
+    };
+
+    auto pickDirNoReverse = [&](Vec2i cur) -> Vec2i {
+        for (int tries = 0; tries < 12; ++tries) {
+            Vec2i nd = dirs[static_cast<size_t>(rng.range(0, 3))];
+            if (nd.x == -cur.x && nd.y == -cur.y) continue;
+            return nd;
+        }
+        return randDir();
+    };
+
+    auto carve = [&](int x, int y) {
+        if (!d.inBounds(x, y)) return;
+        // Keep a 1-tile wall ring (the border looks better and prevents edge leaks).
+        if (x <= 0 || y <= 0 || x >= d.width - 1 || y >= d.height - 1) return;
+
+        Tile& t = d.at(x, y);
+        if (t.type == TileType::Wall) {
+            t.type = TileType::Floor;
+            floorCount++;
+        }
+    };
+
+    struct Digger {
+        Vec2i p;
+        Vec2i dir;
+        int life = 0;
+    };
+
+    const int maxDiggers = std::clamp(4 + depth / 2, 4, 9);
+    std::vector<Digger> diggers;
+    diggers.reserve(static_cast<size_t>(maxDiggers));
+
+    // Seed a couple of diggers in the start chamber.
+    Vec2i start{sx + sw / 2, sy + sh / 2};
+    start.x = clampi(start.x, 2, d.width - 3);
+    start.y = clampi(start.y, 2, d.height - 3);
+
+    const int baseLife = std::clamp(32 + depth * 6, 32, 110);
+    diggers.push_back({start, randDir(), baseLife + rng.range(-10, 15)});
+    diggers.push_back({start, randDir(), baseLife + rng.range(-10, 15)});
+
+    const float turnChance   = 0.22f;
+    const float branchChance = 0.045f;
+    const float widenChance  = 0.10f;
+    const float nodeChance   = 0.030f;
+
+    // Upper bound so pathological seeds can't loop forever.
+    const int maxSteps = std::max(2000, area * 14);
+
+    int steps = 0;
+    while (floorCount < targetFloors && steps < maxSteps) {
+        if (diggers.empty()) {
+            // Respawn from existing tunnel space so we never create disconnected pockets.
+            Vec2i rp = d.randomFloor(rng, true);
+            diggers.push_back({rp, randDir(), baseLife});
+        }
+
+        for (size_t i = 0; i < diggers.size() && floorCount < targetFloors; /*manual*/) {
+            Digger& g = diggers[i];
+
+            // Carve the tunnel tile.
+            carve(g.p.x, g.p.y);
+
+            // Occasional widening for pockets / 2-wide hall segments.
+            if (rng.chance(widenChance)) {
+                if (g.dir.x != 0) {
+                    int side = rng.chance(0.5f) ? 1 : -1;
+                    carve(g.p.x, g.p.y + side);
+                } else {
+                    int side = rng.chance(0.5f) ? 1 : -1;
+                    carve(g.p.x + side, g.p.y);
+                }
+            }
+
+            // Rare "junction node": a small 3x3 pocket that feels like a dug-out hub.
+            if (rng.chance(nodeChance)) {
+                for (int oy = -1; oy <= 1; ++oy) {
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        carve(g.p.x + ox, g.p.y + oy);
+                    }
+                }
+            }
+
+            // Branching: spawn a new digger that heads off in a new direction.
+            if (static_cast<int>(diggers.size()) < maxDiggers && rng.chance(branchChance)) {
+                Digger nb;
+                nb.p = g.p;
+                nb.dir = pickDirNoReverse(g.dir);
+                nb.life = baseLife + rng.range(-18, 18);
+                diggers.push_back(nb);
+            }
+
+            // Turn sometimes (keeps tunnels from being too straight).
+            if (rng.chance(turnChance)) {
+                g.dir = pickDirNoReverse(g.dir);
+            }
+
+            // Step. If we hit the border, bounce by picking a new direction.
+            Vec2i np{g.p.x + g.dir.x, g.p.y + g.dir.y};
+            if (np.x <= 1 || np.y <= 1 || np.x >= d.width - 2 || np.y >= d.height - 2) {
+                g.dir = pickDirNoReverse(g.dir);
+            } else {
+                g.p = np;
+            }
+
+            g.life--;
+            if (g.life <= 0) {
+                // Remove digger (swap-pop).
+                diggers[i] = diggers.back();
+                diggers.pop_back();
+                continue;
+            }
+
+            ++i;
+        }
+
+        steps++;
+    }
+
+    // If something went badly wrong (very small/odd maps), fall back.
+    if (floorCount < area / 8) {
+        d.hasWarrens = false;
+        fillWalls(d);
+        generateBspRooms(d, rng);
+        return;
+    }
+
+    // Keep only the largest connected passable region (guards against rare disconnected pockets).
+    int compCount = 0;
+    auto comp = computePassableComponents(d, compCount);
+
+    if (compCount > 1) {
+        std::vector<int> sizes(static_cast<size_t>(compCount), 0);
+        for (int y = 1; y < d.height - 1; ++y) {
+            for (int x = 1; x < d.width - 1; ++x) {
+                if (!d.isPassable(x, y)) continue;
+                const int c = comp[static_cast<size_t>(y * d.width + x)];
+                if (c >= 0 && c < compCount) sizes[static_cast<size_t>(c)]++;
+            }
+        }
+
+        int best = 0;
+        for (int i = 1; i < compCount; ++i) {
+            if (sizes[static_cast<size_t>(i)] > sizes[static_cast<size_t>(best)]) best = i;
+        }
+
+        for (int y = 1; y < d.height - 1; ++y) {
+            for (int x = 1; x < d.width - 1; ++x) {
+                if (!d.isPassable(x, y)) continue;
+                const int c = comp[static_cast<size_t>(y * d.width + x)];
+                if (c != best) d.at(x, y).type = TileType::Wall;
+            }
+        }
+    }
+
+    // Carve additional chambers as landmarks (always connected because we start from a floor tile).
+    const int extraChambers = std::clamp(4 + depth / 2, 4, 10);
+    for (int i = 0; i < extraChambers; ++i) {
+        Vec2i p = d.randomFloor(rng, true);
+
+        int rw = rng.range(4, 10);
+        int rh = rng.range(4, 8);
+        rw = std::min(rw, d.width - 6);
+        rh = std::min(rh, d.height - 6);
+
+        const int rx = clampi(p.x - rw / 2, 1, d.width - rw - 1);
+        const int ry = clampi(p.y - rh / 2, 1, d.height - rh - 1);
+
+        carveRect(d, rx, ry, rw, rh, TileType::Floor);
+        d.rooms.push_back({rx, ry, rw, rh, RoomType::Normal});
+
+        // Light furniture so chambers aren't empty boxes.
+        if (rw >= 6 && rh >= 6 && rng.chance(0.22f)) {
+            const int fx = clampi(p.x + rng.range(-1, 1), rx + 2, rx + rw - 3);
+            const int fy = clampi(p.y + rng.range(-1, 1), ry + 2, ry + rh - 3);
+            if (d.inBounds(fx, fy) && d.at(fx, fy).type == TileType::Floor) {
+                d.at(fx, fy).type = rng.chance(0.55f) ? TileType::Pillar : TileType::Boulder;
+            }
+        }
+    }
+
+    // Stairs: start at the first (central) chamber, then pick the farthest reachable tile.
+    const Room& startRoom = d.rooms.front();
+    d.stairsUp = { startRoom.cx(), startRoom.cy() };
+    if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) {
+        carveFloor(d, d.stairsUp.x, d.stairsUp.y);
+        d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+    }
+
+    auto dist = bfsDistanceMap(d, d.stairsUp);
+    d.stairsDown = farthestPassableTile(d, dist, rng);
+    if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) {
+        carveFloor(d, d.stairsDown.x, d.stairsDown.y);
+        d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
+    }
+
+    // Sparse corridor doors: warrens should feel claustrophobic, but still benefit from LOS breaks.
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    for (const auto& r : d.rooms) {
+        for (int y = r.y; y < r.y2(); ++y) {
+            for (int x = r.x; x < r.x2(); ++x) {
+                if (d.inBounds(x, y)) inRoom[static_cast<size_t>(y * d.width + x)] = 1;
+            }
+        }
+    }
+
+    placeStrategicCorridorDoors(d, rng, inRoom, 0.58f);
+}
+
+
 
 
 void generateCatacombs(Dungeon& d, RNG& rng, int depth) {
@@ -7364,6 +7673,7 @@ void generateSurfaceCamp(Dungeon& d, RNG& rng) {
     d.rooms.clear();
     d.bonusLootSpots.clear();
     d.hasCavernLake = false;
+    d.hasWarrens = false;
     d.secretShortcutCount = 0;
     d.lockedShortcutCount = 0;
     d.corridorHubCount = 0;
@@ -7943,6 +8253,7 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     vaultSuiteCount = 0;
     deadEndClosetCount = 0;
     hasCavernLake = false;
+    hasWarrens = false;
 
     // Sanity clamp.
     if (maxDepth < 1) maxDepth = 1;
@@ -7996,10 +8307,11 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     fillWalls(*this);
 
     // Choose a generation style (rooms vs caverns vs mazes) and build the base layout.
-    GenKind g = chooseGenKind(depth, rng);
+    GenKind g = chooseGenKind(depth, maxDepth, rng);
     switch (g) {
         case GenKind::Cavern:     generateCavern(*this, rng, depth); break;
         case GenKind::Maze:       generateMaze(*this, rng, depth); break;
+        case GenKind::Warrens:    generateWarrens(*this, rng, depth); break;
         case GenKind::Mines:      generateMines(*this, rng, depth); break;
         case GenKind::Catacombs:  generateCatacombs(*this, rng, depth); break;
         case GenKind::RoomsGraph: generateRoomsGraph(*this, rng, depth); break;
@@ -8059,11 +8371,11 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
 
     // Locked shortcut gates: visible locked doors that connect adjacent corridor regions
     // (already connected elsewhere), creating optional key/lockpick-powered shortcuts.
-    (void)maybePlaceLockedShortcuts(*this, rng, depth, (g == GenKind::RoomsBsp || g == GenKind::RoomsGraph || g == GenKind::Maze || g == GenKind::Mines || g == GenKind::Catacombs));
+    (void)maybePlaceLockedShortcuts(*this, rng, depth, (g == GenKind::RoomsBsp || g == GenKind::RoomsGraph || g == GenKind::Maze || g == GenKind::Warrens || g == GenKind::Mines || g == GenKind::Catacombs));
 
     // Sinkholes: carve small chasm clusters in corridors to create local navigation puzzles.
     // This pass protects a core stairs path and rolls back if it would break connectivity.
-    (void)maybeCarveSinkholes(*this, rng, depth, (g == GenKind::RoomsBsp || g == GenKind::RoomsGraph || g == GenKind::Mines || g == GenKind::Catacombs));
+    (void)maybeCarveSinkholes(*this, rng, depth, (g == GenKind::RoomsBsp || g == GenKind::RoomsGraph || g == GenKind::Warrens || g == GenKind::Mines || g == GenKind::Catacombs));
 
     // Dead-end stash closets: carve tiny side closets off corridor/tunnel dead ends.
     // These are optional rewards and never gate main progression.

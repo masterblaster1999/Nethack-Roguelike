@@ -255,6 +255,88 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
         emitNoise(attacker.pos, 11);
     }
 
+    // Weapon ego procs (NetHack-style brands).
+    // Kept intentionally lightweight: small extra effects that reward rare loot.
+    if (!kick) {
+        ItemEgo ego = ItemEgo::None;
+        if (attacker.kind == EntityKind::Player) {
+            if (const Item* w = equippedMelee()) ego = w->ego;
+        } else {
+            if (monsterCanEquipWeapons(attacker.kind) && attacker.gearMelee.id != 0 && isMeleeWeapon(attacker.gearMelee.kind)) {
+                ego = attacker.gearMelee.ego;
+            }
+        }
+
+        auto canSee = [&](const Entity& e) -> bool {
+            if (e.kind == EntityKind::Player) return true;
+            if (!dung.inBounds(e.pos.x, e.pos.y)) return false;
+            return dung.at(e.pos.x, e.pos.y).visible;
+        };
+
+        switch (ego) {
+            case ItemEgo::Flaming: {
+                if (defender.hp > 0 && rng.chance(0.28f)) {
+                    // Scale a bit with depth so it stays relevant.
+                    const int minTurns = 2 + std::min(4, depth_ / 4);
+                    const int turns = rng.range(minTurns, minTurns + 3);
+                    const int before = defender.effects.burnTurns;
+                    defender.effects.burnTurns = std::max(defender.effects.burnTurns, turns);
+
+                    if (before == 0 && defender.effects.burnTurns > 0) {
+                        if (defender.kind == EntityKind::Player) {
+                            pushMsg("YOU ARE SET AFLAME!", MessageKind::Warning, false);
+                        } else if (canSee(defender)) {
+                            std::ostringstream ss;
+                            ss << kindName(defender.kind) << " CATCHES FIRE!";
+                            pushMsg(ss.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+                break;
+            }
+            case ItemEgo::Venom: {
+                if (defender.hp > 0 && rng.chance(0.32f)) {
+                    const int turns = rng.range(4, 8);
+                    const int before = defender.effects.poisonTurns;
+                    defender.effects.poisonTurns = std::max(defender.effects.poisonTurns, turns);
+
+                    if (before == 0 && defender.effects.poisonTurns > 0) {
+                        if (defender.kind == EntityKind::Player) {
+                            pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
+                        } else if (canSee(defender)) {
+                            std::ostringstream ss;
+                            ss << kindName(defender.kind) << " IS POISONED!";
+                            pushMsg(ss.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+                break;
+            }
+            case ItemEgo::Vampiric: {
+                if (dmg > 0 && attacker.hp > 0) {
+                    int heal = 1 + dmg / 4;
+                    heal = std::min(3, heal);
+                    const int beforeHp = attacker.hp;
+                    attacker.hp = std::min(attacker.hpMax, attacker.hp + heal);
+                    if (attacker.hp > beforeHp) {
+                        if (attacker.kind == EntityKind::Player) {
+                            pushMsg("YOU DRAIN LIFE!", MessageKind::Success, true);
+                        } else if (defender.kind == EntityKind::Player) {
+                            pushMsg("YOUR LIFE IS DRAINED!", MessageKind::Warning, false);
+                        } else if (canSee(attacker)) {
+                            std::ostringstream ss;
+                            ss << kindName(attacker.kind) << " LOOKS REINVIGORATED.";
+                            pushMsg(ss.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
     // Monster special effects.
     if (defender.hp > 0 && defender.kind == EntityKind::Player) {
         // Ghosts: chilling touch can briefly disorient you.

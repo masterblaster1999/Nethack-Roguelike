@@ -61,6 +61,12 @@ int shopBaseValuePerUnit(const Item& it) {
         if (it.buc > 0) v = (v * 120) / 100;
         else if (it.buc < 0) v = (v * 70) / 100;
         v = std::max(1, v);
+
+        // Ego/brand modifier (rare premium gear).
+        if (it.ego != ItemEgo::None) {
+            v = (v * egoValueMultiplierPct(it.ego)) / 100;
+            v = std::max(1, v);
+        }
     }
 
     return std::max(1, v);

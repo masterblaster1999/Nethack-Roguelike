@@ -268,6 +268,9 @@ enum class Action : uint8_t {
 
     // Append-only: keep Action ids stable for replays.
     Dig,                // Dig/tunnel (directional prompt) if wielding a pickaxe
+    ToggleViewMode,      // Toggle TopDown / Isometric 2.5D view (visual-only)
+    ToggleVoxelSprites,  // Toggle 2D/3D (voxel) procedural sprites (visual-only)
+    Scores,             // Scores / run history overlay (Hall of Fame)
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -315,6 +318,19 @@ enum class AutoMoveMode : uint8_t {
     Travel,
     Explore,
 };
+
+enum class ScoresView : uint8_t {
+    Top = 0,
+    Recent,
+};
+
+inline const char* scoresViewDisplayName(ScoresView v) {
+    switch (v) {
+        case ScoresView::Top:    return "TOP";
+        case ScoresView::Recent: return "RECENT";
+        default:                 return "TOP";
+    }
+}
 
 // Optional NetHack-style burden/encumbrance states.
 // Used by the carrying capacity system (when enabled in settings).
@@ -430,6 +446,49 @@ enum class ControlPreset : uint8_t {
     Modern = 0,   // WASD + Q/E/Z/C diagonals (default)
     Nethack,      // vi-keys HJKL + YUBN (NetHack-style)
 };
+
+// View / camera presentation mode.
+// This is purely a renderer feature (no gameplay changes), useful for experimenting with
+// an isometric 2.5D look.
+enum class ViewMode : uint8_t {
+    TopDown = 0,
+    Isometric,
+};
+
+inline const char* viewModeId(ViewMode m) {
+    switch (m) {
+        case ViewMode::TopDown:   return "topdown";
+        case ViewMode::Isometric: return "isometric";
+        default:                  return "topdown";
+    }
+}
+
+inline const char* viewModeDisplayName(ViewMode m) {
+    switch (m) {
+        case ViewMode::TopDown:   return "TOPDOWN";
+        case ViewMode::Isometric: return "ISOMETRIC";
+        default:                  return "TOPDOWN";
+    }
+}
+
+inline bool parseViewMode(const std::string& raw, ViewMode& out) {
+    std::string s;
+    s.reserve(raw.size());
+    for (char c : raw) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (!std::isspace(uc)) s.push_back(static_cast<char>(std::tolower(uc)));
+    }
+
+    if (s == "topdown" || s == "top_down" || s == "2d" || s == "ortho" || s == "orthographic") {
+        out = ViewMode::TopDown;
+        return true;
+    }
+    if (s == "isometric" || s == "iso" || s == "2.5d" || s == "2_5d" || s == "dimetric") {
+        out = ViewMode::Isometric;
+        return true;
+    }
+    return false;
+}
 
 inline const char* controlPresetId(ControlPreset p) {
     switch (p) {
@@ -748,8 +807,8 @@ public:
     static constexpr int MAP_H = Dungeon::DEFAULT_H;
 
     // Run structure / quest pacing.
-    // The default run now spans 10 floors.
-    static constexpr int DUNGEON_MAX_DEPTH = 10;
+    // The default run now spans 20 floors.
+    static constexpr int DUNGEON_MAX_DEPTH = 20;
     static constexpr int QUEST_DEPTH = DUNGEON_MAX_DEPTH; // where the Amulet of Yendor is guaranteed
     static constexpr int MIDPOINT_DEPTH = DUNGEON_MAX_DEPTH / 2;
 
@@ -895,6 +954,13 @@ void setUITheme(UITheme theme) { uiTheme_ = theme; }
 
 bool uiPanelsTextured() const { return uiPanelsTextured_; }
 void setUIPanelsTextured(bool textured) { uiPanelsTextured_ = textured; }
+
+// View mode (renderer-only camera presentation).
+ViewMode viewMode() const { return viewMode_; }
+const char* viewModeIdString() const { return ::viewModeId(viewMode_); }
+const char* viewModeDisplayName() const { return ::viewModeDisplayName(viewMode_); }
+void setViewMode(ViewMode mode) { viewMode_ = mode; }
+bool isIsometricView() const { return viewMode_ == ViewMode::Isometric; }
 
 // Control preset (for help text + optional keybind presets).
 ControlPreset controlPreset() const { return controlPreset_; }
@@ -1090,6 +1156,17 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     bool isMinimapOpen() const { return minimapOpen; }
     bool isStatsOpen() const { return statsOpen; }
 
+    // Minimap cursor (UI-only): used for minimap keyboard/mouse navigation.
+    bool minimapCursorActive() const { return minimapCursorActive_; }
+    Vec2i minimapCursor() const { return minimapCursorPos_; }
+    void setMinimapCursor(Vec2i p) {
+        p.x = std::clamp(p.x, 0, MAP_W - 1);
+        p.y = std::clamp(p.y, 0, MAP_H - 1);
+        minimapCursorPos_ = p;
+        minimapCursorActive_ = true;
+    }
+    void clearMinimapCursor() { minimapCursorActive_ = false; }
+
     // Options overlay
     bool isOptionsOpen() const { return optionsOpen; }
     int optionsSelection() const { return optionsSel; }
@@ -1201,6 +1278,12 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     DiscoveryFilter discoveriesFilter() const { return discoveriesFilter_; }
     DiscoverySort discoveriesSort() const { return discoveriesSort_; }
     int discoveriesSelection() const { return discoveriesSel; }
+
+    // Scores / run history overlay (Hall of Fame)
+    bool isScoresOpen() const { return scoresOpen; }
+    ScoresView scoresView() const { return scoresView_; }
+    int scoresSelection() const { return scoresSel; }
+    void buildScoresList(std::vector<size_t>& out) const;
 
     // UI helper: whether a given identifiable item kind is currently identified.
     // Non-identifiable kinds are treated as identified.
@@ -1389,6 +1472,10 @@ private:
     bool minimapOpen = false;
     bool statsOpen = false;
 
+    // Minimap cursor (UI-only). Allows clicking/keyboard navigation in the minimap.
+    Vec2i minimapCursorPos_{0,0};
+    bool minimapCursorActive_ = false;
+
 
     // Level-up talent allocation overlay (forced while points are pending)
     bool levelUpOpen = false;
@@ -1450,6 +1537,11 @@ private:
     DiscoveryFilter discoveriesFilter_ = DiscoveryFilter::All;
     DiscoverySort discoveriesSort_ = DiscoverySort::Appearance;
     int discoveriesSel = 0;
+
+    // Scores / run history overlay (Hall of Fame)
+    bool scoresOpen = false;
+    ScoresView scoresView_ = ScoresView::Top;
+    int scoresSel = 0;
 
     // Options / quality-of-life
     AutoPickupMode autoPickup = AutoPickupMode::Gold;
@@ -1582,6 +1674,7 @@ private:
     bool showEffectTimers_ = true;
     UITheme uiTheme_ = UITheme::DarkStone;
     bool uiPanelsTextured_ = true;
+    ViewMode viewMode_ = ViewMode::TopDown;
     ControlPreset controlPreset_ = ControlPreset::Modern;
     bool voxelSpritesEnabled_ = true;
 

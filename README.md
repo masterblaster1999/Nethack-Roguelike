@@ -14,7 +14,7 @@ A tiny NetHack-inspired roguelike with:
   - Map tiles + overlays are generated at **tile resolution** to avoid blocky renderer upscaling.
   - 3D voxel sprites also render at the requested resolution.
 
-- **Dungeon generation variety (10-floor run)**:
+- **Dungeon generation variety (20-floor run)**:
   - **Depth 0**: **Surface Camp** hub (above-ground) — a basic palisade + tent layout with a persistent **STASH** chest.
   - Reach it by taking the upstairs (`<`) from Depth 1.
   - Hostile monsters won't follow you up, so it works as a safe-ish staging area.
@@ -23,12 +23,19 @@ A tiny NetHack-inspired roguelike with:
   - **Depth 2**: **Mines** (winding tunnels + small chambers)
   - **Depth 3**: **Sokoban** puzzle floor (boulder→chasm bridges)
   - **Depth 4**: **Grotto** cavern (cellular automata), sometimes with a carved **subterranean lake**
-  - **Depth 5** (midpoint): **Maze** spike *or* a **ruins** floor (varies per run)
+  - **Depth 5**: early spike — **Maze** *or* **Warrens** burrow network *or* a **ruins** floor (varies per run)
   - **Depth 6**: **Rogue** homage level (doorless grid)
   - **Depth 7**: **Deep Mines** (fissures/sinkholes in the tunnels)
   - **Depth 8**: **Catacombs** (dense tomb-grid + lots of doors)
-  - **Depth 9**: **Labyrinth** (boss chase floor)
-  - **Depth 10**: **Sanctum** final floor
+  - **Depth 9**: breather — classic rooms (a calmer floor after the catacombs)
+  - **Depth 10** (midpoint): a bigger spike — heavier bias toward **Maze/Warrens/Catacombs/Cavern/Ruins** layouts
+  - **Depth 11–17**: deeper variety band (more non-room layouts + higher elite/undead pressure)
+  - **Depth 12**: **Lower Mines** setpiece (relative to run length)
+  - **Depth 14**: **Lower Catacombs** setpiece (relative to run length)
+  - **Depth 16**: **Deep Cavern** setpiece (relative to run length)
+  - **Depth 18**: approach floor — calmer **ruins/rooms** before the final gauntlet
+  - **Depth 19**: **Labyrinth** (boss chase floor)
+  - **Depth 20**: **Sanctum** final floor
 
 - **Dead-end stash closets**: some corridor/tunnel dead ends now hide tiny side closets behind a door (sometimes **secret**), often with a chest — making exploration of dead ends feel rewarding.
 
@@ -43,6 +50,11 @@ A tiny NetHack-inspired roguelike with:
   - **Enter** performs a **context action** (equip if gear, use if consumable)
 - **Game controller support** (SDL2 GameController): D-pad move, **A** confirm, **B** cancel, **X** inventory, **Y** pickup, shoulders for look/fire.
 - **VSync + FPS cap settings**: new `vsync` and `max_fps` keys in `procrogue_settings.ini`.
+- **Experimental isometric 2.5D camera**: set `view_mode = isometric` in `procrogue_settings.ini` or toggle it in-game (default keybind: **F7**).
+  - Isometric mode renders terrain with diamond-projected tiles + taller wall blocks.
+
+- **Toggle 2D/3D procedural sprites at runtime**: set `voxel_sprites = true/false` or toggle in-game (default keybind: **F8**).
+
 
 - **VRAM-friendly sprite caching**:
   - Procedural entity/item/projectile sprites are now cached with an **LRU texture cache** instead of growing unbounded.
@@ -119,6 +131,7 @@ A tiny NetHack-inspired roguelike with:
 - **Context pickup**: when not on stairs, **Enter** will pick up items you’re standing on.
 
 - **NetHack-style item identification**: potions + scrolls start unknown each run (randomized appearances). Using them identifies the item type; you can also find/read a **Scroll of Identify**. (Toggle via `identify_items` in settings.)
+  - **Procedural appearance sprites**: potion/scroll/ring/wand icons now follow the randomized appearance each run (so you can't "ID by icon" and it feels more NetHack-like).
 - **New scroll**: **Scroll of Detect Traps** reveals all traps on the current floor (and identifies itself when used).
 - **Shrines**: use **#pray** (`pray heal|cure|identify|bless|uncurse`) to spend gold for a small blessing (consumes a turn).
 
@@ -128,6 +141,11 @@ A tiny NetHack-inspired roguelike with:
   - **Cursed** gear can't be unequipped or dropped until uncursed.
   - New **Scroll of Remove Curse** can cleanse cursed gear.
   - Shrines support `pray uncurse` (and `pray bless` may bless a piece of equipped gear).
+
+- **Ego weapons (brands)**: rare melee weapons can spawn with special prefixes.
+  - **FLAMING** weapons can ignite targets (Burn).
+  - **VENOM** weapons can poison targets.
+  - **VAMPIRIC** weapons can drain life to heal the wielder.
 
 - **New trap**: **Web traps** can immobilize you for a few turns.
 - **Scent trails**: certain monsters (wolves, snakes, spiders, etc.) can follow your lingering scent around corners when you break line-of-sight (e.g. invisibility/darkness). Scent decays over time and is blocked by walls and closed doors.
@@ -149,7 +167,7 @@ A tiny NetHack-inspired roguelike with:
   - **NetHack**: HJKL + YUBN diagonals (Search = `S`, Kick = `Ctrl+D`, Look = `:`/`V`)
 - **Auto-pickup mode**: `P` (cycles OFF/GOLD/SMART/ALL)
 - **Minimap**: `M`
-- **Stats / high scores**: `Shift+Tab`
+- **Stats**: `Shift+Tab`
 
 ### Interaction
 - **Pick up**: `G`

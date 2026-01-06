@@ -1,7 +1,5 @@
 {
-  "patch_id": "roundN_plus49",
-  "previous_patch": "nethack_patch_roundN_plus48.zip",
-  "description": "Gameplay: introduces a new Poison Gas trap that creates a persistent toxic cloud (poisons entities), fully integrated with diffusion/decay, rendering, trap spawning tables, and save/load (SAVE_VERSION 36). Includes UI look text + unit tests.",
+  "description": "Interactive minimap: add a minimap cursor that can be driven by mouse hover or keyboard, allow click-to-travel and click-to-look directly from the minimap overlay, and render a cursor highlight + helpful hint line.",
   "files": [
     "PATCH_MANIFEST.json",
     "README.md",
@@ -27,18 +25,25 @@
     "src/game_world.cpp",
     "src/items.cpp",
     "src/items.hpp",
+    "src/shop.cpp",
     "src/keybinds.cpp",
+    "src/main.cpp",
     "src/render.cpp",
     "src/render.hpp",
     "src/settings.cpp",
+    "src/settings.hpp",
     "src/spritegen.cpp",
+    "src/spritegen.hpp",
     "src/spritegen3d.cpp",
     "tests/test_main.cpp"
   ],
-  "timestamp": "2026-01-05",
+  "patch_id": "roundN_plus59",
+  "previous_patch": "roundN_plus58",
   "summary": [
-    "Added a new trap type: Poison Gas \u2014 creates a persistent toxic cloud that poisons entities standing in it.",
-    "Poison gas is stored per-level, diffuses/decays over time, is rendered on the map, and is serialized in save files (SAVE_VERSION bumped to 36).",
-    "Updated trap spawning tables (doors, caches, labs, chests), UI look text, automove trap penalties, and added unit tests (trap behavior + save/load roundtrip)."
-  ]
+    "Minimap overlay now has its own cursor (UI-only) which is driven by mouse hover and/or keyboard movement.",
+    "While the minimap is open you can move the cursor with movement keys (including diagonals) and use ENTER to auto-travel or L to enter LOOK at the selected tile.",
+    "Mouse support: left-click on the minimap auto-travels; right-click enters LOOK at the clicked tile.",
+    "Renderer draws a cursor highlight on the minimap and shows a compact hint line + cursor coordinates."
+  ],
+  "timestamp": "2026-01-06"
 }

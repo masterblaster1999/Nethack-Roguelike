@@ -167,6 +167,12 @@ Settings loadSettings(const std::string& path) {
                 if (v <= 0) s.viewH = 0;
                 else s.viewH = std::clamp(v, 1, Game::MAP_H);
             }
+        } else if (key == "view_mode" || key == "camera_mode" || key == "camera") {
+            ViewMode vm = ViewMode::TopDown;
+            if (parseViewMode(val, vm)) s.viewMode = vm;
+        } else if (key == "isometric_view") {
+            bool b = false;
+            if (parseBool(val, b)) s.viewMode = b ? ViewMode::Isometric : ViewMode::TopDown;
         } else if (key == "start_fullscreen") {
             bool b = false;
             if (parseBool(val, b)) s.startFullscreen = b;
@@ -298,6 +304,9 @@ start_fullscreen = false
 # follows the player (and the look/target cursor when those modes are active).
 view_w = 0
 view_h = 0
+# view_mode: topdown | isometric
+# (isometric is an experimental 2.5D camera; toggle in-game with F7 by default)
+view_mode = topdown
 
 # Player identity (used in the HUD + scoreboard)
 player_name = PLAYER
@@ -441,6 +450,8 @@ bind_options = f2
 bind_command = shift+3
 bind_toggle_minimap = m
 bind_toggle_stats = shift+tab
+bind_toggle_view_mode = f7
+bind_toggle_voxel_sprites = f8
 bind_message_history = f3, shift+m
 bind_codex = f4
 bind_discoveries = backslash

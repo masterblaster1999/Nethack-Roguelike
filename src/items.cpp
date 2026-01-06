@@ -219,6 +219,12 @@ std::string itemDisplayName(const Item& it) {
             if (it.enchant > 0) ss << "+";
             ss << it.enchant << " ";
         }
+
+        // Ego / brand prefix (rare).
+        if (it.ego != ItemEgo::None) {
+            const char* p = egoPrefix(it.ego);
+            if (p && p[0]) ss << p << " ";
+        }
     }
 
     if (d.stackable && it.count > 1) {
@@ -365,6 +371,7 @@ bool tryStackItem(std::vector<Item>& inv, const Item& incoming) {
         if (it.charges != incoming.charges) continue;
         if (it.enchant != incoming.enchant) continue;
         if (it.buc != incoming.buc) continue;
+        if (it.ego != incoming.ego) continue;
         if (it.shopPrice != incoming.shopPrice) continue;
         if (it.shopDepth != incoming.shopDepth) continue;
 

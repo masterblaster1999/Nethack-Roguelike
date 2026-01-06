@@ -13,6 +13,7 @@
 #include "content.hpp"
 #include "version.hpp"
 #include "game.hpp"
+#include "spritegen.hpp"
 
 #include <cstdint>
 #include <cctype>
@@ -90,12 +91,14 @@ void test_rng_reproducible() {
 }
 
 void test_dungeon_stairs_connected() {
-    const int depthsToTest[] = {0, 1, 2, 3, 4, 5, 7, 8};
+    // Cover key setpiece depths across the longer default run.
+    // (We intentionally skip the final floor because it has no downstairs.)
+    const int depthsToTest[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 14, 16, 18, 19};
 
     for (int depth : depthsToTest) {
         RNG rng(42u + static_cast<uint32_t>(depth));
         Dungeon d(30, 20);
-        d.generate(rng, depth, /*maxDepth=*/10);
+        d.generate(rng, depth, /*maxDepth=*/Game::DUNGEON_MAX_DEPTH);
 
         auto inBounds = [&](Vec2i p) {
             return d.inBounds(p.x, p.y);
@@ -193,6 +196,81 @@ void test_dungeon_stairs_connected() {
 }
 
 
+
+
+void test_warrens_generator_appears_and_looks_tunnel_heavy() {
+    bool found = false;
+
+    // Depth 5 is the intended "midpoint variety" floor (maze/ruins/warrens).
+    // Scan a small seed range and validate that at least one Warrens layout appears.
+    for (uint32_t seed = 1; seed < 250; ++seed) {
+        RNG rng(seed);
+        Dungeon d(60, 40);
+        d.generate(rng, /*depth=*/5, /*maxDepth=*/10);
+
+        if (!d.hasWarrens) continue;
+
+        found = true;
+
+        expect(d.rooms.size() >= 6, "Warrens should contain several chambers/rooms");
+
+        const int W = d.width;
+        const int H = d.height;
+
+        // Build an in-room mask (room rectangles) to estimate corridor/tunnel dominance.
+        std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), 0);
+        for (const auto& r : d.rooms) {
+            for (int y = r.y; y < r.y2(); ++y) {
+                for (int x = r.x; x < r.x2(); ++x) {
+                    if (!d.inBounds(x, y)) continue;
+                    inRoom[static_cast<size_t>(y * W + x)] = 1;
+                }
+            }
+        }
+
+        int passable = 0;
+        int corridorPassable = 0;
+        int floorTiles = 0;
+        int deadEnds = 0;
+
+        const int dirs4[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+        for (int y = 1; y < H - 1; ++y) {
+            for (int x = 1; x < W - 1; ++x) {
+                if (d.isPassable(x, y)) {
+                    passable++;
+                    if (inRoom[static_cast<size_t>(y * W + x)] == 0) corridorPassable++;
+                }
+
+                if (d.at(x, y).type != TileType::Floor) continue;
+                floorTiles++;
+
+                int n = 0;
+                for (auto& dv : dirs4) {
+                    int nx = x + dv[0];
+                    int ny = y + dv[1];
+                    if (!d.inBounds(nx, ny)) continue;
+                    if (d.isPassable(nx, ny)) n++;
+                }
+                if (n == 1) deadEnds++;
+            }
+        }
+
+        // Coverage sanity: warrens shouldn't be a wide-open cave nor a tiny corridor.
+        const float cover = passable / static_cast<float>(W * H);
+        expect(cover >= 0.18f && cover <= 0.58f, "Warrens passable coverage out of expected range");
+
+        const float corridorFrac = (passable > 0) ? (corridorPassable / static_cast<float>(passable)) : 0.0f;
+        expect(corridorFrac >= 0.35f, "Warrens should be tunnel-heavy (corridor fraction too low)");
+
+        const float deadEndFrac = (floorTiles > 0) ? (deadEnds / static_cast<float>(floorTiles)) : 0.0f;
+        expect(deadEndFrac >= 0.04f, "Warrens should have meaningful dead ends");
+
+        break;
+    }
+
+    expect(found, "Warrens generator never selected across seeds for depth 5");
+}
 
 void test_vault_room_prefabs_add_obstacles() {
     // Vaults are optional, so search across many seeds and confirm that at least one vault
@@ -750,7 +828,7 @@ void test_rogue_level_layout() {
 void test_final_floor_sanctum_layout() {
     RNG rng(999u);
     Dungeon d;
-    d.generate(rng, /*depth=*/10, /*maxDepth=*/10);
+    d.generate(rng, /*depth=*/Game::DUNGEON_MAX_DEPTH, /*maxDepth=*/Game::DUNGEON_MAX_DEPTH);
 
     expect(d.inBounds(d.stairsUp.x, d.stairsUp.y), "final floor has stairs up");
     expect(!d.inBounds(d.stairsDown.x, d.stairsDown.y), "final floor has no stairs down");
@@ -1757,6 +1835,27 @@ void test_settings_updateIniKey_creates_parent_dirs() {
 }
 
 
+void test_settings_view_mode_parse() {
+#if __has_include(<filesystem>)
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "procrogue_settings_view_mode_test";
+    const fs::path file = root / "settings.ini";
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+
+    expect(writeTextFile(file.string(), "view_mode = isometric\n"), "writeTextFile should succeed");
+    Settings s = loadSettings(file.string());
+    expect(s.viewMode == ViewMode::Isometric, "Settings should parse view_mode = isometric");
+
+    fs::remove_all(root, ec);
+#else
+    expect(true, "Skipping view_mode parse test (no <filesystem>)");
+#endif
+}
+
+
+
 void test_settings_writeDefaultSettings_creates_parent_dirs() {
 #if __has_include(<filesystem>)
     namespace fs = std::filesystem;
@@ -2351,6 +2450,160 @@ void test_shop_debt_ledger_save_load_roundtrip() {
     expect(g2.shopDebtTotal() >= 77, "shopDebtTotal should include the shop debt ledger");
 
     (void)std::remove(path.c_str());
+}
+
+void test_loot_drop_and_pickup_roundtrip_preserves_stack_and_unique_ids() {
+    Game g;
+    g.newGame(777u);
+
+    // Use the surface camp to avoid shop logic interfering with basic drop/pickup behavior.
+    GameTestAccess::changeLevel(g, 0, false);
+
+    auto& inv = GameTestAccess::inv(g);
+    auto& ground = GameTestAccess::ground(g);
+    inv.clear();
+    ground.clear();
+
+    Item arrows{};
+    arrows.id = 1000000000;
+    arrows.kind = ItemKind::Arrow;
+    arrows.count = 5;
+    arrows.spriteSeed = 1u;
+    inv.push_back(arrows);
+    GameTestAccess::invSel(g) = 0;
+
+    const Vec2i pos = g.player().pos;
+
+    expect(g.dropSelected(), "dropSelected should succeed for a simple stackable item");
+    expect(inv.size() == 1, "Dropping 1 from a stack should keep the stack in inventory");
+    expect(inv[0].count == 4, "Inventory stack count should decrement by 1 when dropping from a stack");
+
+    expect(ground.size() == 1, "Dropping should create a ground item");
+    expect(ground[0].pos == pos, "Dropped item should land on the player's tile");
+    expect(ground[0].item.kind == ItemKind::Arrow, "Dropped ground item kind should match");
+    expect(ground[0].item.count == 1, "Dropped stack should be split to 1 unit");
+
+    // Regression: splitting a stack must not duplicate item ids.
+    expect(ground[0].item.id != inv[0].id, "Split-drop should allocate a unique id for the new ground stack");
+
+    expect(g.pickupAtPlayer(), "pickupAtPlayer should pick up the dropped item");
+    expect(ground.empty(), "Picking up should remove the ground item");
+    expect(inv.size() == 1, "Picking up should restack into the existing inventory stack");
+    expect(inv[0].count == 5, "Drop+pickup should round-trip stack count");
+}
+
+void test_loot_drop_merges_into_existing_ground_stack() {
+    Game g;
+    g.newGame(778u);
+    GameTestAccess::changeLevel(g, 0, false);
+
+    auto& inv = GameTestAccess::inv(g);
+    auto& ground = GameTestAccess::ground(g);
+    inv.clear();
+    ground.clear();
+
+    const Vec2i pos = g.player().pos;
+
+    // Existing arrows on the ground.
+    GroundItem gi{};
+    gi.pos = pos;
+    gi.item.id = 200;
+    gi.item.kind = ItemKind::Arrow;
+    gi.item.count = 3;
+    gi.item.spriteSeed = 2u;
+    ground.push_back(gi);
+
+    // Player has a small arrow stack and drops one.
+    Item arrows{};
+    arrows.id = 1000000000;
+    arrows.kind = ItemKind::Arrow;
+    arrows.count = 2;
+    arrows.spriteSeed = 1u;
+    inv.push_back(arrows);
+    GameTestAccess::invSel(g) = 0;
+
+    expect(g.dropSelected(), "dropSelected should succeed");
+    expect(inv.size() == 1, "Dropping 1 from a stack should keep the stack in inventory");
+    expect(inv[0].count == 1, "Inventory stack should decrement by 1");
+
+    // Regression: dropping stackables should merge into existing matching ground stacks.
+    expect(ground.size() == 1, "Dropping onto an existing matching stack should merge rather than create a new entry");
+    expect(ground[0].item.kind == ItemKind::Arrow, "Ground stack kind should remain arrows");
+    expect(ground[0].item.count == 4, "Ground stack should increment by 1 after merge");
+}
+
+void test_shop_pay_splits_unpaid_stack_creates_unique_id() {
+    Game g;
+    g.newGame(901u);
+    GameTestAccess::changeLevel(g, 1, true);
+
+    // Force the player's tile to be considered a shop.
+    Dungeon& d = GameTestAccess::dungeon(g);
+    d.rooms.clear();
+    const Vec2i ppos = g.player().pos;
+    Room shop{};
+    shop.x = std::max(0, ppos.x - 1);
+    shop.y = std::max(0, ppos.y - 1);
+    shop.w = 3;
+    shop.h = 3;
+    shop.type = RoomType::Shop;
+    d.rooms.push_back(shop);
+
+    // Ensure there's a living shopkeeper.
+    {
+        auto& ents = GameTestAccess::ents(g);
+        const int pid = g.playerId();
+        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+            return e.id != pid;
+        }), ents.end());
+
+        Entity sk{};
+        sk.id = 99999;
+        sk.kind = EntityKind::Shopkeeper;
+        sk.hp = 12;
+        sk.hpMax = 12;
+        sk.pos = {ppos.x + 1, ppos.y};
+        ents.push_back(sk);
+    }
+
+    auto& inv = GameTestAccess::inv(g);
+    inv.clear();
+
+    // 20 gold available.
+    Item gold{};
+    gold.id = 1;
+    gold.kind = ItemKind::Gold;
+    gold.count = 20;
+    inv.push_back(gold);
+
+    // Unpaid stack: 5 potions @ 10 gold each. We'll be able to pay for 2, forcing a split.
+    Item pot{};
+    pot.id = 1000;
+    pot.kind = ItemKind::PotionHealing;
+    pot.count = 5;
+    pot.shopPrice = 10;
+    pot.shopDepth = GameTestAccess::depth(g);
+    inv.push_back(pot);
+
+    expect(g.shopDebtThisDepth() == 50, "Precondition: shop debt should reflect unpaid stack");
+    expect(g.payAtShop(), "payAtShop should succeed when in a shop with debt and gold");
+
+    // Find the paid and unpaid stacks.
+    int paidIdx = -1;
+    int unpaidIdx = -1;
+    for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+        if (inv[static_cast<size_t>(i)].kind != ItemKind::PotionHealing) continue;
+        if (inv[static_cast<size_t>(i)].shopPrice > 0) unpaidIdx = i;
+        else paidIdx = i;
+    }
+
+    expect(paidIdx >= 0 && unpaidIdx >= 0, "payAtShop split should produce both a paid and unpaid stack entry");
+    if (paidIdx >= 0 && unpaidIdx >= 0) {
+        expect(inv[static_cast<size_t>(paidIdx)].count == 2, "Paid stack should contain the number of units paid for (2)");
+        expect(inv[static_cast<size_t>(unpaidIdx)].count == 3, "Unpaid stack should contain the remaining units (3)");
+        expect(inv[static_cast<size_t>(paidIdx)].id != inv[static_cast<size_t>(unpaidIdx)].id,
+               "Splitting a stack during payment must allocate a unique id for the new stack");
+    }
 }
 
 void test_engravings_basic_and_save_load_roundtrip() {
@@ -4013,11 +4266,71 @@ void test_auto_explore_guides_to_blocking_trap_when_frontier_is_behind_it() {
     const Vec2i goal = GameTestAccess::findNearestExploreFrontier(g);
     expect(goal == Vec2i{3, 1}, "When the nearest frontier is only reachable through a known trap, auto-explore should target the blocking trap");
 }
+
+static bool spritesEqual(const SpritePixels& a, const SpritePixels& b) {
+    if (a.w != b.w || a.h != b.h || a.px.size() != b.px.size()) return false;
+    for (size_t i = 0; i < a.px.size(); ++i) {
+        const Color& ca = a.px[i];
+        const Color& cb = b.px[i];
+        if (ca.r != cb.r || ca.g != cb.g || ca.b != cb.b || ca.a != cb.a) return false;
+    }
+    return true;
+}
+
+void test_identification_sprites_are_appearance_based() {
+    // The appearance-id is carried in the low byte and the special flag switches
+    // item spritegen into "appearance art" mode.
+    const uint32_t base = 0x12345600u;
+
+    // Potions: different kinds with the same appearance id should render identically.
+    {
+        const uint32_t seed = SPRITE_SEED_IDENT_APPEARANCE_FLAG | base | 0x02u; // Sapphire-like
+        const SpritePixels a = generateItemSprite(ItemKind::PotionHealing, seed, 0, /*use3d=*/false, 16);
+        const SpritePixels b = generateItemSprite(ItemKind::PotionStrength, seed, 0, /*use3d=*/false, 16);
+        expect(spritesEqual(a, b), "ID sprites: potion art should depend on appearance (not true kind)");
+
+        // And a different appearance id should visibly differ.
+        const uint32_t seedRuby = SPRITE_SEED_IDENT_APPEARANCE_FLAG | base | 0x00u;
+        const SpritePixels ruby = generateItemSprite(ItemKind::PotionHealing, seedRuby, 0, false, 16);
+        expect(!spritesEqual(a, ruby), "ID sprites: different potion appearance ids should produce different art");
+
+        // Quick sanity: ruby should be red-dominant and sapphire blue-dominant at a liquid pixel.
+        const Color cr = ruby.at(7, 9);
+        const Color cs = a.at(7, 9);
+        expect(cr.r > cr.b, "ID sprites: ruby potion should be red-dominant at liquid pixel");
+        expect(cs.b > cs.r, "ID sprites: sapphire potion should be blue-dominant at liquid pixel");
+    }
+
+    // Scrolls: different kinds share the same appearance-driven rune "label".
+    {
+        const uint32_t seed = SPRITE_SEED_IDENT_APPEARANCE_FLAG | base | 0x07u;
+        const SpritePixels a = generateItemSprite(ItemKind::ScrollTeleport, seed, 0, false, 16);
+        const SpritePixels b = generateItemSprite(ItemKind::ScrollMapping, seed, 0, false, 16);
+        expect(spritesEqual(a, b), "ID sprites: scroll art should depend on appearance (not true kind)");
+    }
+
+    // Rings: appearance id drives band/gem materials, not true ring effect.
+    {
+        const uint32_t seed = SPRITE_SEED_IDENT_APPEARANCE_FLAG | base | 0x0Bu; // Ruby-like ring
+        const SpritePixels a = generateItemSprite(ItemKind::RingMight, seed, 0, false, 16);
+        const SpritePixels b = generateItemSprite(ItemKind::RingProtection, seed, 0, false, 16);
+        expect(spritesEqual(a, b), "ID sprites: ring art should depend on appearance (not true kind)");
+    }
+
+    // Wands: appearance id drives material, not true wand spell.
+    {
+        const uint32_t seed = SPRITE_SEED_IDENT_APPEARANCE_FLAG | base | 0x0Cu; // Crystal-like wand
+        const SpritePixels a = generateItemSprite(ItemKind::WandSparks, seed, 0, false, 16);
+        const SpritePixels b = generateItemSprite(ItemKind::WandFireball, seed, 0, false, 16);
+        expect(spritesEqual(a, b), "ID sprites: wand art should depend on appearance (not true kind)");
+    }
+}
 int main() {
     std::cout << "Running ProcRogue tests...\n";
 
     test_rng_reproducible();
     test_dungeon_stairs_connected();
+    test_warrens_generator_appears_and_looks_tunnel_heavy();
     test_vault_room_prefabs_add_obstacles();
     test_vault_suite_prefab_partitions_room();
     test_partition_vaults_embed_locked_door_in_wall_line();
@@ -4063,6 +4376,7 @@ int main() {
     test_scores_sort_ties_by_timestamp();
     test_scores_append_creates_parent_dirs();
     test_settings_updateIniKey_creates_parent_dirs();
+    test_settings_view_mode_parse();
     test_settings_writeDefaultSettings_creates_parent_dirs();
 
     test_settings_load_utf8_bom();
@@ -4085,6 +4399,9 @@ int main() {
     test_wand_display_shows_charges();
     test_shop_debt_ledger_persists_after_consumption();
     test_shop_debt_ledger_save_load_roundtrip();
+    test_loot_drop_and_pickup_roundtrip_preserves_stack_and_unique_ids();
+    test_loot_drop_merges_into_existing_ground_stack();
+    test_shop_pay_splits_unpaid_stack_creates_unique_id();
     test_engravings_basic_and_save_load_roundtrip();
     test_command_prompt_preserves_look_cursor();
     test_throwvoice_alerts_monster_at_target_tile();
@@ -4110,6 +4427,7 @@ int main() {
     test_replay_roundtrip_basic();
     test_headless_replay_runner_verifies_hashes();
     test_content_overrides_basic();
+    test_identification_sprites_are_appearance_based();
 
     if (failures == 0) {
         std::cout << "All tests passed.\n";

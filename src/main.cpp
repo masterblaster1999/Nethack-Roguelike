@@ -513,6 +513,7 @@ int main(int argc, char** argv) {
     game.setShowEffectTimers(settings.showEffectTimers);
     game.setUITheme(settings.uiTheme);
     game.setUIPanelsTextured(settings.uiPanelsTextured);
+    game.setViewMode(settings.viewMode);
     game.setControlPreset(settings.controlPreset);
     game.setSettingsPath(settingsPath);
 
@@ -860,6 +861,9 @@ int main(int argc, char** argv) {
         if (dt > 0.1f) dt = 0.1f;
         lastTicks = now;
 
+        // Keep renderer in sync with the current camera/view mode (affects mouse->tile mapping).
+        renderer.setViewMode(game.viewMode());
+
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             switch (ev.type) {
@@ -1023,6 +1027,13 @@ int main(int argc, char** argv) {
                     if (replayActive) break;
                     {
                         int tx = 0, ty = 0;
+                        // Minimap hover updates the minimap cursor (UI-only).
+                        if (game.isMinimapOpen()) {
+                            if (!renderer.windowToMinimapTile(game, ev.motion.x, ev.motion.y, tx, ty)) break;
+                            game.setMinimapCursor(Vec2i{tx, ty});
+                            break;
+                        }
+
                         if (!renderer.windowToMapTile(ev.motion.x, ev.motion.y, tx, ty)) break;
                         const Vec2i p{tx, ty};
 
@@ -1050,8 +1061,26 @@ int main(int argc, char** argv) {
                 case SDL_MOUSEBUTTONDOWN:
                     if (replayActive) break;
                     {
+                        // Minimap: click to travel/look.
+                        if (game.isMinimapOpen()) {
+                            int tx = 0, ty = 0;
+                            if (!renderer.windowToMinimapTile(game, ev.button.x, ev.button.y, tx, ty)) break;
+                            const Vec2i p{tx, ty};
+
+                            game.setMinimapCursor(p);
+
+                            if (ev.button.button == SDL_BUTTON_LEFT) {
+                                if (recording) recorder.writeAutoTravel(recordTimeMs(), p);
+                                game.requestAutoTravel(p);
+                            } else if (ev.button.button == SDL_BUTTON_RIGHT) {
+                                if (recording) recorder.writeBeginLook(recordTimeMs(), p);
+                                game.beginLookAt(p);
+                            }
+                            break;
+                        }
+
                         // Ignore mouse when menus are open.
-                        if (game.isInventoryOpen() || game.isHelpOpen() || game.isMinimapOpen() || game.isStatsOpen() ||
+                        if (game.isInventoryOpen() || game.isHelpOpen() || game.isStatsOpen() ||
                             game.isMessageHistoryOpen() || game.isOptionsOpen() || game.isCommandOpen())
                             break;
 
@@ -1164,17 +1193,18 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "player_class", game.playerClassIdString());
             ok &= updateIniKey(settingsPath, "show_effect_timers", game.showEffectTimers() ? "true" : "false");
 
-auto uiThemeToString = [](UITheme t) -> const char* {
-    switch (t) {
-        case UITheme::DarkStone: return "darkstone";
-        case UITheme::Parchment: return "parchment";
-        case UITheme::Arcane:    return "arcane";
-    }
-    return "darkstone";
-};
-ok &= updateIniKey(settingsPath, "ui_theme", uiThemeToString(game.uiTheme()));
-ok &= updateIniKey(settingsPath, "ui_panels", game.uiPanelsTextured() ? "textured" : "solid");
-ok &= updateIniKey(settingsPath, "control_preset", controlPresetId(game.controlPreset()));
+            auto uiThemeToString = [](UITheme t) -> const char* {
+                switch (t) {
+                    case UITheme::DarkStone: return "darkstone";
+                    case UITheme::Parchment: return "parchment";
+                    case UITheme::Arcane:    return "arcane";
+                }
+                return "darkstone";
+            };
+            ok &= updateIniKey(settingsPath, "ui_theme", uiThemeToString(game.uiTheme()));
+            ok &= updateIniKey(settingsPath, "ui_panels", game.uiPanelsTextured() ? "textured" : "solid");
+            ok &= updateIniKey(settingsPath, "view_mode", viewModeId(game.viewMode()));
+            ok &= updateIniKey(settingsPath, "control_preset", controlPresetId(game.controlPreset()));
 
             if (!ok) game.pushSystemMessage("FAILED TO SAVE SETTINGS.");
 
@@ -1207,6 +1237,7 @@ ok &= updateIniKey(settingsPath, "control_preset", controlPresetId(game.controlP
             game.setShowEffectTimers(newSettings.showEffectTimers);
             game.setUITheme(newSettings.uiTheme);
             game.setUIPanelsTextured(newSettings.uiPanelsTextured);
+            game.setViewMode(newSettings.viewMode);
             game.setControlPreset(newSettings.controlPreset);
 
             // Keep the local copy up-to-date for any later use.

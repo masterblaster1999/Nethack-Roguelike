@@ -41,7 +41,7 @@ void Game::update(float dt) {
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
-        if (invOpen || chestOpen || targeting || kicking || digging || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || codexOpen || discoveriesOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen || isFinished()) {
+        if (invOpen || chestOpen || targeting || kicking || digging || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || scoresOpen || codexOpen || discoveriesOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen || isFinished()) {
             stopAutoMove(true);
             return;
         }
@@ -184,15 +184,20 @@ void Game::handleAction(Action a) {
             } else {
                 msgHistoryScroll = clampi(msgHistoryScroll - 1, 0, maxScroll);
             }
-        } else {
+            return;
+        }
+
+        // Allow certain overlays (codex / discoveries / scores) to use LOG UP/DOWN
+        // for their own list navigation.
+        if (!(codexOpen || discoveriesOpen || scoresOpen)) {
             const int maxScroll = std::max(0, static_cast<int>(msgs.size()) - 1);
             if (a == Action::LogUp) {
                 msgScroll = clampi(msgScroll + 1, 0, maxScroll);
             } else {
                 msgScroll = clampi(msgScroll - 1, 0, maxScroll);
             }
+            return;
         }
-        return;
     }
 
     auto closeOverlays = [&]() {
@@ -219,6 +224,7 @@ void Game::handleAction(Action a) {
         msgHistoryScroll = 0;
 
         codexOpen = false;
+        scoresOpen = false;
         discoveriesOpen = false;
 
         if (commandOpen) {
@@ -405,6 +411,16 @@ void Game::handleAction(Action a) {
                 msgHistoryScroll = 0;
             }
             return;
+        case Action::Scores:
+            if (scoresOpen) {
+                scoresOpen = false;
+            } else {
+                closeOverlays();
+                scoresOpen = true;
+                scoresView_ = ScoresView::Top;
+                scoresSel = 0;
+            }
+            return;
         case Action::Codex:
             if (codexOpen) {
                 codexOpen = false;
@@ -438,9 +454,12 @@ void Game::handleAction(Action a) {
         case Action::ToggleMinimap:
             if (minimapOpen) {
                 minimapOpen = false;
+                minimapCursorActive_ = false;
             } else {
                 closeOverlays();
                 minimapOpen = true;
+                minimapCursorPos_ = player().pos;
+                minimapCursorActive_ = true;
             }
             return;
         case Action::ToggleStats:
@@ -451,14 +470,25 @@ void Game::handleAction(Action a) {
                 statsOpen = true;
             }
             return;
+        case Action::ToggleViewMode:
+            viewMode_ = (viewMode_ == ViewMode::TopDown) ? ViewMode::Isometric : ViewMode::TopDown;
+            settingsDirtyFlag = true;
+            pushMsg(std::string("VIEW: ") + viewModeDisplayName() + ".", MessageKind::System);
+            return;
+        case Action::ToggleVoxelSprites:
+            setVoxelSpritesEnabled(!voxelSpritesEnabled());
+            settingsDirtyFlag = true;
+            pushMsg(std::string("3D SPRITES: ") + (voxelSpritesEnabled() ? "ON" : "OFF") + ".", MessageKind::System);
+            return;
         case Action::Options:
             if (optionsOpen) {
                 optionsOpen = false;
-        keybindsOpen = false;
-        keybindsCapture = false;
-        keybindsCaptureIndex = -1;
-        keybindsCaptureAdd = false;
-        keybindsScroll_ = 0;
+                // Defensive: ensure any capture UI is closed too.
+                keybindsOpen = false;
+                keybindsCapture = false;
+                keybindsCaptureIndex = -1;
+                keybindsCaptureAdd = false;
+                keybindsScroll_ = 0;
             } else {
                 closeOverlays();
                 optionsOpen = true;
@@ -818,13 +848,16 @@ if (optionsSel == 19) {
         return;
     }
 
-    // Finished runs: allow restart (and global UI hotkeys above).
+    // Finished runs: allow restart, but keep UI overlays navigable.
     if (isFinished()) {
         if (a == Action::Restart) {
             newGame(hash32(rng.nextU32()));
+            return;
         }
-        return;
+        // Note: other actions may be consumed by UI overlays below; gameplay actions
+        // are blocked later in the function.
     }
+
 
     // If animating FX, only allow Cancel to close overlays.
     if (inputLock) {
@@ -836,7 +869,56 @@ if (optionsSel == 19) {
 
     // Overlay: minimap
     if (minimapOpen) {
-        if (a == Action::Cancel) minimapOpen = false;
+        if (!minimapCursorActive_) {
+            minimapCursorPos_ = player().pos;
+            minimapCursorActive_ = true;
+        }
+
+        // Close
+        if (a == Action::Cancel || a == Action::ToggleMinimap) {
+            minimapOpen = false;
+            minimapCursorActive_ = false;
+            return;
+        }
+
+        // Navigation (supports diagonals)
+        int dx = 0;
+        int dy = 0;
+        switch (a) {
+            case Action::Up:       dy = -1; break;
+            case Action::Down:     dy =  1; break;
+            case Action::Left:     dx = -1; break;
+            case Action::Right:    dx =  1; break;
+            case Action::UpLeft:   dx = -1; dy = -1; break;
+            case Action::UpRight:  dx =  1; dy = -1; break;
+            case Action::DownLeft: dx = -1; dy =  1; break;
+            case Action::DownRight:dx =  1; dy =  1; break;
+
+            // Quick scroll (LOG keys / mouse wheel) move by 10 tiles.
+            case Action::LogUp:    dy = -10; break;
+            case Action::LogDown:  dy =  10; break;
+            default: break;
+        }
+
+        if (dx != 0 || dy != 0) {
+            minimapCursorPos_.x = clampi(minimapCursorPos_.x + dx, 0, MAP_W - 1);
+            minimapCursorPos_.y = clampi(minimapCursorPos_.y + dy, 0, MAP_H - 1);
+            return;
+        }
+
+        // Confirm: auto-travel to the selected tile (closes the minimap automatically).
+        if (a == Action::Confirm) {
+            requestAutoTravel(minimapCursorPos_);
+            return;
+        }
+
+        // Look: switch to LOOK mode at the selected tile.
+        if (a == Action::Look) {
+            beginLookAt(minimapCursorPos_);
+            return;
+        }
+
+        // Consume all other input while the minimap is open.
         return;
     }
 
@@ -844,6 +926,42 @@ if (optionsSel == 19) {
     if (statsOpen) {
         if (a == Action::Cancel) statsOpen = false;
         return;
+    }
+
+    // Overlay: scores / run history (Hall of Fame)
+    if (scoresOpen) {
+        std::vector<size_t> list;
+        buildScoresList(list);
+        const int n = static_cast<int>(list.size());
+        const int maxSel = std::max(0, n - 1);
+        if (n <= 0) {
+            scoresSel = 0;
+        } else {
+            scoresSel = clampi(scoresSel, 0, maxSel);
+        }
+
+        auto toggleView = [&]() {
+            scoresView_ = (scoresView_ == ScoresView::Top) ? ScoresView::Recent : ScoresView::Top;
+            scoresSel = 0;
+        };
+
+        switch (a) {
+            case Action::Cancel:
+            case Action::Scores:
+            case Action::Confirm:
+                scoresOpen = false;
+                return;
+            case Action::Up:      scoresSel = clampi(scoresSel - 1, 0, maxSel); return;
+            case Action::Down:    scoresSel = clampi(scoresSel + 1, 0, maxSel); return;
+            case Action::LogUp:   scoresSel = clampi(scoresSel - 10, 0, maxSel); return;
+            case Action::LogDown: scoresSel = clampi(scoresSel + 10, 0, maxSel); return;
+            case Action::Left:
+            case Action::Right:
+                toggleView();
+                return;
+            default:
+                return;
+        }
     }
 
     // Overlay: monster codex (bestiary / encounter log)
@@ -1266,6 +1384,11 @@ if (optionsSel == 19) {
         if (acted) {
             advanceAfterPlayerAction();
         }
+        return;
+    }
+
+    // Finished runs: ignore turn-consuming actions (movement/combat/etc).
+    if (isFinished()) {
         return;
     }
 

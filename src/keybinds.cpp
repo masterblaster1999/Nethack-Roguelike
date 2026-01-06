@@ -199,6 +199,8 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     // UI / meta
     if (name == "toggle_minimap" || name == "minimap") return Action::ToggleMinimap;
     if (name == "toggle_stats" || name == "stats") return Action::ToggleStats;
+    if (name == "toggle_view_mode" || name == "view_mode" || name == "toggle_iso" || name == "isometric") return Action::ToggleViewMode;
+    if (name == "toggle_voxel_sprites" || name == "voxel_sprites" || name == "toggle_3d_sprites" || name == "sprites3d") return Action::ToggleVoxelSprites;
     if (name == "toggle_fullscreen" || name == "fullscreen") return Action::ToggleFullscreen;
     if (name == "screenshot" || name == "take_screenshot") return Action::Screenshot;
     if (name == "help") return Action::Help;
@@ -212,6 +214,8 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     if (name == "load") return Action::Load;
     if (name == "load_auto" || name == "loadauto") return Action::LoadAuto;
     if (name == "restart" || name == "newgame") return Action::Restart;
+    if (name == "scores" || name == "hall" || name == "halloffame") return Action::Scores;
+
 
     if (name == "log_up" || name == "logup") return Action::LogUp;
     if (name == "log_down" || name == "logdown") return Action::LogDown;
@@ -316,11 +320,15 @@ KeyBinds KeyBinds::defaults() {
     add(Action::Discoveries, SDLK_BACKSLASH);
     add(Action::ToggleStats, SDLK_TAB, KMOD_SHIFT);
 
+    add(Action::ToggleViewMode, SDLK_F7);
+    add(Action::ToggleVoxelSprites, SDLK_F8);
+
     add(Action::ToggleFullscreen, SDLK_F11);
     add(Action::Screenshot, SDLK_F12);
 
     add(Action::Save, SDLK_F5);
-    add(Action::Restart, SDLK_F6);
+    add(Action::Scores, SDLK_F6);
+    add(Action::Restart, SDLK_F6, KMOD_SHIFT);
     add(Action::Load, SDLK_F9);
     add(Action::LoadAuto, SDLK_F10);
 
@@ -446,8 +454,11 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::LoadAuto,
         Action::Restart,
 
+        Action::Scores,
+
         Action::ToggleMinimap,
         Action::ToggleStats,
+        Action::ToggleViewMode,
 
         Action::Inventory,
         Action::Fire,
@@ -529,6 +540,8 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
     {Action::Command, "command"},
     {Action::ToggleMinimap, "toggle_minimap"},
     {Action::ToggleStats, "toggle_stats"},
+    {Action::ToggleViewMode, "toggle_view_mode"},
+    {Action::ToggleVoxelSprites, "toggle_voxel_sprites"},
     {Action::ToggleFullscreen, "fullscreen"},
     {Action::Screenshot, "screenshot"},
 
@@ -536,6 +549,8 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
     {Action::Load, "load"},
     {Action::LoadAuto, "load_auto"},
     {Action::Restart, "restart"},
+
+    {Action::Scores, "scores"},
 
     {Action::LogUp, "log_up"},
     {Action::LogDown, "log_down"},

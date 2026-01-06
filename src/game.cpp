@@ -301,6 +301,27 @@ void Game::buildDiscoveryList(std::vector<ItemKind>& out, DiscoveryFilter filter
     });
 }
 
+void Game::buildScoresList(std::vector<size_t>& out) const {
+    out.clear();
+    const auto& es = scores.entries();
+    out.reserve(es.size());
+    for (size_t i = 0; i < es.size(); ++i) out.push_back(i);
+
+    if (scoresView_ == ScoresView::Recent) {
+        // Newest first; keep tie-breakers stable so the list doesn't jitter.
+        std::stable_sort(out.begin(), out.end(), [&](size_t ia, size_t ib) {
+            const ScoreEntry& a = es[ia];
+            const ScoreEntry& b = es[ib];
+            if (a.timestamp != b.timestamp) return a.timestamp > b.timestamp;
+            if (a.score != b.score) return a.score > b.score;
+            if (a.won != b.won) return a.won > b.won;
+            if (a.turns != b.turns) return a.turns < b.turns;
+            if (a.name != b.name) return a.name < b.name;
+            return a.cause < b.cause;
+        });
+    }
+}
+
 Entity* Game::entityById(int id) {
     for (auto& e : ents) if (e.id == id) return &e;
     return nullptr;
@@ -1161,6 +1182,10 @@ void Game::newGame(uint32_t seed) {
     msgHistorySearch.clear();
     msgHistoryScroll = 0;
 
+    scoresOpen = false;
+    scoresView_ = ScoresView::Top;
+    scoresSel = 0;
+
     codexOpen = false;
     codexFilter_ = CodexFilter::All;
     codexSort_ = CodexSort::Kind;
@@ -1239,7 +1264,9 @@ void Game::newGame(uint32_t seed) {
     }
 
     // Hunger pacing (optional setting; stored per-run in save files).
-    hungerMax = 800;
+    // The run is longer now, so slightly increase the default hunger budget
+    // to keep the system from becoming an unintended hard timer.
+    hungerMax = 800 + std::max(0, DUNGEON_MAX_DEPTH - 10) * 40;
     hunger = hungerMax;
     hungerStatePrev = hungerStateFor(hunger, hungerMax);
 
@@ -1411,7 +1438,8 @@ void Game::newGame(uint32_t seed) {
     }
 
     // Shared baseline resources (survivability + escape + scouting)
-    give(ItemKind::FoodRation, hungerEnabled_ ? 2 : 1);
+    // Slightly more food if hunger is enabled to account for the longer run.
+    give(ItemKind::FoodRation, hungerEnabled_ ? 3 : 1);
 
     // If lighting/darkness is enabled, start with a couple torches so early dark floors are survivable.
     if (lightingEnabled_) {
@@ -2314,6 +2342,13 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         }
     }
 
+    // Special floor callout: the organic Warrens layout is a network of dug-out burrows,
+    // with chambers as landmarks and lots of dead ends (great for secrets/closets).
+    if (goingDown && dung.hasWarrens) {
+        pushMsg("THE PASSAGES NARROW INTO DAMP BURROWS...", MessageKind::System, true);
+        pushMsg("YOU HAVE ENTERED THE WARRENS.", MessageKind::System, true);
+    }
+
     // Fixed-depth generator callout: the Catacombs floor is a dense maze of small tomb rooms.
     if (goingDown && depth_ == Dungeon::CATACOMBS_DEPTH) {
         pushMsg("YOU ENTER A MAZE OF NARROW VAULTS AND CRUMBLING TOMBS.", MessageKind::System, true);
@@ -2446,6 +2481,7 @@ static void hashItem(Hash64& hh, const Item& it) {
     hh.addU32(it.spriteSeed);
     hh.addI32(it.shopPrice);
     hh.addI32(it.shopDepth);
+    hh.addEnum(it.ego);
 }
 
 static void hashEffects(Hash64& hh, const Effects& ef) {

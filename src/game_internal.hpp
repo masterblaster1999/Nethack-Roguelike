@@ -912,6 +912,7 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
         ok &= updateIniKey(settingsPath, "bind_close_door", "c");
         ok &= updateIniKey(settingsPath, "bind_lock_door", "shift+c");
         ok &= updateIniKey(settingsPath, "bind_kick", "ctrl+d");
+        ok &= updateIniKey(settingsPath, "bind_dig", "d");
         // Look: ':' is usually shift+semicolon on most layouts.
         ok &= updateIniKey(settingsPath, "bind_look", "shift+semicolon, v");
         // Help: remove 'h' to avoid conflicting with vi movement.
@@ -935,6 +936,7 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
         ok &= updateIniKey(settingsPath, "bind_close_door", "k");
         ok &= updateIniKey(settingsPath, "bind_lock_door", "shift+k");
         ok &= updateIniKey(settingsPath, "bind_kick", "b");
+        ok &= updateIniKey(settingsPath, "bind_dig", "shift+d");
         ok &= updateIniKey(settingsPath, "bind_look", "l, v");
         ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash, h");
         ok &= updateIniKey(settingsPath, "bind_sneak", "n");
@@ -1071,6 +1073,7 @@ else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn 
         if (a == "close_door" || a == "closedoor" || a == "close") { outKey = "bind_close_door"; return true; }
         if (a == "lock_door" || a == "lockdoor" || a == "lock") { outKey = "bind_lock_door"; return true; }
         if (a == "kick") { outKey = "bind_kick"; return true; }
+        if (a == "dig" || a == "tunnel") { outKey = "bind_dig"; return true; }
         if (a == "look") { outKey = "bind_look"; return true; }
         if (a == "stairs_up" || a == "stairsup") { outKey = "bind_stairs_up"; return true; }
         if (a == "stairs_down" || a == "stairsdown") { outKey = "bind_stairs_down"; return true; }

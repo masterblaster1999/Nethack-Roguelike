@@ -265,6 +265,9 @@ enum class Action : uint8_t {
 
     // Item discoveries / identification reference overlay
     Discoveries,
+
+    // Append-only: keep Action ids stable for replays.
+    Dig,                // Dig/tunnel (directional prompt) if wielding a pickaxe
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -551,6 +554,9 @@ enum class TrapKind : uint8_t {
     RollingBoulder,
     TrapDoor,
     LetheMist,
+
+    // Persistent hazard cloud (append-only)
+    PoisonGas,
 };
 
 struct Trap {
@@ -717,6 +723,10 @@ struct LevelState {
     // Currently used for persistent Confusion Gas clouds.
     std::vector<uint8_t> confusionGas;
 
+    // Persistent toxic vapor / poison gas field.
+    std::vector<uint8_t> poisonGas;
+
+
     // Persistent flames / embers left behind by explosions and other fire sources.
     std::vector<uint8_t> fireField;
 
@@ -827,6 +837,11 @@ public:
     // Persistent environmental gas on the current level (0..255 intensity).
     // 0 means no gas. Only meaningful on in-bounds tiles.
     uint8_t confusionGasAt(int x, int y) const;
+
+    // Persistent poison gas on the current level (0..255 intensity).
+    // 0 means no gas. Only meaningful on in-bounds tiles.
+    uint8_t poisonGasAt(int x, int y) const;
+
 
     // Persistent fire field on the current level (0..255 intensity).
     // 0 means no fire. Only meaningful on in-bounds tiles.
@@ -1059,6 +1074,9 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
 
     // Kick prompt (directional)
     bool isKicking() const { return kicking; }
+
+    // Dig prompt (directional)
+    bool isDigging() const { return digging; }
 
     // Help overlay
     bool isHelpOpen() const { return helpOpen; }
@@ -1308,6 +1326,7 @@ private:
     // Environmental fields (current level).
     // Stored as per-tile intensities (0..255).
     std::vector<uint8_t> confusionGas_;
+    std::vector<uint8_t> poisonGas_;
     std::vector<uint8_t> fireField_;
     std::vector<uint8_t> scentField_;
 
@@ -1355,6 +1374,9 @@ private:
 
     // Kick prompt mode (directional)
     bool kicking = false;
+
+    // Dig prompt mode (directional)
+    bool digging = false;
 
     // Help overlay
     bool helpOpen = false;
@@ -1679,6 +1701,9 @@ private:
     bool consumeKeys(int n);
     bool consumeLockpicks(int n);
 
+    // Dig action (directional prompt)
+    void beginDig();
+
     // Kick action (directional prompt)
     void beginKick();
     bool kickInDirection(int dx, int dy);
@@ -1690,11 +1715,11 @@ private:
     bool tileHasAutoExploreLoot(Vec2i p) const;
 
     bool stepAutoMove();
-    bool buildAutoTravelPath(Vec2i goal, bool requireExplored);
+    bool buildAutoTravelPath(Vec2i goal, bool requireExplored, bool allowKnownTraps);
     bool buildAutoExplorePath();
     Vec2i findNearestExploreFrontier() const;
     Vec2i findNearestExploreSearchSpot() const;
-    std::vector<Vec2i> findPathBfs(Vec2i start, Vec2i goal, bool requireExplored) const;
+    std::vector<Vec2i> findPathBfs(Vec2i start, Vec2i goal, bool requireExplored, bool allowKnownTraps) const;
     void stopAutoMove(bool silent);
     bool searchForTraps(bool verbose = true, int* foundTrapsOut = nullptr, int* foundSecretsOut = nullptr);
     bool disarmTrap();

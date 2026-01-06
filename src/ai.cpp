@@ -107,23 +107,48 @@ void Game::monsterTurn() {
     auto stepCostForMode = [&](int x, int y, int mode) -> int {
         if (!dung.inBounds(x, y)) return 0;
 
+        int cost = 1;
+
         // Phasing movement still consumes time, but we bias the pathfinder
         // to prefer open corridors over "living" inside solid walls.
         if (mode == PathMode::Phasing) {
-            return dung.isWalkable(x, y) ? 1 : 2;
+            cost = dung.isWalkable(x, y) ? 1 : 2;
+        } else {
+            const TileType t = dung.at(x, y).type;
+            switch (t) {
+                case TileType::DoorClosed:
+                    // Monsters open doors as an action, then step through next.
+                    cost = 2;
+                    break;
+                case TileType::DoorLocked:
+                    // Smashing locks is much slower than opening an unlocked door.
+                    cost = (mode == PathMode::SmashLockedDoors) ? 4 : 0;
+                    break;
+                default:
+                    cost = 1;
+                    break;
+            }
         }
 
-        const TileType t = dung.at(x, y).type;
-        switch (t) {
-            case TileType::DoorClosed:
-                // Monsters open doors as an action, then step through next.
-                return 2;
-            case TileType::DoorLocked:
-                // Smashing locks is much slower than opening an unlocked door.
-                return (mode == PathMode::SmashLockedDoors) ? 4 : 0;
-            default:
-                return 1;
+        if (cost <= 0) return cost;
+
+        // Environmental hazards:
+        // - Fire is an obvious hazard: monsters generally try to route around it.
+        // - Confusion gas is also undesirable (unless it is the only way through).
+        // This mirrors player auto-travel's strong preference to avoid fire.
+        const uint8_t f = this->fireAt(x, y);
+        if (f > 0u) {
+            // Strongly discourage stepping onto burning tiles, but don't hard-block.
+            cost += 10 + static_cast<int>(f) / 16; // +10..+25
         }
+
+        const uint8_t g = this->confusionGasAt(x, y);
+        if (g > 0u) {
+            // Moderate penalty so monsters avoid lingering gas clouds when possible.
+            cost += 6 + static_cast<int>(g) / 32; // +6..+13
+        }
+
+        return cost;
     };
 
     auto diagOkForMode = [&](int fromX, int fromY, int dx, int dy, int mode) -> bool {

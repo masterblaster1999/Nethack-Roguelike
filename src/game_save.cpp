@@ -556,7 +556,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 35u;
+constexpr uint32_t SAVE_VERSION = 36u;
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 1u;
@@ -1334,6 +1334,20 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
             }
         }
 
+        // Poison gas field (v36+)
+        // Stored as a per-tile intensity map.
+        if constexpr (SAVE_VERSION >= 36u) {
+            const uint32_t expected = tileCount;
+            uint32_t gasCount = static_cast<uint32_t>(st.poisonGas.size());
+            if (gasCount != expected) gasCount = expected;
+            writePod(mem, gasCount);
+            for (uint32_t gi = 0; gi < gasCount; ++gi) {
+                uint8_t v = 0u;
+                if (gi < st.poisonGas.size()) v = st.poisonGas[static_cast<size_t>(gi)];
+                writePod(mem, v);
+            }
+        }
+
         // Fire field (v22+)
         // Stored as a per-tile intensity map.
         if constexpr (SAVE_VERSION >= 22u) {
@@ -2040,6 +2054,32 @@ bool Game::loadFromFile(const std::string& path) {
                     }
                 } else {
                     st.confusionGas = std::move(gasTmp);
+                }
+            }
+
+            // Poison gas field (v36+)
+            st.poisonGas.clear();
+            if (ver >= 36u) {
+                uint32_t gasCount = 0;
+                if (!readPod(in, gasCount)) return fail();
+
+                std::vector<uint8_t> gasTmp;
+                gasTmp.assign(gasCount, 0u);
+                for (uint32_t gi = 0; gi < gasCount; ++gi) {
+                    uint8_t gv = 0;
+                    if (!readPod(in, gv)) return fail();
+                    gasTmp[gi] = gv;
+                }
+
+                // Normalize size to the dungeon tile count when possible.
+                if (tileCount > 0) {
+                    st.poisonGas.assign(tileCount, 0u);
+                    const uint32_t copyN = std::min(gasCount, tileCount);
+                    for (uint32_t i = 0; i < copyN; ++i) {
+                        st.poisonGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
+                    }
+                } else {
+                    st.poisonGas = std::move(gasTmp);
                 }
             }
 

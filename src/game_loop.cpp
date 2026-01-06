@@ -41,7 +41,7 @@ void Game::update(float dt) {
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
-        if (invOpen || chestOpen || targeting || kicking || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || codexOpen || discoveriesOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen || isFinished()) {
+        if (invOpen || chestOpen || targeting || kicking || digging || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || codexOpen || discoveriesOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen || isFinished()) {
             stopAutoMove(true);
             return;
         }
@@ -1086,6 +1086,44 @@ if (optionsSel == 19) {
 
     bool acted = false;
 
+    // Dig prompt mode (directional).
+    // This is a lightweight two-step command: press DIG, then a direction key.
+    if (digging) {
+        bool spent = false;
+        switch (a) {
+            case Action::Up:        spent = digInDirection(0, -1); break;
+            case Action::Down:      spent = digInDirection(0, 1); break;
+            case Action::Left:      spent = digInDirection(-1, 0); break;
+            case Action::Right:     spent = digInDirection(1, 0); break;
+            case Action::UpLeft:    spent = digInDirection(-1, -1); break;
+            case Action::UpRight:   spent = digInDirection(1, -1); break;
+            case Action::DownLeft:  spent = digInDirection(-1, 1); break;
+            case Action::DownRight: spent = digInDirection(1, 1); break;
+
+            case Action::Inventory:
+                digging = false;
+                openInventory();
+                return;
+
+            case Action::Cancel:
+            case Action::Dig:
+                digging = false;
+                pushMsg("NEVER MIND.", MessageKind::System, true);
+                return;
+
+            default:
+                // Ignore non-directional input while waiting for a direction.
+                return;
+        }
+
+        // digInDirection() advances the turn internally (used by extended command too),
+        // so we don't call advanceAfterPlayerAction() here.
+        if (spent) {
+            digging = false;
+        }
+        return;
+    }
+
     // Kick prompt mode (directional).
     // This is a lightweight two-step command: press KICK, then a direction key.
     if (kicking) {
@@ -1296,6 +1334,10 @@ if (optionsSel == 19) {
             break;
         case Action::Kick:
             beginKick();
+            acted = false;
+            break;
+        case Action::Dig:
+            beginDig();
             acted = false;
             break;
         case Action::Pickup:

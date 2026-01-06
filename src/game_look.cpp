@@ -88,8 +88,16 @@ std::string Game::describeAt(Vec2i p) const {
             case TrapKind::RollingBoulder: ss << "ROLLING BOULDER"; break;
             case TrapKind::TrapDoor: ss << "TRAP DOOR"; break;
             case TrapKind::LetheMist: ss << "LETHE MIST"; break;
+            case TrapKind::PoisonGas: ss << "POISON GAS"; break;
         }
         break;
+    }
+
+    // Environmental fields (only if currently visible).
+    if (t.visible) {
+        if (confusionGasAt(p.x, p.y) > 0u) ss << " | CONFUSION GAS";
+        if (poisonGasAt(p.x, p.y) > 0u) ss << " | POISON GAS";
+        if (fireAt(p.x, p.y) > 0u) ss << " | FIRE";
     }
 
     // Player map marker / note (persistent on this floor).

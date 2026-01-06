@@ -1115,6 +1115,7 @@ void Game::newGame(uint32_t seed) {
     mapMarkers_.clear();
     engravings_.clear();
     confusionGas_.clear();
+    poisonGas_.clear();
     fireField_.clear();
     scentField_.clear();
     inv.clear();
@@ -1245,8 +1246,9 @@ void Game::newGame(uint32_t seed) {
     dung.generate(rng, depth_, DUNGEON_MAX_DEPTH);
     // Environmental fields reset per floor (no lingering gas on a fresh level).
     confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+    poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
     fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-        scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+    scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
     // Flavor graffiti/engravings are generated once per freshly created floor.
     spawnGraffiti();
@@ -1466,6 +1468,7 @@ void Game::storeCurrentLevel() {
     st.engravings = engravings_;
     st.chestContainers = chestContainers_;
     st.confusionGas = confusionGas_;
+    st.poisonGas = poisonGas_;
     st.fireField = fireField_;
     st.scentField = scentField_;
     st.monsters.clear();
@@ -1501,6 +1504,9 @@ bool Game::restoreLevel(int depth) {
     confusionGas_ = it->second.confusionGas;
     const size_t expect = static_cast<size_t>(dung.width * dung.height);
     if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+
+    poisonGas_ = it->second.poisonGas;
+    if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
 
     fireField_ = it->second.fireField;
     if (fireField_.size() != expect) fireField_.assign(expect, 0u);
@@ -2142,11 +2148,13 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         engravings_.clear();
         chestContainers_.clear();
         confusionGas_.clear();
+        poisonGas_.clear();
         fireField_.clear();
         scentField_.clear();
 
         dung.generate(rng, depth_, DUNGEON_MAX_DEPTH);
         confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
@@ -2580,6 +2588,9 @@ static void hashLevelState(Hash64& hh, const LevelState& ls) {
     hh.addU32(static_cast<uint32_t>(ls.confusionGas.size()));
     for (uint8_t v : ls.confusionGas) hh.addU8(v);
 
+    hh.addU32(static_cast<uint32_t>(ls.poisonGas.size()));
+    for (uint8_t v : ls.poisonGas) hh.addU8(v);
+
     hh.addU32(static_cast<uint32_t>(ls.fireField.size()));
     for (uint8_t v : ls.fireField) hh.addU8(v);
 
@@ -2692,6 +2703,9 @@ uint64_t Game::determinismHash() const {
 
     hh.addU32(static_cast<uint32_t>(confusionGas_.size()));
     for (uint8_t v : confusionGas_) hh.addU8(v);
+
+    hh.addU32(static_cast<uint32_t>(poisonGas_.size()));
+    for (uint8_t v : poisonGas_) hh.addU8(v);
 
     hh.addU32(static_cast<uint32_t>(fireField_.size()));
     for (uint8_t v : fireField_) hh.addU8(v);

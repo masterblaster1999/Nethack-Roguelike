@@ -1,5 +1,31 @@
 #include "game_internal.hpp"
 
+namespace {
+const Trap* discoveredTrapAt(const std::vector<Trap>& traps, int x, int y) {
+    for (const Trap& t : traps) {
+        if (!t.discovered) continue;
+        if (t.pos.x == x && t.pos.y == y) return &t;
+    }
+    return nullptr;
+}
+
+int autoMoveTrapPenalty(TrapKind kind) {
+    switch (kind) {
+        case TrapKind::TrapDoor: return 120;
+        case TrapKind::RollingBoulder: return 100;
+        case TrapKind::PoisonDart: return 80;
+        case TrapKind::Spike: return 80;
+        case TrapKind::ConfusionGas: return 60;
+        case TrapKind::PoisonGas: return 75;
+        case TrapKind::LetheMist: return 70;
+        case TrapKind::Alarm: return 50;
+        case TrapKind::Teleport: return 40;
+        default: return 75;
+    }
+}
+} // namespace
+
+
 void Game::cancelAutoMove(bool silent) {
     stopAutoMove(silent);
 }
@@ -135,7 +161,7 @@ bool Game::requestAutoTravel(Vec2i goal) {
 
     stopAutoMove(true);
 
-    if (!buildAutoTravelPath(goal, /*requireExplored*/true)) {
+    if (!buildAutoTravelPath(goal, /*requireExplored*/true, /*allowKnownTraps*/true)) {
         pushMsg("NO PATH FOUND.", MessageKind::Warning);
         return false;
     }
@@ -371,7 +397,7 @@ bool Game::stepAutoMove() {
 
             // If we aren't already headed there, retarget.
             if (!autoExploreGoalIsLoot || autoExploreGoalPos != bestPos) {
-                if (!buildAutoTravelPath(bestPos, /*requireExplored*/true)) {
+                if (!buildAutoTravelPath(bestPos, /*requireExplored*/true, /*allowKnownTraps*/false)) {
                     pushMsg("AUTO-EXPLORE STOPPED (NO PATH TO LOOT).", MessageKind::System);
                     stopAutoMove(true);
                     return false;
@@ -436,6 +462,17 @@ bool Game::stepAutoMove() {
             stopAutoMove(true);
             return false;
         }
+    }
+
+    if (discoveredTrapAt(trapsCur, next.x, next.y)) {
+        const char* msg = (autoMode == AutoMoveMode::Travel)
+            ? "AUTO-TRAVEL STOPPED (KNOWN TRAP AHEAD)."
+            : (autoMode == AutoMoveMode::Explore)
+                ? "AUTO-EXPLORE STOPPED (KNOWN TRAP AHEAD)."
+                : "AUTO-MOVE STOPPED (KNOWN TRAP AHEAD).";
+        pushMsg(msg, MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
     }
 
     const int dx = next.x - p.pos.x;
@@ -529,8 +566,8 @@ bool Game::stepAutoMove() {
     return true;
 }
 
-bool Game::buildAutoTravelPath(Vec2i goal, bool requireExplored) {
-    autoPathTiles = findPathBfs(player().pos, goal, requireExplored);
+bool Game::buildAutoTravelPath(Vec2i goal, bool requireExplored, bool allowKnownTraps) {
+    autoPathTiles = findPathBfs(player().pos, goal, requireExplored, allowKnownTraps);
     if (autoPathTiles.empty()) return false;
 
     // Remove start tile so the vector becomes a list of "next tiles to step into".
@@ -559,7 +596,7 @@ bool Game::buildAutoExplorePath() {
     if (goal.x >= 0 && goal.y >= 0) {
         // We have something "normal" to do again; reset the secret-hunt announcement.
         autoExploreSearchAnnounced = false;
-        return buildAutoTravelPath(goal, /*requireExplored*/true);
+        return buildAutoTravelPath(goal, /*requireExplored*/true, /*allowKnownTraps*/false);
     }
 
     // Optional: when the floor appears fully explored, walk to dead-ends/corridor corners and spend a few
@@ -581,88 +618,137 @@ bool Game::buildAutoExplorePath() {
         return true;
     }
 
-    return buildAutoTravelPath(searchGoal, /*requireExplored*/true);
+    return buildAutoTravelPath(searchGoal, /*requireExplored*/true, /*allowKnownTraps*/false);
 }
 
 Vec2i Game::findNearestExploreFrontier() const {
+    // A "frontier" is any explored, passable tile that borders at least one unexplored tile.
+    //
+    // We try to find a frontier reachable without stepping on known traps first. If none exists,
+    // we do a second search that *allows* traversing known traps, and return the first known trap
+    // on the shortest path to the nearest frontier. This lets auto-explore guide the player to the
+    // blocking trap instead of incorrectly claiming the floor is fully explored.
+
     const Vec2i start = player().pos;
-
-    std::vector<uint8_t> visited(MAP_W * MAP_H, 0);
-    std::deque<Vec2i> q;
-
-    auto idxOf = [](int x, int y) { return y * MAP_W + x; };
-
-    visited[idxOf(start.x, start.y)] = 1;
-    q.push_back(start);
-
     const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
 
-    auto isKnownTrap = [&](int x, int y) -> bool {
-        for (const auto& t : trapsCur) {
-            if (!t.discovered) continue;
-            if (t.pos.x == x && t.pos.y == y) return true;
-        }
-        return false;
+    auto idxOf = [](int x, int y) -> int { return x + y * MAP_W; };
+    auto isKnownTrap = [&](int x, int y) -> bool { return discoveredTrapAt(trapsCur, x, y) != nullptr; };
+
+    const int dirs[8][2] = {
+        { 1, 0 },
+        { -1, 0 },
+        { 0, 1 },
+        { 0, -1 },
+        { 1, 1 },
+        { 1, -1 },
+        { -1, 1 },
+        { -1, -1 },
     };
 
     auto isFrontier = [&](int x, int y) -> bool {
         if (!dung.inBounds(x, y)) return false;
-        const Tile& t = dung.at(x, y);
-        if (!t.explored) return false;
-        // Treat locked doors as passable frontiers if we can unlock them.
-        if (!dung.isPassable(x, y)) {
-            const TileType tt = dung.at(x, y).type;
-            if (!(canUnlockDoors && tt == TileType::DoorLocked)) return false;
-        }
-        if (isKnownTrap(x, y)) return false;
+        if (!dung.at(x, y).explored) return false;
+        if (!dung.isPassable(x, y)) return false;
         if (fireAt(x, y) > 0u) return false;
 
-        // Any adjacent unexplored tile means stepping here can reveal something.
-        const int dirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
-        for (const auto& d : dirs) {
-            int nx = x + d[0], ny = y + d[1];
+        for (int dir = 0; dir < 8; ++dir) {
+            const int nx = x + dirs[dir][0];
+            const int ny = y + dirs[dir][1];
             if (!dung.inBounds(nx, ny)) continue;
             if (!dung.at(nx, ny).explored) return true;
         }
         return false;
     };
 
-    const int dirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
+    auto passableForSearch = [&](int x, int y) -> bool {
+        if (!dung.inBounds(x, y)) return false;
+        if (!dung.at(x, y).explored) return false;
+        if (fireAt(x, y) > 0u) return false;
 
-    while (!q.empty()) {
-        Vec2i cur = q.front();
-        q.pop_front();
+        const TileType tt = dung.at(x, y).type;
+        const bool passable = dung.isPassable(x, y) || (canUnlockDoors && tt == TileType::DoorLocked);
+        if (!passable) return false;
 
-        if (!(cur == start) && isFrontier(cur.x, cur.y)) return cur;
+        if (const Entity* occ = entityAt(x, y)) {
+            if (occ->id != playerId() && !occ->friendly) return false;
+        }
+        return true;
+    };
 
-        for (const auto& d : dirs) {
-            int dx = d[0], dy = d[1];
-            int nx = cur.x + dx, ny = cur.y + dy;
-            if (!dung.inBounds(nx, ny)) continue;
-            if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
+    // Pass 1: BFS that does NOT traverse known traps (but can still return a trap tile if it's a frontier).
+    {
+        std::deque<Vec2i> q;
+        std::vector<uint8_t> visited(MAP_W * MAP_H, 0);
+        visited[idxOf(start.x, start.y)] = 1;
+        q.push_back(start);
 
-            const int ii = idxOf(nx, ny);
-            if (visited[ii]) continue;
+        while (!q.empty()) {
+            const Vec2i cur = q.front();
+            q.pop_front();
 
-            const Tile& t = dung.at(nx, ny);
-            if (!t.explored) continue; // don't route through unknown
-            if (!dung.isPassable(nx, ny)) {
-                const TileType tt = dung.at(nx, ny).type;
-                if (!(canUnlockDoors && tt == TileType::DoorLocked)) continue;
+            if (cur != start && isFrontier(cur.x, cur.y)) return cur;
+
+            for (int dir = 0; dir < 8; ++dir) {
+                const int nx = cur.x + dirs[dir][0];
+                const int ny = cur.y + dirs[dir][1];
+                if (!dung.inBounds(nx, ny)) continue;
+                const int nIdx = idxOf(nx, ny);
+                if (visited[nIdx]) continue;
+                if (!passableForSearch(nx, ny)) continue;
+
+                // We don't traverse known traps in pass 1, but if a known trap tile is itself a frontier,
+                // we return it as the goal (auto-explore will stop before stepping onto it).
+                if (isKnownTrap(nx, ny)) {
+                    if (Vec2i{nx, ny} != start && isFrontier(nx, ny)) return Vec2i{nx, ny};
+                    continue;
+                }
+
+                visited[nIdx] = 1;
+                q.push_back(Vec2i{nx, ny});
             }
-            if (isKnownTrap(nx, ny)) continue;
-            if (fireAt(nx, ny) > 0u) continue;
-
-            if (const Entity* occ = entityAt(nx, ny)) {
-                if (occ->id != playerId_ && !occ->friendly) continue;
-            }
-
-            visited[ii] = 1;
-            q.push_back({nx, ny});
         }
     }
 
-    return {-1, -1};
+    // Pass 2: BFS that allows traversing known traps. If we find any frontier, we return the FIRST
+    // known trap tile along the shortest path to it (so the player can deal with the blocker).
+    {
+        std::deque<Vec2i> q;
+        std::vector<uint8_t> visited(MAP_W * MAP_H, 0);
+        std::vector<int> firstTrapIdx(MAP_W * MAP_H, -1);
+        visited[idxOf(start.x, start.y)] = 1;
+        q.push_back(start);
+
+        while (!q.empty()) {
+            const Vec2i cur = q.front();
+            q.pop_front();
+
+            if (cur != start && isFrontier(cur.x, cur.y)) {
+                const int ft = firstTrapIdx[idxOf(cur.x, cur.y)];
+                if (ft != -1) return Vec2i{ft % MAP_W, ft / MAP_W};
+                return cur;
+            }
+
+            for (int dir = 0; dir < 8; ++dir) {
+                const int nx = cur.x + dirs[dir][0];
+                const int ny = cur.y + dirs[dir][1];
+                if (!dung.inBounds(nx, ny)) continue;
+                const int nIdx = idxOf(nx, ny);
+                if (visited[nIdx]) continue;
+                if (!passableForSearch(nx, ny)) continue;
+
+                const int curIdx = idxOf(cur.x, cur.y);
+                int ft = firstTrapIdx[curIdx];
+                if (ft == -1 && isKnownTrap(nx, ny)) ft = nIdx;
+                firstTrapIdx[nIdx] = ft;
+
+                visited[nIdx] = 1;
+                q.push_back(Vec2i{nx, ny});
+            }
+        }
+    }
+
+    return Vec2i{-1, -1};
 }
 
 Vec2i Game::findNearestExploreSearchSpot() const {
@@ -791,7 +877,7 @@ Vec2i Game::findNearestExploreSearchSpot() const {
     return {-1, -1};
 }
 
-std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplored) const {
+std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplored, bool allowKnownTraps) const {
     if (!dung.inBounds(start.x, start.y) || !dung.inBounds(goal.x, goal.y)) return {};
     if (start == goal) return { start };
 
@@ -832,7 +918,7 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
         }
 
         // Avoid known traps.
-        if (isKnownTrap(x, y) && !(x == goal.x && y == goal.y)) return false;
+        if (!allowKnownTraps && isKnownTrap(x, y) && !(x == goal.x && y == goal.y)) return false;
 
         // Don't path through monsters.
         if (const Entity* occ = entityAt(x, y)) {
@@ -865,6 +951,12 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
 
         // Strongly prefer routes that avoid lingering fire, but don't hard-block.
         if (fireAt(x, y) > 0u) cost += 25;
+        if (allowKnownTraps) {
+            if (const Trap* t = discoveredTrapAt(trapsCur, x, y)) {
+                cost += autoMoveTrapPenalty(t->kind);
+            }
+        }
+
         return cost;
     };
 

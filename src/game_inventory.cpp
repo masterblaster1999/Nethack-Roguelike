@@ -426,6 +426,14 @@ bool Game::openChestAtPlayer() {
                 emitNoise(pos, 8);
                 break;
             }
+            case TrapKind::PoisonGas: {
+                const int turns = rng.range(6, 10) + std::min(6, depth_ / 2);
+                p.effects.poisonTurns = std::max(p.effects.poisonTurns, turns);
+                pushMsg("A CLOUD OF TOXIC VAPOR BURSTS FROM THE CHEST!", MessageKind::Warning, true);
+                pushMsg("YOU ARE POISONED!", MessageKind::Warning, true);
+                emitNoise(pos, 8);
+                break;
+            }
             default:
                 break;
         }

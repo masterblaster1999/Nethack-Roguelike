@@ -426,10 +426,16 @@ void Game::spawnItems() {
 
     auto rollChestTrap = [&]() -> TrapKind {
         // Weighted: mostly poison/alarm/web; teleport is rarer.
+        // Deeper floors can also roll a lingering poison gas trap.
         int r = rng.range(0, 99);
-        if (r < 30) return TrapKind::PoisonDart;
-        if (r < 55) return TrapKind::Alarm;
-        if (r < 76) return TrapKind::Web;
+        if (r < 28) return TrapKind::PoisonDart;
+        if (r < 52) return TrapKind::Alarm;
+        if (r < 72) return TrapKind::Web;
+        if (depth_ >= 4) {
+            if (r < 84) return TrapKind::ConfusionGas;
+            if (r < 92) return TrapKind::PoisonGas;
+            return TrapKind::Teleport;
+        }
         if (r < 90) return TrapKind::ConfusionGas;
         return TrapKind::Teleport;
     };
@@ -1040,8 +1046,9 @@ void Game::spawnTraps() {
         if (r < 30) return TrapKind::Alarm;
         if (r < 56) return TrapKind::PoisonDart;
         if (r < 74) return TrapKind::Web;
-        if (r < 88) return TrapKind::ConfusionGas;
-        if (r < 92) return TrapKind::LetheMist;
+        if (r < 86) return TrapKind::ConfusionGas;
+        if (r < 92) return TrapKind::PoisonGas;
+        if (r < 95) return TrapKind::LetheMist;
         return TrapKind::Teleport;
     };
 
@@ -1134,8 +1141,9 @@ void Game::spawnTraps() {
         if (r < 33) return TrapKind::Spike;
         if (r < 61) return TrapKind::PoisonDart;
         if (r < 74) return TrapKind::Web;
-        if (r < 86) return TrapKind::Alarm;
-        return TrapKind::ConfusionGas;
+        if (r < 84) return TrapKind::Alarm;
+        if (r < 92) return TrapKind::ConfusionGas;
+        return TrapKind::PoisonGas;
     };
 
     struct StraightCorr {
@@ -1279,7 +1287,8 @@ void Game::spawnTraps() {
             else if (roll < 44) tk = TrapKind::PoisonDart;
             else if (roll < 64) tk = TrapKind::Alarm;
             else if (roll < 80) tk = TrapKind::Web;
-            else if (roll < 88) tk = TrapKind::ConfusionGas;
+            else if (roll < 86) tk = TrapKind::ConfusionGas;
+            else if (roll < 90) tk = TrapKind::PoisonGas;
             else if (roll < 92) tk = TrapKind::LetheMist;
             else if (roll < 96) tk = TrapKind::RollingBoulder;
             else if (depth_ < DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
@@ -1299,7 +1308,8 @@ void Game::spawnTraps() {
             else if (roll < 61) tk = TrapKind::PoisonDart;
             else if (roll < 76) tk = TrapKind::Alarm;
             else if (roll < 86) tk = TrapKind::Web;
-            else if (roll < 92) tk = TrapKind::ConfusionGas;
+            else if (roll < 90) tk = TrapKind::ConfusionGas;
+            else if (roll < 93) tk = TrapKind::PoisonGas;
             else if (roll < 95) tk = TrapKind::LetheMist;
             else if (roll < 97) tk = TrapKind::RollingBoulder;
             else if (depth_ < DUNGEON_MAX_DEPTH && roll < 99) tk = TrapKind::TrapDoor;
@@ -1355,7 +1365,8 @@ void Game::spawnTraps() {
             t.pos = p;
             t.discovered = false;
             // Bias toward alarm/poison on doors (fits the theme), with occasional gas traps.
-            if (rng.chance(0.12f)) t.kind = TrapKind::ConfusionGas;
+            if (depth_ >= 4 && rng.chance(0.10f)) t.kind = TrapKind::PoisonGas;
+            else if (rng.chance(0.10f)) t.kind = TrapKind::ConfusionGas;
             else t.kind = rng.chance(0.55f) ? TrapKind::Alarm : TrapKind::PoisonDart;
             trapsCur.push_back(t);
         }
@@ -1379,8 +1390,9 @@ void Game::spawnTraps() {
             t.pos = p;
             t.discovered = false;
             const int roll = rng.range(0, 99);
-            if (roll < 55) t.kind = TrapKind::ConfusionGas;
-            else if (roll < 85) t.kind = TrapKind::PoisonDart;
+            if (roll < 45) t.kind = TrapKind::ConfusionGas;
+            else if (roll < 62) t.kind = TrapKind::PoisonGas;
+            else if (roll < 88) t.kind = TrapKind::PoisonDart;
             else if (roll < 95) t.kind = TrapKind::Alarm;
             else t.kind = TrapKind::Teleport;
             trapsCur.push_back(t);
@@ -1450,6 +1462,58 @@ void Game::applyEndOfTurnEffects() {
     }
 
     // ------------------------------------------------------------
+    // Environmental fields: Poison Gas (persistent, tile-based)
+    //
+    // Poison gas is stored as an intensity map (0..255). Entities standing
+    // in gas have their poison duration "topped up" each turn.
+    // ------------------------------------------------------------
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+
+        auto gasIdx = [&](int x, int y) -> size_t {
+            return static_cast<size_t>(y * dung.width + x);
+        };
+        auto gasAt = [&](int x, int y) -> uint8_t {
+            if (!dung.inBounds(x, y)) return 0u;
+            const size_t i = gasIdx(x, y);
+            if (i >= poisonGas_.size()) return 0u;
+            return poisonGas_[i];
+        };
+
+        auto applyGasTo = [&](Entity& e, bool isPlayer) {
+            const uint8_t g = gasAt(e.pos.x, e.pos.y);
+            if (g == 0u) return;
+
+            // Scale poison severity with gas intensity.
+            int minTurns = 2 + static_cast<int>(g) / 2;
+            minTurns = clampi(minTurns, 2, 10);
+
+            const int before = e.effects.poisonTurns;
+            if (before < minTurns) e.effects.poisonTurns = minTurns;
+
+            // Message only on first exposure (avoids log spam while standing in gas).
+            if (before == 0 && e.effects.poisonTurns > 0) {
+                if (isPlayer) {
+                    pushMsg("YOU INHALE TOXIC VAPORS!", MessageKind::Warning, true);
+                    pushMsg("YOU ARE POISONED!", MessageKind::Warning, true);
+                } else if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(e.kind) << " CHOKES ON TOXIC VAPORS!";
+                    pushMsg(ss.str(), MessageKind::Info, false);
+                }
+            }
+        };
+
+        applyGasTo(p, true);
+        for (auto& m : ents) {
+            if (m.id == playerId_) continue;
+            if (m.hp <= 0) continue;
+            applyGasTo(m, false);
+        }
+    }
+
+// ------------------------------------------------------------
     // Environmental fields: Fire (persistent, tile-based)
     //
     // Fire is stored as an intensity map (0..255). Entities standing on fire have
@@ -2123,6 +2187,59 @@ void Game::applyEndOfTurnEffects() {
             }
 
             confusionGas_.swap(next);
+        }
+    }
+
+
+    // Update poison gas cloud diffusion/decay.
+    // Similar to confusion gas, but we keep it slightly more localized.
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (expect > 0 && poisonGas_.size() != expect) {
+            poisonGas_.assign(expect, 0u);
+        }
+
+        if (!poisonGas_.empty()) {
+            const int w = dung.width;
+            const int h = dung.height;
+            const size_t n = static_cast<size_t>(w * h);
+
+            std::vector<uint8_t> next(n, 0u);
+            auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
+            auto passable = [&](int x, int y) -> bool {
+                if (!dung.inBounds(x, y)) return false;
+                // Keep gas on walkable tiles (floors, open doors, stairs).
+                return dung.isWalkable(x, y);
+            };
+
+            constexpr Vec2i kDirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const size_t i = idx2(x, y);
+                    const uint8_t s = poisonGas_[i];
+                    if (s == 0u) continue;
+                    if (!passable(x, y)) continue;
+
+                    // Always decay in place.
+                    const uint8_t self = (s > 0u) ? static_cast<uint8_t>(s - 1u) : 0u;
+                    if (next[i] < self) next[i] = self;
+
+                    // Spread to neighbors with extra decay (more dissipative than confusion gas).
+                    if (s >= 4u) {
+                        const uint8_t spread = static_cast<uint8_t>(s - 3u);
+                        for (const Vec2i& d : kDirs) {
+                            const int nx = x + d.x;
+                            const int ny = y + d.y;
+                            if (!passable(nx, ny)) continue;
+                            const size_t j = idx2(nx, ny);
+                            if (next[j] < spread) next[j] = spread;
+                        }
+                    }
+                }
+            }
+
+            poisonGas_.swap(next);
         }
     }
 

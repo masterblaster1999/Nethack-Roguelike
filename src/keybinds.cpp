@@ -189,6 +189,7 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     if (name == "close_door" || name == "closedoor" || name == "close") return Action::CloseDoor;
     if (name == "lock_door" || name == "lockdoor") return Action::LockDoor;
     if (name == "kick") return Action::Kick;
+    if (name == "dig" || name == "tunnel") return Action::Dig;
     if (name == "look") return Action::Look;
     if (name == "stairs_up" || name == "stairsup") return Action::StairsUp;
     if (name == "stairs_down" || name == "stairsdown") return Action::StairsDown;
@@ -287,6 +288,7 @@ KeyBinds KeyBinds::defaults() {
     add(Action::CloseDoor, SDLK_k);
     add(Action::LockDoor, SDLK_k, KMOD_SHIFT);
     add(Action::Kick, SDLK_b);
+    add(Action::Dig, SDLK_d, KMOD_SHIFT);
     add(Action::Look, SDLK_l);
     add(Action::Look, SDLK_v);
 
@@ -455,6 +457,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::CloseDoor,
         Action::LockDoor,
         Action::Kick,
+        Action::Dig,
         Action::AutoExplore,
         Action::ToggleAutoPickup,
         Action::Pickup,
@@ -505,6 +508,7 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
     {Action::CloseDoor, "close_door"},
     {Action::LockDoor, "lock_door"},
     {Action::Kick, "kick"},
+    {Action::Dig, "dig"},
     {Action::Look, "look"},
     {Action::StairsUp, "stairs_up"},
     {Action::StairsDown, "stairs_down"},

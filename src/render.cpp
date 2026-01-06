@@ -1683,6 +1683,68 @@ void Renderer::render(const Game& game) {
     }
 
 
+    // Draw poison gas (visible tiles only). This is a persistent, tile-based hazard
+    // spawned by Poison Gas traps.
+    {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+        const bool haveGasTex = (gasVar[0][0] != nullptr);
+
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                const Tile& t = d.at(x, y);
+                if (!t.visible) continue;
+
+                const uint8_t g = game.poisonGasAt(x, y);
+                if (g == 0u) continue;
+
+                const uint8_t m = lightMod(x, y);
+
+                // Scale intensity by light; keep a minimum so it reads even in deep shadow.
+                int a = 80 + static_cast<int>(g) * 14;
+                a = (a * static_cast<int>(m)) / 255;
+                a = std::max(30, std::min(235, a));
+
+                // Slight shimmer so the cloud feels alive (deterministic per tile/frame).
+                a = std::max(30, std::min(245, a + (static_cast<int>((frame + x * 5 + y * 11) % 9) - 4)));
+
+                SDL_Rect r = tileDst(x, y);
+
+                if (haveGasTex) {
+                    const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                                   static_cast<uint32_t>(y)) ^ 0xC41u;
+                    const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(GAS_VARS));
+                    const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
+
+                    SDL_Texture* gtex = gasVar[vi][fi];
+                    if (gtex) {
+                        // Multiply a "signature" green by the tile lighting/tint so it feels embedded in the world.
+                        const Color lmod = tileColorMod(x, y, /*visible=*/true);
+                        const Color base{120, 255, 120, 255};
+
+                        const uint8_t mr = static_cast<uint8_t>((static_cast<int>(base.r) * lmod.r) / 255);
+                        const uint8_t mg = static_cast<uint8_t>((static_cast<int>(base.g) * lmod.g) / 255);
+                        const uint8_t mb = static_cast<uint8_t>((static_cast<int>(base.b) * lmod.b) / 255);
+
+                        SDL_SetTextureColorMod(gtex, mr, mg, mb);
+                        SDL_SetTextureAlphaMod(gtex, static_cast<uint8_t>(a));
+                        SDL_RenderCopy(renderer, gtex, nullptr, &r);
+                        SDL_SetTextureColorMod(gtex, 255, 255, 255);
+                        SDL_SetTextureAlphaMod(gtex, 255);
+                        continue;
+                    }
+                }
+
+                // Fallback: simple tinted quad (should rarely be used).
+                SDL_SetRenderDrawColor(renderer, 90, 220, 90, static_cast<uint8_t>(a));
+                SDL_RenderFillRect(renderer, &r);
+            }
+        }
+
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    }
+
+
     // Draw fire field (visible tiles only). This is a persistent, tile-based hazard
     // spawned primarily by Fireball explosions.
     {
@@ -1761,6 +1823,7 @@ void Renderer::render(const Game& game) {
             case TrapKind::Alarm:    r = 220; g = 220; b = 80;  break;
             case TrapKind::Web:       r = 140; g = 180; b = 255; break;
             case TrapKind::ConfusionGas: r = 200; g = 120; b = 255; break;
+            case TrapKind::PoisonGas: r = 90; g = 220; b = 90; break;
             case TrapKind::RollingBoulder: r = 200; g = 170; b = 90; break;
             case TrapKind::TrapDoor: r = 180; g = 130; b = 90; break;
             case TrapKind::LetheMist: r = 160; g = 160; b = 210; break;
@@ -2262,9 +2325,12 @@ void Renderer::drawHud(const Game& game) {
     if (game.isKicking()) {
         drawText5x7(renderer, 8, controlY2, 2, yellow,
             "KICK: CHOOSE DIRECTION (ESC CANCEL)");
+    } else if (game.isDigging()) {
+        drawText5x7(renderer, 8, controlY2, 2, yellow,
+            "DIG: CHOOSE DIRECTION (ESC CANCEL)");
     } else {
         drawText5x7(renderer, 8, controlY2, 2, gray,
-            "B KICK | F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH (TRAPS/SECRETS)");
+            "D DIG | B KICK | F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH (TRAPS/SECRETS)");
     }
     drawText5x7(renderer, 8, controlY3, 2, gray,
         "F2 OPT | F3 MSGS | # CMD | M MAP | SHIFT+TAB STATS | F5 SAVE | F9 LOAD | PGUP/PGDN LOG | ? HELP");
@@ -3066,12 +3132,12 @@ void Renderer::drawHelpOverlay(const Game& game) {
         lineGray("MOVE: HJKL + YUBN (ARROWS/NUMPAD OK)");
         lineGray("SPACE/. WAIT  R REST  SHIFT+N SNEAK  < > STAIRS");
         lineGray("F FIRE  G/, PICKUP  I/TAB INVENTORY");
-        lineGray("CTRL+D KICK  :/V LOOK  S SEARCH  T DISARM  C CLOSE  SHIFT+C LOCK");
+        lineGray("D DIG  CTRL+D KICK  :/V LOOK  S SEARCH  T DISARM  C CLOSE  SHIFT+C LOCK");
     } else {
         lineGray("MOVE: WASD / ARROWS / NUMPAD + Q/E/Z/C DIAGONALS");
         lineGray("SPACE/. WAIT  R REST  N SNEAK  < > STAIRS");
         lineGray("F FIRE  G/, PICKUP  I/TAB INVENTORY");
-        lineGray("B KICK  L/V LOOK  SHIFT+C SEARCH  T DISARM  K CLOSE  SHIFT+K LOCK");
+        lineGray("D DIG  B KICK  L/V LOOK  SHIFT+C SEARCH  T DISARM  K CLOSE  SHIFT+K LOCK");
     }
     lineGray("O EXPLORE  P AUTOPICKUP  M MINIMAP  SHIFT+TAB STATS");
     lineGray("F2 OPTIONS  # EXTENDED COMMANDS  (TYPE + ENTER)");

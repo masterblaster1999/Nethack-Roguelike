@@ -568,6 +568,62 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
             break;
         }
 
+        case TrapKind::PoisonGas: {
+            // Lingering poison gas cloud. This trap creates a persistent, tile-based hazard
+            // that slowly diffuses and dissipates over time.
+            const size_t expect = static_cast<size_t>(dung.width * dung.height);
+            if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+
+            // Apply an immediate poison hit to the victim (the cloud will keep it topped up).
+            const int turns = rng.range(3, 6) + std::min(4, depth_ / 3);
+            victim.effects.poisonTurns = std::max(victim.effects.poisonTurns, turns);
+
+            // Seed the gas intensity in a small radius around the trap.
+            const uint8_t baseStrength = static_cast<uint8_t>(clampi(8 + depth_ / 3, 8, 12));
+            constexpr int radius = 2;
+
+            std::vector<uint8_t> mask;
+            dung.computeFovMask(pos.x, pos.y, radius, mask);
+
+            const int minX = std::max(0, pos.x - radius);
+            const int maxX = std::min(dung.width - 1, pos.x + radius);
+            const int minY = std::max(0, pos.y - radius);
+            const int maxY = std::min(dung.height - 1, pos.y + radius);
+
+            for (int y = minY; y <= maxY; ++y) {
+                for (int x = minX; x <= maxX; ++x) {
+                    const int dx = std::abs(x - pos.x);
+                    const int dy = std::abs(y - pos.y);
+                    const int dist = std::max(dx, dy);
+                    if (dist > radius) continue;
+
+                    const size_t i = static_cast<size_t>(y * dung.width + x);
+                    if (i >= mask.size()) continue;
+                    if (mask[i] == 0u) continue;
+                    if (!dung.isWalkable(x, y)) continue;
+
+                    const int s = static_cast<int>(baseStrength) - dist * 2;
+                    if (s <= 0) continue;
+                    const uint8_t ss = static_cast<uint8_t>(s);
+                    if (poisonGas_[i] < ss) poisonGas_[i] = ss;
+                }
+            }
+
+            if (isPlayer) {
+                pushMsg("A CLOUD OF TOXIC VAPOR ERUPTS!", MessageKind::Warning, true);
+                pushMsg("YOU ARE POISONED!", MessageKind::Warning, true);
+            } else if (tileVisible) {
+                std::ostringstream ss;
+                ss << kindName(victim.kind) << " CHOKES IN A CLOUD OF TOXIC VAPOR!";
+                pushMsg(ss.str(), MessageKind::Warning, false);
+            }
+
+            // Gas traps are loud enough to draw attention.
+            emitNoise(pos, 8);
+            break;
+        }
+
+
         case TrapKind::LetheMist: {
             // Lethe mist: a single-use burst of forgetfulness.
             //
@@ -1343,6 +1399,7 @@ bool Game::disarmTrap() {
             case TrapKind::RollingBoulder: return "ROLLING BOULDER";
             case TrapKind::TrapDoor: return "TRAP DOOR";
             case TrapKind::LetheMist: return "LETHE MIST";
+            case TrapKind::PoisonGas: return "POISON GAS";
         }
         return "TRAP";
     };
@@ -1396,6 +1453,7 @@ bool Game::disarmTrap() {
         if (tk == TrapKind::Teleport) setOffChance += 0.06f;
         if (tk == TrapKind::Web) setOffChance += 0.04f;
         if (tk == TrapKind::ConfusionGas) setOffChance += 0.03f;
+        if (tk == TrapKind::PoisonGas) setOffChance += 0.03f;
 
         if (rng.chance(setOffChance)) {
             pushMsg("YOU SET OFF THE CHEST TRAP!", MessageKind::Warning, true);
@@ -1466,6 +1524,20 @@ bool Game::disarmTrap() {
                     pushMsg("STICKY WEBBING EXPLODES OUT!", MessageKind::Warning, true);
                     break;
                 }
+            case TrapKind::ConfusionGas: {
+                // A burst of noxious gas.
+                p.effects.confusionTurns = std::max(p.effects.confusionTurns, rng.range(4, 7));
+                pushMsg("A NOXIOUS GAS ERUPTS! YOU FEEL CONFUSED!", MessageKind::Warning, true);
+                break;
+            }
+            case TrapKind::PoisonGas: {
+                // A burst of toxic vapor.
+                p.effects.poisonTurns = std::max(p.effects.poisonTurns, rng.range(3, 6));
+                pushMsg("A CLOUD OF TOXIC VAPOR ERUPTS!", MessageKind::Warning, true);
+                pushMsg("YOU ARE POISONED!", MessageKind::Warning, true);
+                break;
+            }
+
                 default:
                     break;
             }
@@ -1491,6 +1563,8 @@ bool Game::disarmTrap() {
     if (tr.kind == TrapKind::Alarm) chance *= 0.90f;
     if (tr.kind == TrapKind::RollingBoulder) chance *= 0.80f;
     if (tr.kind == TrapKind::TrapDoor) chance *= 0.82f;
+    if (tr.kind == TrapKind::PoisonGas) chance *= 0.85f;
+
     if (tr.kind == TrapKind::LetheMist) chance *= 0.83f;
 
     chance = std::max(0.05f, chance);
@@ -1519,6 +1593,7 @@ bool Game::disarmTrap() {
     if (tr.kind == TrapKind::Alarm) setOffChance = 0.25f;
     if (tr.kind == TrapKind::Web) setOffChance = 0.20f;
     if (tr.kind == TrapKind::ConfusionGas) setOffChance = 0.18f;
+    if (tr.kind == TrapKind::PoisonGas) setOffChance = 0.18f;
     if (tr.kind == TrapKind::RollingBoulder) setOffChance = 0.22f;
     if (tr.kind == TrapKind::TrapDoor) setOffChance = 0.24f;
     if (tr.kind == TrapKind::LetheMist) setOffChance = 0.23f;
@@ -1669,6 +1744,39 @@ bool Game::lockDoor() {
     return true; // Locking costs a turn.
 }
 
+
+
+void Game::beginDig() {
+    if (gameOver || gameWon) return;
+
+    const Item* mw = equippedMelee();
+    if (!mw || mw->kind != ItemKind::Pickaxe) {
+        pushMsg("YOU NEED TO WIELD A PICKAXE.", MessageKind::Warning, true);
+        return;
+    }
+
+    // Close other overlays/modes.
+    invOpen = false;
+    invIdentifyMode = false;
+    targeting = false;
+    looking = false;
+    helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
+    optionsOpen = false;
+
+    if (commandOpen) {
+        commandOpen = false;
+        commandBuf.clear();
+        commandDraft.clear();
+        commandHistoryPos = -1;
+    }
+
+    msgScroll = 0;
+
+    digging = true;
+    pushMsg("DIG IN WHICH DIRECTION?", MessageKind::System, true);
+}
 
 void Game::beginKick() {
     if (gameOver || gameWon) return;
@@ -1863,6 +1971,14 @@ bool Game::kickInDirection(int dx, int dy) {
                     p.effects.confusionTurns = std::max(p.effects.confusionTurns, turns);
                     pushMsg("A NOXIOUS GAS BURSTS FROM THE CHEST!", MessageKind::Warning, true);
                     pushMsg("YOU FEEL CONFUSED!", MessageKind::Warning, true);
+                    emitNoise(tgt, 8);
+                    break;
+                }
+                case TrapKind::PoisonGas: {
+                    const int turns = rng.range(6, 10) + std::min(6, depth_ / 2);
+                    p.effects.poisonTurns = std::max(p.effects.poisonTurns, turns);
+                    pushMsg("A CLOUD OF TOXIC VAPOR BURSTS FROM THE CHEST!", MessageKind::Warning, true);
+                    pushMsg("YOU ARE POISONED!", MessageKind::Warning, true);
                     emitNoise(tgt, 8);
                     break;
                 }
@@ -2503,6 +2619,10 @@ bool Game::payAtShop() {
 
 bool Game::digInDirection(int dx, int dy) {
     if (gameOver || gameWon) return false;
+
+    dx = clampi(dx, -1, 1);
+    dy = clampi(dy, -1, 1);
+
     if (dx == 0 && dy == 0) {
         pushMsg("DIG WHERE?", MessageKind::Info, true);
         return false;
@@ -2515,6 +2635,22 @@ bool Game::digInDirection(int dx, int dy) {
     }
 
     const Vec2i src = player().pos;
+
+    // Confusion can scramble the dig direction.
+    if (player().effects.confusionTurns > 0) {
+        static const int dirs[8][2] = { {0,-1},{0,1},{-1,0},{1,0},{-1,-1},{1,-1},{-1,1},{1,1} };
+        const int i = rng.range(0, 7);
+        dx = dirs[i][0];
+        dy = dirs[i][1];
+        pushMsg("YOU SWING THE PICKAXE WILDLY!", MessageKind::Warning, true);
+    }
+
+    // Prevent digging diagonally "through" a blocked corner.
+    if (dx != 0 && dy != 0 && !diagonalPassable(dung, src, dx, dy)) {
+        pushMsg("YOU CAN'T REACH AROUND THE CORNER.", MessageKind::Info, true);
+        return false;
+    }
+
     const Vec2i p{ src.x + dx, src.y + dy };
     if (!dung.inBounds(p.x, p.y)) {
         pushMsg("YOU CAN'T DIG THERE.", MessageKind::Info, true);

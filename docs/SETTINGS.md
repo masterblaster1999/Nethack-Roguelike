@@ -174,12 +174,14 @@ Available actions:
 
 **Gameplay**
 - `confirm`, `cancel`
-- `wait`, `rest`
+- `wait`, `rest`, `sneak`
 - `pickup`, `inventory`
-- `fire`, `search`, `look`
+- `fire`, `search`, `disarm`
+- `close_door`, `lock_door`
+- `kick`, `dig`
+- `look`
 - `stairs_up`, `stairs_down`
 - `auto_explore`, `toggle_auto_pickup`
-
 **Inventory**
 - `equip`, `use`, `drop`, `drop_all`, `sort_inventory`
 
@@ -189,7 +191,6 @@ Available actions:
 - `toggle_minimap`, `toggle_stats`
 - `fullscreen`, `screenshot`
 - `save`, `load`, `load_auto`, `restart`
-- `log_up`, `log_down`
 - `log_up`, `log_down`
 
 Tip: For `<` and `>` on most keyboard layouts, prefer `shift+comma` and `shift+period`.

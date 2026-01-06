@@ -33,11 +33,13 @@ struct GameTestAccess {
     static int& depth(Game& g) { return g.depth_; }
     static std::array<int, Game::DUNGEON_MAX_DEPTH + 1>& shopLedger(Game& g) { return g.shopDebtLedger_; }
     static std::vector<Entity>& ents(Game& g) { return g.ents; }
+    static const Entity* entityAt(Game& g, int x, int y) { return g.entityAt(x, y); }
     static std::vector<Trap>& traps(Game& g) { return g.trapsCur; }
     static std::vector<GroundItem>& ground(Game& g) { return g.ground; }
     static void dropGroundItem(Game& g, Vec2i pos, ItemKind k, int count = 1, int enchant = 0) { g.dropGroundItem(pos, k, count, enchant); }
     static int playerRangedRange(Game& g) { return g.playerRangedRange(); }
     static RNG& rng(Game& g) { return g.rng; }
+    static bool equipSelected(Game& g) { return GameTestAccess::equipSelected(g); }
     static void triggerTrapAt(Game& g, Vec2i pos, Entity& victim, bool fromDisarm = false) { g.triggerTrapAt(pos, victim, fromDisarm); }
     static void cleanupDead(Game& g) { g.cleanupDead(); }
     static void monsterTurn(Game& g) { g.monsterTurn(); }
@@ -46,7 +48,12 @@ struct GameTestAccess {
     static void recomputeFov(Game& g) { g.recomputeFov(); }
     static bool useSelected(Game& g) { return g.useSelected(); }
     static Dungeon& dungeon(Game& g) { return g.dung; }
+    static std::vector<uint8_t>& fireField(Game& g) { return g.fireField_; }
+    static std::vector<uint8_t>& confusionGas(Game& g) { return g.confusionGas_; }
+    static std::vector<uint8_t>& poisonGas(Game& g) { return g.poisonGas_; }
     static void markIdentified(Game& g, ItemKind k, bool quiet = false) { g.markIdentified(k, quiet); }
+    static bool stepAutoMove(Game& g) { return g.stepAutoMove(); }
+    static Vec2i findNearestExploreFrontier(const Game& g) { return g.findNearestExploreFrontier(); }
 };
 
 namespace {
@@ -2240,6 +2247,53 @@ void test_dungeon_digging() {
     expect(d.at(1, 1).type == TileType::Floor, "Dig should destroy door into floor");
 }
 
+void test_dig_prompt_digs_adjacent_wall_with_pickaxe() {
+    Game g;
+    g.newGame(123u);
+
+    // Clear non-player entities for determinism.
+    auto& ents = GameTestAccess::ents(g);
+    const int pid = g.playerId();
+    ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+        return e.id != pid;
+    }), ents.end());
+
+    Dungeon& d = GameTestAccess::dungeon(g);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            auto& t = d.at(x, y);
+            t.type = TileType::Floor;
+            t.visible = false;
+            t.explored = true;
+        }
+    }
+
+    GameTestAccess::traps(g).clear();
+
+    // Place the player and a diggable wall.
+    g.playerMut().pos = {5, 5};
+    d.at(6, 5).type = TileType::Wall;
+
+    // Equip a pickaxe.
+    GameTestAccess::inv(g).clear();
+    Item pick{};
+    pick.id = 1;
+    pick.kind = ItemKind::Pickaxe;
+    pick.count = 1;
+    GameTestAccess::inv(g).push_back(pick);
+    GameTestAccess::invSel(g) = 0;
+    expect(GameTestAccess::equipSelected(g), "Equipping a pickaxe should succeed");
+
+    const int turns0 = g.turns();
+    g.handleAction(Action::Dig);
+    expect(g.turns() == turns0, "Entering dig prompt should not spend a turn");
+
+    g.handleAction(Action::Right);
+    expect(g.turns() == turns0 + 1, "Digging should spend one turn");
+    expect(d.at(6, 5).type == TileType::Floor, "Dig prompt should convert the adjacent wall to floor");
+    expect(g.player().pos == Vec2i{5, 5}, "Dig prompt should not move the player");
+}
+
 void test_wand_display_shows_charges() {
     Item it;
     it.kind = ItemKind::WandDigging;
@@ -2843,6 +2897,67 @@ void test_companion_fetch_carries_and_delivers_gold() {
     expect(dog->stolenGold == 0, "After delivery, companion should no longer be carrying gold");
 }
 
+
+void test_monster_ai_avoids_fire_tiles_when_chasing() {
+    Game g;
+    g.newGame(123u);
+
+    auto& ents = GameTestAccess::ents(g);
+    const int pid = g.player().id;
+
+    // Keep only the player so the pathing decision is deterministic.
+    ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+        return e.id != pid;
+    }), ents.end());
+
+    // Replace the dungeon with a small open arena.
+    Dungeon& d = GameTestAccess::dungeon(g);
+    d = Dungeon(7, 7);
+    for (auto& t : d.tiles) {
+        t.type = TileType::Floor;
+        t.visible = true;
+        t.explored = true;
+    }
+
+    GameTestAccess::ground(g).clear();
+    GameTestAccess::traps(g).clear();
+
+    // Place the player and a single hostile goblin.
+    ents[0].pos = {5, 3};
+
+    Entity gob;
+    gob.id = 2001;
+    gob.kind = EntityKind::Goblin;
+    gob.pos = {1, 3};
+    gob.hpMax = 6;
+    gob.hp = 6;
+    gob.friendly = false;
+
+    // Make scheduling predictable (one action per monster turn).
+    gob.speed = 100;
+    gob.energy = 0;
+
+    ents.push_back(gob);
+
+    // Put fire directly on the straight-line route so a naive chase would step into it.
+    auto& fire = GameTestAccess::fireField(g);
+    fire.assign(static_cast<size_t>(d.width * d.height), 0u);
+    fire[static_cast<size_t>(3 * d.width + 2)] = 255u; // tile (2,3)
+
+    GameTestAccess::monsterTurn(g);
+
+    Vec2i mpos{-1, -1};
+    for (const auto& e : ents) {
+        if (e.id == 2001) {
+            mpos = e.pos;
+            break;
+        }
+    }
+
+    expect(mpos != Vec2i{2, 3}, "Monster AI should avoid stepping onto fire when an alternate path exists");
+}
+
+
 void test_targeting_tab_cycles_visible_hostiles() {
     Game g;
     g.newGame(777u);
@@ -3236,6 +3351,90 @@ void test_lethe_mist_triggers_amnesia_and_forgets_far_memory() {
            "Lethe mist should clear unseen monster lastKnownPlayerPos");
     expect(m->lastKnownPlayerAge >= 1000,
            "Lethe mist should set unseen monster lastKnownPlayerAge to a large value");
+}
+
+
+void test_poison_gas_trap_creates_persistent_cloud() {
+    Game g;
+    g.newGame(777u);
+
+    // Find a walkable adjacent tile to place the trap on.
+    const Vec2i p0 = g.player().pos;
+
+    Vec2i target{-1, -1};
+    Action moveAct = Action::Wait;
+
+    struct Dir { int dx, dy; Action a; };
+    const Dir dirs[] = {
+        { 1, 0, Action::Right }, { -1, 0, Action::Left }, { 0, 1, Action::Down }, { 0, -1, Action::Up },
+        { 1, 1, Action::DownRight }, { 1, -1, Action::UpRight }, { -1, 1, Action::DownLeft }, { -1, -1, Action::UpLeft },
+    };
+
+    for (const auto& d : dirs) {
+        const Vec2i p{ p0.x + d.dx, p0.y + d.dy };
+        if (!g.dungeon().inBounds(p.x, p.y)) continue;
+        if (!g.dungeon().isWalkable(p.x, p.y)) continue;
+        if (GameTestAccess::entityAt(g, p.x, p.y) != nullptr) continue;
+        target = p;
+        moveAct = d.a;
+        break;
+    }
+
+    bool directTrigger = false;
+    if (target.x == -1) {
+        // Fallback: if player spawns boxed in (rare), trigger the trap directly on the
+        // player's current tile so the test remains robust.
+        target = p0;
+        directTrigger = true;
+    }
+
+
+    // Place a poison gas trap and step onto it.
+    {
+        auto& traps = GameTestAccess::traps(g);
+        traps.clear();
+
+        Trap t;
+        t.kind = TrapKind::PoisonGas;
+        t.pos = target;
+        t.discovered = false;
+        traps.push_back(t);
+    }
+
+    const int hpBefore = g.player().hp;
+    if (directTrigger) {
+        GameTestAccess::triggerTrapAt(g, target, g.playerMut(), /*fromDisarm=*/false);
+    } else {
+        g.handleAction(moveAct);
+    }
+
+    expect(g.player().pos == target, "Player should have stepped onto poison gas trap tile.");
+    expect(g.player().effects.poisonTurns > 0, "Poison gas trap should poison the victim.");
+    expect(g.poisonGasAt(target.x, target.y) > 0u, "Poison gas trap should seed a persistent poison gas field.");
+    expect(g.player().hp <= hpBefore, "Trap should not heal the player.");
+}
+
+void test_poison_gas_field_save_load_roundtrip() {
+    Game g;
+    g.newGame(2025u);
+
+    const Dungeon& d = g.dungeon();
+    const Vec2i p0 = g.player().pos;
+
+    // Seed a poison gas tile directly (stable + deterministic for save/load).
+    auto& pg = GameTestAccess::poisonGas(g);
+    pg.assign(static_cast<size_t>(d.width * d.height), 0u);
+    const size_t idx = static_cast<size_t>(p0.y * d.width + p0.x);
+    pg[idx] = 42u;
+
+    const std::string path = "test_poison_gas_roundtrip_tmp.sav";
+    expect(g.saveToFile(path, /*quiet=*/true), "Saving should succeed");
+
+    Game g2;
+    expect(g2.loadFromFile(path), "Loading should succeed");
+
+    expect(g2.poisonGasAt(p0.x, p0.y) == 42u, "Poison gas field should roundtrip through save/load.");
+    std::remove(path.c_str());
 }
 
 
@@ -3709,6 +3908,111 @@ void test_discoveries_list_builds_and_sorts() {
 }
 
 
+
+void test_auto_travel_plans_paths_through_known_traps_but_stops_before_them() {
+    Game g;
+    g.newGame(123u);
+
+    // Remove all non-player entities so auto-move isn't interrupted by hostiles.
+    {
+        auto& ents = GameTestAccess::ents(g);
+        const int pid = g.playerId();
+        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) { return e.id != pid; }), ents.end());
+    }
+
+    GameTestAccess::ground(g).clear();
+    GameTestAccess::traps(g).clear();
+
+    Dungeon& d = GameTestAccess::dungeon(g);
+
+    // Start with an explored solid map, then carve a small corridor:
+    //   S . T . G
+    // where T is a *known* trap blocking the only route to the goal.
+    for (int y = 0; y < Game::MAP_H; ++y) {
+        for (int x = 0; x < Game::MAP_W; ++x) {
+            d.at(x, y).type = TileType::Wall;
+            d.at(x, y).explored = true;
+            d.at(x, y).visible = false;
+        }
+    }
+
+    const int y = 1;
+    for (int x = 1; x <= 5; ++x) {
+        d.at(x, y).type = TileType::Floor;
+        d.at(x, y).explored = true;
+    }
+
+    // Place a discovered trap at (3,1).
+    {
+        Trap t;
+        t.pos = Vec2i{3, 1};
+        t.kind = TrapKind::Spike;
+        t.discovered = true;
+        GameTestAccess::traps(g).push_back(t);
+    }
+
+    g.playerMut().pos = Vec2i{1, 1};
+
+    // Auto-travel should find a path to the goal even though a known trap blocks the only route.
+    const bool ok = g.requestAutoTravel(Vec2i{5, 1});
+    expect(ok, "Auto-travel should plan a path even if a known trap blocks the only route");
+
+    // First step: move from S to the tile before the trap.
+    const bool cont1 = GameTestAccess::stepAutoMove(g);
+    expect(cont1, "Auto-move should take the first step toward the goal");
+    expect(g.player().pos == Vec2i{2, 1}, "Auto-move should advance to (2,1)");
+
+    // Second step: stop BEFORE stepping onto the known trap.
+    const bool cont2 = GameTestAccess::stepAutoMove(g);
+    expect(!cont2, "Auto-move should stop when the next step is a known trap");
+    expect(g.player().pos == Vec2i{2, 1}, "Auto-move must not step onto a known trap tile");
+    expect(!g.isAutoActive(), "Auto-move should be inactive after stopping at a known trap");
+}
+
+void test_auto_explore_guides_to_blocking_trap_when_frontier_is_behind_it() {
+    Game g;
+    g.newGame(456u);
+
+    // Remove all non-player entities so exploration logic is deterministic.
+    {
+        auto& ents = GameTestAccess::ents(g);
+        const int pid = g.playerId();
+        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) { return e.id != pid; }), ents.end());
+    }
+
+    GameTestAccess::ground(g).clear();
+    GameTestAccess::traps(g).clear();
+
+    Dungeon& d = GameTestAccess::dungeon(g);
+    for (int y = 0; y < Game::MAP_H; ++y) {
+        for (int x = 0; x < Game::MAP_W; ++x) {
+            d.at(x, y).type = TileType::Wall;
+            d.at(x, y).explored = true;
+            d.at(x, y).visible = false;
+        }
+    }
+
+    // Carve a corridor with a known trap in the middle. The ONLY unexplored tile is beyond the trap,
+    // so the nearest frontier is unreachable without dealing with the trap.
+    for (int x = 1; x <= 5; ++x) {
+        d.at(x, 1).type = TileType::Floor;
+        d.at(x, 1).explored = true;
+    }
+    d.at(5, 1).explored = false; // unexplored tile creates a frontier at (4,1) behind the trap
+
+    {
+        Trap t;
+        t.pos = Vec2i{3, 1};
+        t.kind = TrapKind::Spike;
+        t.discovered = true;
+        GameTestAccess::traps(g).push_back(t);
+    }
+
+    g.playerMut().pos = Vec2i{1, 1};
+
+    const Vec2i goal = GameTestAccess::findNearestExploreFrontier(g);
+    expect(goal == Vec2i{3, 1}, "When the nearest frontier is only reachable through a known trap, auto-explore should target the blocking trap");
+}
 int main() {
     std::cout << "Running ProcRogue tests...\n";
 
@@ -3738,6 +4042,8 @@ int main() {
     test_sound_diagonal_corner_cutting_is_blocked();
     test_augury_preview_does_not_consume_rng();
     test_weighted_pathfinding_prefers_open_route_over_closed_door();
+    test_auto_travel_plans_paths_through_known_traps_but_stops_before_them();
+    test_auto_explore_guides_to_blocking_trap_when_frontier_is_behind_it();
     test_item_defs_sane();
     test_item_weight_helpers();
     test_combat_dice_rules();
@@ -3775,6 +4081,7 @@ int main() {
 
     // Patch-specific regression tests.
     test_dungeon_digging();
+    test_dig_prompt_digs_adjacent_wall_with_pickaxe();
     test_wand_display_shows_charges();
     test_shop_debt_ledger_persists_after_consumption();
     test_shop_debt_ledger_save_load_roundtrip();
@@ -3786,6 +4093,7 @@ int main() {
     test_scroll_earth_raises_boulders_around_player();
     test_scroll_taming_charms_adjacent_non_undead_monsters();
     test_companion_fetch_carries_and_delivers_gold();
+    test_monster_ai_avoids_fire_tiles_when_chasing();
     test_targeting_tab_cycles_visible_hostiles();
     test_boulder_blocks_projectiles_but_not_opaque();
     test_targeting_out_of_range_sets_status_text();
@@ -3794,6 +4102,8 @@ int main() {
     test_trap_door_drops_player_to_next_depth();
     test_levitation_skips_trap_door_trigger();
     test_lethe_mist_triggers_amnesia_and_forgets_far_memory();
+    test_poison_gas_trap_creates_persistent_cloud();
+    test_poison_gas_field_save_load_roundtrip();
     test_trap_door_monster_falls_to_next_depth_and_persists();
     test_shrine_recharge_replenishes_wand_charges();
     test_monster_energy_scheduling_basic();

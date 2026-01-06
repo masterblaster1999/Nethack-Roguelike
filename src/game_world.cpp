@@ -374,6 +374,14 @@ uint8_t Game::confusionGasAt(int x, int y) const {
     return confusionGas_[i];
 }
 
+uint8_t Game::poisonGasAt(int x, int y) const {
+    if (!dung.inBounds(x, y)) return 0u;
+    const size_t i = static_cast<size_t>(y * dung.width + x);
+    if (i >= poisonGas_.size()) return 0u;
+    return poisonGas_[i];
+}
+
+
 uint8_t Game::fireAt(int x, int y) const {
     if (!dung.inBounds(x, y)) return 0u;
     const size_t i = static_cast<size_t>(y * dung.width + x);

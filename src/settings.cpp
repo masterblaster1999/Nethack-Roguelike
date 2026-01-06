@@ -421,6 +421,7 @@ bind_disarm = t
 bind_close_door = k
 bind_lock_door = shift+k
 bind_kick = b
+bind_dig = shift+d
 bind_look = l, v
 bind_stairs_up = shift+comma, less
 bind_stairs_down = shift+period, greater

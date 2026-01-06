@@ -1,6 +1,7 @@
 {
-  "description": "Interactive minimap: add a minimap cursor that can be driven by mouse hover or keyboard, allow click-to-travel and click-to-look directly from the minimap overlay, and render a cursor highlight + helpful hint line.",
+  "description": "Procedural generation: corridor braiding pass that reduces corridor dead-ends by tunneling through solid wall to create loops/alternate routes (biased toward maze/catacombs/warrens) and feeds into the existing terrain sculpt pass for nicer edges.",
   "files": [
+    "CMakeLists.txt",
     "PATCH_MANIFEST.json",
     "README.md",
     "docs/SETTINGS.md",
@@ -10,6 +11,8 @@
     "src/content.cpp",
     "src/dungeon.cpp",
     "src/dungeon.hpp",
+    "src/corridor_braid.cpp",
+    "src/corridor_braid.hpp",
     "src/effects.hpp",
     "src/game.cpp",
     "src/game.hpp",
@@ -35,15 +38,17 @@
     "src/spritegen.cpp",
     "src/spritegen.hpp",
     "src/spritegen3d.cpp",
+    "src/terrain_sculpt.cpp",
+    "src/terrain_sculpt.hpp",
     "tests/test_main.cpp"
   ],
-  "patch_id": "roundN_plus59",
-  "previous_patch": "roundN_plus58",
+  "patch_id": "roundN_plus62",
+  "previous_patch": "roundN_plus61",
   "summary": [
-    "Minimap overlay now has its own cursor (UI-only) which is driven by mouse hover and/or keyboard movement.",
-    "While the minimap is open you can move the cursor with movement keys (including diagonals) and use ENTER to auto-travel or L to enter LOOK at the selected tile.",
-    "Mouse support: left-click on the minimap auto-travels; right-click enters LOOK at the clicked tile.",
-    "Renderer draws a cursor highlight on the minimap and shows a compact hint line + cursor coordinates."
+    "Added a corridor-braiding post-pass: it searches from corridor dead-ends through solid wall and carves short connecting tunnels to other corridors, creating extra loops and reducing mandatory backtracking.",
+    "The braiding pass is conservative: it avoids rooms, doors, stairs, and chasm edges, and only digs through Wall tiles in solid stone.",
+    "Integrated braiding before the existing terrain sculpt pass so newly dug tunnels also get edge-sculpting/roughening.",
+    "Exposed Dungeon::corridorBraidCount as a lightweight per-floor debug/telemetry counter (tunnels carved)."
   ],
   "timestamp": "2026-01-06"
 }

@@ -39,6 +39,12 @@ A tiny NetHack-inspired roguelike with:
 
 - **Dead-end stash closets**: some corridor/tunnel dead ends now hide tiny side closets behind a door (sometimes **secret**), often with a chest — making exploration of dead ends feel rewarding.
 
+- **Vault prefabs**: occasional small "vault" set-pieces carved into solid wall pockets off corridors — e.g., secret caches, locked micro-vaults, and boulder→chasm bridge loot rooms.
+
+- **Terrain edge erosion (walls/floors)**: a new late procgen pass "sculpts" Wall/Floor boundaries (chips + light cellular smoothing) so corridor/ruins layouts feel less perfectly boxy while preserving door thresholds and stairs connectivity.
+
+- **Corridor braiding (dead-end reduction)**: on maze/catacombs/warrens-style floors, a post-pass carves short tunnels through solid wall to reconnect corridor dead ends back into the network, creating more loops and alternate routes (less mandatory backtracking).
+
 - **Special room pacing**: shops now bias closer to the upstairs, while treasure/lairs bias deeper into the floor (using BFS distance), and key rooms avoid disconnected pockets.
 
 - **Inventory hotkeys**: while inventory is open:

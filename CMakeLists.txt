@@ -73,6 +73,8 @@ set(PROCROGUE_CORE_SOURCES
     src/physics.cpp
     src/combat_rules.cpp
     src/dungeon.cpp
+    src/corridor_braid.cpp
+    src/terrain_sculpt.cpp
     src/items.cpp
     src/shop.cpp
     src/scores.cpp

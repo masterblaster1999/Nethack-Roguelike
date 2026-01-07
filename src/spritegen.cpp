@@ -2776,7 +2776,6 @@ SpritePixels generateIsometricWallBlockTile(uint32_t seed, int frame, int pxSize
     const int W = 16;
     const int H = 16;
     const int topH = 8;
-    const int wallH = 8;
 
     // Helper: scanline-fill a convex quad.
     auto fillQuad = [&](Vec2i p0, Vec2i p1, Vec2i p2, Vec2i p3, const Color& c0, float shadeMul) {

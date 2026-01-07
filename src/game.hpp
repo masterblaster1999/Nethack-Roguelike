@@ -1063,6 +1063,9 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     void setIdentificationEnabled(bool enabled);
     bool identificationEnabled() const { return identifyItemsEnabled; }
 
+    // Per-run randomized appearance id for an item kind (used by renderer for NetHack-style identification visuals).
+    uint8_t itemAppearanceFor(ItemKind k) const { return appearanceFor(k); }
+
     // Optional hunger system (survival / NetHack-like pacing).
     void setHungerEnabled(bool enabled);
     bool hungerEnabled() const { return hungerEnabled_; }

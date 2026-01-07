@@ -286,9 +286,9 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                         if (defender.kind == EntityKind::Player) {
                             pushMsg("YOU ARE SET AFLAME!", MessageKind::Warning, false);
                         } else if (canSee(defender)) {
-                            std::ostringstream ss;
-                            ss << kindName(defender.kind) << " CATCHES FIRE!";
-                            pushMsg(ss.str(), MessageKind::Info, true);
+                            std::ostringstream ss2;
+                            ss2 << kindName(defender.kind) << " CATCHES FIRE!";
+                            pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
                 }
@@ -304,9 +304,9 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                         if (defender.kind == EntityKind::Player) {
                             pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
                         } else if (canSee(defender)) {
-                            std::ostringstream ss;
-                            ss << kindName(defender.kind) << " IS POISONED!";
-                            pushMsg(ss.str(), MessageKind::Info, true);
+                            std::ostringstream ss2;
+                            ss2 << kindName(defender.kind) << " IS POISONED!";
+                            pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
                 }
@@ -324,9 +324,9 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                         } else if (defender.kind == EntityKind::Player) {
                             pushMsg("YOUR LIFE IS DRAINED!", MessageKind::Warning, false);
                         } else if (canSee(attacker)) {
-                            std::ostringstream ss;
-                            ss << kindName(attacker.kind) << " LOOKS REINVIGORATED.";
-                            pushMsg(ss.str(), MessageKind::Info, true);
+                            std::ostringstream ss2;
+                            ss2 << kindName(attacker.kind) << " LOOKS REINVIGORATED.";
+                            pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
                 }

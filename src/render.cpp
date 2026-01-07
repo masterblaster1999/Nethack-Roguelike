@@ -787,7 +787,6 @@ bool Renderer::windowToMinimapTile(const Game& game, int winX, int winY, int& ti
 
     const int titleH = 16;
     const int panelW = W * px + pad * 2;
-    const int panelH = H * px + pad * 2 + titleH;
 
     const int x0 = winW - panelW - margin;
     const int y0 = margin;
@@ -904,7 +903,7 @@ namespace {
     // and set SPRITE_SEED_IDENT_APPEARANCE_FLAG so spritegen can draw
     // appearance-based art.
     inline uint32_t identAppearanceSpriteSeed(const Game& game, ItemKind k) {
-        const uint8_t app = game.appearanceFor(k);
+        const uint8_t app = game.itemAppearanceFor(k);
 
         // Category salt keeps potion/scroll/ring/wand appearance id spaces separate.
         // (These are just arbitrary constants; determinism is all that matters.)
@@ -4016,10 +4015,11 @@ void Renderer::drawMinimapOverlay(const Game& game) {
 
     const int titleH = 16;
     const int panelW = W * px + pad * 2;
-    const int panelH = H * px + pad * 2 + titleH;
 
     const int x0 = winW - panelW - margin;
     const int y0 = margin;
+
+    const int panelH = H * px + pad * 2 + titleH;
 
     SDL_Rect panel { x0, y0, panelW, panelH };
     drawPanel(game, panel, 210, lastFrame);
@@ -4451,15 +4451,16 @@ void Renderer::drawScoresOverlay(const Game& game) {
     const int panelX = (winW - panelW) / 2;
     const int panelY = (winH - panelH) / 2;
 
-    drawPanel(panelX, panelY, panelW, panelH);
+    SDL_Rect panel{ panelX, panelY, panelW, panelH };
+    drawPanel(game, panel, 230, lastFrame);
 
     const int titleScale = 2;
     const int bodyScale = 1;
     const int lineH = 10 * bodyScale;
 
-    const SDL_Color white = {255, 255, 255, 255};
-    const SDL_Color gray = {160, 160, 160, 255};
-    const SDL_Color selCol = {240, 240, 120, 255};
+    const Color white{255, 255, 255, 255};
+    const Color gray{160, 160, 160, 255};
+    const Color selCol{240, 240, 120, 255};
 
     int x = panelX + pad;
     int y = panelY + pad;
@@ -4502,7 +4503,7 @@ void Renderer::drawScoresOverlay(const Game& game) {
     // Left: list
     {
         const SDL_Rect clip = {innerX, innerY, listW, innerH};
-        ClipRectGuard g(renderer, clip);
+        ClipRectGuard g(renderer, &clip);
 
         if (total <= 0) {
             drawText5x7(renderer, innerX, innerY, bodyScale, gray, "NO RUNS RECORDED YET.");
@@ -4524,14 +4525,14 @@ void Renderer::drawScoresOverlay(const Game& game) {
                     ss << "D" << std::setw(2) << e.depth << "  ";
                     ss << (e.won ? "W " : "D ");
                     ss << e.name;
-                    if (!e.className.empty()) ss << " (" << e.className << ")";
+                    if (!e.playerClass.empty()) ss << " (" << e.playerClass << ")";
                 } else {
                     std::string date = e.timestamp;
                     if (date.size() >= 10) date = date.substr(0, 10);
                     ss << date << "  " << (e.won ? "W " : "D ");
                     ss << "S" << e.score << " D" << e.depth << " ";
                     ss << e.name;
-                    if (!e.className.empty()) ss << " (" << e.className << ")";
+                    if (!e.playerClass.empty()) ss << " (" << e.playerClass << ")";
                 }
 
                 const int maxChars = std::max(1, (listW - 4) / 6);
@@ -4545,15 +4546,13 @@ void Renderer::drawScoresOverlay(const Game& game) {
     // Right: details
     {
         const SDL_Rect clip = {detailX, innerY, detailW, innerH};
-        ClipRectGuard g(renderer, clip);
+        ClipRectGuard g(renderer, &clip);
 
         if (total > 0) {
             const ScoreEntry& e = entries[order[sel]];
 
             int dy = innerY;
-            std::ostringstream title;
-            title << "DETAILS";
-            drawText5x7(renderer, detailX, dy, bodyScale + 1, white, title.str());
+            drawText5x7(renderer, detailX, dy, bodyScale + 1, white, "DETAILS");
             dy += 18;
 
             // Rank by score (always meaningful since entries are stored score-sorted)
@@ -4581,9 +4580,9 @@ void Renderer::drawScoresOverlay(const Game& game) {
                 dy += lineH;
             }
 
-            if (!e.className.empty()) {
+            if (!e.playerClass.empty()) {
                 std::ostringstream ss;
-                ss << "CLASS: " << e.className;
+                ss << "CLASS: " << e.playerClass;
                 drawText5x7(renderer, detailX, dy, bodyScale, white, ss.str());
                 dy += lineH;
             }
@@ -4638,6 +4637,7 @@ void Renderer::drawScoresOverlay(const Game& game) {
         }
     }
 }
+
 
 void Renderer::drawCodexOverlay(const Game& game) {
     const int pad = 14;

@@ -3,6 +3,7 @@
 
 #include "common.hpp"
 #include <string>
+#include <algorithm>
 
 // Tiny built-in 5x7 bitmap font to avoid SDL_ttf dependency.
 // Includes common ASCII used by the HUD/messages.
@@ -110,4 +111,113 @@ inline void drawText5x7(SDL_Renderer* r, int x, int y, int scale, Color c, const
 
         penX += (5 + 1) * scale;
     }
+}
+
+
+// Word-wrapped text helper for the built-in 5x7 font.
+// Returns the number of lines drawn.
+inline int drawTextWrapped5x7(SDL_Renderer* r, int x, int y, int scale, Color c,
+                             const std::string& text, int maxWidthPx) {
+    if (!r) return 0;
+    if (scale <= 0) scale = 1;
+
+    const int charW = (5 + 1) * scale;
+    int maxChars = (charW > 0) ? (maxWidthPx / charW) : 0;
+    if (maxChars <= 0) maxChars = 1;
+
+    const int lineH = (7 + 1) * scale;
+
+    std::string line;
+    line.reserve(static_cast<size_t>(maxChars));
+
+    std::string word;
+    word.reserve(32);
+
+    int lines = 0;
+    int cy = y;
+
+    auto flushLine = [&]() {
+        drawText5x7(r, x, cy, scale, c, line);
+        line.clear();
+        cy += lineH;
+        ++lines;
+    };
+
+    auto placeWord = [&](const std::string& w) {
+        if (w.empty()) return;
+
+        if (line.empty()) {
+            line = w;
+            return;
+        }
+
+        if (static_cast<int>(line.size() + 1 + w.size()) <= maxChars) {
+            line.push_back(' ');
+            line += w;
+            return;
+        }
+
+        flushLine();
+        line = w;
+    };
+
+    auto emitWord = [&](const std::string& w) {
+        if (w.empty()) return;
+
+        // Fits cleanly.
+        if (static_cast<int>(w.size()) <= maxChars) {
+            placeWord(w);
+            return;
+        }
+
+        // Word is longer than a line: break it.
+        size_t start = 0;
+        while (start < w.size()) {
+            const size_t remaining = w.size() - start;
+            const size_t n = std::min(static_cast<size_t>(maxChars), remaining);
+            const std::string chunk = w.substr(start, n);
+
+            if (!line.empty()) flushLine();
+            line = chunk;
+
+            // If there's more coming, flush immediately. Otherwise, leave it in `line`
+            // so more words can be appended (rare, but keeps spacing consistent).
+            start += n;
+            if (start < w.size()) flushLine();
+        }
+    };
+
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char ch = text[i];
+
+        if (ch == '\n') {
+            emitWord(word);
+            word.clear();
+
+            if (!line.empty()) {
+                flushLine();
+            } else {
+                cy += lineH;
+                ++lines;
+            }
+            continue;
+        }
+
+        if (ch == ' ' || ch == '\t' || ch == '\r') {
+            emitWord(word);
+            word.clear();
+            continue;
+        }
+
+        word.push_back(ch);
+    }
+
+    emitWord(word);
+
+    if (!line.empty()) {
+        drawText5x7(r, x, cy, scale, c, line);
+        ++lines;
+    }
+
+    return lines;
 }

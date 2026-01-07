@@ -1,5 +1,5 @@
 {
-  "description": "Monster pocket potions: Wizards may spawn with a consumable potion and will sometimes drink it mid-fight; levitation now enables monster pathing across chasms. Save version bumped to v38.",
+  "description": "Fix build errors in scores overlay and identification rendering; add 5x7 wrapped text helper; silence a few MSVC warnings.",
   "files": [
     "CMakeLists.txt",
     "PATCH_MANIFEST.json",
@@ -29,6 +29,7 @@
     "src/game_targeting.cpp",
     "src/game_world.cpp",
     "src/hallucination.hpp",
+    "src/ui_font.hpp",
     "src/items.cpp",
     "src/items.hpp",
     "src/shop.cpp",
@@ -48,14 +49,13 @@
     "src/terrain_sculpt.hpp",
     "tests/test_main.cpp"
   ],
-  "patch_id": "roundN_plus67",
-  "previous_patch": "roundN_plus66",
+  "patch_id": "roundN_plus68",
+  "previous_patch": "roundN_plus67",
   "summary": [
-    "Added Entity::pocketConsumable (v38) and serialize it in saves so monsters can carry a single stackable consumable item.",
-    "Wizards can now spawn with a pocket potion (heal, regen, shielding, invisibility, levitation).",
-    "AI: Wizards will sometimes drink their pocket potion mid-fight; 'obvious' effects can identify the potion if observed.",
-    "AI pathfinding: added a Levitate path mode so levitating monsters can route across chasms.",
-    "Updated README + CHANGELOG; bumped save version to v38 and included pocket consumable in determinism hash."
+    "Fixed build break in scores overlay: correct drawPanel signature usage, ClipRectGuard construction, and ScoreEntry field names.",
+    "Added drawTextWrapped5x7() to ui_font.hpp for simple word-wrapped 5x7 HUD/UI text.",
+    "Renderer: stop accessing private Game::appearanceFor by exposing Game::itemAppearanceFor() for identification visuals.",
+    "Silenced a few MSVC warnings (unused locals, shadowed ss ostringstreams)."
   ],
   "timestamp": "2026-01-07"
 }

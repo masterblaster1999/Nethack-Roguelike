@@ -1,5 +1,6 @@
 #include "render.hpp"
 #include "ui_font.hpp"
+#include "hallucination.hpp"
 #include "rng.hpp"
 #include "version.hpp"
 
@@ -891,33 +892,6 @@ namespace {
         return (static_cast<uint64_t>(cat) << 56) |
                (static_cast<uint64_t>(kind) << 48) |
                (static_cast<uint64_t>(seed) << 16);
-    }
-
-    inline bool isHallucinating(const Game& game) {
-        return game.player().effects.hallucinationTurns > 0;
-    }
-
-    // Keep the hallucinated mapping stable for a few turns to reduce flicker.
-    inline uint32_t hallucinationPhase(const Game& game) {
-        return game.turns() / 3u;
-    }
-
-    inline EntityKind hallucinatedEntityKind(const Game& game, const Entity& e) {
-        // Preserve player readability.
-        if (e.id == game.playerId()) return e.kind;
-
-        const uint32_t base = hashCombine(game.seed() ^ 0x6A09E667u, hallucinationPhase(game));
-        const uint32_t h = hashCombine(base, static_cast<uint32_t>(e.id) ^ hash32(e.spriteSeed));
-        // Exclude Player (0); everything else is fair game.
-        const uint32_t k = 1u + (h % static_cast<uint32_t>(ENTITY_KIND_COUNT - 1));
-        return static_cast<EntityKind>(k);
-    }
-
-    inline ItemKind hallucinatedItemKind(const Game& game, const Item& it) {
-        const uint32_t base = hashCombine(game.seed() ^ 0xBB67AE85u, hallucinationPhase(game));
-        const uint32_t h = hashCombine(base, static_cast<uint32_t>(it.id) ^ hash32(it.spriteSeed));
-        const uint32_t k = (h % static_cast<uint32_t>(ITEM_KIND_COUNT));
-        return static_cast<ItemKind>(k);
     }
 
     // For NetHack-style identification, identifiable items have randomized
@@ -2577,6 +2551,127 @@ void Renderer::render(const Game& game) {
                 SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
                 SDL_SetRenderDrawColor(renderer, 200, 40, 40, 160);
                 SDL_RenderFillRect(renderer, &bar);
+            }
+        }
+    }
+
+    // Hallucination "phantoms": purely visual, fake monsters that appear on
+    // empty visible tiles while the player is hallucinating.
+    //
+    // These are intentionally derived from stable hashes of (seed, phase, tile)
+    // so that they do NOT consume RNG state and remain compatible with
+    // replay/state-hash verification.
+    if (isHallucinating(game)) {
+        const int w = d.width;
+        const int h = d.height;
+        if (w > 0 && h > 0) {
+            // Occupancy map so we don't spawn phantoms on top of real entities/items.
+            std::vector<uint8_t> occ;
+            occ.assign(static_cast<size_t>(w * h), 0u);
+            auto idx = [&](int x, int y) -> size_t {
+                return static_cast<size_t>(y * w + x);
+            };
+
+            for (const auto& e : game.entities()) {
+                if (!d.inBounds(e.pos.x, e.pos.y)) continue;
+                occ[idx(e.pos.x, e.pos.y)] = 1u;
+            }
+            for (const auto& gi : game.groundItems()) {
+                if (!d.inBounds(gi.pos.x, gi.pos.y)) continue;
+                occ[idx(gi.pos.x, gi.pos.y)] |= 2u;
+            }
+
+            struct Phantom {
+                Vec2i pos;
+                EntityKind kind;
+                uint32_t seed;
+                uint32_t h;
+            };
+
+            // Keep the number of phantoms low to avoid overwhelming the player
+            // and to keep sprite cache churn under control.
+            const int maxPhantoms = 12;
+            constexpr uint32_t kCount = static_cast<uint32_t>(ENTITY_KIND_COUNT);
+
+            std::vector<Phantom> ph;
+            ph.reserve(static_cast<size_t>(maxPhantoms));
+
+            const uint32_t phase = hallucinationPhase(game);
+            const uint32_t base = hashCombine(game.seed() ^ 0xF00DFACEu, phase);
+
+            // Keep phantoms grounded in places that are normally passable and
+            // unambiguous to read: avoid spawning them on stairs/doors.
+            auto phantomAllowedTile = [](TileType tt) -> bool {
+                return tt == TileType::Floor || tt == TileType::DoorOpen;
+            };
+
+            // Sample tiles in scanline order but gate via a hash so the
+            // distribution feels "random" and deterministic.
+            for (int y = 0; y < h && static_cast<int>(ph.size()) < maxPhantoms; ++y) {
+                for (int x = 0; x < w && static_cast<int>(ph.size()) < maxPhantoms; ++x) {
+                    if (!mapTileInView(x, y)) continue;
+                    const Tile& t = d.at(x, y);
+                    if (!t.visible) continue;
+                    if (!phantomAllowedTile(t.type)) continue;
+                    if (occ[idx(x, y)] != 0u) continue;
+                    if (x == game.player().pos.x && y == game.player().pos.y) continue;
+
+                    // Roughly ~2% chance per visible tile, then capped by maxPhantoms.
+                    const uint32_t h0 = hashCombine(base, static_cast<uint32_t>(x) ^ (static_cast<uint32_t>(y) << 16));
+                    const uint32_t r = hash32(h0);
+                    if ((r % 1000u) >= 20u) continue;
+
+                    if (kCount <= 1u) continue;
+                    const uint32_t kk = 1u + (hash32(r ^ 0x9E3779B9u) % (kCount - 1u));
+
+                    Phantom p;
+                    p.pos = {x, y};
+                    p.kind = static_cast<EntityKind>(kk);
+                    p.seed = hash32(r ^ 0xA53A9u);
+                    p.h = r;
+                    ph.push_back(p);
+                }
+            }
+
+            if (!ph.empty()) {
+                // For isometric view, draw in painter order so they sit nicely in the world.
+                if (isoView) {
+                    std::sort(ph.begin(), ph.end(), [](const Phantom& a, const Phantom& b) {
+                        const int sa = a.pos.x + a.pos.y;
+                        const int sb = b.pos.x + b.pos.y;
+                        if (sa != sb) return sa < sb;
+                        if (a.pos.y != b.pos.y) return a.pos.y < b.pos.y;
+                        return a.pos.x < b.pos.x;
+                    });
+                }
+
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                for (const Phantom& p : ph) {
+                    Entity e{};
+                    e.kind = p.kind;
+                    e.spriteSeed = p.seed;
+                    e.pos = p.pos;
+
+                    SDL_Texture* tex = entityTexture(e, (frame + static_cast<int>(p.seed & 3u)) % FRAMES);
+                    if (!tex) continue;
+
+                    SDL_Rect dst = spriteDst(p.pos.x, p.pos.y);
+
+                    // Subtle jitter so the phantoms feel unstable.
+                    const int jx = ((static_cast<int>(hash32(p.h ^ static_cast<uint32_t>(frame))) & 1) ? 1 : -1);
+                    const int jy = ((static_cast<int>(hash32(p.h ^ static_cast<uint32_t>(frame + 17))) & 1) ? 1 : -1);
+                    if ((frame & 1) != 0) {
+                        dst.x += jx;
+                        dst.y += jy;
+                    }
+
+                    const Color mod = tileColorMod(p.pos.x, p.pos.y, /*visible*/true);
+
+                    // Flickering alpha in a readable range.
+                    const uint8_t a = static_cast<uint8_t>(std::clamp<int>(110 + static_cast<int>(hash32(p.h ^ static_cast<uint32_t>(frame * 31))) % 120, 60, 210));
+                    drawSpriteWithShadowOutline(renderer, tex, dst, mod, a, /*shadow*/true, /*outline*/true);
+                }
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
             }
         }
     }

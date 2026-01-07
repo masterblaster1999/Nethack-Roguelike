@@ -192,6 +192,62 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear) {
         }
     }
 
+    // Pocket consumables: some intelligent monsters can spawn with a potion and
+    // may use it mid-fight (see AI).
+    if (allowGear && k == EntityKind::Wizard) {
+        auto makePocket = [&](ItemKind kind, int count) -> Item {
+            Item it;
+            it.id = 1; // non-zero => present
+            it.kind = kind;
+            it.count = count;
+            it.spriteSeed = rng.nextU32();
+            it.shopPrice = 0;
+            it.shopDepth = 0;
+            // Consumables carried by monsters are always uncursed.
+            it.buc = 0;
+            it.enchant = 0;
+            it.ego = ItemEgo::None;
+            return it;
+        };
+
+        // Scale chance slightly with depth so deeper wizards are a bit more
+        // prepared.
+        const float chance = std::clamp(0.30f + 0.03f * static_cast<float>(depth_), 0.30f, 0.70f);
+        if (rng.chance(chance)) {
+            struct Opt { ItemKind k; int w; };
+            std::vector<Opt> opts;
+            opts.push_back({ItemKind::PotionHealing, 38});
+            opts.push_back({ItemKind::PotionShielding, 26});
+            opts.push_back({ItemKind::PotionRegeneration, (depth_ >= 6) ? 18 : 12});
+            opts.push_back({ItemKind::PotionInvisibility, (depth_ >= 5) ? 14 : 7});
+            if (depth_ >= 4) {
+                // Levitation is... useful for navigating fissures and moats.
+                opts.push_back({ItemKind::PotionLevitation, 10});
+            }
+
+            int total = 0;
+            for (const auto& o : opts) total += std::max(0, o.w);
+            if (total > 0) {
+                int roll = rng.range(1, total);
+                ItemKind picked = ItemKind::PotionHealing;
+                for (const auto& o : opts) {
+                    roll -= std::max(0, o.w);
+                    if (roll <= 0) {
+                        picked = o.k;
+                        break;
+                    }
+                }
+
+                int count = 1;
+                // Occasional double-heal potion on very deep floors.
+                if (picked == ItemKind::PotionHealing && depth_ >= 8 && rng.chance(0.25f)) {
+                    count = 2;
+                }
+                e.pocketConsumable = makePocket(picked, count);
+            }
+        }
+    }
+
     return e;
 }
 
@@ -2497,6 +2553,15 @@ void Game::cleanupDead() {
         // Thief loot: drop any carried stolen gold (so the player can recover it).
         if (e.stolenGold > 0) {
             dropGroundItem(e.pos, ItemKind::Gold, e.stolenGold);
+        }
+
+        // Pocket consumable: drop any remaining carried consumable so the player
+        // can recover it.
+        if (e.pocketConsumable.id != 0 && e.pocketConsumable.count > 0) {
+            Item it = e.pocketConsumable;
+            it.shopPrice = 0;
+            it.shopDepth = 0;
+            dropGroundItemItem(e.pos, it);
         }
 
 

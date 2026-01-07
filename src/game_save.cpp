@@ -542,6 +542,13 @@ std::string Game::lightTag() const {
         return ss.str();
     }
 
+    // If wielding a flaming weapon, show a simple indicator.
+    if (const Item* w = equippedMelee()) {
+        if (w->ego == ItemEgo::Flaming) {
+            return "GLOW";
+        }
+    }
+
     // Warning when you're standing in darkness without a light source.
     const Vec2i p = player().pos;
     if (dung.inBounds(p.x, p.y) && tileLightLevel(p.x, p.y) == 0) {
@@ -558,7 +565,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 37u;
+constexpr uint32_t SAVE_VERSION = 38u; // v38: monster pocket consumable item
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -803,6 +810,9 @@ void writeEntity(std::ostream& out, const Entity& e) {
     // v28+: monsters can carry stolen gold (used by Leprechauns, etc.)
     int32_t stolenGold = e.stolenGold;
     writePod(out, stolenGold);
+
+    // v38+: pocket consumable (monsters only; player ignores this field)
+    writeItem(out, e.pocketConsumable);
 }
 
 bool readEntity(std::istream& in, Entity& e, uint32_t version) {
@@ -844,6 +854,8 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     int32_t hallucinationTurns = 0;
 
     int32_t stolenGold = 0;
+
+    Item pocketConsumable;
 
     Item gearMelee;
     Item gearArmor;
@@ -932,6 +944,10 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         if (!readPod(in, stolenGold)) return false;
     }
 
+    if (version >= 38u) {
+        if (!readItem(in, pocketConsumable, version)) return false;
+    }
+
     e.id = id;
     e.kind = static_cast<EntityKind>(kind);
     e.pos = { x, y };
@@ -1003,6 +1019,13 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         e.stolenGold = stolenGold;
     } else {
         e.stolenGold = 0;
+    }
+
+    // v38+: pocket consumable
+    if (version >= 38u) {
+        e.pocketConsumable = pocketConsumable;
+    } else {
+        e.pocketConsumable.id = 0;
     }
 
     // Monster speed scheduling fields aren't serialized (derived from kind).

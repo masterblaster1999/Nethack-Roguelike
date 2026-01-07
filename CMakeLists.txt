@@ -13,8 +13,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PROCROGUE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+
+# When PROCROGUE_BUILD_TESTS=ON we want the project to configure/build cleanly
+# without requiring SDL2. Developers can still set PROCROGUE_BUILD_GAME=ON to
+# build the full game alongside the tests.
 option(PROCROGUE_BUILD_TESTS "Build unit tests (no SDL required)" OFF)
-option(PROCROGUE_BUILD_GAME "Build the SDL2 game executable" ON)
+
+set(_PROCROGUE_GAME_DEFAULT ON)
+if (PROCROGUE_BUILD_TESTS)
+    set(_PROCROGUE_GAME_DEFAULT OFF)
+endif()
+option(PROCROGUE_BUILD_GAME "Build the SDL2 game executable" ${_PROCROGUE_GAME_DEFAULT})
+unset(_PROCROGUE_GAME_DEFAULT)
 
 # Headless tools are most useful for CI/regression (and are also SDL-free).
 set(_PROCROGUE_HEADLESS_DEFAULT OFF)

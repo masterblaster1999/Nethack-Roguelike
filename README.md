@@ -73,6 +73,7 @@ A tiny NetHack-inspired roguelike with:
 - **NetHack-like extended commands**: press **#** (Shift+3) to open a command prompt (`save`, `load`, `pray`, `quit`, ...).
 
 - **Sound propagation + investigation:** noisy actions (footsteps, doors, combat) now generate dungeon-aware sound; monsters can investigate through corridors, while walls/secret doors block and closed/locked doors muffle.
+- **Monsters can drink potions:** Wizards may now spawn with a pocket potion and will sometimes drink it mid-fight (heal, regen, shielding, invisibility, levitation). Levitation now also enables monster pathing across chasms.
 - **Potion of Invisibility:** makes you much harder to see (most monsters only notice you when adjacent). Attacking breaks invisibility.
 - **New extended commands (sound tricks):**
   - `#shout` (or `#yell`) spends a turn to make a loud noise to lure monsters.

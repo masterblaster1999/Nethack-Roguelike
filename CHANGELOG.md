@@ -85,6 +85,10 @@
   - Invalid targeting states are now explained more clearly (e.g., **OUT OF RANGE**, **TARGET NOT VISIBLE**, **NO CLEAR SHOT**).
   - **Boulders** now block projectiles (even though they remain non-opaque for line-of-sight), and projectiles can no longer "cut" perfectly blocked diagonal corners.
 
+- **Hallucination improvements**:
+  - While hallucinating, **look/target** text now reflects the same scrambled monster/object types you see on the map.
+  - New: hallucination can also manifest as fleeting **phantom monsters** on empty visible tiles.
+
 - **Rogue homage floor**: depth **6** is now a classic 3x3-room "Rogue level" with **doorless corridors** for a distinctly different tactical feel.
   - Entering it prints: `YOU ENTER WHAT SEEMS TO BE AN OLDER, MORE PRIMITIVE WORLD.`
 
@@ -102,12 +106,15 @@
 - **Trap setpieces**: some floors now generate small **corridor gauntlets** (short strips of traps in long straight corridors).
   - **Bonus loot caches** requested by the dungeon generator may also be guarded by one or more nearby floor traps.
 
+- **Monsters can drink potions:** Wizards may now spawn with a pocket potion and will sometimes drink it mid-fight (heal, regen, shielding, invisibility, levitation). Levitation now also enables monster pathing across chasms.
+
 ### Save compatibility
-- Save version bumped to **v33** (persists queued trapdoor-fall creatures; v32 FEAR timer + v31 shop debt ledger retained).
+- Save version bumped to **v38** (adds monster pocket consumables; retains v37 item egos/brands).
 
 ### Changed
 - **#whistle** now calls **all friendly companions** with **Follow/Fetch** orders (not just the starting dog).
 - Floor trap scatter now avoids **shops** and **shrines** (keeps safe spaces consistent; traps still appear elsewhere).
+- Darkness lighting now treats **burning creatures** and **flaming ego weapons** as small moving light sources (in addition to torches, room ambient light, and fire fields).
 
 ### Fixed
 - Test/headless builds no longer require SDL2: **keybinds** are compiled only for the game executable.

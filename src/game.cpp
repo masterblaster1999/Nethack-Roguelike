@@ -2539,6 +2539,9 @@ static void hashEntity(Hash64& hh, const Entity& e) {
     hh.addEnum(e.allyOrder);
 
     hh.addI32(e.stolenGold);
+
+    // v38+: pocket consumable (used by some monsters)
+    hashItem(hh, e.pocketConsumable);
 }
 
 static void hashDungeon(Hash64& hh, const Dungeon& d) {

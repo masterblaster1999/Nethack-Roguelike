@@ -1,9 +1,10 @@
 {
-  "description": "Procedural generation: corridor braiding pass that reduces corridor dead-ends by tunneling through solid wall to create loops/alternate routes (biased toward maze/catacombs/warrens) and feeds into the existing terrain sculpt pass for nicer edges.",
+  "description": "Monster pocket potions: Wizards may spawn with a consumable potion and will sometimes drink it mid-fight; levitation now enables monster pathing across chasms. Save version bumped to v38.",
   "files": [
     "CMakeLists.txt",
     "PATCH_MANIFEST.json",
     "README.md",
+    "CHANGELOG.md",
     "docs/SETTINGS.md",
     "src/ai.cpp",
     "src/combat.cpp",
@@ -25,14 +26,19 @@
     "src/game_markers.cpp",
     "src/game_save.cpp",
     "src/game_spawn.cpp",
+    "src/game_targeting.cpp",
     "src/game_world.cpp",
+    "src/hallucination.hpp",
     "src/items.cpp",
     "src/items.hpp",
     "src/shop.cpp",
     "src/keybinds.cpp",
     "src/main.cpp",
+    "src/headless_main.cpp",
     "src/render.cpp",
     "src/render.hpp",
+    "src/replay_runner.cpp",
+    "src/replay_runner.hpp",
     "src/settings.cpp",
     "src/settings.hpp",
     "src/spritegen.cpp",
@@ -42,13 +48,14 @@
     "src/terrain_sculpt.hpp",
     "tests/test_main.cpp"
   ],
-  "patch_id": "roundN_plus62",
-  "previous_patch": "roundN_plus61",
+  "patch_id": "roundN_plus67",
+  "previous_patch": "roundN_plus66",
   "summary": [
-    "Added a corridor-braiding post-pass: it searches from corridor dead-ends through solid wall and carves short connecting tunnels to other corridors, creating extra loops and reducing mandatory backtracking.",
-    "The braiding pass is conservative: it avoids rooms, doors, stairs, and chasm edges, and only digs through Wall tiles in solid stone.",
-    "Integrated braiding before the existing terrain sculpt pass so newly dug tunnels also get edge-sculpting/roughening.",
-    "Exposed Dungeon::corridorBraidCount as a lightweight per-floor debug/telemetry counter (tunnels carved)."
+    "Added Entity::pocketConsumable (v38) and serialize it in saves so monsters can carry a single stackable consumable item.",
+    "Wizards can now spawn with a pocket potion (heal, regen, shielding, invisibility, levitation).",
+    "AI: Wizards will sometimes drink their pocket potion mid-fight; 'obvious' effects can identify the potion if observed.",
+    "AI pathfinding: added a Levitate path mode so levitating monsters can route across chasms.",
+    "Updated README + CHANGELOG; bumped save version to v38 and included pocket consumable in determinism hash."
   ],
-  "timestamp": "2026-01-06"
+  "timestamp": "2026-01-07"
 }

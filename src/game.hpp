@@ -690,6 +690,11 @@ struct Entity {
     // Loot carried by monsters (append-only for save compatibility).
     // Used by thieves (e.g., Leprechauns) so stolen gold can be recovered on death.
     int stolenGold = 0;
+
+    // Pocket consumable carried by monsters (append-only for save compatibility).
+    // Used by a few intelligent monsters so they can drink a potion mid-fight.
+    // id==0 means the slot is empty.
+    Item pocketConsumable;
 };
 
 struct FXProjectile {

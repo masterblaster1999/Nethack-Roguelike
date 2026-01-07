@@ -177,8 +177,12 @@ std::string Game::targetingCombatPreviewText() const {
                 const bool confused = (player().effects.confusionTurns > 0);
                 if (confused) adjAtk -= 3;
 
-                const int pct = hitChancePercent(adjAtk, ac);
-                ss << "HIT " << pct << "% ";
+                if (player().effects.hallucinationTurns > 0) {
+                    ss << "HIT ?% ";
+                } else {
+                    const int pct = hitChancePercent(adjAtk, ac);
+                    ss << "HIT " << pct << "% ";
+                }
             }
         }
     }

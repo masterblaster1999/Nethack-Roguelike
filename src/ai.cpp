@@ -86,6 +86,7 @@ void Game::monsterTurn() {
         Normal = 0,
         SmashLockedDoors = 1,
         Phasing = 2,
+        Levitate = 3,
     };
 
     auto monsterCanBashLockedDoor = [&](EntityKind k) -> bool {
@@ -101,6 +102,7 @@ void Game::monsterTurn() {
 
         if (dung.isPassable(x, y)) return true;
         if (mode == PathMode::SmashLockedDoors && dung.isDoorLocked(x, y)) return true;
+        if (mode == PathMode::Levitate && dung.at(x, y).type == TileType::Chasm) return true;
         return false;
     };
 
@@ -152,7 +154,17 @@ void Game::monsterTurn() {
     };
 
     auto diagOkForMode = [&](int fromX, int fromY, int dx, int dy, int mode) -> bool {
+        // Cardinal moves never need special casing.
+        if (dx == 0 || dy == 0) return true;
+
         if (mode == PathMode::Phasing) return true;
+
+        if (mode == PathMode::Levitate) {
+            // Allow diagonal movement as long as the two adjacent cardinal tiles
+            // are passable in this mode (including chasms).
+            return passableForMode(fromX + dx, fromY, mode) && passableForMode(fromX, fromY + dy, mode);
+        }
+
         return diagonalPassable(dung, {fromX, fromY}, dx, dy);
     };
 
@@ -186,7 +198,7 @@ void Game::monsterTurn() {
             const int nx = m.pos.x + dx;
             const int ny = m.pos.y + dy;
             if (!dung.inBounds(nx, ny)) continue;
-            if (mode != PathMode::Phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
+            if (dx != 0 && dy != 0 && !diagOkForMode(m.pos.x, m.pos.y, dx, dy, mode)) continue;
             if (!passableForMode(nx, ny, mode)) continue;
             if (entityAt(nx, ny)) continue;
 
@@ -214,7 +226,7 @@ void Game::monsterTurn() {
             const int nx = m.pos.x + dx;
             const int ny = m.pos.y + dy;
             if (!dung.inBounds(nx, ny)) continue;
-            if (mode != PathMode::Phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
+            if (dx != 0 && dy != 0 && !diagOkForMode(m.pos.x, m.pos.y, dx, dy, mode)) continue;
             if (!passableForMode(nx, ny, mode)) continue;
             if (entityAt(nx, ny)) continue;
 
@@ -666,6 +678,8 @@ void Game::monsterTurn() {
         int pathMode = PathMode::Normal;
         if (entityCanPhase(m.kind)) {
             pathMode = PathMode::Phasing;
+        } else if (m.effects.levitationTurns > 0) {
+            pathMode = PathMode::Levitate;
         } else if (monsterCanBashLockedDoor(m.kind)) {
             pathMode = PathMode::SmashLockedDoors;
         }
@@ -694,6 +708,92 @@ void Game::monsterTurn() {
 
         const std::vector<int>& costMap = getCostMap(target, pathMode);
         const int d0 = costMap[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
+
+        // Pocket consumables: a few intelligent monsters can carry a potion and
+        // will sometimes drink it mid-fight. This makes encounters with Wizards
+        // more dynamic and also ensures levitation is meaningful for monsters.
+        if (!m.friendly && m.pocketConsumable.id != 0 && m.pocketConsumable.count > 0 && isPotionKind(m.pocketConsumable.kind)) {
+            auto drinkPocketPotion = [&](ItemKind pk) {
+                const bool vis = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+                if (vis) {
+                    Item tmp = m.pocketConsumable;
+                    tmp.count = 1;
+                    pushMsg(std::string("THE ") + kindName(m.kind) + " DRINKS A " + displayItemName(tmp) + "!", MessageKind::Warning, false);
+                }
+
+                // Apply a subset of potion effects that make sense for monsters.
+                switch (pk) {
+                    case ItemKind::PotionHealing: {
+                        const int heal = itemDef(ItemKind::PotionHealing).healAmount;
+                        m.hp = std::min(m.hpMax, m.hp + std::max(1, heal));
+                        break;
+                    }
+                    case ItemKind::PotionRegeneration:
+                        m.effects.regenTurns = std::max(m.effects.regenTurns, 18);
+                        break;
+                    case ItemKind::PotionShielding:
+                        m.effects.shieldTurns = std::max(m.effects.shieldTurns, 14);
+                        break;
+                    case ItemKind::PotionInvisibility:
+                        m.effects.invisTurns = std::min(60, m.effects.invisTurns + 18);
+                        break;
+                    case ItemKind::PotionLevitation: {
+                        const int dur = 14 + rng.range(0, 6);
+                        m.effects.levitationTurns = std::max(m.effects.levitationTurns, dur);
+                        break;
+                    }
+                    default:
+                        break;
+                }
+
+                // If the effect is obvious and the player saw it happen, auto-identify.
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    const bool obvious = (pk == ItemKind::PotionInvisibility || pk == ItemKind::PotionShielding || pk == ItemKind::PotionRegeneration || pk == ItemKind::PotionLevitation);
+                    if (obvious) {
+                        markIdentified(pk, false);
+                    }
+                }
+
+                // Consume one potion from the stack.
+                m.pocketConsumable.count -= 1;
+                if (m.pocketConsumable.count <= 0) {
+                    m.pocketConsumable.id = 0;
+                }
+            };
+
+            const ItemKind pk = m.pocketConsumable.kind;
+
+            // Emergency heal.
+            if (pk == ItemKind::PotionHealing && m.hp <= std::max(1, m.hpMax / 3)) {
+                drinkPocketPotion(pk);
+                return;
+            }
+
+            // Combat buffs once engaged.
+            if (seesPlayer && pk == ItemKind::PotionShielding && m.effects.shieldTurns <= 0 && rng.chance(0.65f)) {
+                drinkPocketPotion(pk);
+                return;
+            }
+            if (seesPlayer && pk == ItemKind::PotionInvisibility && m.effects.invisTurns <= 0 && rng.chance(0.75f)) {
+                drinkPocketPotion(pk);
+                return;
+            }
+            if (pk == ItemKind::PotionRegeneration && m.hp < m.hpMax && m.effects.regenTurns <= 0 && (m.hp <= m.hpMax / 2 || seesPlayer)) {
+                drinkPocketPotion(pk);
+                return;
+            }
+
+            // Tactical levitation: if the player is unreachable with normal pathing
+            // (typically due to a chasm split), drink levitation to open a route.
+            if (pk == ItemKind::PotionLevitation && m.effects.levitationTurns <= 0 && d0 < 0) {
+                const std::vector<int>& costLev = getCostMap(target, PathMode::Levitate);
+                const int dLev = costLev[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
+                if (dLev >= 0) {
+                    drinkPocketPotion(pk);
+                    return;
+                }
+            }
+        }
 
         // If adjacent, melee attack (with some monster-specific tricks).
         if (isAdjacent8(m.pos, p.pos)) {

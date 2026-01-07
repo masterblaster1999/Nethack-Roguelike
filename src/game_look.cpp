@@ -1,5 +1,7 @@
 #include "game_internal.hpp"
 
+#include "hallucination.hpp"
+
 void Game::beginLook() {
     // Close other overlays
     invOpen = false;
@@ -56,6 +58,8 @@ std::string Game::describeAt(Vec2i p) const {
     }
 
     std::ostringstream ss;
+
+    const bool hallu = isHallucinating(*this);
 
     // Base tile description
     switch (t.type) {
@@ -126,7 +130,8 @@ std::string Game::describeAt(Vec2i p) const {
             if (e->id == playerId_) {
                 ss << " | YOU";
             } else {
-                std::string label = kindName(e->kind);
+                const EntityKind showKind = hallucinatedEntityKind(*this, *e);
+                std::string label = kindName(showKind);
                 if (e->friendly) {
                     label += " (ALLY";
                     switch (e->allyOrder) {
@@ -141,18 +146,18 @@ std::string Game::describeAt(Vec2i p) const {
                 ss << " | " << label << " " << e->hp << "/" << e->hpMax;
 
                 // Codex (per-run) stats: kills by kind + XP value.
-                const uint16_t kindKills = codexKills(e->kind);
+                const uint16_t kindKills = codexKills(showKind);
                 if (kindKills > 0) {
                     ss << " | KILLS: " << kindKills;
                 }
-                ss << " | XP: " << xpFor(e->kind);
+                ss << " | XP: " << xpFor(showKind);
 
-                if (e->kind == EntityKind::Ghost) {
+                if (showKind == EntityKind::Ghost) {
                     ss << " | ETHEREAL";
                 }
 
                 if (e->stolenGold > 0) {
-                    if (e->kind == EntityKind::Leprechaun) {
+                    if (showKind == EntityKind::Leprechaun) {
                         ss << " | STOLEN: " << e->stolenGold << "G";
                     } else if (e->friendly) {
                         ss << " | CARRY: " << e->stolenGold << "G";
@@ -165,11 +170,15 @@ std::string Game::describeAt(Vec2i p) const {
                     ss << " | FEARED";
                 }
 
-                if (e->gearMelee.id != 0 && isMeleeWeapon(e->gearMelee.kind)) {
-                    ss << " | WPN: " << itemDisplayNameSingle(e->gearMelee.kind);
-                }
-                if (e->gearArmor.id != 0 && isArmor(e->gearArmor.kind)) {
-                    ss << " | ARM: " << itemDisplayNameSingle(e->gearArmor.kind);
+                // Don't leak extra information while hallucinating: the player is already
+                // being shown a distorted creature type.
+                if (!hallu) {
+                    if (e->gearMelee.id != 0 && isMeleeWeapon(e->gearMelee.kind)) {
+                        ss << " | WPN: " << itemDisplayNameSingle(e->gearMelee.kind);
+                    }
+                    if (e->gearArmor.id != 0 && isArmor(e->gearArmor.kind)) {
+                        ss << " | ARM: " << itemDisplayNameSingle(e->gearArmor.kind);
+                    }
                 }
 
             }
@@ -185,20 +194,30 @@ std::string Game::describeAt(Vec2i p) const {
             }
         }
         if (itemCount > 0 && first) {
-            std::string itemLabel = displayItemName(first->item);
-            if (first->item.kind == ItemKind::Chest) {
-                if (chestLocked(first->item)) itemLabel += " (LOCKED)";
-                if (chestTrapped(first->item) && chestTrapKnown(first->item)) itemLabel += " (TRAPPED)";
-            } else if (first->item.kind == ItemKind::ChestOpen) {
-                int stacks = 0;
-                for (const auto& c : chestContainers_) {
-                    if (c.chestId == first->item.id) { stacks = static_cast<int>(c.items.size()); break; }
+            Item showItem = first->item;
+            if (hallu) {
+                showItem.kind = hallucinatedItemKind(*this, first->item);
+            }
+
+            std::string itemLabel = displayItemName(showItem);
+
+            // Chest metadata is deliberately suppressed while hallucinating: it would otherwise
+            // reveal the true underlying object even if the player "sees" something else.
+            if (!hallu) {
+                if (first->item.kind == ItemKind::Chest) {
+                    if (chestLocked(first->item)) itemLabel += " (LOCKED)";
+                    if (chestTrapped(first->item) && chestTrapKnown(first->item)) itemLabel += " (TRAPPED)";
+                } else if (first->item.kind == ItemKind::ChestOpen) {
+                    int stacks = 0;
+                    for (const auto& c : chestContainers_) {
+                        if (c.chestId == first->item.id) { stacks = static_cast<int>(c.items.size()); break; }
+                    }
+                    const int tier = chestTier(first->item);
+                    const int limit = chestStackLimitForTier(tier);
+                    std::stringstream cs;
+                    cs << " (" << chestTierName(tier) << " " << stacks << "/" << limit << ")";
+                    itemLabel += cs.str();
                 }
-                const int tier = chestTier(first->item);
-                const int limit = chestStackLimitForTier(tier);
-                std::stringstream cs;
-                cs << " (" << chestTierName(tier) << " " << stacks << "/" << limit << ")";
-                itemLabel += cs.str();
             }
             ss << " | ITEM: " << itemLabel;
             if (itemCount > 1) ss << " (+" << (itemCount - 1) << ")";
@@ -209,20 +228,6 @@ std::string Game::describeAt(Vec2i p) const {
     Vec2i pp = player().pos;
     int dist = std::abs(p.x - pp.x) + std::abs(p.y - pp.y);
     ss << " | DIST " << dist;
-
-
-
-    // Environmental fields
-    if (dung.inBounds(p.x, p.y) && dung.at(p.x, p.y).visible) {
-        const uint8_t f = fireAt(p.x, p.y);
-        if (f > 0u) {
-            ss << " | FIRE";
-        }
-        const uint8_t g = confusionGasAt(p.x, p.y);
-        if (g > 0u) {
-            ss << " | GAS (CONFUSION)";
-        }
-    }
 
     return ss.str();
 }

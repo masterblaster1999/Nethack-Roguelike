@@ -105,13 +105,6 @@ void Game::recomputeLightMap() {
 
     auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * dung.width + x); };
 
-    auto setLight = [&](int x, int y, uint8_t v) {
-        if (!dung.inBounds(x, y)) return;
-        const size_t i = idx(x, y);
-        if (i >= lightMap_.size()) return;
-        if (lightMap_[i] < v) lightMap_[i] = v;
-    };
-
     auto setAmbient = [&](int x, int y, uint8_t amb, Color tint) {
         if (!dung.inBounds(x, y)) return;
         const size_t i = idx(x, y);
@@ -265,6 +258,76 @@ void Game::recomputeLightMap() {
                 const int b = std::min(255, 110 + static_cast<int>(f.s) * 14);
                 sources.push_back({ Vec2i{f.x, f.y}, radius, static_cast<uint8_t>(b), Color{ 255, 170, 110, 255 } });
             }
+        }
+    }
+
+
+    // Burning creatures act as small moving light sources.
+    // This helps fire-based attacks/egos feel impactful in darkness and makes burning monsters trackable.
+    {
+        struct BurnSrc { Vec2i pos; int turns; };
+        std::vector<BurnSrc> burns;
+        burns.reserve(24);
+
+        for (const auto& e : ents) {
+            if (e.hp <= 0) continue;
+            if (e.effects.burnTurns <= 0) continue;
+            if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
+            burns.push_back({ e.pos, e.effects.burnTurns });
+        }
+
+        constexpr size_t MAX_BURN_SOURCES = 24;
+        if (burns.size() > MAX_BURN_SOURCES) {
+            std::nth_element(burns.begin(), burns.begin() + static_cast<std::ptrdiff_t>(MAX_BURN_SOURCES), burns.end(),
+                             [](const BurnSrc& a, const BurnSrc& b) { return a.turns > b.turns; });
+            burns.resize(MAX_BURN_SOURCES);
+        }
+
+        for (const auto& b : burns) {
+            // Scale light with remaining burn duration.
+            int radius = 2 + std::min(2, b.turns / 3);
+            radius = clampi(radius, 2, 4);
+
+            int intensity = 120 + b.turns * 18;
+            intensity = clampi(intensity, 120, 255);
+
+            sources.push_back({ b.pos, radius, static_cast<uint8_t>(intensity), Color{ 255, 175, 120, 255 } });
+        }
+    }
+
+    // Flaming ego weapons (rare loot) emit a steady glow.
+    // This gives them a small utility bump on dark floors without requiring torches.
+    {
+        struct EgoSrc { Vec2i pos; uint8_t power; };
+        std::vector<EgoSrc> egos;
+        egos.reserve(16);
+
+        // Player (equipped melee).
+        if (const Item* w = equippedMelee()) {
+            if (w->ego == ItemEgo::Flaming) {
+                egos.push_back({ player().pos, 200u });
+            }
+        }
+
+        // Monsters (equipped melee gear).
+        for (const auto& e : ents) {
+            if (e.id == playerId_) continue;
+            if (e.hp <= 0) continue;
+            if (e.gearMelee.id == 0) continue;
+            if (e.gearMelee.ego != ItemEgo::Flaming) continue;
+            if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
+            egos.push_back({ e.pos, 190u });
+        }
+
+        constexpr size_t MAX_EGO_SOURCES = 16;
+        if (egos.size() > MAX_EGO_SOURCES) {
+            std::nth_element(egos.begin(), egos.begin() + static_cast<std::ptrdiff_t>(MAX_EGO_SOURCES), egos.end(),
+                             [](const EgoSrc& a, const EgoSrc& b) { return a.power > b.power; });
+            egos.resize(MAX_EGO_SOURCES);
+        }
+
+        for (const auto& es : egos) {
+            sources.push_back({ es.pos, 3, es.power, Color{ 255, 150, 100, 255 } });
         }
     }
 

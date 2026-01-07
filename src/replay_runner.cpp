@@ -16,7 +16,10 @@ struct TurnHashVerifyCtx {
     const std::vector<TurnHashCheckpoint>* expected = nullptr;
     size_t idx = 0;
     bool failed = false;
+    // Current turn when the mismatch is detected.
     uint32_t failedTurn = 0;
+    // Checkpoint turn that was expected (may be < failedTurn if we skipped over it).
+    uint32_t expectedTurn = 0;
     uint64_t expectedHash = 0;
     uint64_t gotHash = 0;
 };
@@ -28,6 +31,7 @@ static void onTurnHashVerify(void* user, uint32_t turn, uint64_t hash) {
         // We missed one or more expected checkpoints; treat as failure.
         ctx->failed = true;
         ctx->failedTurn = turn;
+        ctx->expectedTurn = (*ctx->expected)[ctx->idx].turn;
         ctx->expectedHash = (*ctx->expected)[ctx->idx].hash;
         ctx->gotHash = hash;
         return;
@@ -38,6 +42,7 @@ static void onTurnHashVerify(void* user, uint32_t turn, uint64_t hash) {
         if (exp != hash) {
             ctx->failed = true;
             ctx->failedTurn = turn;
+            ctx->expectedTurn = turn;
             ctx->expectedHash = exp;
             ctx->gotHash = hash;
         }
@@ -46,9 +51,16 @@ static void onTurnHashVerify(void* user, uint32_t turn, uint64_t hash) {
 
 static void formatHashMismatch(const TurnHashVerifyCtx& ctx, std::string& out) {
     std::ostringstream ss;
-    ss << "REPLAY DESYNC at turn " << ctx.failedTurn
-       << " (expected 0x" << std::hex << ctx.expectedHash
-       << ", got 0x" << std::hex << ctx.gotHash << ")";
+    if (ctx.expectedTurn != 0 && ctx.expectedTurn != ctx.failedTurn) {
+        ss << "REPLAY DESYNC: missed checkpoint turn " << ctx.expectedTurn
+           << " while at turn " << ctx.failedTurn
+           << " (expected 0x" << std::hex << ctx.expectedHash
+           << ", got 0x" << std::hex << ctx.gotHash << ")";
+    } else {
+        ss << "REPLAY DESYNC at turn " << ctx.failedTurn
+           << " (expected 0x" << std::hex << ctx.expectedHash
+           << ", got 0x" << std::hex << ctx.gotHash << ")";
+    }
     out = ss.str();
 }
 
@@ -173,6 +185,13 @@ bool runReplayHeadless(Game& game,
         // Validate initial state (turn 0) immediately, if present in the replay.
         onTurnHashVerify(&verify, game.turns(), game.determinismHash());
         if (verify.failed) {
+            if (outStats) {
+                outStats->failure = ReplayFailureKind::HashMismatch;
+                outStats->failedTurn = verify.failedTurn;
+                outStats->failedCheckpointTurn = verify.expectedTurn;
+                outStats->expectedHash = verify.expectedHash;
+                outStats->gotHash = verify.gotHash;
+            }
             if (err) formatHashMismatch(verify, *err);
             return false;
         }
@@ -214,6 +233,17 @@ bool runReplayHeadless(Game& game,
             ++dispatched;
 
             if (verify.failed) {
+                if (outStats) {
+                    outStats->failure = ReplayFailureKind::HashMismatch;
+                    outStats->failedTurn = verify.failedTurn;
+                    outStats->failedCheckpointTurn = verify.expectedTurn;
+                    outStats->expectedHash = verify.expectedHash;
+                    outStats->gotHash = verify.gotHash;
+                    outStats->simulatedMs = elapsedMs;
+                    outStats->frames = frames;
+                    outStats->eventsDispatched = dispatched;
+                    outStats->turns = game.turns();
+                }
                 if (err) formatHashMismatch(verify, *err);
                 return false;
             }
@@ -240,12 +270,30 @@ bool runReplayHeadless(Game& game,
         ++frames;
 
         if (verify.failed) {
+            if (outStats) {
+                outStats->failure = ReplayFailureKind::HashMismatch;
+                outStats->failedTurn = verify.failedTurn;
+                outStats->failedCheckpointTurn = verify.expectedTurn;
+                outStats->expectedHash = verify.expectedHash;
+                outStats->gotHash = verify.gotHash;
+                outStats->simulatedMs = elapsedMs;
+                outStats->frames = frames;
+                outStats->eventsDispatched = dispatched;
+                outStats->turns = game.turns();
+            }
             if (err) formatHashMismatch(verify, *err);
             return false;
         }
     }
 
     if (frames >= maxFrames || elapsedMs > maxSimMs) {
+        if (outStats) {
+            outStats->failure = ReplayFailureKind::SafetyLimit;
+            outStats->simulatedMs = elapsedMs;
+            outStats->frames = frames;
+            outStats->eventsDispatched = dispatched;
+            outStats->turns = game.turns();
+        }
         if (err) {
             std::ostringstream ss;
             ss << "Replay runner exceeded safety limit (elapsedMs=" << elapsedMs

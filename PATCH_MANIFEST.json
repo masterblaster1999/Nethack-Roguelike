@@ -1,5 +1,5 @@
 {
-  "description": "Bug hunt: fix degenerate spawn placement, eliminate MSVC C4127 constant-condition warnings without pragmas, and clean up unsafe vector erase casts.",
+  "description": "Minimap usability upgrade: zoom controls, cursor info line, and discovered trap pips (with settings persistence).",
   "files": [
     "CMakeLists.txt",
     "PATCH_MANIFEST.json",
@@ -49,12 +49,16 @@
     "src/terrain_sculpt.hpp",
     "tests/test_main.cpp"
   ],
-  "patch_id": "roundN_plus71",
-  "previous_patch": "roundN_plus70",
+  "patch_id": "roundN_plus73",
+  "previous_patch": "roundN_plus72",
   "summary": [
-    "Spawn safety: randomFreeTileInRoom() now has robust fallback logic (global random + full-map scan) so degenerate rooms cannot place monsters/items inside walls or on occupied tiles.",
-    "Warnings: replace constant-condition branches in hallucination helpers and hallucination phantom rendering with static_assert guards, removing MSVC C4127 without disabling warnings.",
-    "Warnings/robustness: fix size_t->long iterator math in inventory ground-item erases by using std::vector<>::difference_type casts."
+    "Minimap zoom: [ / ] while the minimap is open to scale the minimap tile size (also persisted via minimap_zoom in settings).",
+    "Minimap info: adds a third info line that shows the look-style description of the tile under the minimap cursor (truncated to fit).",
+    "Minimap traps: discovered traps now show as colored pips on the minimap (faded in fog-of-war).",
+    "Sneak mode stealth: monsters have a reduced visual detection range while you are sneaking (with penalties for heavy armor/encumbrance and partial resistance for keen-sensed monsters).",
+    "Sneak mode scent: sneaking leaves a weaker scent trail, making smell-capable monsters less reliable trackers (heavy armor/encumbrance reduce the benefit).",
+    "Sneak mode tradeoffs: sneaking is now slightly slower via occasional extra monster turns; door open/close/lock/pick interactions are also quieter while sneaking.",
+    "Determinism/testing: include sneakMode_ in determinismHash() and add a save/load regression test that preserves sneak state."
   ],
   "timestamp": "2026-01-08"
 }

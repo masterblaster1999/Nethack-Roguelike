@@ -477,10 +477,43 @@ void Game::updateScentMap() {
         scentField_[i] = (v > DECAY) ? static_cast<uint8_t>(v - DECAY) : 0u;
     }
 
-    // Deposit at the player's current tile (even if the player didn't move this turn).
+    // Deposit at the player's current tile.
+    //
+    // Sneak mode intentionally reduces the "freshness" of the player's scent trail so
+    // smell-capable monsters have a harder time tracking you around corners.
+    // Heavy armor / heavy burden reduce the benefit.
     const Entity& p = player();
     if (dung.inBounds(p.pos.x, p.pos.y)) {
-        scentField_[idx(p.pos.x, p.pos.y)] = std::max(scentField_[idx(p.pos.x, p.pos.y)], DEPOSIT);
+        uint8_t deposit = DEPOSIT;
+
+        if (isSneaking()) {
+            // Base sneaking deposit: ~200 down to ~80 with high agility.
+            int d = 200 - std::max(0, playerAgility()) * 6;
+
+            // Heavy armor makes it harder to suppress your trail.
+            if (const Item* a = equippedArmor()) {
+                if (a->kind == ItemKind::ChainArmor) d += 20;
+                if (a->kind == ItemKind::PlateArmor) d += 40;
+            }
+
+            // Encumbrance makes sneaking clumsier and less subtle.
+            if (encumbranceEnabled_) {
+                switch (burdenState()) {
+                    case BurdenState::Unburdened: break;
+                    case BurdenState::Burdened:   d += 10; break;
+                    case BurdenState::Stressed:   d += 20; break;
+                    case BurdenState::Strained:   d += 30; break;
+                    case BurdenState::Overloaded: d += 40; break;
+                }
+            }
+
+            if (d < 80) d = 80;
+            if (d > 255) d = 255;
+            deposit = static_cast<uint8_t>(d);
+        }
+
+        const size_t pi = idx(p.pos.x, p.pos.y);
+        scentField_[pi] = std::max(scentField_[pi], deposit);
     }
 
     // Spread along walkable tiles so the "trail" forms a gradient that can be followed around corners.

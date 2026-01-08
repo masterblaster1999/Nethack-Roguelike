@@ -153,6 +153,9 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "hud_height") {
             int v = 0;
             if (parseInt(val, v)) s.hudHeight = std::clamp(v, 120, 240);
+        } else if (key == "minimap_zoom" || key == "minimap_scale") {
+            int v = 0;
+            if (parseInt(val, v)) s.minimapZoom = std::clamp(v, -3, 3);
         } else if (key == "view_w" || key == "view_width" || key == "viewport_w") {
             int v = 0;
             if (parseInt(val, v)) {
@@ -296,6 +299,10 @@ bool writeDefaultSettings(const std::string& path) {
 tile_size = 13
 hud_height = 160
 start_fullscreen = false
+
+# Minimap zoom level (UI-only)
+# minimap_zoom: -3..3  (0 = default)
+minimap_zoom = 0
 
 # Viewport / camera
 # view_w/view_h: 0 = auto-fit to your display; otherwise set a fixed viewport in tiles.
@@ -449,6 +456,8 @@ bind_help = f1, shift+slash, h
 bind_options = f2
 bind_command = shift+3
 bind_toggle_minimap = m
+bind_minimap_zoom_out = [
+bind_minimap_zoom_in = ]
 bind_toggle_stats = shift+tab
 bind_toggle_view_mode = f7
 bind_toggle_voxel_sprites = f8

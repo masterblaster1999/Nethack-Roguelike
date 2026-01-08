@@ -2669,6 +2669,7 @@ uint64_t Game::determinismHash() const {
     hh.addI32(hungerMax);
     hh.addBool(encumbranceEnabled_);
     hh.addBool(lightingEnabled_);
+    hh.addBool(sneakMode_);
 
     // Endgame escalation.
     hh.addBool(yendorDoomEnabled_);

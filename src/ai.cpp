@@ -242,6 +242,35 @@ void Game::monsterTurn() {
     constexpr int LOS_MANHATTAN = 12;
     constexpr int TRACK_TURNS = 16;
 
+    // Sneak mode: while sneaking, reduce the range at which most monsters can visually
+    // notice the player. This stacks with the existing noise + scent systems.
+    // Heavy armor and encumbrance reduce the benefit; keen-sensed monsters partially ignore it.
+    int sneakSightStealth = 0;
+    if (isSneaking() && p.effects.invisTurns <= 0) {
+        const int agi = std::max(0, playerAgility());
+        // Base stealth from agility: 2..6 tiles of LOS reduction.
+        sneakSightStealth = 2 + std::min(4, agi / 4);
+
+        // Heavy armor makes sneaking less effective.
+        if (const Item* a = equippedArmor()) {
+            if (a->kind == ItemKind::ChainArmor) sneakSightStealth -= 1;
+            if (a->kind == ItemKind::PlateArmor) sneakSightStealth -= 2;
+        }
+
+        // Encumbrance makes it harder to sneak effectively.
+        if (encumbranceEnabled_) {
+            switch (burdenState()) {
+                case BurdenState::Unburdened: break;
+                case BurdenState::Burdened:   sneakSightStealth -= 1; break;
+                case BurdenState::Stressed:   sneakSightStealth -= 2; break;
+                case BurdenState::Strained:   sneakSightStealth -= 3; break;
+                case BurdenState::Overloaded: sneakSightStealth -= 3; break;
+            }
+        }
+
+        if (sneakSightStealth < 0) sneakSightStealth = 0;
+    }
+
     // Energy scheduling constants.
     constexpr int ENERGY_PER_ACTION = 100;
     constexpr int MAX_ACTIONS_PER_TURN = 3; // safety cap: avoids runaway loops if speed is ever mis-set
@@ -578,8 +607,24 @@ void Game::monsterTurn() {
             return m.pos;
         };
 
+        int losLimit = LOS_MANHATTAN;
+        if (sneakSightStealth > 0) {
+            // Some monsters have especially keen senses and partially ignore stealth.
+            int keen = 0;
+            switch (m.kind) {
+                case EntityKind::Bat:      keen = 2; break;
+                case EntityKind::Wizard:   keen = 3; break;
+                case EntityKind::Minotaur: keen = 1; break;
+                default: break;
+            }
+
+            losLimit = LOS_MANHATTAN - sneakSightStealth + keen;
+            if (losLimit < 4) losLimit = 4; // never fully "blind" at close range
+            if (losLimit > LOS_MANHATTAN) losLimit = LOS_MANHATTAN;
+        }
+
         bool seesPlayer = false;
-        if (man <= LOS_MANHATTAN) {
+        if (man <= losLimit) {
             seesPlayer = dung.hasLineOfSight(m.pos.x, m.pos.y, p.pos.x, p.pos.y);
         }
 

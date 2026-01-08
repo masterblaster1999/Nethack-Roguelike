@@ -777,15 +777,17 @@ bool Renderer::windowToMinimapTile(const Game& game, int winX, int winY, int& ti
     if (W <= 0 || H <= 0) return false;
 
     // Mirror drawMinimapOverlay layout so hit-testing matches visuals.
-    int px = 4;
+    int px = 4 + game.minimapZoom();
+    px = std::clamp(px, 2, 12);
+
     const int pad = 10;
     const int margin = 10;
+    const int titleH = 30; // matches drawMinimapOverlay (title + hints + info)
     const int maxW = winW / 2;
     const int maxH = (winH - hudH) / 2;
     while (px > 2 && (W * px + pad * 2) > maxW) px--;
-    while (px > 2 && (H * px + pad * 2) > maxH) px--;
+    while (px > 2 && (H * px + pad * 2 + titleH) > maxH) px--;
 
-    const int titleH = 16;
     const int panelW = W * px + pad * 2;
 
     const int x0 = winW - panelW - margin;
@@ -3105,7 +3107,7 @@ void Renderer::drawHud(const Game& game) {
     const int controlY3 = winH - 16;
 
     drawText5x7(renderer, 8, controlY1, 2, gray,
-        "MOVE: WASD/ARROWS/NUMPAD | SPACE/. WAIT | R REST | N SNEAK | < > STAIRS");
+        "MOVE: WASD/ARROWS/NUMPAD | SPACE/. WAIT | R REST | N SNEAK (STEALTH) | < > STAIRS");
     if (game.isKicking()) {
         drawText5x7(renderer, 8, controlY2, 2, yellow,
             "KICK: CHOOSE DIRECTION (ESC CANCEL)");
@@ -3918,17 +3920,17 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineWhite("CONTROLS:");
     if (game.controlPreset() == ControlPreset::Nethack) {
         lineGray("MOVE: HJKL + YUBN (ARROWS/NUMPAD OK)");
-        lineGray("SPACE/. WAIT  R REST  SHIFT+N SNEAK  < > STAIRS");
+        lineGray("SPACE/. WAIT  R REST  SHIFT+N SNEAK (STEALTH)  < > STAIRS");
         lineGray("F FIRE  G/, PICKUP  I/TAB INVENTORY");
         lineGray("D DIG  CTRL+D KICK  :/V LOOK  S SEARCH  T DISARM  C CLOSE  SHIFT+C LOCK");
     } else {
         lineGray("MOVE: WASD / ARROWS / NUMPAD + Q/E/Z/C DIAGONALS");
-        lineGray("SPACE/. WAIT  R REST  N SNEAK  < > STAIRS");
+        lineGray("SPACE/. WAIT  R REST  N SNEAK (STEALTH)  < > STAIRS");
         lineGray("F FIRE  G/, PICKUP  I/TAB INVENTORY");
         lineGray("D DIG  B KICK  L/V LOOK  SHIFT+C SEARCH  T DISARM  K CLOSE  SHIFT+K LOCK");
     }
     lineGray("O EXPLORE  P AUTOPICKUP  M MINIMAP  SHIFT+TAB STATS");
-    lineGray("MINIMAP: MOVE CURSOR (ARROWS/WASD), ENTER TRAVEL, L/RMB LOOK, LMB TRAVEL");
+    lineGray("MINIMAP: MOVE CURSOR (ARROWS/WASD), [ ] ZOOM, ENTER TRAVEL, L/RMB LOOK, LMB TRAVEL");
     lineGray("F2 OPTIONS  # EXTENDED COMMANDS  (TYPE + ENTER)");
     lineGray("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART");
     lineGray("F11 FULLSCREEN  F12 SCREENSHOT (BINDABLE)");
@@ -4004,16 +4006,19 @@ void Renderer::drawMinimapOverlay(const Game& game) {
     const int H = d.height;
 
     // Choose a small per-tile pixel size that fits comfortably on screen.
-    int px = 4;
+    int px = 4 + game.minimapZoom();
+    px = std::clamp(px, 2, 12);
+
     const int pad = 10;
     const int margin = 10;
+    const int titleH = 30; // title + hint + info line
+
     // Don't let the minimap eat the whole window.
     const int maxW = winW / 2;
     const int maxH = (winH - hudH) / 2;
     while (px > 2 && (W * px + pad * 2) > maxW) px--;
-    while (px > 2 && (H * px + pad * 2) > maxH) px--;
+    while (px > 2 && (H * px + pad * 2 + titleH) > maxH) px--;
 
-    const int titleH = 16;
     const int panelW = W * px + pad * 2;
 
     const int x0 = winW - panelW - margin;
@@ -4029,15 +4034,35 @@ void Renderer::drawMinimapOverlay(const Game& game) {
 
     // Hint line (fit inside the title band).
     const Color gray{ 160, 160, 160, 255 };
-    drawText5x7(renderer, x0 + pad, y0 + 4 + 14, 1, gray, "LMB/ENTER:TRAVEL  RMB/L:LOOK");
+    drawText5x7(renderer, x0 + pad, y0 + 4 + 14, 1, gray, "[]:ZOOM  LMB/ENTER:TRAVEL  RMB/L:LOOK");
 
-    // Cursor coordinates (right aligned).
+    // Cursor coordinates + zoom (right aligned).
     if (game.minimapCursorActive()) {
         const Vec2i c = game.minimapCursor();
-        const std::string coords = std::to_string(c.x) + "," + std::to_string(c.y);
+        const int z = game.minimapZoom();
+        std::string ztxt = "Z";
+        if (z >= 0) ztxt += "+";
+        ztxt += std::to_string(z);
+
+        const std::string coords = ztxt + "  " + std::to_string(c.x) + "," + std::to_string(c.y);
         const int charW = (5 + 1) * 1;
         const int textW = static_cast<int>(coords.size()) * charW;
         drawText5x7(renderer, x0 + panelW - pad - textW, y0 + 4 + 14, 1, gray, coords);
+    }
+
+    // Cursor info line (truncated to fit).
+    if (game.minimapCursorActive()) {
+        const Vec2i c = game.minimapCursor();
+        std::string info = game.describeAt(c);
+
+        const int charW = (5 + 1) * 1;
+        const int maxChars = std::max(0, (panelW - pad * 2) / charW);
+        if (maxChars > 0 && static_cast<int>(info.size()) > maxChars) {
+            if (maxChars >= 3) info = info.substr(0, static_cast<size_t>(maxChars - 3)) + "...";
+            else info = info.substr(0, static_cast<size_t>(maxChars));
+        }
+
+        drawText5x7(renderer, x0 + pad, y0 + 4 + 14 + 8, 1, gray, info);
     }
 
     const int mapX = x0 + pad;
@@ -4045,6 +4070,13 @@ void Renderer::drawMinimapOverlay(const Game& game) {
 
     auto drawCell = [&](int tx, int ty, uint8_t r, uint8_t g, uint8_t b, uint8_t a=255) {
         SDL_Rect rc { mapX + tx * px, mapY + ty * px, px, px };
+        SDL_SetRenderDrawColor(renderer, r, g, b, a);
+        SDL_RenderFillRect(renderer, &rc);
+    };
+
+    auto drawDot = [&](int tx, int ty, uint8_t r, uint8_t g, uint8_t b, uint8_t a=255) {
+        const int dot = std::max(1, px / 2);
+        SDL_Rect rc { mapX + tx * px + (px - dot) / 2, mapY + ty * px + (px - dot) / 2, dot, dot };
         SDL_SetRenderDrawColor(renderer, r, g, b, a);
         SDL_RenderFillRect(renderer, &rc);
     };
@@ -4146,6 +4178,39 @@ void Renderer::drawMinimapOverlay(const Game& game) {
         SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, c.a);
         SDL_Rect rr { mapX + r.x * px, mapY + r.y * px, r.w * px, r.h * px };
         SDL_RenderDrawRect(renderer, &rr);
+    }
+
+    // Traps (discovered only; explored tiles only).
+    for (const auto& tr : game.traps()) {
+        if (!tr.discovered) continue;
+        if (!d.inBounds(tr.pos.x, tr.pos.y)) continue;
+        const Tile& t = d.at(tr.pos.x, tr.pos.y);
+        if (!t.explored) continue;
+
+        const bool vis = t.visible;
+        uint8_t r = 220, g = 160, b = 220;
+        switch (tr.kind) {
+            case TrapKind::Spike:          r = 255; g = 140; b = 80;  break;
+            case TrapKind::PoisonDart:     r = 120; g = 255; b = 120; break;
+            case TrapKind::Teleport:       r = 200; g = 120; b = 255; break;
+            case TrapKind::Alarm:          r = 255; g = 255; b = 140; break;
+            case TrapKind::Web:            r = 235; g = 235; b = 235; break;
+            case TrapKind::ConfusionGas:   r = 120; g = 180; b = 255; break;
+            case TrapKind::RollingBoulder: r = 190; g = 150; b = 110; break;
+            case TrapKind::TrapDoor:       r = 150; g = 150; b = 150; break;
+            case TrapKind::LetheMist:      r = 140; g = 255; b = 255; break;
+            case TrapKind::PoisonGas:      r = 90;  g = 220; b = 90;  break;
+            default: break;
+        }
+
+        // Fade traps in the fog-of-war.
+        if (!vis) {
+            r = static_cast<uint8_t>(std::max<int>(40, r / 2));
+            g = static_cast<uint8_t>(std::max<int>(40, g / 2));
+            b = static_cast<uint8_t>(std::max<int>(40, b / 2));
+        }
+
+        drawDot(tr.pos.x, tr.pos.y, r, g, b, 220);
     }
 
     // Player map markers / notes (explored tiles only).

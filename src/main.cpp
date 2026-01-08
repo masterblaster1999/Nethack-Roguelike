@@ -514,6 +514,7 @@ int main(int argc, char** argv) {
     game.setUITheme(settings.uiTheme);
     game.setUIPanelsTextured(settings.uiPanelsTextured);
     game.setViewMode(settings.viewMode);
+    game.setMinimapZoom(settings.minimapZoom);
     game.setControlPreset(settings.controlPreset);
     game.setSettingsPath(settingsPath);
 
@@ -1203,6 +1204,7 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "player_name", game.playerName());
             ok &= updateIniKey(settingsPath, "player_class", game.playerClassIdString());
             ok &= updateIniKey(settingsPath, "show_effect_timers", game.showEffectTimers() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "minimap_zoom", std::to_string(game.minimapZoom()));
 
             auto uiThemeToString = [](UITheme t) -> const char* {
                 switch (t) {
@@ -1249,6 +1251,7 @@ int main(int argc, char** argv) {
             game.setUITheme(newSettings.uiTheme);
             game.setUIPanelsTextured(newSettings.uiPanelsTextured);
             game.setViewMode(newSettings.viewMode);
+            game.setMinimapZoom(newSettings.minimapZoom);
             game.setControlPreset(newSettings.controlPreset);
 
             // Keep the local copy up-to-date for any later use.

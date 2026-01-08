@@ -1,7 +1,9 @@
 #include "game.hpp"
+#include "settings.hpp"
 
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -99,6 +101,95 @@ bool test_save_load_roundtrip() {
     return true;
 }
 
+bool test_save_load_preserves_sneak() {
+    Game g;
+    g.setPlayerClass(PlayerClass::Rogue);
+    g.newGame(424242u);
+
+    const uint64_t hOff = g.determinismHash();
+
+    // Sneak should affect deterministic simulation state (and therefore the hash).
+    g.setSneakMode(true, true);
+    const uint64_t hOn = g.determinismHash();
+    CHECK(hOff != hOn);
+
+    // Spend a few deterministic turns so we cover more than the turn-0 state.
+    for (int i = 0; i < 3; ++i) {
+        g.handleAction(Action::Wait);
+    }
+
+    const uint32_t turnsBefore = g.turns();
+    const uint64_t h1 = g.determinismHash();
+
+    const fs::path p = testTempFile("procrogue_test_save_sneak.prs");
+    std::error_code ec;
+    fs::remove(p, ec);
+
+    CHECK(g.saveToFile(p.string(), true));
+    CHECK(fs::exists(p));
+
+    Game g2;
+    CHECK(g2.loadFromFile(p.string()));
+
+    CHECK(g2.determinismHash() == h1);
+    CHECK(g2.turns() == turnsBefore);
+    CHECK(g2.isSneaking());
+
+    fs::remove(p, ec);
+    return true;
+}
+
+
+bool test_settings_minimap_zoom_clamp() {
+    const fs::path p = testTempFile("procrogue_test_settings_minimap.ini");
+    std::error_code ec;
+    fs::remove(p, ec);
+
+    // Default should be 0 when not specified.
+    {
+        std::ofstream out(p);
+        out << "# minimal settings for test\n";
+    }
+    {
+        Settings s = loadSettings(p.string());
+        CHECK(s.minimapZoom == 0);
+    }
+
+    // Clamp high values.
+    {
+        std::ofstream out(p);
+        out << "minimap_zoom = 999\n";
+    }
+    {
+        Settings s = loadSettings(p.string());
+        CHECK(s.minimapZoom == 3);
+    }
+
+    // Clamp low values.
+    {
+        std::ofstream out(p);
+        out << "minimap_zoom = -999\n";
+    }
+    {
+        Settings s = loadSettings(p.string());
+        CHECK(s.minimapZoom == -3);
+    }
+
+    // Pass-through in-range values.
+    {
+        std::ofstream out(p);
+        out << "minimap_zoom = 2\n";
+    }
+    {
+        Settings s = loadSettings(p.string());
+        CHECK(s.minimapZoom == 2);
+    }
+
+    fs::remove(p, ec);
+    return true;
+}
+
+
 struct TestCase {
     const char* name;
     bool (*fn)();
@@ -110,6 +201,8 @@ int main(int argc, char** argv) {
     std::vector<TestCase> tests = {
         {"new_game_determinism", test_new_game_determinism},
         {"save_load_roundtrip",  test_save_load_roundtrip},
+        {"save_load_sneak",      test_save_load_preserves_sneak},
+        {"settings_minimap_zoom", test_settings_minimap_zoom_clamp},
     };
 
     bool list = false;

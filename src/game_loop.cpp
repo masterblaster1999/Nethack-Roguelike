@@ -881,6 +881,19 @@ if (optionsSel == 19) {
             return;
         }
 
+
+        // Zoom (UI-only; does not take a turn)
+        if (a == Action::MinimapZoomIn || a == Action::MinimapZoomOut) {
+            const int cur = minimapZoom();
+            int next = cur + (a == Action::MinimapZoomIn ? 1 : -1);
+            next = std::clamp(next, -3, 3);
+            if (next != cur) {
+                setMinimapZoom(next);
+                markSettingsDirty();
+            }
+            return;
+        }
+
         // Navigation (supports diagonals)
         int dx = 0;
         int dy = 0;
@@ -2064,6 +2077,40 @@ void Game::advanceAfterPlayerAction() {
             }
 
             for (int i = 0; i < extra && !isFinished(); ++i) {
+                monsterTurn();
+            }
+        }
+
+        // Sneak mode: acting carefully is slower. Model this as occasional extra monster turns
+        // (without additional hunger/regen ticks) so stealth has a real tradeoff.
+        if (isSneaking() && !isFinished()) {
+            // Base: extra turn every 3..6 turns, depending on agility.
+            int period = 3 + std::max(0, playerAgility()) / 6;
+            if (period < 3) period = 3;
+            if (period > 6) period = 6;
+
+            // Heavy armor: clanking makes careful movement slower.
+            if (const Item* a = equippedArmor()) {
+                if (a->kind == ItemKind::ChainArmor) period -= 1;
+                if (a->kind == ItemKind::PlateArmor) period -= 2;
+            }
+
+            // Encumbrance stacks with sneaking slowdown when enabled.
+            if (encumbranceEnabled_) {
+                switch (burdenState()) {
+                    case BurdenState::Unburdened: break;
+                    case BurdenState::Burdened:   period -= 1; break;
+                    case BurdenState::Stressed:   period -= 2; break;
+                    case BurdenState::Strained:   period -= 3; break;
+                    case BurdenState::Overloaded: period -= 3; break;
+                }
+            }
+
+            if (period < 2) period = 2;
+            if (period > 6) period = 6;
+
+            const int extraSneak = (turnCount % static_cast<uint32_t>(period) == 0u) ? 1 : 0;
+            for (int i = 0; i < extraSneak && !isFinished(); ++i) {
                 monsterTurn();
             }
         }

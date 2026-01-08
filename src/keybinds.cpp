@@ -238,6 +238,8 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
 
     // UI / meta
     if (name == "toggle_minimap" || name == "minimap") return Action::ToggleMinimap;
+    if (name == "minimap_zoom_in" || name == "minimap_zoomin" || name == "zoom_minimap_in") return Action::MinimapZoomIn;
+    if (name == "minimap_zoom_out" || name == "minimap_zoomout" || name == "zoom_minimap_out") return Action::MinimapZoomOut;
     if (name == "toggle_stats" || name == "stats") return Action::ToggleStats;
     if (name == "toggle_view_mode" || name == "view_mode" || name == "toggle_iso" || name == "isometric") return Action::ToggleViewMode;
     if (name == "toggle_voxel_sprites" || name == "voxel_sprites" || name == "toggle_3d_sprites" || name == "sprites3d") return Action::ToggleVoxelSprites;
@@ -354,6 +356,8 @@ KeyBinds KeyBinds::defaults() {
     add(Action::Command, SDLK_3, KMOD_SHIFT);
 
     add(Action::ToggleMinimap, SDLK_m);
+    add(Action::MinimapZoomOut, SDLK_LEFTBRACKET);
+    add(Action::MinimapZoomIn, SDLK_RIGHTBRACKET);
     add(Action::MessageHistory, SDLK_F3);
     add(Action::MessageHistory, SDLK_m, KMOD_SHIFT);
     add(Action::Codex, SDLK_F4);
@@ -486,6 +490,8 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::LoadAuto,
             Action::Restart,
             Action::ToggleMinimap,
+            Action::MinimapZoomIn,
+            Action::MinimapZoomOut,
             Action::ToggleStats,
             Action::ToggleViewMode,
             Action::ToggleVoxelSprites,
@@ -512,6 +518,8 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::Scores,
 
         Action::ToggleMinimap,
+        Action::MinimapZoomIn,
+        Action::MinimapZoomOut,
         Action::ToggleStats,
         Action::ToggleViewMode,
 
@@ -594,6 +602,8 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
     {Action::Options, "options"},
     {Action::Command, "command"},
     {Action::ToggleMinimap, "toggle_minimap"},
+    {Action::MinimapZoomIn, "minimap_zoom_in"},
+    {Action::MinimapZoomOut, "minimap_zoom_out"},
     {Action::ToggleStats, "toggle_stats"},
     {Action::ToggleViewMode, "toggle_view_mode"},
     {Action::ToggleVoxelSprites, "toggle_voxel_sprites"},

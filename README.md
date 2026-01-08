@@ -169,6 +169,7 @@ A tiny NetHack-inspired roguelike with:
 - **Auto-travel**: Enter while looking (or left-click a tile)
 - **Auto-explore**: `O`
 - **Search (reveal traps)**: `C`
+- **Sneak**: `N` (or `Shift+N` in NetHack preset) — quieter actions, reduced scent trail, shorter enemy sight range, but slower
 - **Control preset**: `F2` → **Control Preset** (or `#preset modern|nethack`)
   - **Modern**: WASD + QEZC diagonals (Search = `C`, Kick = `B`, Look = `L/V`)
   - **NetHack**: HJKL + YUBN diagonals (Search = `S`, Kick = `Ctrl+D`, Look = `:`/`V`)

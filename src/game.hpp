@@ -271,6 +271,10 @@ enum class Action : uint8_t {
     ToggleViewMode,      // Toggle TopDown / Isometric 2.5D view (visual-only)
     ToggleVoxelSprites,  // Toggle 2D/3D (voxel) procedural sprites (visual-only)
     Scores,             // Scores / run history overlay (Hall of Fame)
+
+    // Minimap (append-only)
+    MinimapZoomIn,
+    MinimapZoomOut,
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -1175,6 +1179,11 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     }
     void clearMinimapCursor() { minimapCursorActive_ = false; }
 
+
+    // Minimap zoom (UI-only; persisted in settings).
+    int minimapZoom() const { return minimapZoom_; }
+    void setMinimapZoom(int z) { minimapZoom_ = std::clamp(z, -3, 3); }
+
     // Options overlay
     bool isOptionsOpen() const { return optionsOpen; }
     int optionsSelection() const { return optionsSel; }
@@ -1483,6 +1492,7 @@ private:
     // Minimap cursor (UI-only). Allows clicking/keyboard navigation in the minimap.
     Vec2i minimapCursorPos_{0,0};
     bool minimapCursorActive_ = false;
+    int minimapZoom_ = 0;
 
 
     // Level-up talent allocation overlay (forced while points are pending)

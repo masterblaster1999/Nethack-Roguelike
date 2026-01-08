@@ -62,7 +62,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         if (e.kind == EntityKind::Player) {
             pushMsg("YOU OPEN THE DOOR.");
             // Opening doors is noisy; monsters may investigate.
-            emitNoise({nx, ny}, 12);
+            emitNoise({nx, ny}, isSneaking() ? 8 : 12);
         }
         return true;
     }
@@ -120,7 +120,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
             dung.unlockDoor(nx, ny);
             dung.openDoor(nx, ny);
             pushMsg("YOU UNLOCK THE DOOR.", MessageKind::System, true);
-            emitNoise({nx, ny}, 12);
+            emitNoise({nx, ny}, isSneaking() ? 9 : 12);
             return true;
         }
 
@@ -148,7 +148,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
             }
 
             // Picking is noisy regardless of success.
-            emitNoise({nx, ny}, 10);
+            emitNoise({nx, ny}, isSneaking() ? 8 : 10);
 
             return true; // picking takes a turn either way
         }
@@ -1647,7 +1647,7 @@ bool Game::closeDoor() {
 
     dung.closeDoor(doorX, doorY);
     pushMsg("YOU CLOSE THE DOOR.", MessageKind::System, true);
-    emitNoise({doorX, doorY}, 8);
+    emitNoise({doorX, doorY}, isSneaking() ? 6 : 8);
     return true; // Closing a door costs a turn.
 }
 
@@ -1739,7 +1739,7 @@ bool Game::lockDoor() {
         pushMsg("YOU LOCK THE DOOR.", MessageKind::System, true);
     }
 
-    emitNoise({doorX, doorY}, 8);
+    emitNoise({doorX, doorY}, isSneaking() ? 6 : 8);
 
     return true; // Locking costs a turn.
 }

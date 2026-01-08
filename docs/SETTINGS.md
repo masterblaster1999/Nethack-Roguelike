@@ -32,6 +32,10 @@ Comments start with `#` or `;`.
 - `hud_height` (int, default `160`)
   - Clamped to `120..240`
 
+- `minimap_zoom` (int, default `0`)
+  - Clamped to `-3..3`
+  - Minimap overlay zoom (0 = default auto-fit)
+
 - `start_fullscreen` (`true/false`, default `false`)
 
 - `view_mode` (string, default `topdown`)
@@ -185,7 +189,7 @@ Available actions:
 
 **Gameplay**
 - `confirm`, `cancel`
-- `wait`, `rest`, `sneak`
+- `wait`, `rest`, `sneak` (toggle sneak mode: quieter actions, weaker scent trail, shorter enemy sight range, but slower)
 - `pickup`, `inventory`
 - `fire`, `search`, `disarm`
 - `close_door`, `lock_door`
@@ -199,7 +203,7 @@ Available actions:
 **UI / Meta**
 - `help`, `options`, `command`
 - `message_history`, `codex`, `discoveries`
-- `toggle_minimap`, `toggle_stats`
+- `toggle_minimap`, `minimap_zoom_in`, `minimap_zoom_out`, `toggle_stats`
 - `fullscreen`, `screenshot`
 - `save`, `load`, `load_auto`, `restart`
 - `log_up`, `log_down`

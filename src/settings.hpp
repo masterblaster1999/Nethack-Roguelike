@@ -13,6 +13,9 @@ struct Settings {
     int hudHeight = 160;
     bool startFullscreen = false;
 
+    // Minimap zoom level (UI-only): -3..3 (0 = default auto-fit)
+    int minimapZoom = 0;
+
     // Viewport / camera
     // view_w/view_h are in tiles:
     // - 0 means auto-fit to your current display (and uses full-map view when it fits).

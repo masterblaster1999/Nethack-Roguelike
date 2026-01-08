@@ -1,5 +1,5 @@
 {
-  "description": "Fix build errors in scores overlay and identification rendering; add 5x7 wrapped text helper; silence a few MSVC warnings.",
+  "description": "Bug hunt: fix degenerate spawn placement, eliminate MSVC C4127 constant-condition warnings without pragmas, and clean up unsafe vector erase casts.",
   "files": [
     "CMakeLists.txt",
     "PATCH_MANIFEST.json",
@@ -49,13 +49,12 @@
     "src/terrain_sculpt.hpp",
     "tests/test_main.cpp"
   ],
-  "patch_id": "roundN_plus68",
-  "previous_patch": "roundN_plus67",
+  "patch_id": "roundN_plus71",
+  "previous_patch": "roundN_plus70",
   "summary": [
-    "Fixed build break in scores overlay: correct drawPanel signature usage, ClipRectGuard construction, and ScoreEntry field names.",
-    "Added drawTextWrapped5x7() to ui_font.hpp for simple word-wrapped 5x7 HUD/UI text.",
-    "Renderer: stop accessing private Game::appearanceFor by exposing Game::itemAppearanceFor() for identification visuals.",
-    "Silenced a few MSVC warnings (unused locals, shadowed ss ostringstreams)."
+    "Spawn safety: randomFreeTileInRoom() now has robust fallback logic (global random + full-map scan) so degenerate rooms cannot place monsters/items inside walls or on occupied tiles.",
+    "Warnings: replace constant-condition branches in hallucination helpers and hallucination phantom rendering with static_assert guards, removing MSVC C4127 without disabling warnings.",
+    "Warnings/robustness: fix size_t->long iterator math in inventory ground-item erases by using std::vector<>::difference_type casts."
   ],
-  "timestamp": "2026-01-07"
+  "timestamp": "2026-01-08"
 }

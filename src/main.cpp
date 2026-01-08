@@ -924,7 +924,18 @@ int main(int argc, char** argv) {
                 case SDL_KEYDOWN:
                     if (ev.key.repeat != 0) break;
                     {
-                        const SDL_Keycode key = ev.key.keysym.sym;
+                        // For configurable keybinds we want the *unmodified* key symbol
+                        // (layout-aware) plus the explicit modifier bits.
+                        //
+                        // SDL will often report SHIFT-modified punctuation as a different
+                        // keycode (e.g. '?' instead of '/' + Shift). Using the scancode to
+                        // recover the base key makes bindings like `shift+slash` and
+                        // `shift+3` work reliably across layouts.
+                        const SDL_Keycode rawKey = ev.key.keysym.sym;
+                        const SDL_Scancode sc = ev.key.keysym.scancode;
+                        SDL_Keycode key = SDL_GetKeyFromScancode(sc);
+                        if (key == SDLK_UNKNOWN) key = rawKey;
+
                         const Uint16 mod = ev.key.keysym.mod;
 
                         // During replay playback, ignore live input (optional ESC to exit).

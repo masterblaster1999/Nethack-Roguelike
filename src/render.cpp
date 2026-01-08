@@ -2591,6 +2591,7 @@ void Renderer::render(const Game& game) {
             // and to keep sprite cache churn under control.
             const int maxPhantoms = 12;
             constexpr uint32_t kCount = static_cast<uint32_t>(ENTITY_KIND_COUNT);
+            static_assert(kCount > 1u, "ENTITY_KIND_COUNT must include Player plus at least one monster kind.");
 
             std::vector<Phantom> ph;
             ph.reserve(static_cast<size_t>(maxPhantoms));
@@ -2620,7 +2621,6 @@ void Renderer::render(const Game& game) {
                     const uint32_t r = hash32(h0);
                     if ((r % 1000u) >= 20u) continue;
 
-                    if (kCount <= 1u) continue;
                     const uint32_t kk = 1u + (hash32(r ^ 0x9E3779B9u) % (kCount - 1u));
 
                     Phantom p;

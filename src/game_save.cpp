@@ -565,7 +565,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 38u; // v38: monster pocket consumable item
+constexpr uint32_t SAVE_VERSION = 39u; // v39: persist monster AI memory + energy scheduling
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -813,6 +813,21 @@ void writeEntity(std::ostream& out, const Entity& e) {
 
     // v38+: pocket consumable (monsters only; player ignores this field)
     writeItem(out, e.pocketConsumable);
+
+    // v39+: monster AI memory (last known player pos + age) and turn scheduling.
+    // These fields affect deterministic simulation and save/load fidelity.
+    if constexpr (SAVE_VERSION >= 39u) {
+        int32_t lkx = e.lastKnownPlayerPos.x;
+        int32_t lky = e.lastKnownPlayerPos.y;
+        int32_t lkAge = e.lastKnownPlayerAge;
+        int32_t speed = e.speed;
+        int32_t energy = e.energy;
+        writePod(out, lkx);
+        writePod(out, lky);
+        writePod(out, lkAge);
+        writePod(out, speed);
+        writePod(out, energy);
+    }
 }
 
 bool readEntity(std::istream& in, Entity& e, uint32_t version) {
@@ -856,6 +871,13 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     int32_t stolenGold = 0;
 
     Item pocketConsumable;
+
+    // v39+: monster AI memory and energy scheduling.
+    int32_t lkx = -1;
+    int32_t lky = -1;
+    int32_t lkAge = 9999;
+    int32_t speed = 0;
+    int32_t energy = 0;
 
     Item gearMelee;
     Item gearArmor;
@@ -948,6 +970,15 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         if (!readItem(in, pocketConsumable, version)) return false;
     }
 
+    // v39+: monster AI memory + energy scheduling
+    if (version >= 39u) {
+        if (!readPod(in, lkx)) return false;
+        if (!readPod(in, lky)) return false;
+        if (!readPod(in, lkAge)) return false;
+        if (!readPod(in, speed)) return false;
+        if (!readPod(in, energy)) return false;
+    }
+
     e.id = id;
     e.kind = static_cast<EntityKind>(kind);
     e.pos = { x, y };
@@ -1028,9 +1059,22 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         e.pocketConsumable.id = 0;
     }
 
-    // Monster speed scheduling fields aren't serialized (derived from kind).
-    e.speed = baseSpeedFor(e.kind);
-    e.energy = 0;
+    if (version >= 39u) {
+        e.lastKnownPlayerPos = Vec2i{lkx, lky};
+        e.lastKnownPlayerAge = lkAge;
+
+        // Defensive: keep corrupted saves from creating pathological scheduler state.
+        e.speed = speed;
+        if (e.speed <= 0) e.speed = baseSpeedFor(e.kind);
+        e.energy = energy;
+        if (e.energy < 0) e.energy = 0;
+    } else {
+        // Older saves: these runtime fields were not persisted.
+        e.lastKnownPlayerPos = Vec2i{-1, -1};
+        e.lastKnownPlayerAge = 9999;
+        e.speed = baseSpeedFor(e.kind);
+        e.energy = 0;
+    }
 
     return true;
 }
@@ -2368,6 +2412,23 @@ if (ver >= 33u) {
         lookPos = {0,0};
         inputLock = false;
         fx.clear();
+
+        // Auto-move / auto-explore state is treated as transient UI convenience.
+        // Reset it to the same default state as newGame() / changeLevel() so a
+        // loaded game never resumes "on rails".
+        autoMode = AutoMoveMode::None;
+        autoPathTiles.clear();
+        autoPathIndex = 0;
+        autoStepTimer = 0.0f;
+        autoExploreGoalIsLoot = false;
+        autoExploreGoalPos = Vec2i{-1, -1};
+        autoExploreGoalIsSearch = false;
+        autoExploreSearchGoalPos = Vec2i{-1, -1};
+        autoExploreSearchTurnsLeft = 0;
+        autoExploreSearchAnnounced = false;
+        // Keep the bookkeeping array initialized for determinism and to avoid
+        // out-of-bounds issues in optional secret-hunting logic.
+        autoExploreSearchTriedTurns.assign(MAP_W * MAP_H, 0);
 
         restoreLevel(depth_);
         recomputeFov();

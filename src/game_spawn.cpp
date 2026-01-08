@@ -41,29 +41,50 @@ ItemEgo rollWeaponEgo(RNG& rng, ItemKind k, int depth, RoomType rt, bool fromSho
 Vec2i Game::randomFreeTileInRoom(const Room& r, int tries) {
     tries = std::max(10, tries);
 
+    auto isValid = [&](int x, int y) -> bool {
+        if (!dung.inBounds(x, y)) return false;
+        const TileType t = dung.at(x, y).type;
+        if (!(t == TileType::Floor || t == TileType::StairsUp || t == TileType::StairsDown || t == TileType::DoorOpen)) return false;
+        if (entityAt(x, y)) return false;
+        return true;
+    };
+
     for (int i = 0; i < tries; ++i) {
         const int x0 = rng.range(r.x + 1, std::max(r.x + 1, r.x + r.w - 2));
         const int y0 = rng.range(r.y + 1, std::max(r.y + 1, r.y + r.h - 2));
-        if (!dung.inBounds(x0, y0)) continue;
-        const TileType t = dung.at(x0, y0).type;
-        if (!(t == TileType::Floor || t == TileType::StairsUp || t == TileType::StairsDown || t == TileType::DoorOpen)) continue;
-        if (entityAt(x0, y0)) continue;
+        if (!isValid(x0, y0)) continue;
         return {x0, y0};
     }
 
     // Fallback: brute scan the room interior for any valid tile.
     for (int y = r.y + 1; y < r.y + r.h - 1; ++y) {
         for (int x = r.x + 1; x < r.x + r.w - 1; ++x) {
-            if (!dung.inBounds(x, y)) continue;
-            const TileType t = dung.at(x, y).type;
-            if (!(t == TileType::Floor || t == TileType::StairsUp || t == TileType::StairsDown || t == TileType::DoorOpen)) continue;
-            if (entityAt(x, y)) continue;
+            if (!isValid(x, y)) continue;
             return {x, y};
         }
     }
 
-    // As a last resort, return a center-ish tile (may still be occupied in degenerate rooms).
-    return {r.cx(), r.cy()};
+    // Degenerate rooms can end up completely packed (or even malformed). Avoid returning
+    // an invalid tile that could place spawns inside walls or stacked on other entities.
+    // Try a few random floors from the whole dungeon, then fall back to a full scan.
+    for (int i = 0; i < tries * 4; ++i) {
+        const Vec2i p = dung.randomFloor(rng, false);
+        if (isValid(p.x, p.y)) return p;
+    }
+
+    for (int y = 1; y < dung.height - 1; ++y) {
+        for (int x = 1; x < dung.width - 1; ++x) {
+            if (isValid(x, y)) return {x, y};
+        }
+    }
+
+    // Absolute last resort: clamp the room center to bounds.
+    Vec2i c{r.cx(), r.cy()};
+    if (!dung.inBounds(c.x, c.y)) {
+        c.x = clampi(c.x, 0, std::max(0, dung.width - 1));
+        c.y = clampi(c.y, 0, std::max(0, dung.height - 1));
+    }
+    return c;
 }
 
 Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear) {
@@ -350,7 +371,10 @@ void Game::spawnMonsters() {
         // Deep milestone (roughly 3/4 through the run): introduce an ethereal threat
         // before the final approach. This keeps longer runs from feeling like a flat
         // difficulty plateau once the player is geared up.
-        if (QUEST_DEPTH >= 16) {
+        //
+        // NOTE: we guard this with a runtime condition so MSVC doesn't warn about
+        // constant-condition branches (C4127).
+        if (depth_ > 0 && QUEST_DEPTH >= 16) {
             const int deepMilestone = MIDPOINT_DEPTH + std::max(2, (QUEST_DEPTH - MIDPOINT_DEPTH) / 2);
             if (depth_ == deepMilestone && depth_ < QUEST_DEPTH - 1) {
                 Vec2i p = randomFreeTileInRoom(*treasure);

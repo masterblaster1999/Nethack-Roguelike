@@ -192,7 +192,7 @@ bool Game::autoPickupAtPlayer() {
             ++pickedCount;
             if (sampleNames.size() < 3) sampleNames.push_back(displayItemName(it));
 
-            ground.erase(ground.begin() + static_cast<long>(i));
+            ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(i));
             continue;
         }
         ++i;
@@ -938,7 +938,7 @@ bool Game::pickupAtPlayer() {
                 pushMsg("YOU HAVE FOUND THE AMULET OF YENDOR! RETURN TO THE EXIT (<) TO WIN.", MessageKind::Success, true);
                 onAmuletAcquired();
             }
-            ground.erase(ground.begin() + static_cast<long>(gi));
+            ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(gi));
             continue;
         }
 
@@ -954,7 +954,7 @@ bool Game::pickupAtPlayer() {
             pushMsg("YOU HAVE FOUND THE AMULET OF YENDOR! RETURN TO THE EXIT (<) TO WIN.", MessageKind::Success, true);
             onAmuletAcquired();
         }
-        ground.erase(ground.begin() + static_cast<long>(gi));
+        ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(gi));
     }
 
     return pickedAny;

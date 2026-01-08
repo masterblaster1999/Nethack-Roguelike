@@ -36,7 +36,7 @@ inline EntityKind hallucinatedEntityKind(const Game& game, const Entity& e) {
     if (e.id == game.playerId()) return e.kind;
 
     constexpr uint32_t kCount = static_cast<uint32_t>(ENTITY_KIND_COUNT);
-    if (kCount <= 1u) return e.kind;
+    static_assert(kCount > 1u, "ENTITY_KIND_COUNT must include Player plus at least one monster kind.");
 
     const uint32_t base = hashCombine(game.seed() ^ 0x6A09E667u, hallucinationPhase(game));
     const uint32_t h = hashCombine(base, static_cast<uint32_t>(e.id) ^ hash32(e.spriteSeed));
@@ -50,7 +50,7 @@ inline ItemKind hallucinatedItemKind(const Game& game, const Item& it) {
     if (!isHallucinating(game)) return it.kind;
 
     constexpr uint32_t kCount = static_cast<uint32_t>(ITEM_KIND_COUNT);
-    if (kCount == 0u) return it.kind;
+    static_assert(kCount > 0u, "ITEM_KIND_COUNT must be non-zero.");
 
     const uint32_t base = hashCombine(game.seed() ^ 0xBB67AE85u, hallucinationPhase(game));
     const uint32_t h = hashCombine(base, static_cast<uint32_t>(it.id) ^ hash32(it.spriteSeed));

@@ -2753,8 +2753,20 @@ uint64_t Game::determinismHash() const {
     for (uint8_t v : scentField_) hh.addU8(v);
 
     // Persisted off-screen levels.
-    hh.addU32(static_cast<uint32_t>(levels.size()));
+    //
+    // NOTE: `levels` is primarily intended to cache *off-screen* floors, but the
+    // currently active depth may also be mirrored into `levels` as a convenience
+    // for saving. That cached copy is not authoritative while we're on the
+    // level (it may be stale until storeCurrentLevel() runs), so exclude it
+    // from the determinism hash to make the hash stable across save/load
+    // round-trips.
+    uint32_t levelCount = static_cast<uint32_t>(levels.size());
+    if (levels.find(depth_) != levels.end()) {
+        levelCount -= 1u;
+    }
+    hh.addU32(levelCount);
     for (const auto& kv : levels) {
+        if (kv.first == depth_) continue;
         hh.addI32(kv.first);
         hashLevelState(hh, kv.second);
     }

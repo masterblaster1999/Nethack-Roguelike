@@ -82,6 +82,12 @@ bool test_save_load_roundtrip() {
     CHECK(g.saveToFile(p.string(), true));
     CHECK(fs::exists(p));
 
+    // Saving should not mutate deterministic simulation state.
+    // (Historically this could fail if the cached per-level store wasn't kept
+    // in sync with the active level and the hash included both.)
+    const uint64_t hAfterSave = g.determinismHash();
+    CHECK(h1 == hAfterSave);
+
     Game g2;
     CHECK(g2.loadFromFile(p.string()));
 

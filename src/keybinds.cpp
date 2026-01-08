@@ -34,17 +34,55 @@ std::vector<std::string> KeyBinds::split(const std::string& s, char delim) {
     return out;
 }
 
+namespace {
+// Convert a keycode that may represent a shifted symbol (e.g. '?', '<', '#')
+// into the *base* (unmodified) keycode for the same physical key, using the
+// current keyboard layout.
+//
+// This is critical because SDL will often set BOTH:
+//   - mods: KMOD_SHIFT
+//   - keycode: the shifted symbol
+// for punctuation. Our binds are expressed as (base key + required modifiers),
+// so we normalize tokens and events to that representation.
+static SDL_Keycode baseKeycodeForLayout(SDL_Keycode key, Uint16* impliedMods) {
+    // Preserve special keys.
+    if (key == SDLK_UNKNOWN) return key;
+
+    // Uppercase ASCII letters: treat as the base letter + implied Shift.
+    if (key >= 'A' && key <= 'Z') {
+        if (impliedMods) *impliedMods |= KMOD_SHIFT;
+        return static_cast<SDL_Keycode>(static_cast<char>(key - 'A' + 'a'));
+    }
+
+    // Layout-aware fallback: map keycode -> scancode -> base keycode.
+    const SDL_Scancode sc = SDL_GetScancodeFromKey(key);
+    if (sc == SDL_SCANCODE_UNKNOWN) return key;
+
+    const SDL_Keycode base = SDL_GetKeyFromScancode(sc);
+    if (base == SDLK_UNKNOWN || base == key) return key;
+
+    // If the unmodified key differs from the symbol token, the symbol is
+    // typically reached via Shift on this layout.
+    if (impliedMods) *impliedMods |= KMOD_SHIFT;
+    return base;
+}
+} // namespace
+
 SDL_Keycode KeyBinds::parseKeycode(const std::string& keyNameIn, Uint16* impliedMods) {
     if (impliedMods) *impliedMods = KMOD_NONE;
-    std::string keyName = trim(toLower(keyNameIn));
-    if (keyName.empty()) return SDLK_UNKNOWN;
 
-    // Single character (letters are treated case-insensitively).
-    if (keyName.size() == 1) {
-        unsigned char c = static_cast<unsigned char>(keyName[0]);
-        if (std::isalpha(c)) c = static_cast<unsigned char>(std::tolower(c));
-        return static_cast<SDL_Keycode>(c);
+    std::string raw = trim(keyNameIn);
+    if (raw.empty()) return SDLK_UNKNOWN;
+
+    // Single character tokens are accepted verbatim (e.g. w, ., ?, D).
+    // We keep the original case so uppercase can imply Shift.
+    if (raw.size() == 1) {
+        SDL_Keycode kc = static_cast<SDL_Keycode>(static_cast<unsigned char>(raw[0]));
+        return baseKeycodeForLayout(kc, impliedMods);
     }
+
+    std::string keyName = trim(toLower(raw));
+    if (keyName.empty()) return SDLK_UNKNOWN;
 
     // Directional / navigation
     if (keyName == "up") return SDLK_UP;
@@ -76,8 +114,8 @@ SDL_Keycode KeyBinds::parseKeycode(const std::string& keyNameIn, Uint16* implied
     if (keyName == "semicolon") return SDLK_SEMICOLON;
     if (keyName == "apostrophe" || keyName == "quote") return SDLK_QUOTE;
     if (keyName == "grave" || keyName == "backquote") return SDLK_BACKQUOTE;
-    if (keyName == "less") return SDLK_LESS;
-    if (keyName == "greater") return SDLK_GREATER;
+    if (keyName == "less") return baseKeycodeForLayout(SDLK_LESS, impliedMods);
+    if (keyName == "greater") return baseKeycodeForLayout(SDLK_GREATER, impliedMods);
 
     // Function keys
     if (keyName.size() >= 2 && keyName[0] == 'f' && std::isdigit(static_cast<unsigned char>(keyName[1]))) {
@@ -108,7 +146,9 @@ SDL_Keycode KeyBinds::parseKeycode(const std::string& keyNameIn, Uint16* implied
     // Fallback: SDL's own key name parsing.
     // This lets users use names like "Left Shift", "Keypad 8", etc.
     SDL_Keycode kc = SDL_GetKeyFromName(keyNameIn.c_str());
-    if (kc != SDLK_UNKNOWN) return kc;
+    if (kc != SDLK_UNKNOWN) {
+        return baseKeycodeForLayout(kc, impliedMods);
+    }
 
     return SDLK_UNKNOWN;
 }
@@ -416,6 +456,9 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
     };
 
     // Inventory gets priority for inventory-specific actions (users may rebind keys to overlap movement).
+    //
+    // IMPORTANT: global UI/meta hotkeys should still work while the inventory overlay is open
+    // (help/options/message history/etc). This avoids "dead" bindings when a menu is up.
     if (game.isInventoryOpen()) {
         Action a = matchIn({
             Action::DropAll,
@@ -429,13 +472,25 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::Down,
             Action::Left,
             Action::Right,
-            Action::ToggleFullscreen,
-            Action::Screenshot,
             Action::LogUp,
             Action::LogDown,
             Action::Help,
             Action::Options,
             Action::Command,
+            Action::MessageHistory,
+            Action::Codex,
+            Action::Discoveries,
+            Action::Scores,
+            Action::Save,
+            Action::Load,
+            Action::LoadAuto,
+            Action::Restart,
+            Action::ToggleMinimap,
+            Action::ToggleStats,
+            Action::ToggleViewMode,
+            Action::ToggleVoxelSprites,
+            Action::ToggleFullscreen,
+            Action::Screenshot,
         });
         if (a != Action::None) return a;
     }

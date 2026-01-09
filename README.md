@@ -5,6 +5,7 @@ A tiny NetHack-inspired roguelike with:
 - Procedurally generated pixel sprites (player, monsters, items)
 - Field-of-view + explored/seen tiles
 - Traps, potions/scrolls, ranged attacks, stairs, saving/loading
+- **Friendly companions**: tame creatures (Scroll of Taming) and issue simple orders via `#pet` — **fetch** can bring you loot.
 - **Secret rooms + secret doors** (search to discover)
 - **Locked doors, keys + lockpicks**: unlock optional **vault rooms** for bonus loot (or read a **Scroll of Knock**)
 
@@ -18,6 +19,7 @@ A tiny NetHack-inspired roguelike with:
   - **Depth 0**: **Surface Camp** hub (above-ground) — a basic palisade + tent layout with a persistent **STASH** chest.
   - Reach it by taking the upstairs (`<`) from Depth 1.
   - Hostile monsters won't follow you up, so it works as a safe-ish staging area.
+  - **Merchant Guild ledger**: use `#debt` (or `#ledger`) to review shop debts, and `#pay` at camp to settle them.
 
 - **Depth 1**: classic rooms — now with a chance to generate a more scattered **"ruins" graph** layout (packed rooms + MST connectivity + extra loops)
   - **Depth 2**: **Mines** (winding tunnels + small chambers)
@@ -46,6 +48,9 @@ A tiny NetHack-inspired roguelike with:
 - **Corridor braiding (dead-end reduction)**: on maze/catacombs/warrens-style floors, a post-pass carves short tunnels through solid wall to reconnect corridor dead ends back into the network, creating more loops and alternate routes (less mandatory backtracking).
 
 - **Special room pacing**: shops now bias closer to the upstairs, while treasure/lairs bias deeper into the floor (using BFS distance), and key rooms avoid disconnected pockets.
+- **Shops**: each shop now spawns a **Shopkeeper** and avoids random monster spawns, so buying/selling work as intended.
+  - Use `#pay` in a shop to pay for unpaid goods (or `#pay` at the surface camp to pay the Merchant Guild directly).
+  - Use `#debt` / `#ledger` to see what you owe per depth.
 
 - **Inventory hotkeys**: while inventory is open:
   - **E** equip/unequip
@@ -140,7 +145,10 @@ A tiny NetHack-inspired roguelike with:
 - **NetHack-style item identification**: potions + scrolls start unknown each run (randomized appearances). Using them identifies the item type; you can also find/read a **Scroll of Identify**. (Toggle via `identify_items` in settings.)
   - **Procedural appearance sprites**: potion/scroll/ring/wand icons now follow the randomized appearance each run (so you can't "ID by icon" and it feels more NetHack-like).
 - **New scroll**: **Scroll of Detect Traps** reveals all traps on the current floor (and identifies itself when used).
-- **Shrines**: use **#pray** (`pray heal|cure|identify|bless|uncurse`) to spend gold for a small blessing (consumes a turn).
+- **Shrines (piety + prayer cooldown)**:
+  - Use **#pray** (`pray heal|cure|identify|bless|uncurse|recharge`) to request a service.
+  - Services cost **PIETY** and trigger a short **cooldown** (shown on the HUD).
+  - Earn PIETY by donating gold (**#donate [amount]**) or offering corpses (**#sacrifice**) at a shrine (or at the surface camp).
 
 - **Augury (obscure divination):** use **#augury** at a **shrine** (or the **surface camp**) to spend gold for **cryptic hints** about the *next* floor.
   - The vision is generated using a copy of the current RNG state so performing augury doesn't change fate directly — but the future can still shift if you do other RNG-consuming actions before you descend.

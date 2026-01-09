@@ -605,6 +605,41 @@ bool Game::playerHasRangedReady(std::string* reasonOut) const {
 }
 
 
+int Game::playerManaMax() const {
+    // Simple initial formula (subject to rebalancing): base + focus scaling + a tiny level scaling.
+    const int base = 6;
+    const int focus = std::max(0, playerFocus());
+    const int lvl = std::max(1, playerCharLevel());
+
+    int maxMana = base + focus * 2 + (lvl - 1);
+    maxMana = clampi(maxMana, 0, 99);
+    return maxMana;
+}
+
+bool Game::knowsSpell(SpellKind k) const {
+    const uint32_t idx = static_cast<uint32_t>(k);
+    if (idx >= 32u) return false;
+    return (knownSpellsMask_ & (1u << idx)) != 0u;
+}
+
+std::vector<SpellKind> Game::knownSpellsList() const {
+    std::vector<SpellKind> out;
+    out.reserve(8);
+    for (int i = 0; i < SPELL_KIND_COUNT; ++i) {
+        SpellKind k = static_cast<SpellKind>(i);
+        if (knowsSpell(k)) out.push_back(k);
+    }
+    return out;
+}
+
+SpellKind Game::selectedSpell() const {
+    const std::vector<SpellKind> ks = knownSpellsList();
+    if (ks.empty()) return SpellKind::MagicMissile;
+    const int idx = clampi(spellsSel, 0, static_cast<int>(ks.size()) - 1);
+    return ks[static_cast<size_t>(idx)];
+}
+
+
 int Game::xpFor(EntityKind k) const {
     switch (k) {
         case EntityKind::Goblin: return 8;
@@ -1141,6 +1176,13 @@ void Game::newGame(uint32_t seed) {
     scentField_.clear();
     inv.clear();
     shopDebtLedger_.fill(0);
+    merchantGuildAlerted_ = false;
+    piety_ = 0;
+    prayerCooldownUntilTurn_ = 0u;
+
+    // Spell system (WIP)
+    mana_ = 0;
+    knownSpellsMask_ = 0u;
     fx.clear();
     fxExpl.clear();
 
@@ -1165,6 +1207,9 @@ void Game::newGame(uint32_t seed) {
     invPrompt_ = InvPromptKind::None;
     invSel = 0;
     targeting = false;
+
+    spellsOpen = false;
+    spellsSel = 0;
     targetLine.clear();
     targetValid = false;
     helpOpen = false;
@@ -1262,6 +1307,20 @@ void Game::newGame(uint32_t seed) {
         default:
             break;
     }
+
+    // Starting spell knowledge (WIP). Wizards begin with a few basics.
+    knownSpellsMask_ = 0u;
+    if (playerClass_ == PlayerClass::Wizard) {
+        auto learn = [&](SpellKind k) {
+            const uint32_t idx = static_cast<uint32_t>(k);
+            if (idx < 32u) knownSpellsMask_ |= (1u << idx);
+        };
+        learn(SpellKind::MagicMissile);
+        learn(SpellKind::Blink);
+        learn(SpellKind::MinorHeal);
+    }
+    // Start full.
+    mana_ = playerManaMax();
 
     // Hunger pacing (optional setting; stored per-run in save files).
     // The run is longer now, so slightly increase the default hunger budget
@@ -1462,6 +1521,7 @@ void Game::newGame(uint32_t seed) {
     tryApplyBones();
 
     storeCurrentLevel();
+
     recomputeFov();
 
 
@@ -1893,8 +1953,7 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     if (playerInShop()) {
         const int debt = shopDebtThisDepth();
         if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
-            setShopkeepersAlerted(ents, playerId_, player().pos, true);
-            pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+            triggerShopTheftAlarm(player().pos, player().pos);
         }
     }
 
@@ -2313,6 +2372,21 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         pushMsg(ms.str(), MessageKind::Warning, true);
     }
 
+    // MERCHANT GUILD PURSUIT: if you fled a shop with unpaid goods, guards may pursue across floors.
+    if (merchantGuildAlerted_ && shopDebtTotal() > 0 && depth_ > 0) {
+        if (rng.chance(0.65f)) {
+            Vec2i gpos = findNearbyFreeTile(p.pos, 6, true, true);
+            if (dung.inBounds(gpos.x, gpos.y) && dung.isWalkable(gpos.x, gpos.y) && !entityAt(gpos.x, gpos.y)) {
+                Entity& g = spawnMonster(EntityKind::Guard, gpos, 0, /*allowGear=*/true);
+                g.alerted = true;
+                g.lastKnownPlayerPos = p.pos;
+                g.lastKnownPlayerAge = 0;
+                g.energy = 0;
+                pushMsg("YOU HEAR BOOTS ECHOING IN THE DARK...", MessageKind::Warning, true);
+            }
+        }
+    }
+
     recomputeFov();
 
     if (goingDown && depth_ == MIDPOINT_DEPTH) {
@@ -2401,6 +2475,77 @@ void Game::changeLevel(int newDepth, bool goingDown) {
 }
 
 
+void Game::triggerShopTheftAlarm(Vec2i shopInsidePos, Vec2i playerPos) {
+    // If no peaceful shopkeeper remains, there is nobody to raise the alarm.
+    if (!anyPeacefulShopkeeper(ents, playerId_)) return;
+
+    setShopkeepersAlerted(ents, playerId_, playerPos, true);
+    pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+
+    // Merchant guild now considers you "wanted" until the debt is cleared.
+    merchantGuildAlerted_ = true;
+
+    // Try to find the shop room so guards can spawn just outside.
+    const Room* shopRoom = nullptr;
+    for (const Room& r : dung.rooms) {
+        if (r.type != RoomType::Shop) continue;
+        if (r.contains(shopInsidePos.x, shopInsidePos.y)) {
+            shopRoom = &r;
+            break;
+        }
+    }
+
+    // Sample potential spawn tiles near the shop boundary.
+    std::vector<Vec2i> candidates;
+    if (shopRoom) {
+        for (int y = shopRoom->y - 1; y <= shopRoom->y2(); ++y) {
+            for (int x = shopRoom->x - 1; x <= shopRoom->x2(); ++x) {
+                if (!dung.inBounds(x, y)) continue;
+
+                const Vec2i p{x, y};
+                if (!dung.isWalkable(x, y)) continue;
+                if (entityAt(x, y)) continue;
+
+                // Avoid spawning inside the shop room.
+                if (shopRoom->contains(p.x, p.y)) continue;
+
+                candidates.push_back(p);
+            }
+        }
+    }
+
+    auto pickSpawn = [&]() -> Vec2i {
+        if (!candidates.empty()) {
+            return candidates[rng.range(0, static_cast<int>(candidates.size()) - 1)];
+        }
+        // Fallback: near the player.
+        Vec2i best = playerPos;
+        for (int tries = 0; tries < 120; ++tries) {
+            Vec2i p{playerPos.x + rng.range(-6, 6), playerPos.y + rng.range(-6, 6)};
+            if (!dung.inBounds(p.x, p.y)) continue;
+            if (!dung.isWalkable(p.x, p.y)) continue;
+            if (entityAt(p.x, p.y)) continue;
+            best = p;
+            break;
+        }
+        return best;
+    };
+
+    // Spawn a small response team.
+    const int n = 2 + (rng.chance(0.35f) ? 1 : 0);
+    for (int i = 0; i < n; ++i) {
+        Vec2i sp = pickSpawn();
+        if (!dung.inBounds(sp.x, sp.y) || !dung.isWalkable(sp.x, sp.y) || entityAt(sp.x, sp.y)) continue;
+
+        Entity& g = spawnMonster(EntityKind::Guard, sp, 0, /*allowGear=*/true);
+        g.alerted = true;
+        g.lastKnownPlayerPos = player().pos;
+        g.lastKnownPlayerAge = 0;
+        g.energy = 0;
+    }
+}
+
+
 
 
 // -----------------------------------------------------------------------------
@@ -2482,6 +2627,7 @@ static void hashItem(Hash64& hh, const Item& it) {
     hh.addI32(it.shopPrice);
     hh.addI32(it.shopDepth);
     hh.addEnum(it.ego);
+    hh.addU32(static_cast<uint32_t>(it.flags));
 }
 
 static void hashEffects(Hash64& hh, const Effects& ef) {
@@ -2670,6 +2816,10 @@ uint64_t Game::determinismHash() const {
     hh.addBool(encumbranceEnabled_);
     hh.addBool(lightingEnabled_);
     hh.addBool(sneakMode_);
+
+    // Shrine state.
+    hh.addI32(piety_);
+    hh.addU32(prayerCooldownUntilTurn_);
 
     // Endgame escalation.
     hh.addBool(yendorDoomEnabled_);

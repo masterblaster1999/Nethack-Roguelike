@@ -879,6 +879,8 @@ static std::vector<std::string> extendedCommandList() {
         "throwtorch",
         "augury",
         "pray",
+        "donate",
+        "sacrifice",
         "pay",
     };
 }
@@ -1124,7 +1126,9 @@ else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn 
         game.pushSystemMessage("MARKS: mark [note|danger|loot] <label> | unmark | marks | travel <index|label>");
         game.pushSystemMessage("ENGRAVE: engrave <text> (costs a turn; try 'ELBERETH' for a ward)");
         game.pushSystemMessage("SOUND: shout | whistle | listen | throwvoice [x y] (TIP: LOOK cursor works)");
-        game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse|recharge] (costs gold)");
+        game.pushSystemMessage("COMPANIONS: pet [follow|stay|fetch|guard] | tame (needs a FOOD RATION)");
+        game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse|recharge] (costs PIETY + cooldown)");
+        game.pushSystemMessage("         donate [amount] (convert gold->piety) | sacrifice (offer a corpse for piety)");
         game.pushSystemMessage("AUGURY: augury (costs gold; shrine/camp only; hints can shift)");
         game.pushSystemMessage("DIG: dig <dir> (requires wielded pickaxe)");
         game.pushSystemMessage("CURSES: CURSED weapons/armor can't be removed until uncursed (scroll or shrine).");
@@ -1762,13 +1766,45 @@ else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn 
         return;
     }
 
+    if (cmd == "donate") {
+        // #donate [amount]
+        // Converts gold into piety. If amount is omitted, a reasonable default is used.
+        int amt = 0;
+        if (toks.size() > 1) {
+            try {
+                amt = std::stoi(toks[1], nullptr, 0);
+            } catch (...) {
+                game.pushSystemMessage("USAGE: donate [amount]");
+                return;
+            }
+        }
+        (void)game.donateAtShrine(amt);
+        return;
+    }
+
+    if (cmd == "sacrifice") {
+        (void)game.sacrificeAtShrine();
+        return;
+    }
+
     if (cmd == "augury") {
         game.augury();
         return;
     }
 
+    if (cmd == "debt" || cmd == "ledger") {
+        game.showDebtLedger();
+        return;
+    }
+
     if (cmd == "pay") {
-        game.payAtShop();
+        if (game.playerInShop()) {
+            game.payAtShop();
+        } else if (game.depth() == 0) {
+            game.payAtCamp();
+        } else {
+            game.pushSystemMessage("YOU MUST BE IN A SHOP OR AT CAMP TO PAY.");
+        }
         return;
     }
 
@@ -2244,6 +2280,7 @@ else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn 
         const std::string v = arg(1);
         if (v.empty() || v == "status") {
             int n = 0;
+            int carrying = 0;
             AllyOrder order = AllyOrder::Follow;
             bool mixed = false;
             bool first = true;
@@ -2253,6 +2290,7 @@ else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn 
                 if (e.hp <= 0) continue;
                 if (!e.friendly) continue;
                 ++n;
+                if (e.stolenGold > 0 || (e.pocketConsumable.id != 0 && e.pocketConsumable.count > 0)) ++carrying;
                 if (first) { order = e.allyOrder; first = false; }
                 else if (e.allyOrder != order) mixed = true;
             }
@@ -2264,7 +2302,10 @@ else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn 
                     (order == AllyOrder::Follow ? "FOLLOW" :
                      order == AllyOrder::Stay ? "STAY" :
                      order == AllyOrder::Fetch ? "FETCH" : "GUARD");
-                game.pushSystemMessage("COMPANIONS: " + std::to_string(n) + " | ORDER: " + o + " | USAGE: pet <follow|stay|fetch|guard>");
+                std::string msg = "COMPANIONS: " + std::to_string(n) + " | ORDER: " + o;
+                if (carrying > 0) msg += " | CARRYING: " + std::to_string(carrying);
+                msg += " | USAGE: pet <follow|stay|fetch|guard>";
+                game.pushSystemMessage(msg);
             }
             return;
         }
@@ -2401,6 +2442,7 @@ constexpr ItemKind POTION_KINDS[] = {
     ItemKind::PotionClarity,
     ItemKind::PotionLevitation,
     ItemKind::PotionHallucination,
+    ItemKind::PotionEnergy,
 };
 
 constexpr ItemKind SCROLL_KINDS[] = {

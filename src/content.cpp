@@ -939,6 +939,7 @@ MonsterBaseStats baseMonsterStatsFor(EntityKind k) {
         case EntityKind::Ogre: s.hpMax = 18; s.baseAtk = 5; s.baseDef = 2; s.willFlee = false; break;
         case EntityKind::Mimic: s.hpMax = 14; s.baseAtk = 4; s.baseDef = 2; s.willFlee = false; break;
         case EntityKind::Shopkeeper: s.hpMax = 18; s.baseAtk = 6; s.baseDef = 4; s.willFlee = false; break;
+        case EntityKind::Guard: s.hpMax = 20; s.baseAtk = 5; s.baseDef = 4; s.willFlee = false; break;
         case EntityKind::Minotaur: s.hpMax = 38; s.baseAtk = 7; s.baseDef = 3; s.willFlee = false; break;
         case EntityKind::Dog: s.hpMax = 10; s.baseAtk = 2; s.baseDef = 0; s.willFlee = false; break;
         case EntityKind::Ghost:

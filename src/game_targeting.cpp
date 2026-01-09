@@ -100,12 +100,74 @@ std::string Game::targetingStatusText() const {
 std::string Game::targetingCombatPreviewText() const {
     if (!targeting) return std::string();
 
+    // Spell targeting preview (separate from ranged weapons/throw).
+    if (targetingMode_ == TargetingMode::Spell) {
+        const SpellKind sk = targetingSpell_;
+        const SpellDef& sd = spellDef(sk);
+
+        std::ostringstream ss;
+        ss << sd.name;
+        ss << " | MANA " << sd.manaCost;
+        if (sd.range > 0) ss << " | RNG " << sd.range;
+
+        if (sk == SpellKind::Blink) {
+            // Teleport, no damage.
+            return ss.str();
+        }
+
+        // Damage preview for projectile spells.
+        ProjectileKind projKind = ProjectileKind::Spark;
+        if (sk == SpellKind::Fireball) projKind = ProjectileKind::Fireball;
+        if (sk != SpellKind::MagicMissile && sk != SpellKind::Fireball) {
+            return ss.str();
+        }
+
+        int atkBonus = player().baseAtk + playerFocus();
+        if (sk == SpellKind::MagicMissile) atkBonus += 2;
+        const int dmgBonus = std::max(0, playerFocus()) / 2;
+
+        // Spells use the weaker baseline (wands are stronger).
+        DiceExpr dice = rangedDiceForProjectile(projKind, /*wandPowered=*/false);
+        dice.bonus += dmgBonus;
+        dice.bonus += statDamageBonusFromAtk(player().baseAtk);
+        const std::string dmgStr = diceToString(dice, true);
+
+        // For an actual hit chance, only show it when the current target is valid and contains a creature.
+        if (targetValid) {
+            if (const Entity* e = entityAt(targetPos.x, targetPos.y)) {
+                if (e->hp > 0 && e->id != player().id) {
+                    const int ac = 10 + ((e->kind == EntityKind::Player) ? playerDefense() : e->baseDef);
+
+                    const int dist = std::max(1, static_cast<int>(targetLine.size()) - 1);
+                    const int penalty = dist / 3;
+
+                    int adjAtk = atkBonus - penalty;
+                    if (player().effects.confusionTurns > 0) adjAtk -= 3;
+
+                    if (player().effects.hallucinationTurns > 0) {
+                        ss << " | HIT ?%";
+                    } else {
+                        const int pct = hitChancePercent(adjAtk, ac);
+                        ss << " | HIT " << pct << "%";
+                    }
+                }
+            }
+        }
+
+        if (projKind == ProjectileKind::Fireball) ss << " | AOE";
+        ss << " | DMG " << dmgStr;
+        if (player().effects.confusionTurns > 0) ss << " | CONFUSED";
+
+        return ss.str();
+    }
+
     // Determine what will be used if the player fires right now (equipped ranged weapon vs throw).
     ProjectileKind projKind = ProjectileKind::Arrow;
     int range = 0;
     int atkBonus = 0;
     int dmgBonus = 0;
     bool isDigWand = false;
+    bool wandPowered = false;
     std::string tag;
 
     if (const Item* w = equippedRanged()) {
@@ -121,6 +183,7 @@ std::string Game::targetingCombatPreviewText() const {
 
             const int bucBonus = (w->buc < 0 ? -1 : (w->buc > 0 ? 1 : 0));
             const bool isWand = isRangedWeapon(w->kind) && d.maxCharges > 0 && d.ammo == AmmoKind::None;
+            wandPowered = isWand;
 
             // Talents: Agility improves physical ranged weapons; Focus empowers wands.
             dmgBonus = w->enchant + bucBonus;
@@ -146,6 +209,7 @@ std::string Game::targetingCombatPreviewText() const {
         dmgBonus = 0;
         tag = (spec.ammo == AmmoKind::Arrow) ? "THROW ARROW" : "THROW ROCK";
         isDigWand = false;
+        wandPowered = false;
     }
 
     // Digging wands don't do direct damage; they carve tunnels.
@@ -154,7 +218,6 @@ std::string Game::targetingCombatPreviewText() const {
     }
 
     // Damage expression (before DR), approximated as base dice + static bonuses.
-    const bool wandPowered = (projKind == ProjectileKind::Spark || projKind == ProjectileKind::Fireball);
     DiceExpr dice = rangedDiceForProjectile(projKind, wandPowered);
     dice.bonus += dmgBonus;
     dice.bonus += statDamageBonusFromAtk(player().baseAtk);
@@ -201,7 +264,10 @@ void Game::cycleTargetCursor(int dir) {
 
     // Build a deterministic list of visible hostile targets.
     const Vec2i src = player().pos;
-    const int range = playerRangedRange();
+    int range = playerRangedRange();
+    if (targetingMode_ == TargetingMode::Spell) {
+        range = spellDef(targetingSpell_).range;
+    }
 
     std::vector<Vec2i> cands;
     cands.reserve(16);
@@ -290,7 +356,9 @@ void Game::beginTargeting() {
     }
 
     targeting = true;
+    targetingMode_ = TargetingMode::Ranged;
     invOpen = false;
+    spellsOpen = false;
     closeChestOverlay();
     helpOpen = false;
     looking = false;
@@ -304,8 +372,61 @@ void Game::beginTargeting() {
 }
 
 
+void Game::beginSpellTargeting(SpellKind k) {
+    const SpellDef& sd = spellDef(k);
+    if (!sd.needsTarget) {
+        pushMsg("THAT SPELL DOES NOT REQUIRE A TARGET.", MessageKind::System, true);
+        return;
+    }
+
+    std::string reason;
+    if (!canCastSpell(k, &reason)) {
+        if (!reason.empty()) pushMsg(reason + ".", MessageKind::Warning, true);
+        return;
+    }
+
+    targeting = true;
+    targetingMode_ = TargetingMode::Spell;
+    targetingSpell_ = k;
+
+    invOpen = false;
+    spellsOpen = false;
+    closeChestOverlay();
+    helpOpen = false;
+    looking = false;
+    minimapOpen = false;
+    statsOpen = false;
+    msgScroll = 0;
+
+    targetPos = player().pos;
+    targetStatusText_.clear();
+    recomputeTargetLine();
+
+    pushMsg(std::string("CAST ") + sd.name + "...", MessageKind::System, true);
+}
+
+
 void Game::endTargeting(bool fire) {
     if (!targeting) return;
+
+    // Spell targeting: cast the selected spell instead of firing ranged weapons.
+    if (targetingMode_ == TargetingMode::Spell) {
+        if (fire) {
+            if (!targetValid) {
+                if (!targetStatusText_.empty()) pushMsg(targetStatusText_ + ".");
+                else pushMsg("NO CLEAR TARGET.");
+            } else {
+                (void)castSpellAt(targetingSpell_, targetPos);
+            }
+        }
+
+        targeting = false;
+        targetLine.clear();
+        targetValid = false;
+        targetStatusText_.clear();
+        targetingMode_ = TargetingMode::Ranged;
+        return;
+    }
 
     if (fire) {
         if (!targetValid) {
@@ -362,7 +483,7 @@ void Game::endTargeting(bool fire) {
                     if (wCopy.kind == ItemKind::WandDigging) {
                         zapDiggingWand(d.range);
                     } else {
-                        attackRanged(playerMut(), targetPos, d.range, atkBonus, dmgBonus, d.projectile, true, projPtr);
+                        attackRanged(playerMut(), targetPos, d.range, atkBonus, dmgBonus, d.projectile, true, projPtr, /*wandPowered=*/isWand);
                     }
 
                     if (isWand) {
@@ -415,6 +536,7 @@ void Game::endTargeting(bool fire) {
     targetLine.clear();
     targetValid = false;
     targetStatusText_.clear();
+    targetingMode_ = TargetingMode::Ranged;
 }
 
 
@@ -438,9 +560,13 @@ void Game::recomputeTargetLine() {
         return;
     }
 
-    // Clamp the line to the *current* ranged range. Note: the cursor can still be beyond range;
-    // in that case we render the truncated line but mark the target as invalid.
-    const int range = playerRangedRange();
+    // Clamp the line to the current targeting range (ranged weapons or spell range).
+    // Note: the cursor can still be beyond range; in that case we render the truncated line but
+    // mark the target as invalid.
+    int range = playerRangedRange();
+    if (targetingMode_ == TargetingMode::Spell) {
+        range = spellDef(targetingSpell_).range;
+    }
     if (range > 0 && static_cast<int>(targetLine.size()) > range + 1) {
         targetLine.resize(static_cast<size_t>(range + 1));
     }
@@ -454,11 +580,34 @@ void Game::recomputeTargetLine() {
         return;
     }
 
-    // Weapon ready?
-    std::string reason;
-    if (!playerHasRangedReady(&reason)) {
-        targetStatusText_ = reason;
-        return;
+    if (targetingMode_ == TargetingMode::Spell) {
+        // Validate spell prerequisites (mainly mana).
+        std::string reason;
+        if (!canCastSpell(targetingSpell_, &reason)) {
+            targetStatusText_ = reason;
+            return;
+        }
+
+        // Blink requires a walkable destination.
+        if (targetingSpell_ == SpellKind::Blink) {
+            if (!dung.isWalkable(targetPos.x, targetPos.y)) {
+                targetStatusText_ = "CAN'T BLINK THERE";
+                return;
+            }
+            if (const Entity* e = entityAt(targetPos.x, targetPos.y)) {
+                if (e->hp > 0 && e->id != player().id) {
+                    targetStatusText_ = "SPACE OCCUPIED";
+                    return;
+                }
+            }
+        }
+    } else {
+        // Weapon ready?
+        std::string reason;
+        if (!playerHasRangedReady(&reason)) {
+            targetStatusText_ = reason;
+            return;
+        }
     }
 
     // If the truncated line doesn't reach the cursor, we're out of range.

@@ -134,10 +134,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
     // Peaceful shopkeepers only become hostile if you aggress them (or steal).
     if (attacker.kind == EntityKind::Player && defender.kind == EntityKind::Shopkeeper) {
         if (!defender.alerted) {
-            defender.alerted = true;
-            defender.lastKnownPlayerPos = attacker.pos;
-            defender.lastKnownPlayerAge = 0;
-            pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+            triggerShopTheftAlarm(defender.pos, attacker.pos);
         }
     }
 
@@ -352,6 +349,11 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
         if (attacker.kind == EntityKind::Spider && rng.chance(0.45f)) {
             defender.effects.webTurns = std::max(defender.effects.webTurns, rng.range(2, 4));
             pushMsg("YOU ARE ENSNARED BY WEBBING!", MessageKind::Warning, false);
+        }
+        // Mimics: adhesive bodies can stick you in place briefly.
+        if (attacker.kind == EntityKind::Mimic && rng.chance(0.35f)) {
+            defender.effects.webTurns = std::max(defender.effects.webTurns, rng.range(2, 4));
+            pushMsg("THE MIMIC'S ADHESIVE HIDE STICKS TO YOU!", MessageKind::Warning, false);
         }
     }
 
@@ -569,7 +571,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
 }
 
 
-void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer, const Item* projectileTemplate) {
+void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer, const Item* projectileTemplate, bool wandPowered) {
     // Confusion: shots drift and accuracy suffers.
     if (attacker.effects.confusionTurns > 0) {
         atkBonus -= 3;
@@ -617,8 +619,8 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
     Entity* hit = nullptr;
     size_t stopIdx = line.size() - 1;
 
-    // "Powered" ranged magic (wands) get slightly beefier dice.
-    const bool wandPowered = fromPlayer && (projKind == ProjectileKind::Spark || projKind == ProjectileKind::Fireball);
+    // Whether Spark/Fireball use the stronger wand damage profile.
+    // Provided by the caller so player spellcasting can use the weaker baseline.
 
     // Projectiles travel the full line. If they miss a creature, they keep going.
     for (size_t i = 1; i < line.size(); ++i) {
@@ -686,10 +688,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
         stopIdx = i;
 
         if (fromPlayer && hit->kind == EntityKind::Shopkeeper && !hit->alerted) {
-            hit->alerted = true;
-            hit->lastKnownPlayerPos = attacker.pos;
-            hit->lastKnownPlayerAge = 0;
-            pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+            triggerShopTheftAlarm(hit->pos, attacker.pos);
         }
 
         if (projKind == ProjectileKind::Fireball) {
@@ -945,10 +944,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
             dmg = std::max(0, dmg - dist);
 
             if (fromPlayer && e->kind == EntityKind::Shopkeeper && !e->alerted) {
-                e->alerted = true;
-                e->lastKnownPlayerPos = attacker.pos;
-                e->lastKnownPlayerAge = 0;
-                pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+                triggerShopTheftAlarm(e->pos, attacker.pos);
             }
 
             if (dmg > 0) e->hp -= dmg;

@@ -38,6 +38,10 @@
 - **Room shape variety**: some **normal rooms** now get internal wall partitions (L-shaped alcoves, donut blocks, and partition walls with occasional inner doors).
   - Designed to increase tactical line-of-sight variation while keeping the global stairs path intact.
 
+- **Merchant guild pursuit**: stealing from shops can now trigger a guard response that may follow you across floors.
+  - Shop debts can be paid across depths, and clearing all debt causes guards to stand down globally.
+  - Save format bumped to **v42**.
+
 - **Secret shortcut doors**: some procedural floors now add a small number of **hidden** doors (secret doors) in corridor walls where adjacent passages run alongside each other.
   - These create optional **loops/shortcuts** that reward searching, without carving disconnected "hidden corridor" pockets.
 
@@ -76,7 +80,7 @@
   - Undead, shopkeepers, and the Minotaur are immune.
 
 - **Companion order improvements**:
-  - **FETCH** companions now pick up gold and actually **carry it back**, delivering it when adjacent to you (and dropping it on death).
+  - **FETCH** companions now pick up **gold and useful loot** (never shop stock), carrying it back and delivering/dropping it when adjacent to you (still drops carried loot on death).
   - **STAY/GUARD** now remember an anchor tile so companions can **return** after chasing enemies; **GUARD** will also lightly **patrol** near its anchor.
 
 - **Targeting / ranged QoL**:
@@ -100,6 +104,10 @@
   - Special cases: **troll/slime/mimic/wizard corpses** can sometimes reanimate into their original creature.
   - Rising is **noisy** and can wake nearby monsters.
 
+- **Item mimics**: rare high-value loot (outside of shops) may actually be a **Mimic**. Attempting to pick it up reveals an ambushing Mimic that drops the original item on death.
+  - Weighted toward **Treasure/Vault/Secret** and themed rooms (Armory/Library/Laboratory).
+- **Mimic stickiness**: Mimic attacks can briefly **stick** you in place (applies the existing **WEB** status).
+
 - New monster: **Zombie** (slow, tough undead).
   - **Undead** (Ghost/Skeleton/Zombie) are **immune to poison damage**.
 
@@ -108,8 +116,12 @@
 
 - **Monsters can drink potions:** Wizards may now spawn with a pocket potion and will sometimes drink it mid-fight (heal, regen, shielding, invisibility, levitation). Levitation now also enables monster pathing across chasms.
 
+- **Shrine piety + offerings:** shrine services now cost **PIETY** and have a cooldown.
+  - Earn PIETY by donating gold (**#donate**) or offering corpses (**#sacrifice**) at a shrine (or at the surface camp).
+  - The HUD now shows your current PIETY and remaining prayer cooldown.
+
 ### Save compatibility
-- Save version bumped to **v38** (adds monster pocket consumables; retains v37 item egos/brands).
+- Save version bumped to **v43** (v41 adds `Item.flags`; v42 adds merchant guild pursuit; v43 adds shrine piety + prayer cooldown).
 
 ### Changed
 - **#whistle** now calls **all friendly companions** with **Follow/Fetch** orders (not just the starting dog).
@@ -117,6 +129,9 @@
 - Darkness lighting now treats **burning creatures** and **flaming ego weapons** as small moving light sources (in addition to torches, room ambient light, and fire fields).
 
 ### Fixed
+- Shops now correctly spawn a **Shopkeeper** (enabling **#pay** and selling), and shop rooms no longer spawn random monsters.
+- Shrine item-targeting prompts (**Identify/Bless/Recharge/Sacrifice**) now resolve properly from the inventory UI.
+- Fixed build-breaking errors in the merchant guild theft-alarm helper.
 - Test/headless builds no longer require SDL2: **keybinds** are compiled only for the game executable.
 - Fixed build-breaking pointer dereferences in **Disarm Trap** and **Shrine prayer** interactions.
 - Fixed MSVC build breaks/warnings: implemented missing chest overlay item icon helper, corrected keybind chord formatting, and centralized SDL includes to avoid SDL_MAIN_HANDLED macro redefinitions.

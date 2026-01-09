@@ -205,6 +205,11 @@ void Game::handleAction(Action a) {
         invIdentifyMode = false;
         closeChestOverlay();
         targeting = false;
+        targetingMode_ = TargetingMode::Ranged;
+        targetLine.clear();
+        targetValid = false;
+        targetStatusText_.clear();
+        spellsOpen = false;
         kicking = false;
         helpOpen = false;
         looking = false;
@@ -309,6 +314,322 @@ void Game::handleAction(Action a) {
         return;
     }
 
+
+    // ------------------------------------------------------------
+    // Modal inventory prompt: shrine services that need a target item
+    // ------------------------------------------------------------
+    // Like Scroll of Identify, the shrine prayer action already consumed the turn;
+    // this prompt is UI-only and does not advance the simulation.
+    if (invOpen && invPrompt_ != InvPromptKind::None) {
+        auto unidentifiedKinds = [&]() {
+            std::vector<ItemKind> out;
+            out.reserve(16);
+            auto seen = [&](ItemKind k) {
+                for (ItemKind x : out) if (x == k) return true;
+                return false;
+            };
+            for (const auto& it : inv) {
+                if (!isIdentifiableKind(it.kind)) continue;
+                if (isIdentified(it.kind)) continue;
+                if (!seen(it.kind)) out.push_back(it.kind);
+            }
+            return out;
+        };
+
+        auto blessable = [&](const Item& it) {
+            if (it.kind == ItemKind::Gold) return false;
+            if (it.kind == ItemKind::AmuletYendor) return false;
+            const ItemDef& d = itemDef(it.kind);
+            return (d.slot != EquipSlot::None) || d.consumable;
+        };
+
+        auto isRechargeableWand = [&](const Item& it) {
+            if (!isWandKind(it.kind)) return false;
+            const ItemDef& d = itemDef(it.kind);
+            if (d.maxCharges <= 0) return false;
+            return it.charges < d.maxCharges;
+        };
+
+        auto blessOne = [&](int idx) {
+            if (idx < 0 || idx >= static_cast<int>(inv.size())) return;
+            Item& it = inv[static_cast<size_t>(idx)];
+            if (!blessable(it)) {
+                pushMsg("THAT CANNOT BE BLESSED.", MessageKind::Info, true);
+                return;
+            }
+
+            Item named = it;
+            named.buc = 0;
+            const std::string nm = displayItemName(named);
+
+            if (it.buc < 0) {
+                it.buc = 0;
+                pushMsg("A WARMTH LIFTS THE CURSE FROM YOUR " + nm + ".", MessageKind::Success, true);
+            } else if (it.buc == 0) {
+                it.buc = 1;
+                pushMsg("YOUR " + nm + " GLOWS WITH HOLY LIGHT.", MessageKind::Success, true);
+            } else {
+                pushMsg("YOUR " + nm + " SHINES BRIEFLY.", MessageKind::Info, true);
+            }
+        };
+
+        auto rechargeOne = [&](int idx) {
+            if (idx < 0 || idx >= static_cast<int>(inv.size())) return;
+            Item& it = inv[static_cast<size_t>(idx)];
+            if (!isWandKind(it.kind)) {
+                pushMsg("THAT IS NOT A WAND.", MessageKind::Info, true);
+                return;
+            }
+            const ItemDef& d = itemDef(it.kind);
+            if (d.maxCharges <= 0) {
+                pushMsg("THAT WAND CANNOT HOLD A CHARGE.", MessageKind::Info, true);
+                return;
+            }
+
+            const int before = it.charges;
+            if (it.buc < 0) it.buc = 0;
+            it.charges = d.maxCharges;
+
+            Item named = it;
+            named.buc = 0;
+            const std::string nm = displayItemName(named);
+
+            if (before < d.maxCharges) {
+                pushMsg("DIVINE ENERGY FLOWS INTO YOUR " + nm + ".", MessageKind::Success, true);
+            } else {
+                pushMsg("YOUR " + nm + " IS ALREADY FULLY CHARGED.", MessageKind::Info, true);
+            }
+        };
+
+        auto sacrificeOne = [&](int idx) {
+            if (idx < 0 || idx >= static_cast<int>(inv.size())) return;
+            Item& it = inv[static_cast<size_t>(idx)];
+            if (!isCorpseKind(it.kind)) {
+                pushMsg("THAT IS NOT A PROPER SACRIFICE.", MessageKind::Info, true);
+                return;
+            }
+
+            // Corpse freshness is tracked in charges (see useSelected corpse-eating logic).
+            const bool rotten = (it.charges <= 0);
+
+            // Map corpse kind to a representative monster for piety value.
+            EntityKind ek = EntityKind::Goblin;
+            switch (it.kind) {
+                case ItemKind::CorpseGoblin:   ek = EntityKind::Goblin; break;
+                case ItemKind::CorpseOrc:      ek = EntityKind::Orc; break;
+                case ItemKind::CorpseBat:      ek = EntityKind::Bat; break;
+                case ItemKind::CorpseSlime:    ek = EntityKind::Slime; break;
+                case ItemKind::CorpseKobold:   ek = EntityKind::KoboldSlinger; break;
+                case ItemKind::CorpseWolf:     ek = EntityKind::Wolf; break;
+                case ItemKind::CorpseTroll:    ek = EntityKind::Troll; break;
+                case ItemKind::CorpseWizard:   ek = EntityKind::Wizard; break;
+                case ItemKind::CorpseSnake:    ek = EntityKind::Snake; break;
+                case ItemKind::CorpseSpider:   ek = EntityKind::Spider; break;
+                case ItemKind::CorpseOgre:     ek = EntityKind::Ogre; break;
+                case ItemKind::CorpseMimic:    ek = EntityKind::Mimic; break;
+                case ItemKind::CorpseMinotaur: ek = EntityKind::Minotaur; break;
+                default: break;
+            }
+
+            int gain = std::max(1, xpFor(ek) / 8);
+            if (rotten) gain = std::max(1, gain / 2);
+
+            // Consume the corpse.
+            if (it.count > 1) {
+                it.count -= 1;
+            } else {
+                inv.erase(inv.begin() + idx);
+                invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+            }
+
+            piety_ = std::min(999, piety_ + gain);
+
+            pushMsg("YOU OFFER A SACRIFICE. (+"
+                    + std::to_string(gain)
+                    + " PIETY)", MessageKind::Success, true);
+        };
+
+        auto identifyRandom = [&]() {
+            std::vector<ItemKind> c = unidentifiedKinds();
+            if (c.empty()) {
+                pushMsg("YOU LEARN NOTHING NEW.", MessageKind::Info, true);
+                return;
+            }
+            const int idx = rng.range(0, static_cast<int>(c.size()) - 1);
+            (void)markIdentified(c[static_cast<size_t>(idx)], false);
+            pushMsg("DIVINE INSIGHT REVEALS THE TRUTH.", MessageKind::Success, true);
+        };
+
+        auto blessEquippedFallback = [&]() {
+            // Prefer equipped gear, otherwise first blessable item.
+            const int equippedIds[5] = { equipMeleeId, equipArmorId, equipRangedId, equipRing1Id, equipRing2Id };
+            for (int id : equippedIds) {
+                if (id == 0) continue;
+                const int idx = findItemIndexById(inv, id);
+                if (idx >= 0 && blessable(inv[static_cast<size_t>(idx)])) {
+                    blessOne(idx);
+                    return;
+                }
+            }
+            for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+                if (blessable(inv[static_cast<size_t>(i)])) {
+                    blessOne(i);
+                    return;
+                }
+            }
+            pushMsg("NOTHING HERE RESPONDS.", MessageKind::Info, true);
+        };
+
+        auto rechargeBestFallback = [&]() {
+            int bestIdx = -1;
+            int bestMissing = -1;
+            int bestMax = 0;
+            for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+                const Item& it = inv[static_cast<size_t>(i)];
+                if (!isRechargeableWand(it)) continue;
+                const ItemDef& d = itemDef(it.kind);
+                const int missing = d.maxCharges - it.charges;
+                if (missing > bestMissing || (missing == bestMissing && d.maxCharges > bestMax)) {
+                    bestMissing = missing;
+                    bestMax = d.maxCharges;
+                    bestIdx = i;
+                }
+            }
+            if (bestIdx >= 0) rechargeOne(bestIdx);
+            else pushMsg("YOU HAVE NOTHING TO RECHARGE.", MessageKind::Info, true);
+        };
+
+        auto sacrificeBestFallback = [&]() {
+            // Prefer the freshest/highest-value corpse.
+            int bestIdx = -1;
+            int bestScore = -999999;
+            for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+                const Item& it = inv[static_cast<size_t>(i)];
+                if (!isCorpseKind(it.kind)) continue;
+                int score = 0;
+                // Freshness in charges (higher = fresher).
+                score += it.charges;
+                // Roughly weight by corpse kind (minotaur > troll > ogre > ...)
+                switch (it.kind) {
+                    case ItemKind::CorpseMinotaur: score += 500; break;
+                    case ItemKind::CorpseWizard:   score += 300; break;
+                    case ItemKind::CorpseTroll:    score += 250; break;
+                    case ItemKind::CorpseOgre:     score += 200; break;
+                    case ItemKind::CorpseMimic:    score += 180; break;
+                    case ItemKind::CorpseWolf:     score += 120; break;
+                    case ItemKind::CorpseSpider:   score += 110; break;
+                    case ItemKind::CorpseSnake:    score += 100; break;
+                    case ItemKind::CorpseOrc:      score += 90; break;
+                    case ItemKind::CorpseKobold:   score += 70; break;
+                    case ItemKind::CorpseGoblin:   score += 60; break;
+                    case ItemKind::CorpseBat:      score += 50; break;
+                    case ItemKind::CorpseSlime:    score += 40; break;
+                    default: break;
+                }
+                if (score > bestScore) { bestScore = score; bestIdx = i; }
+            }
+            if (bestIdx >= 0) sacrificeOne(bestIdx);
+            else pushMsg("YOU HAVE NOTHING TO SACRIFICE.", MessageKind::Info, true);
+        };
+
+        switch (a) {
+            case Action::Up:
+                moveInventorySelection(-1);
+                break;
+            case Action::Down:
+                moveInventorySelection(1);
+                break;
+            case Action::SortInventory:
+                sortInventory();
+                break;
+
+            case Action::Confirm: {
+                if (inv.empty()) {
+                    closeInventory();
+                    break;
+                }
+                invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
+                const Item& selIt = inv[static_cast<size_t>(invSel)];
+
+                switch (invPrompt_) {
+                    case InvPromptKind::ShrineIdentify:
+                        if (!isIdentifiableKind(selIt.kind) || isIdentified(selIt.kind)) {
+                            pushMsg("THAT DOESN'T REVEAL ANYTHING.", MessageKind::Info, true);
+                            break;
+                        }
+                        (void)markIdentified(selIt.kind, false);
+                        pushMsg("DIVINE INSIGHT REVEALS THE TRUTH.", MessageKind::Success, true);
+                        closeInventory();
+                        break;
+
+                    case InvPromptKind::ShrineBless:
+                        if (!blessable(selIt)) {
+                            pushMsg("THAT CANNOT BE BLESSED.", MessageKind::Info, true);
+                            break;
+                        }
+                        blessOne(invSel);
+                        closeInventory();
+                        break;
+
+                    case InvPromptKind::ShrineRecharge:
+                        if (!isRechargeableWand(selIt)) {
+                            pushMsg("THAT CANNOT BE RECHARGED HERE.", MessageKind::Info, true);
+                            break;
+                        }
+                        rechargeOne(invSel);
+                        closeInventory();
+                        break;
+
+                    case InvPromptKind::ShrineSacrifice:
+                        if (!isCorpseKind(selIt.kind)) {
+                            pushMsg("THAT IS NOT A PROPER SACRIFICE.", MessageKind::Info, true);
+                            break;
+                        }
+                        sacrificeOne(invSel);
+                        closeInventory();
+                        break;
+
+                    default:
+                        closeInventory();
+                        break;
+                }
+                break;
+            }
+
+            case Action::Cancel:
+            case Action::Inventory:
+                // Cancel chooses the prompt's suggested default.
+                switch (invPrompt_) {
+                    case InvPromptKind::ShrineIdentify:
+                        identifyRandom();
+                        closeInventory();
+                        break;
+                    case InvPromptKind::ShrineBless:
+                        blessEquippedFallback();
+                        closeInventory();
+                        break;
+                    case InvPromptKind::ShrineRecharge:
+                        rechargeBestFallback();
+                        closeInventory();
+                        break;
+                    case InvPromptKind::ShrineSacrifice:
+                        sacrificeBestFallback();
+                        closeInventory();
+                        break;
+                    default:
+                        closeInventory();
+                        break;
+                }
+                break;
+
+            default:
+                // Ignore other actions while the prompt is active.
+                break;
+        }
+        return;
+    }
+
+
     // ------------------------------------------------------------
     // Level-up talent allocation overlay (forced while points are pending)
     // ------------------------------------------------------------
@@ -393,6 +714,14 @@ void Game::handleAction(Action a) {
             if (helpOpen) {
                 closeOverlays();
                 helpOpen = true;
+            }
+            return;
+        case Action::Spells:
+            if (spellsOpen) {
+                spellsOpen = false;
+            } else {
+                closeOverlays();
+                openSpells();
             }
             return;
         case Action::MessageHistory:
@@ -939,6 +1268,74 @@ if (optionsSel == 19) {
     if (statsOpen) {
         if (a == Action::Cancel) statsOpen = false;
         return;
+    }
+
+    // Overlay: spells
+    if (spellsOpen) {
+        const std::vector<SpellKind> ks = knownSpellsList();
+        const int n = static_cast<int>(ks.size());
+        const int maxSel = std::max(0, n - 1);
+        if (n <= 0) {
+            spellsSel = 0;
+        } else {
+            spellsSel = clampi(spellsSel, 0, maxSel);
+        }
+
+        auto close = [&]() {
+            spellsOpen = false;
+        };
+
+        auto castSelected = [&]() -> bool {
+            if (n <= 0) {
+                pushMsg("YOU DON'T KNOW ANY SPELLS.", MessageKind::System, true);
+                return false;
+            }
+
+            const SpellKind sk = ks[static_cast<size_t>(spellsSel)];
+            const SpellDef& sd = spellDef(sk);
+
+            std::string reason;
+            if (!canCastSpell(sk, &reason)) {
+                if (!reason.empty()) pushMsg(reason + ".", MessageKind::Warning, true);
+                return false;
+            }
+
+            if (sd.needsTarget) {
+                close();
+                beginSpellTargeting(sk);
+                return false; // targeting does not consume a turn yet
+            }
+
+            close();
+            return castSpell(sk);
+        };
+
+        switch (a) {
+            case Action::Cancel:
+            case Action::Spells:
+                close();
+                return;
+            case Action::Up:
+                spellsSel = clampi(spellsSel - 1, 0, maxSel);
+                return;
+            case Action::Down:
+                spellsSel = clampi(spellsSel + 1, 0, maxSel);
+                return;
+            case Action::LogUp:
+                spellsSel = clampi(spellsSel - 10, 0, maxSel);
+                return;
+            case Action::LogDown:
+                spellsSel = clampi(spellsSel + 10, 0, maxSel);
+                return;
+            case Action::Confirm:
+            case Action::Fire: {
+                const bool acted = castSelected();
+                if (acted) advanceAfterPlayerAction();
+                return;
+            }
+            default:
+                return;
+        }
     }
 
     // Overlay: scores / run history (Hall of Fame)

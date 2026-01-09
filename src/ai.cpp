@@ -294,6 +294,55 @@ void Game::monsterTurn() {
         }
     };
 
+    // FETCH-mode allies can also pick up non-gold loot and bring it back.
+    // To avoid unwanted shop interactions, companions will never pick up shop stock/unpaid items.
+    auto allyFetchableItem = [&](const Item& it) -> bool {
+        if (it.count <= 0) return false;
+        if (it.shopPrice > 0) return false; // don't steal shop stock / don't launder unpaid items
+        if (it.kind == ItemKind::Gold) return true;
+
+        // Corpses/chests are special-case gameplay items; don't have pets yoink them.
+        if (isCorpseKind(it.kind)) return false;
+        if (isChestKind(it.kind)) return false;
+
+        const ItemDef& def = itemDef(it.kind);
+
+        // Prefer "real" loot, but keep a small allowlist for utility items even if value==0.
+        if (def.value > 0) return true;
+        if (it.kind == ItemKind::FoodRation) return true;
+        if (it.kind == ItemKind::Key) return true;
+        if (it.kind == ItemKind::Lockpick) return true;
+        if (it.kind == ItemKind::Torch || it.kind == ItemKind::TorchLit) return true;
+
+        return false;
+    };
+
+    // Crude desirability heuristic for FETCH targeting. Higher = more attractive.
+    auto allyFetchDesire = [&](const Item& it) -> int {
+        if (it.count <= 0) return 0;
+        if (it.kind == ItemKind::Gold) return std::max(1, it.count);
+
+        const ItemDef& def = itemDef(it.kind);
+        int base = std::max(1, def.value);
+        int n = isStackable(it.kind) ? std::max(1, it.count) : 1;
+        int v = base * n;
+
+        // Bias toward survival items so FETCH feels smarter.
+        switch (it.kind) {
+            case ItemKind::PotionHealing:
+            case ItemKind::PotionRegeneration:
+            case ItemKind::PotionAntidote:
+                v += 25;
+                break;
+            case ItemKind::FoodRation:
+                v += 12;
+                break;
+            default:
+                break;
+        }
+        return v;
+    };
+
     auto pickupGoldAt = [&](Entity& ally) -> bool {
         for (size_t gi = 0; gi < ground.size(); ++gi) {
             GroundItem& g = ground[gi];
@@ -318,6 +367,42 @@ void Game::monsterTurn() {
         return false;
     };
 
+    // Item pickup helper used by FETCH-mode allies (non-gold).
+    // Stored in the pocketConsumable slot (already serialized) and delivered by dropping it near the player.
+    auto pickupItemAt = [&](Entity& ally) -> bool {
+        if (ally.pocketConsumable.id != 0 && ally.pocketConsumable.count > 0) return false;
+
+        size_t bestIdx = static_cast<size_t>(-1);
+        int bestDesire = -1;
+
+        for (size_t gi = 0; gi < ground.size(); ++gi) {
+            GroundItem& g = ground[gi];
+            if (g.pos != ally.pos) continue;
+            if (g.item.kind == ItemKind::Gold) continue; // gold uses stolenGold
+            if (!allyFetchableItem(g.item)) continue;
+
+            const int v = allyFetchDesire(g.item);
+            if (v > bestDesire) {
+                bestDesire = v;
+                bestIdx = gi;
+            }
+        }
+
+        if (bestIdx == static_cast<size_t>(-1)) return false;
+
+        Item it = ground[bestIdx].item;
+        ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(bestIdx));
+        ally.pocketConsumable = it;
+
+        const bool vis = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
+        if (vis) {
+            std::ostringstream ss;
+            ss << "YOUR " << kindName(ally.kind) << " PICKS UP " << displayItemName(it) << ".";
+            pushMsg(ss.str(), MessageKind::Loot, true);
+        }
+        return true;
+    };
+
     auto depositAllyGold = [&](Entity& ally) -> bool {
         if (ally.stolenGold <= 0) return false;
         if (!isAdjacent8(ally.pos, p.pos)) return false;
@@ -335,30 +420,73 @@ void Game::monsterTurn() {
         return true;
     };
 
-    auto findVisibleGoldTarget = [&](const Entity& ally, Vec2i& out) -> bool {
-        int bestMan = 999999;
+    
+    auto depositAllyItem = [&](Entity& ally) -> bool {
+        if (ally.pocketConsumable.id == 0 || ally.pocketConsumable.count <= 0) return false;
+        if (!isAdjacent8(ally.pos, p.pos)) return false;
+
+        Item it = ally.pocketConsumable;
+        ally.pocketConsumable = Item{};
+
+        // Drop at the player's feet rather than forcing it into inventory (avoids surprise encumbrance).
+        dropGroundItemItem(p.pos, it);
+
+        const bool vis = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
+        if (vis) {
+            std::ostringstream ss;
+            ss << "YOUR " << kindName(ally.kind) << " BRINGS YOU " << displayItemName(it) << ".";
+            pushMsg(ss.str(), MessageKind::Loot, true);
+        }
+        return true;
+    };
+
+    auto findVisibleFetchTarget = [&](const Entity& ally, Vec2i& out, bool& outIsGold) -> bool {
         Vec2i best{-1, -1};
+        bool bestGold = false;
+        int bestVal = 0;
+        int bestDist = 999999;
 
         for (const auto& g : ground) {
-            if (g.item.kind != ItemKind::Gold) continue;
-            if (g.item.shopPrice > 0) continue;
-            if (g.item.count <= 0) continue;
+            if (!allyFetchableItem(g.item)) continue;
 
             if (!dung.inBounds(g.pos.x, g.pos.y)) continue;
             const Tile& t0 = dung.at(g.pos.x, g.pos.y);
             if (!t0.visible) continue;
 
-            const int man = manhattan(ally.pos, g.pos);
-            if (man < bestMan) {
-                bestMan = man;
+            // Only chase non-gold items if we have an empty pocket slot.
+            if (g.item.kind != ItemKind::Gold) {
+                if (ally.pocketConsumable.id != 0 && ally.pocketConsumable.count > 0) continue;
+            }
+
+            const int dist = manhattan(ally.pos, g.pos);
+            const int val = allyFetchDesire(g.item);
+            if (val <= 0) continue;
+
+            if (best.x < 0) {
                 best = g.pos;
+                bestGold = (g.item.kind == ItemKind::Gold);
+                bestVal = val;
+                bestDist = dist;
+                continue;
+            }
+
+            // Compare val/(dist+1) without division.
+            const int64_t lhs = static_cast<int64_t>(val) * static_cast<int64_t>(bestDist + 1);
+            const int64_t rhs = static_cast<int64_t>(bestVal) * static_cast<int64_t>(dist + 1);
+            if (lhs > rhs || (lhs == rhs && dist < bestDist)) {
+                best = g.pos;
+                bestGold = (g.item.kind == ItemKind::Gold);
+                bestVal = val;
+                bestDist = dist;
             }
         }
 
         if (best.x < 0) return false;
         out = best;
+        outIsGold = bestGold;
         return true;
     };
+
 
     // Pack monsters will "reserve" adjacent-to-player tiles so they spread out
     // a bit more (reduced bumping / pileups).
@@ -398,10 +526,12 @@ void Game::monsterTurn() {
             // If an ally is adjacent and carrying gold, deliver it immediately.
             // (This consumes the ally's action for the turn.)
             if (depositAllyGold(m)) return;
+            if (depositAllyItem(m)) return;
 
-            // FETCH: grab any gold you're standing on.
+            // FETCH: grab any loot you're standing on.
             if (m.allyOrder == AllyOrder::Fetch) {
                 if (pickupGoldAt(m)) return;
+                if (pickupItemAt(m)) return;
             }
 
             // Look for the nearest hostile in line-of-sight.
@@ -413,7 +543,8 @@ void Game::monsterTurn() {
                 maxChase = 8;
             } else if (m.allyOrder == AllyOrder::Fetch) {
                 // When carrying loot, prefer returning instead of chasing fights.
-                maxChase = (m.stolenGold > 0) ? 6 : 10;
+                const bool carryingLoot = (m.stolenGold > 0) || (m.pocketConsumable.id != 0 && m.pocketConsumable.count > 0);
+                maxChase = carryingLoot ? 6 : 10;
             } else if (m.allyOrder == AllyOrder::Guard) {
                 maxChase = LOS_MANHATTAN;
             }
@@ -504,8 +635,9 @@ void Game::monsterTurn() {
             }
 
             if (m.allyOrder == AllyOrder::Fetch) {
-                // If carrying gold, head back to the player to deliver.
-                if (m.stolenGold > 0) {
+                // If carrying loot, head back to the player to deliver.
+                const bool carryingLoot = (m.stolenGold > 0) || (m.pocketConsumable.id != 0 && m.pocketConsumable.count > 0);
+                if (carryingLoot) {
                     const auto& costMap = getCostMap(p.pos, PathMode::Normal);
                     const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
                     if (step != m.pos) {
@@ -514,13 +646,15 @@ void Game::monsterTurn() {
                     return;
                 }
 
-                Vec2i goldPos;
-                if (findVisibleGoldTarget(m, goldPos)) {
-                    if (goldPos == m.pos) {
-                        (void)pickupGoldAt(m);
+                Vec2i tgt;
+                bool tgtIsGold = false;
+                if (findVisibleFetchTarget(m, tgt, tgtIsGold)) {
+                    if (tgt == m.pos) {
+                        if (tgtIsGold) (void)pickupGoldAt(m);
+                        else (void)pickupItemAt(m);
                         return;
                     }
-                    const auto& costMap = getCostMap(goldPos, PathMode::Normal);
+                    const auto& costMap = getCostMap(tgt, PathMode::Normal);
                     const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
                     if (step != m.pos) {
                         tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
@@ -528,6 +662,7 @@ void Game::monsterTurn() {
                     }
                 }
             }
+
 
             // Default: stick close to the player.
             const int dist = chebyshev(m.pos, p.pos);

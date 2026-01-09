@@ -282,8 +282,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         if (wasInShop && !nowInShop) {
             const int debt = shopDebtThisDepth();
             if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
-                setShopkeepersAlerted(ents, playerId_, e.pos, true);
-                pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+                triggerShopTheftAlarm(prevPos, e.pos);
             }
         }
         // Footstep noise: small, but enough for nearby monsters to investigate.
@@ -488,8 +487,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
                 if (wasInShop && !nowInShop) {
                     const int debt = shopDebtThisDepth();
                     if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
-                        setShopkeepersAlerted(ents, playerId_, victim.pos, true);
-                        pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+                        triggerShopTheftAlarm(prevPos, victim.pos);
                     }
                 }
             }
@@ -1506,8 +1504,7 @@ bool Game::disarmTrap() {
                     if (wasInShop && !nowInShop) {
                         const int debt = shopDebtThisDepth();
                         if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
-                            setShopkeepersAlerted(ents, playerId_, p.pos, true);
-                            pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+                            triggerShopTheftAlarm(prevPos, p.pos);
                         }
                     }
                     break;
@@ -2199,23 +2196,50 @@ bool Game::prayAtShrine(const std::string& modeIn) {
         }
     }
 
-    const int base = 10 + depth_ * 2;
-    int cost = 0;
-    if (mode == "heal") cost = base + 6;
-    else if (mode == "cure") cost = base + 8;
-    else if (mode == "identify") cost = base + 10;
-    else if (mode == "bless") cost = base + 12;
-    else if (mode == "uncurse") cost = base + 14;
-    else if (mode == "recharge") cost = base + 16;
-
-    if (goldCount() < cost) {
-        pushMsg("YOU LACK THE GOLD FOR THAT.", MessageKind::Info, true);
+    // Prayer timeout: shrine services cannot be spammed back-to-back.
+    if (turnCount < prayerCooldownUntilTurn_) {
+        const int cd = static_cast<int>(prayerCooldownUntilTurn_ - turnCount);
+        pushMsg("THE GODS ARE SILENT. (COOLDOWN: " + std::to_string(cd) + ")", MessageKind::Info, true);
         return false;
     }
 
-    // Spend gold now; selection prompts (if any) are UI-only and do not consume extra turns.
-    (void)spendGoldFromInv(inv, cost);
-    pushMsg("YOU OFFER " + std::to_string(cost) + " GOLD.", MessageKind::Info, true);
+    // Services are priced in PIETY. If you don't have enough, the shrine will accept a
+    // gold donation to make up the difference.
+    constexpr int GOLD_PER_PIETY = 5;
+
+    const int baseGold = 10 + depth_ * 2;
+    int costGold = 0;
+    if (mode == "heal") costGold = baseGold + 6;
+    else if (mode == "cure") costGold = baseGold + 8;
+    else if (mode == "identify") costGold = baseGold + 10;
+    else if (mode == "bless") costGold = baseGold + 12;
+    else if (mode == "uncurse") costGold = baseGold + 14;
+    else if (mode == "recharge") costGold = baseGold + 16;
+
+    const int costPiety = std::max(1, (costGold + GOLD_PER_PIETY - 1) / GOLD_PER_PIETY);
+
+    if (piety_ < costPiety) {
+        const int missing = costPiety - piety_;
+        const int goldNeeded = missing * GOLD_PER_PIETY;
+        if (goldCount() < goldNeeded) {
+            pushMsg("YOU LACK THE PIETY FOR THAT.", MessageKind::Info, true);
+            pushMsg("YOU ALSO LACK THE GOLD TO DONATE (" + std::to_string(goldNeeded) + ").", MessageKind::Info, true);
+            return false;
+        }
+
+        // Convert just enough gold into piety.
+        (void)spendGoldFromInv(inv, goldNeeded);
+        piety_ = std::min(999, piety_ + missing);
+        pushMsg("YOU DONATE " + std::to_string(goldNeeded) + " GOLD. (+" + std::to_string(missing) + " PIETY)", MessageKind::Info, true);
+    }
+
+    // Spend piety now; selection prompts (if any) are UI-only and do not consume extra turns.
+    piety_ -= costPiety;
+    pushMsg("YOU OFFER " + std::to_string(costPiety) + " PIETY.", MessageKind::Info, true);
+
+    // Set a simple prayer timeout scaled by how "expensive" the service is.
+    const uint32_t cooldown = 40u + static_cast<uint32_t>(costPiety) * 10u;
+    prayerCooldownUntilTurn_ = std::max(prayerCooldownUntilTurn_, turnCount + cooldown);
 
     if (mode == "heal") {
         int healed = std::max(8, p.hpMax / 2);
@@ -2317,6 +2341,138 @@ bool Game::prayAtShrine(const std::string& modeIn) {
     advanceAfterPlayerAction();
     return true;
 }
+
+bool Game::donateAtShrine(int goldAmount) {
+    if (gameOver || gameWon) return false;
+
+    Entity& p = playerMut();
+
+    bool inShrine = false;
+    for (const auto& r : dung.rooms) {
+        if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
+    }
+    const bool atCamp = (depth_ <= 0);
+
+    if (!inShrine && !atCamp) {
+        pushMsg("YOU NEED A SHRINE OR YOUR CAMP TO DONATE.", MessageKind::Info, true);
+        return false;
+    }
+
+    constexpr int GOLD_PER_PIETY = 5;
+
+    const int gold = goldCount();
+    const int maxConvertible = (gold / GOLD_PER_PIETY) * GOLD_PER_PIETY;
+    if (maxConvertible < GOLD_PER_PIETY) {
+        pushMsg("YOU HAVE TOO LITTLE GOLD TO DONATE.", MessageKind::Info, true);
+        return false;
+    }
+
+    int target = goldAmount;
+    if (target <= 0) {
+        // Default: donate enough for ~10 piety (or as much as you can).
+        target = std::min(maxConvertible, GOLD_PER_PIETY * 10);
+    }
+
+    int donateGold = (target / GOLD_PER_PIETY) * GOLD_PER_PIETY;
+    donateGold = std::min(donateGold, maxConvertible);
+
+    if (donateGold < GOLD_PER_PIETY) {
+        pushMsg("DONATION MUST BE AT LEAST " + std::to_string(GOLD_PER_PIETY) + " GOLD.", MessageKind::Info, true);
+        return false;
+    }
+
+    const int gain = donateGold / GOLD_PER_PIETY;
+
+    (void)spendGoldFromInv(inv, donateGold);
+    piety_ = std::min(999, piety_ + gain);
+
+    pushMsg("YOU DONATE " + std::to_string(donateGold) + " GOLD. (+" + std::to_string(gain) + " PIETY)", MessageKind::Success, true);
+
+    advanceAfterPlayerAction();
+    return true;
+}
+
+bool Game::sacrificeAtShrine() {
+    if (gameOver || gameWon) return false;
+
+    Entity& p = playerMut();
+
+    bool inShrine = false;
+    for (const auto& r : dung.rooms) {
+        if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
+    }
+    const bool atCamp = (depth_ <= 0);
+
+    if (!inShrine && !atCamp) {
+        pushMsg("YOU NEED A SHRINE OR YOUR CAMP TO SACRIFICE.", MessageKind::Info, true);
+        return false;
+    }
+
+    std::vector<int> corpses;
+    corpses.reserve(8);
+    for (size_t i = 0; i < inv.size(); ++i) {
+        if (isCorpseKind(inv[i].kind)) corpses.push_back(static_cast<int>(i));
+    }
+
+    if (corpses.empty()) {
+        pushMsg("YOU HAVE NOTHING TO SACRIFICE.", MessageKind::Info, true);
+        return false;
+    }
+
+    auto sacrificeOne = [&](int idx) {
+        if (idx < 0 || idx >= static_cast<int>(inv.size())) return;
+
+        Item& it = inv[static_cast<size_t>(idx)];
+        if (!isCorpseKind(it.kind)) return;
+
+        const bool rotten = (it.charges <= 0);
+
+        EntityKind ek = EntityKind::Goblin;
+        switch (it.kind) {
+            case ItemKind::CorpseGoblin:   ek = EntityKind::Goblin; break;
+            case ItemKind::CorpseOrc:      ek = EntityKind::Orc; break;
+            case ItemKind::CorpseBat:      ek = EntityKind::Bat; break;
+            case ItemKind::CorpseSlime:    ek = EntityKind::Slime; break;
+            case ItemKind::CorpseKobold:   ek = EntityKind::Kobold; break;
+            case ItemKind::CorpseWolf:     ek = EntityKind::Wolf; break;
+            case ItemKind::CorpseTroll:    ek = EntityKind::Troll; break;
+            case ItemKind::CorpseWizard:   ek = EntityKind::Wizard; break;
+            case ItemKind::CorpseSnake:    ek = EntityKind::Snake; break;
+            case ItemKind::CorpseSpider:   ek = EntityKind::Spider; break;
+            case ItemKind::CorpseOgre:     ek = EntityKind::Ogre; break;
+            case ItemKind::CorpseMimic:    ek = EntityKind::Mimic; break;
+            case ItemKind::CorpseMinotaur: ek = EntityKind::Minotaur; break;
+            default: break;
+        }
+
+        int gain = std::max(1, xpFor(ek) / 8);
+        if (rotten) gain = std::max(1, gain / 2);
+
+        // Consume corpse (corpses are usually count=1, but keep it generic).
+        if (it.count > 1) {
+            it.count -= 1;
+        } else {
+            inv.erase(inv.begin() + idx);
+            invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+        }
+
+        piety_ = std::min(999, piety_ + gain);
+        pushMsg("YOU OFFER A SACRIFICE. (+" + std::to_string(gain) + " PIETY)", MessageKind::Success, true);
+    };
+
+    if (corpses.size() == 1) {
+        sacrificeOne(corpses[0]);
+    } else {
+        openInventory();
+        invPrompt_ = InvPromptKind::ShrineSacrifice;
+        invSel = corpses[0];
+        pushMsg("SELECT A CORPSE TO SACRIFICE (ENTER=OFFER, ESC=BEST).", MessageKind::System, true);
+    }
+
+    advanceAfterPlayerAction();
+    return true;
+}
+
 
 bool Game::augury() {
     if (gameOver || gameWon) return false;
@@ -2511,46 +2667,79 @@ bool Game::payAtShop() {
     if (gameOver || gameWon) return false;
 
     if (!playerInShop()) {
-        pushMsg("YOU ARE NOT IN A SHOP.", MessageKind::Warning, true);
+        pushMsg("YOU MUST BE IN A SHOP TO PAY.", MessageKind::Info, true);
         return false;
     }
 
     if (!anyLivingShopkeeper(ents, playerId_)) {
-        pushMsg("NO ONE IS HERE TO TAKE YOUR MONEY.", MessageKind::Info, true);
+        pushMsg("THERE IS NO SHOPKEEPER HERE.", MessageKind::Info, true);
         return false;
     }
 
-    const int debt = shopDebtThisDepth();
-    if (debt <= 0) {
-        pushMsg("YOU OWE NOTHING.", MessageKind::Info, true);
-        return false;
-    }
+    auto standDownMerchantGuild = [&]() {
+        // Calm shopkeepers on the current level.
+        setShopkeepersAlerted(ents, playerId_, player().pos, false);
 
-    int availableGold = goldCount();
+        // Remove merchant guild guards from this level.
+        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+            return e.id != playerId_ && e.hp > 0 && e.kind == EntityKind::Guard;
+        }), ents.end());
+
+        // Calm shopkeepers + remove guards from stored levels (so the world "cools down" everywhere).
+        for (auto& [d, st] : levels) {
+            for (auto& e : st.monsters) {
+                if (e.hp <= 0) continue;
+                if (e.kind == EntityKind::Shopkeeper) {
+                    e.alerted = false;
+                }
+            }
+
+            st.monsters.erase(std::remove_if(st.monsters.begin(), st.monsters.end(), [&](const Entity& e) {
+                return e.hp > 0 && e.kind == EntityKind::Guard;
+            }), st.monsters.end());
+        }
+
+        // Also cancel any queued trapdoor fallers that are guards.
+        for (auto& q : trapdoorFallers_) {
+            q.erase(std::remove_if(q.begin(), q.end(), [&](const Entity& e) {
+                return e.hp > 0 && e.kind == EntityKind::Guard;
+            }), q.end());
+        }
+
+        merchantGuildAlerted_ = false;
+    };
+
+    const int availableGold = countGold(inv);
     if (availableGold <= 0) {
-        pushMsg("YOU HAVE NO GOLD.", MessageKind::Warning, true);
+        pushMsg("YOU HAVE NO GOLD TO PAY.", MessageKind::Info, true);
+        return false;
+    }
+
+    const int owedTotal = shopDebtTotal();
+    if (owedTotal <= 0) {
+        pushMsg("YOU OWE NOTHING.", MessageKind::Info, true);
+
+        // Safety: if a save somehow preserved an alerted guild state with no debt, stand down.
+        if (merchantGuildAlerted_) {
+            standDownMerchantGuild();
+        }
         return false;
     }
 
     int spent = 0;
     int remainingGold = availableGold;
 
-    // Apply payments across unpaid items on this depth.
-    // - Stackables: pay whole units (split stack if only partially paid).
-    // - Non-stackables: allow partial payments by reducing the remaining owed.
-    for (size_t i = 0; i < inv.size(); ++i) {
-        if (remainingGold <= 0) break;
-
-        Item& it = inv[i];
-        if (it.shopPrice <= 0 || it.shopDepth != depth_) continue;
+    auto payForItem = [&](Item& it) {
+        if (remainingGold <= 0) return;
+        if (it.shopPrice <= 0 || it.shopDepth <= 0) return;
 
         const int perUnit = it.shopPrice;
-        if (perUnit <= 0) continue;
+        if (perUnit <= 0) return;
 
         if (isStackable(it.kind) && it.count > 1) {
             // Pay as many whole units as possible.
             const int canUnits = std::min(it.count, remainingGold / perUnit);
-            if (canUnits <= 0) continue;
+            if (canUnits <= 0) return;
 
             const int pay = canUnits * perUnit;
             remainingGold -= pay;
@@ -2586,17 +2775,41 @@ bool Game::payAtShop() {
                 it.shopDepth = 0;
             }
         }
+    };
+
+    // Apply payments across unpaid items.
+    // Pay current depth first (so the shop you're standing in is satisfied ASAP),
+    // then pay any remaining debts from other depths.
+    for (size_t i = 0; i < inv.size() && remainingGold > 0; ++i) {
+        Item& it = inv[i];
+        if (it.shopPrice <= 0) continue;
+        if (it.shopDepth != depth_) continue;
+        payForItem(it);
+    }
+    for (size_t i = 0; i < inv.size() && remainingGold > 0; ++i) {
+        Item& it = inv[i];
+        if (it.shopPrice <= 0) continue;
+        if (it.shopDepth <= 0 || it.shopDepth == depth_) continue;
+        payForItem(it);
     }
 
     // Pay down any additional bill for goods already consumed/destroyed.
-    if (remainingGold > 0 && depth_ >= 1 && depth_ <= DUNGEON_MAX_DEPTH) {
-        int& bill = shopDebtLedger_[depth_];
-        if (bill > 0) {
-            const int pay = std::min(bill, remainingGold);
-            bill -= pay;
-            remainingGold -= pay;
-            spent += pay;
-        }
+    auto payBill = [&](int d) {
+        if (remainingGold <= 0) return;
+        if (d < 1 || d > DUNGEON_MAX_DEPTH) return;
+        int& bill = shopDebtLedger_[d];
+        if (bill <= 0) return;
+
+        const int pay = std::min(bill, remainingGold);
+        bill -= pay;
+        remainingGold -= pay;
+        spent += pay;
+    };
+
+    payBill(depth_);
+    for (int d = 1; d <= DUNGEON_MAX_DEPTH && remainingGold > 0; ++d) {
+        if (d == depth_) continue;
+        payBill(d);
     }
 
     if (spent <= 0) {
@@ -2606,11 +2819,10 @@ bool Game::payAtShop() {
 
     (void)spendGoldFromInv(inv, spent);
 
-    const int stillOwe = shopDebtThisDepth();
+    const int stillOwe = shopDebtTotal();
     if (stillOwe <= 0) {
-        pushMsg("YOU PAY " + std::to_string(spent) + " GOLD. YOUR DEBT IS CLEARED.", MessageKind::Success, true);
-        // Calm the shopkeeper if this payment settled the bill.
-        setShopkeepersAlerted(ents, playerId_, player().pos, false);
+        pushMsg("YOU PAY " + std::to_string(spent) + " GOLD. ALL DEBTS ARE CLEARED.", MessageKind::Success, true);
+        standDownMerchantGuild();
     } else {
         pushMsg("YOU PAY " + std::to_string(spent) + " GOLD. YOU STILL OWE " + std::to_string(stillOwe) + " GOLD.", MessageKind::Info, true);
     }
@@ -2618,6 +2830,192 @@ bool Game::payAtShop() {
     // Paying takes a turn.
     advanceAfterPlayerAction();
     return true;
+}
+
+bool Game::payAtCamp() {
+    if (gameOver || gameWon) return false;
+
+    if (depth_ != 0) {
+        pushMsg("YOU MUST BE AT CAMP TO SETTLE YOUR DEBTS.", MessageKind::Info, true);
+        return false;
+    }
+
+    auto standDownMerchantGuild = [&]() {
+        // Current level (camp) shouldn't have shopkeepers/guards, but keep it symmetric.
+        setShopkeepersAlerted(ents, playerId_, player().pos, false);
+        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+            return e.id != playerId_ && e.hp > 0 && e.kind == EntityKind::Guard;
+        }), ents.end());
+
+        // Stored levels: calm shopkeepers + remove guards.
+        for (auto& [d, st] : levels) {
+            for (auto& e : st.monsters) {
+                if (e.hp <= 0) continue;
+                if (e.kind == EntityKind::Shopkeeper) {
+                    e.alerted = false;
+                }
+            }
+
+            st.monsters.erase(std::remove_if(st.monsters.begin(), st.monsters.end(), [&](const Entity& e) {
+                return e.hp > 0 && e.kind == EntityKind::Guard;
+            }), st.monsters.end());
+        }
+
+        for (auto& q : trapdoorFallers_) {
+            q.erase(std::remove_if(q.begin(), q.end(), [&](const Entity& e) {
+                return e.hp > 0 && e.kind == EntityKind::Guard;
+            }), q.end());
+        }
+
+        merchantGuildAlerted_ = false;
+    };
+
+    const int owedTotal = shopDebtTotal();
+    if (owedTotal <= 0) {
+        pushMsg("YOU OWE NOTHING.", MessageKind::Info, true);
+        if (merchantGuildAlerted_) {
+            // Safety: if the guild is flagged as alerted but there is no debt, stand down.
+            standDownMerchantGuild();
+        }
+        return false;
+    }
+
+    const int availableGold = countGold(inv);
+    if (availableGold <= 0) {
+        pushMsg("YOU HAVE NO GOLD TO PAY.", MessageKind::Info, true);
+        return false;
+    }
+
+    int spent = 0;
+    int remainingGold = availableGold;
+
+    auto payForItem = [&](Item& it) {
+        if (remainingGold <= 0) return;
+        if (it.shopPrice <= 0 || it.shopDepth <= 0) return;
+
+        const int perUnit = it.shopPrice;
+        if (perUnit <= 0) return;
+
+        if (isStackable(it.kind) && it.count > 1) {
+            const int canUnits = std::min(it.count, remainingGold / perUnit);
+            if (canUnits <= 0) return;
+
+            const int pay = canUnits * perUnit;
+            remainingGold -= pay;
+            spent += pay;
+
+            if (canUnits == it.count) {
+                it.shopPrice = 0;
+                it.shopDepth = 0;
+            } else {
+                it.count -= canUnits;
+                Item paid = it;
+                paid.count = canUnits;
+                paid.shopPrice = 0;
+                paid.shopDepth = 0;
+                if (!tryStackItem(inv, paid)) {
+                    paid.id = nextItemId++;
+                    inv.push_back(paid);
+                }
+            }
+        } else {
+            const int pay = std::min(perUnit, remainingGold);
+            it.shopPrice -= pay;
+            remainingGold -= pay;
+            spent += pay;
+
+            if (it.shopPrice <= 0) {
+                it.shopPrice = 0;
+                it.shopDepth = 0;
+            }
+        }
+    };
+
+    auto payBill = [&](int d) {
+        if (remainingGold <= 0) return;
+        if (d < 1 || d > DUNGEON_MAX_DEPTH) return;
+        int& bill = shopDebtLedger_[d];
+        if (bill <= 0) return;
+
+        const int pay = std::min(bill, remainingGold);
+        bill -= pay;
+        remainingGold -= pay;
+        spent += pay;
+    };
+
+    // Camp has no "current shop depth", so pay debts from shallow->deep for predictability.
+    for (int d = 1; d <= DUNGEON_MAX_DEPTH && remainingGold > 0; ++d) {
+        for (size_t i = 0; i < inv.size() && remainingGold > 0; ++i) {
+            Item& it = inv[i];
+            if (it.shopPrice <= 0) continue;
+            if (it.shopDepth != d) continue;
+            payForItem(it);
+        }
+        payBill(d);
+    }
+
+    if (spent <= 0) {
+        pushMsg("YOU CANNOT PAY FOR ANYTHING RIGHT NOW.", MessageKind::Info, true);
+        return false;
+    }
+
+    (void)spendGoldFromInv(inv, spent);
+
+    const int stillOwe = shopDebtTotal();
+    if (stillOwe <= 0) {
+        pushMsg("YOU PAY " + std::to_string(spent) + " GOLD TO THE MERCHANT GUILD. ALL DEBTS ARE CLEARED.", MessageKind::Success, true);
+        standDownMerchantGuild();
+    } else {
+        pushMsg("YOU PAY " + std::to_string(spent) + " GOLD TO THE MERCHANT GUILD. YOU STILL OWE " + std::to_string(stillOwe) + " GOLD.", MessageKind::Info, true);
+    }
+
+    // Paying takes a turn.
+    advanceAfterPlayerAction();
+    return true;
+}
+
+void Game::showDebtLedger() {
+    const int owedTotal = shopDebtTotal();
+    if (owedTotal <= 0) {
+        pushSystemMessage("YOU OWE NOTHING.");
+        return;
+    }
+
+    std::vector<int> perDepth(static_cast<size_t>(DUNGEON_MAX_DEPTH + 1), 0);
+
+    // Unpaid items currently in inventory.
+    for (const auto& it : inv) {
+        if (it.shopPrice <= 0) continue;
+        if (it.shopDepth <= 0 || it.shopDepth > DUNGEON_MAX_DEPTH) continue;
+        const int c = std::max(1, it.count);
+        const int add = it.shopPrice * c;
+        if (add > 0) perDepth[static_cast<size_t>(it.shopDepth)] += add;
+    }
+
+    // Extra bill for consumed/destroyed goods.
+    for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
+        const int bill = shopDebtLedger_[d];
+        if (bill > 0) perDepth[static_cast<size_t>(d)] += bill;
+    }
+
+    std::ostringstream ss;
+    ss << "DEBT:";
+    bool any = false;
+    for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
+        const int v = perDepth[static_cast<size_t>(d)];
+        if (v <= 0) continue;
+        ss << "  D" << d << ":" << v << "G";
+        any = true;
+    }
+    if (!any) {
+        ss << " (UNKNOWN)";
+    }
+    ss << "  TOTAL:" << owedTotal << "G";
+    pushSystemMessage(ss.str());
+
+    if (merchantGuildAlerted_) {
+        pushSystemMessage("MERCHANT GUILD: ALERTED.");
+    }
 }
 
 

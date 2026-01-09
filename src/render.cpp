@@ -2876,6 +2876,10 @@ void Renderer::render(const Game& game) {
         drawMessageHistoryOverlay(game);
     }
 
+    if (game.isSpellsOpen()) {
+        drawSpellsOverlay(game);
+    }
+
     if (game.isInventoryOpen()) {
         drawInventoryOverlay(game);
     }
@@ -3020,6 +3024,7 @@ void Renderer::drawHud(const Game& game) {
     ss << "HP: " << p.hp << "/" << p.hpMax;
     ss << " | LV: " << game.playerCharLevel();
     ss << " | XP: " << game.playerXp() << "/" << game.playerXpToNext();
+    ss << " | MANA: " << game.playerMana() << "/" << game.playerManaMax();
     ss << " | GOLD: " << game.goldCount();
     const int debtAll = game.shopDebtTotal();
     if (debtAll > 0) {
@@ -3029,6 +3034,13 @@ void Renderer::drawHud(const Game& game) {
             ss << " (THIS: " << debtThis << ")";
         }
     }
+    const int piety = game.piety();
+    const int prayCd = game.prayerCooldownTurns();
+    if (piety > 0 || prayCd > 0) {
+        ss << " | PIETY: " << piety;
+        if (prayCd > 0) ss << " (CD: " << prayCd << ")";
+    }
+
     ss << " | KEYS: " << game.keyCount() << " | PICKS: " << game.lockpickCount();
 
     const int arrows = ammoCount(game.inventory(), AmmoKind::Arrow);
@@ -3116,7 +3128,7 @@ void Renderer::drawHud(const Game& game) {
             "DIG: CHOOSE DIRECTION (ESC CANCEL)");
     } else {
         drawText5x7(renderer, 8, controlY2, 2, gray,
-            "D DIG | B KICK | F FIRE | G PICKUP | I INV | O EXPLORE | P AUTOPICKUP | C SEARCH (TRAPS/SECRETS)");
+            "D DIG | B KICK | F FIRE | G PICKUP | I INV | Z SPELLS | O EXPLORE | P AUTOPICKUP | C SEARCH (TRAPS/SECRETS)");
     }
     drawText5x7(renderer, 8, controlY3, 2, gray,
         "F2 OPT | F3 MSGS | # CMD | M MAP | SHIFT+TAB STATS | F5 SAVE | F6 SCORES | F9 LOAD | PGUP/PGDN LOG | ? HELP");
@@ -3156,6 +3168,149 @@ void Renderer::drawHud(const Game& game) {
         drawText5x7(renderer, winW/2 - 80, winH - hudH + 70, 3, red, "GAME OVER");
     } else if (game.isGameWon()) {
         drawText5x7(renderer, winW/2 - 90, winH - hudH + 70, 3, green, "YOU ESCAPED!");
+    }
+}
+
+
+void Renderer::drawSpellsOverlay(const Game& game) {
+    const int panelW = winW - 40;
+    const int panelH = winH - 40;
+    SDL_Rect bg{ 20, 20, panelW, panelH };
+
+    drawPanel(game, bg, 210, lastFrame);
+
+    const Color white{240,240,240,255};
+    const Color gray{160,160,160,255};
+    const Color yellow{255,230,120,255};
+    const Color cyan{140,220,255,255};
+
+    const int scale = 2;
+    const int pad = 16;
+    const int lineH = 18;
+
+    int x = bg.x + pad;
+    int y = bg.y + pad;
+
+    drawText5x7(renderer, x, y, scale, yellow, "SPELLS");
+    drawText5x7(renderer, x + 160, y, scale, gray, "(ENTER: cast, ESC: close)");
+
+    {
+        std::stringstream ms;
+        ms << "MANA: " << game.playerMana() << "/" << game.playerManaMax();
+        drawText5x7(renderer, x, y + 14, scale, gray, ms.str());
+    }
+
+    y += 44;
+
+    const std::vector<SpellKind> spells = game.knownSpellsList();
+    const int sel = game.spellsSelection();
+
+    // Layout: list (left) + description (right)
+    const int colGap = 18;
+    const int listW = (bg.w * 50) / 100;
+    SDL_Rect listRect{ x, y, listW, bg.y + bg.h - pad - y };
+    SDL_Rect infoRect{ x + listW + colGap, y, bg.x + bg.w - pad - (x + listW + colGap), listRect.h };
+
+    const int maxLines = std::max(1, listRect.h / lineH);
+    int start = 0;
+    if (!spells.empty()) {
+        start = std::clamp(sel - maxLines / 2, 0, std::max(0, (int)spells.size() - maxLines));
+    }
+    const int end = std::min((int)spells.size(), start + maxLines);
+
+    // Selection background
+    if (!spells.empty() && sel >= start && sel < end) {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_Rect hi{ listRect.x - 6, listRect.y + (sel - start) * lineH - 2, listRect.w + 12, lineH };
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 20);
+        SDL_RenderFillRect(renderer, &hi);
+    }
+
+    // Simple word wrap for the info panel.
+    auto wrap = [&](const std::string& s, int maxChars) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        std::string cur;
+        cur.reserve(s.size());
+        auto flush = [&]() {
+            if (!cur.empty()) {
+                out.push_back(cur);
+                cur.clear();
+            }
+        };
+        std::string word;
+        for (size_t i = 0; i <= s.size(); ++i) {
+            const char c = (i < s.size()) ? s[i] : ' ';
+            if (c == ' ' || c == '\n' || i == s.size()) {
+                if (!word.empty()) {
+                    const int need = static_cast<int>(word.size()) + (cur.empty() ? 0 : 1);
+                    if (!cur.empty() && (int)cur.size() + need > maxChars) {
+                        flush();
+                    }
+                    if (!cur.empty()) cur.push_back(' ');
+                    cur += word;
+                    word.clear();
+                }
+                if (c == '\n') {
+                    flush();
+                }
+            } else {
+                word.push_back(c);
+            }
+        }
+        flush();
+        return out;
+    };
+
+    // List
+    for (int i = start; i < end; ++i) {
+        const SpellKind sk = spells[static_cast<size_t>(i)];
+        const SpellDef& sd = spellDef(sk);
+
+        std::stringstream line;
+        line << sd.name;
+        line << "  (";
+        line << "M" << sd.manaCost;
+        if (sd.needsTarget) line << ", R" << sd.range;
+        else line << ", SELF";
+        line << ")";
+
+        const bool enough = game.playerMana() >= sd.manaCost;
+        const Color c = enough ? white : gray;
+        if (i == sel) {
+            drawText5x7(renderer, listRect.x, listRect.y + (i - start) * lineH, scale, cyan, line.str());
+        } else {
+            drawText5x7(renderer, listRect.x, listRect.y + (i - start) * lineH, scale, c, line.str());
+        }
+    }
+
+    // Info panel
+    if (spells.empty()) {
+        drawText5x7(renderer, infoRect.x, infoRect.y, scale, gray, "YOU DON'T KNOW ANY SPELLS.");
+        drawText5x7(renderer, infoRect.x, infoRect.y + 18, scale, gray, "READ SPELLBOOKS TO LEARN.");
+        return;
+    }
+
+    const int selIdx = clampi(sel, 0, (int)spells.size() - 1);
+    const SpellKind sk = spells[static_cast<size_t>(selIdx)];
+    const SpellDef& sd = spellDef(sk);
+
+    drawText5x7(renderer, infoRect.x, infoRect.y, scale, yellow, sd.name);
+
+    {
+        std::stringstream meta;
+        meta << "COST: " << sd.manaCost << "  |  " << (sd.needsTarget ? "TARGET" : "SELF") ;
+        if (sd.needsTarget) meta << "  |  RANGE: " << sd.range;
+        drawText5x7(renderer, infoRect.x, infoRect.y + 18, scale, gray, meta.str());
+    }
+
+    const int maxChars = std::max(10, infoRect.w / (6 * scale));
+    const auto lines = wrap(sd.description, maxChars);
+
+    int ty = infoRect.y + 42;
+    for (const auto& ln : lines) {
+        if (ty + 14 > infoRect.y + infoRect.h) break;
+        drawText5x7(renderer, infoRect.x, ty, scale, white, ln);
+        ty += 18;
     }
 }
 
@@ -3947,6 +4102,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("name <text>  scores [N]");
     lineGray("autosave <turns>  stepdelay <ms>  identify on/off  timers on/off");
     lineGray("pray [heal|cure|identify|bless|uncurse]");
+    lineGray("pay  (IN SHOP / AT CAMP)   debt/ledger  (SHOW SHOP DEBTS)");
 
     y += 6;
     lineWhite("KEYBINDINGS:");
@@ -4925,6 +5081,7 @@ void Renderer::drawCodexOverlay(const Game& game) {
                 case EntityKind::Zombie: note("SLOW UNDEAD; OFTEN RISES FROM CORPSES. IMMUNE TO POISON."); break;
                 case EntityKind::Minotaur: note("BOSS-LIKE THREAT; SCALES MORE SLOWLY UNTIL DEEPER LEVELS."); break;
                 case EntityKind::Shopkeeper: note("ATTACKING MAY ANGER THE SHOP."); break;
+                case EntityKind::Guard: note("MERCHANT GUILD ENFORCER; APPEARS WHEN YOU STEAL."); break;
                 default: break;
             }
         }

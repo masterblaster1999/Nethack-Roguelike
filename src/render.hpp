@@ -348,6 +348,7 @@ private:
 
     void drawHud(const Game& game);
     void drawInventoryOverlay(const Game& game);
+    void drawSpellsOverlay(const Game& game);
     void drawChestOverlay(const Game& game);
     void drawOptionsOverlay(const Game& game);
     void drawKeybindsOverlay(const Game& game);

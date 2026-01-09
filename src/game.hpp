@@ -2,6 +2,7 @@
 #include "common.hpp"
 #include "dungeon.hpp"
 #include "items.hpp"
+#include "spells.hpp"
 #include "effects.hpp"
 #include "rng.hpp"
 #include "scores.hpp"
@@ -47,9 +48,12 @@ enum class EntityKind : uint8_t {
 
     // Undead (append-only to keep save compatibility)
     Zombie,
+
+    // Merchant guild enforcement (append-only to keep save compatibility)
+    Guard,
 };
 
-inline constexpr int ENTITY_KIND_COUNT = static_cast<int>(EntityKind::Zombie) + 1;
+inline constexpr int ENTITY_KIND_COUNT = static_cast<int>(EntityKind::Guard) + 1;
 
 inline const char* entityKindName(EntityKind k) {
     switch (k) {
@@ -73,6 +77,7 @@ inline const char* entityKindName(EntityKind k) {
         case EntityKind::Ghost: return "GHOST";
         case EntityKind::Leprechaun: return "LEPRECHAUN";
         case EntityKind::Zombie: return "ZOMBIE";
+        case EntityKind::Guard: return "GUARD";
         default: return "UNKNOWN";
     }
 }
@@ -105,6 +110,7 @@ inline int baseSpeedFor(EntityKind k) {
         case EntityKind::Ghost: return 95;
         case EntityKind::Leprechaun: return 140;
         case EntityKind::Zombie: return 80;
+        case EntityKind::Guard: return 110;
         default: return 100;
     }
 }
@@ -175,6 +181,7 @@ inline bool monsterCanEquipWeapons(EntityKind k) {
         case EntityKind::KoboldSlinger:
         case EntityKind::Wizard:
         case EntityKind::Ghost:
+        case EntityKind::Guard:
             return true;
         default:
             return false;
@@ -189,6 +196,7 @@ inline bool monsterCanEquipArmor(EntityKind k) {
         case EntityKind::KoboldSlinger:
         case EntityKind::Wizard:
         case EntityKind::Ghost:
+        case EntityKind::Guard:
             return true;
         default:
             return false;
@@ -275,6 +283,9 @@ enum class Action : uint8_t {
     // Minimap (append-only)
     MinimapZoomIn,
     MinimapZoomOut,
+
+    // Spells (append-only)
+    Spells,
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -876,6 +887,16 @@ public:
     // mode: \"heal\" | \"cure\" | \"identify\" | \"bless\" | \"\" (auto)
     bool prayAtShrine(const std::string& mode = std::string());
 
+    // Donate gold to earn piety at a shrine (or at the surface camp).
+    // Extended command: #donate [amount]
+    // Returns true if a turn was spent.
+    bool donateAtShrine(int goldAmount);
+
+    // Sacrifice a corpse to earn piety at a shrine (or at the surface camp).
+    // Extended command: #sacrifice
+    // Returns true if a turn was spent.
+    bool sacrificeAtShrine();
+
     // Augury/divination: pay gold at a shrine or the surface camp to receive
     // cryptic hints about the *next* floor layout.
     // Extended command: #augury
@@ -1010,6 +1031,10 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     int chestOpenStackLimit() const { return chestOpenMaxStacks_; }
     const std::vector<Item>& chestOpenItems() const;
 
+    // Spells overlay (renderer)
+    bool isSpellsOpen() const { return spellsOpen; }
+    int spellsSelection() const { return spellsSel; }
+
     // Talents (earned on level-up). These provide build variety while keeping the
     // classic ATK/DEF progression intact.
     int playerMight() const { return talentMight_ + ringTalentBonusMight(); }      // melee power / carry capacity
@@ -1036,6 +1061,20 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
 
     // Convenience getters (kept for renderer/legacy naming)
     int goldCount() const { return countGold(inv); }
+    // Shrines / religion
+    int piety() const { return piety_; }
+    // Remaining turns until the next shrine prayer service is allowed (0 = ready).
+    int prayerCooldownTurns() const {
+        if (turnCount >= prayerCooldownUntilTurn_) return 0;
+        return static_cast<int>(prayerCooldownUntilTurn_ - turnCount);
+    }
+
+    // Spells / mana (work-in-progress)
+    int playerMana() const { return mana_; }
+    int playerManaMax() const;
+    bool knowsSpell(SpellKind k) const;
+    std::vector<SpellKind> knownSpellsList() const;
+    SpellKind selectedSpell() const;
     // Shops / economy
     // Total gold owed for UNPAID items currently in inventory.
     int shopDebtTotal() const;
@@ -1045,6 +1084,13 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     bool playerInShop() const;
     // Pay for all (or as many as possible) unpaid goods on this depth. Use via #pay.
     bool payAtShop();
+    // Pay debts to the Merchant Guild while at the surface camp (depth 0).
+    // This is a QoL escape hatch so a run isn't soft-locked by debt on a dead shop floor.
+    bool payAtCamp();
+
+    // Print a per-depth breakdown of outstanding shop debts (unpaid items + consumed/destroyed ledger).
+    // Extended command: #debt
+    void showDebtLedger();
 
     int keyCount() const;
     int lockpickCount() const;
@@ -1438,6 +1484,20 @@ private:
     // This is additive to per-item shopPrice tagging.
     std::array<int, DUNGEON_MAX_DEPTH + 1> shopDebtLedger_{};
 
+    // Merchant guild pursuit state: set when you steal from a shop and persists across floors.
+    bool merchantGuildAlerted_ = false;
+
+    // Shrine economy: piety earned via donations/sacrifices and spent on shrine services.
+    int piety_ = 0;
+    // Simple prayer timeout: once you receive a shrine service, you cannot receive another
+    // one until this turn count is reached.
+    uint32_t prayerCooldownUntilTurn_ = 0u;
+
+    // Spell system (append-only): mana + known spells bitmask.
+    // NOTE: These are persisted (v44+) but the load migration is not yet wired.
+    int mana_ = 0;
+    uint32_t knownSpellsMask_ = 0u;
+
     int equipMeleeId = 0;
     int equipRangedId = 0;
     int equipArmorId = 0;
@@ -1454,6 +1514,7 @@ private:
         ShrineIdentify,
         ShrineBless,
         ShrineRecharge,
+        ShrineSacrifice,
     };
     InvPromptKind invPrompt_ = InvPromptKind::None;
 
@@ -1471,6 +1532,17 @@ private:
     std::vector<Vec2i> targetLine;
     bool targetValid = false;
     std::string targetStatusText_; // reason for invalid targeting (UI-only; not serialized)
+
+    enum class TargetingMode : uint8_t {
+        Ranged = 0,
+        Spell,
+    };
+    TargetingMode targetingMode_ = TargetingMode::Ranged;
+    SpellKind targetingSpell_ = SpellKind::MagicMissile;
+
+    // Spells overlay (UI-only; not serialized)
+    bool spellsOpen = false;
+    int spellsSel = 0;
 
     // Kick prompt mode (directional)
     bool kicking = false;
@@ -1717,7 +1789,7 @@ private:
     // If kick=true, perform an unarmed kick attack (ignores equipped melee weapon)
     // with a stronger knockback profile.
     void attackMelee(Entity& attacker, Entity& defender, bool kick = false);
-    void attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer, const Item* projectileTemplate = nullptr);
+    void attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer, const Item* projectileTemplate = nullptr, bool wandPowered = false);
 
     void monsterTurn();
     void cleanupDead();
@@ -1736,8 +1808,19 @@ private:
     bool equipSelected();
     bool useSelected();
 
+    // Spells
+    void openSpells();
+    void closeSpells();
+    void moveSpellsSelection(int dy);
+    bool canCastSpell(SpellKind k, std::string* reasonOut = nullptr) const;
+    // Cast immediately (no target selection).
+    bool castSpell(SpellKind k);
+    // Cast at an already-selected target (used by spell targeting).
+    bool castSpellAt(SpellKind k, Vec2i target);
+
     // Targeting actions
     void beginTargeting();
+    void beginSpellTargeting(SpellKind k);
     void endTargeting(bool fire);
     void moveTargetCursor(int dx, int dy);
     void recomputeTargetLine();
@@ -1750,6 +1833,10 @@ private:
     void storeCurrentLevel();
     bool restoreLevel(int depth);
     void changeLevel(int newDepth, bool goingDown);
+
+    // Shops / economy
+    // Triggered when the player escapes a shop with unpaid goods or attacks the shopkeeper.
+    void triggerShopTheftAlarm(Vec2i shopInsidePos, Vec2i playerPos);
 
     // Save/load
 public:
@@ -1801,6 +1888,9 @@ private:
     // QoL / traps / status
     bool autoPickupAtPlayer();
     bool openChestAtPlayer();
+    // Ambush mimics: used by chest mimics and item mimics.
+    // `lootToDrop` (if non-null) will be carried by the mimic and dropped on death.
+    void revealMimicFromBait(Vec2i baitPos, const std::string& revealMsg, const Item* lootToDrop);
 
     // Chest container overlay
     bool openChestOverlayAtPlayer();
@@ -1865,7 +1955,7 @@ private:
 
     // Monster factory (shared by level generation + dynamic spawns).
     // Returns a fully-initialized Entity (id, stats, speed, ammo, gear, ...).
-    Entity makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear);
+    Entity makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, uint32_t forcedSpriteSeed = 0);
     // Convenience wrapper that appends the monster to the entity list and returns a reference.
     Entity& spawnMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear = true);
 

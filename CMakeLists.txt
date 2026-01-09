@@ -75,6 +75,7 @@ set(PROCROGUE_CORE_SOURCES
     src/game_interact.cpp
     src/game_world.cpp
     src/game_inventory.cpp
+    src/game_spellcasting.cpp
     src/game_targeting.cpp
     src/game_spawn.cpp
     src/game_markers.cpp
@@ -86,6 +87,7 @@ set(PROCROGUE_CORE_SOURCES
     src/corridor_braid.cpp
     src/terrain_sculpt.cpp
     src/items.cpp
+    src/spells.cpp
     src/shop.cpp
     src/scores.cpp
 )

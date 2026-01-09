@@ -175,6 +175,31 @@ bool Game::autoPickupAtPlayer() {
     int pickedCount = 0;
     std::vector<std::string> sampleNames;
 
+    // Item mimics: if auto-pickup would grab a bait item, trigger the reveal
+    // before collecting anything else (prevents partial pick-ups and lost messages).
+    for (size_t i = 0; i < ground.size(); ++i) {
+        if (ground[i].pos != pos) continue;
+        const Item& it = ground[i].item;
+        if (it.shopPrice > 0) continue;
+        if (!autoPickupWouldPick(it.kind)) continue;
+        if (!itemIsMimicBait(it)) continue;
+
+        Item loot = it;
+        setItemMimicBait(loot, false);
+        loot.shopPrice = 0;
+        loot.shopDepth = 0;
+
+        ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(i));
+
+        revealMimicFromBait(pos, "THE " + displayItemName(loot) + " WAS A MIMIC!", &loot);
+
+        if (autoMode != AutoMoveMode::None) {
+            stopAutoMove(true);
+            pushMsg("AUTO-MOVE STOPPED (MIMIC!).", MessageKind::Warning, true);
+        }
+        return true;
+    }
+
     for (size_t i = 0; i < ground.size();) {
         if (ground[i].pos == pos && ground[i].item.shopPrice <= 0 && autoPickupWouldPick(ground[i].item.kind)) {
             Item it = ground[i].item;
@@ -218,6 +243,97 @@ bool Game::autoPickupAtPlayer() {
     return true;
 }
 
+void Game::revealMimicFromBait(Vec2i baitPos, const std::string& revealMsg, const Item* lootToDrop) {
+    pushMsg(revealMsg, MessageKind::Warning, true);
+
+    // A mimic reveal is loud.
+    emitNoise(baitPos, 14);
+
+    // Prefer spawning adjacent so we don't overlap the player (bait is interacted with underfoot).
+    static const int dirs[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
+    Vec2i spawn = {-1, -1};
+
+    // Randomize direction order a bit.
+    int order[8] = {0,1,2,3,4,5,6,7};
+    for (int i = 7; i > 0; --i) {
+        int j = rng.range(0, i);
+        std::swap(order[i], order[j]);
+    }
+    for (int ii = 0; ii < 8; ++ii) {
+        int di = order[ii];
+        int nx = baitPos.x + dirs[di][0];
+        int ny = baitPos.y + dirs[di][1];
+        if (!dung.inBounds(nx, ny)) continue;
+        if (!dung.isWalkable(nx, ny)) continue;
+        if (entityAt(nx, ny)) continue;
+        Vec2i cand{nx, ny};
+        if (cand == dung.stairsUp || cand == dung.stairsDown) continue;
+        spawn = cand;
+        break;
+    }
+
+    // Worst-case: if surrounded, shove the player to a nearby free tile and spawn in place.
+    if (spawn.x < 0) {
+        if (baitPos == player().pos) {
+            Vec2i dst = baitPos;
+            for (int r = 2; r <= 6 && dst == baitPos; ++r) {
+                for (int y = baitPos.y - r; y <= baitPos.y + r; ++y) {
+                    for (int x = baitPos.x - r; x <= baitPos.x + r; ++x) {
+                        if (!dung.inBounds(x, y)) continue;
+                        if (!dung.isWalkable(x, y)) continue;
+                        if (entityAt(x, y)) continue;
+                        Vec2i cand{x, y};
+                        if (cand == dung.stairsUp || cand == dung.stairsDown) continue;
+                        dst = cand;
+                        break;
+                    }
+                    if (dst != baitPos) break;
+                }
+            }
+            if (dst != baitPos) {
+                playerMut().pos = dst;
+                pushMsg("THE MIMIC SHOVES YOU BACK!", MessageKind::Warning, true);
+            }
+        }
+        spawn = baitPos;
+    }
+
+    // Spawn using monster factory so scaling stays consistent with normal spawns.
+    Entity m = makeMonster(EntityKind::Mimic, spawn, /*groupId=*/0, /*allowGear=*/false);
+
+    // Ambush mimics are slightly tougher than baseline mimics.
+    m.hpMax += 2;
+    m.hp += 2;
+
+    if (lootToDrop && lootToDrop->id != 0 && lootToDrop->count > 0) {
+        Item loot = *lootToDrop;
+        // This is real loot, not another mimic trap.
+        setItemMimicBait(loot, false);
+        loot.shopPrice = 0;
+        loot.shopDepth = 0;
+
+        // Tougher mimics tend to masquerade as more valuable items.
+        const int value = std::max(0, itemDef(loot.kind).value);
+        if (value >= 250) {
+            m.hpMax += 4; m.hp += 4;
+            m.baseAtk += 1;
+            m.baseDef += 1;
+        } else if (value >= 120) {
+            m.hpMax += 2; m.hp += 2;
+            m.baseAtk += 1;
+        }
+
+        m.pocketConsumable = loot;
+    }
+
+    m.alerted = true;
+    m.lastKnownPlayerPos = player().pos;
+    m.lastKnownPlayerAge = 0;
+
+    ents.push_back(m);
+}
+
+
 bool Game::openChestAtPlayer() {
     const Vec2i pos = player().pos;
 
@@ -236,88 +352,13 @@ bool Game::openChestAtPlayer() {
     // Mimic: a fake chest that turns into a monster when you try to open it.
     if (chestMimic(chest)) {
         // Remove the chest first.
-        Vec2i chestPos = chestGi->pos;
+        const Vec2i chestPos = chestGi->pos;
+        const int chestId = chest.id;
         ground.erase(std::remove_if(ground.begin(), ground.end(), [&](const GroundItem& gi) {
-            return gi.pos == chestPos && gi.item.id == chest.id;
+            return gi.pos == chestPos && gi.item.id == chestId;
         }), ground.end());
 
-        pushMsg("THE CHEST WAS A MIMIC!", MessageKind::Warning, true);
-
-        // A mimic reveal is loud.
-        emitNoise(chestPos, 14);
-
-        // Prefer spawning adjacent so we don't overlap the player (chests are opened underfoot).
-        static const int dirs[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
-        Vec2i spawn = {-1, -1};
-        // Randomize direction order a bit.
-        int order[8] = {0,1,2,3,4,5,6,7};
-        for (int i = 7; i > 0; --i) {
-            int j = rng.range(0, i);
-            std::swap(order[i], order[j]);
-        }
-        for (int ii = 0; ii < 8; ++ii) {
-            int di = order[ii];
-            int nx = chestPos.x + dirs[di][0];
-            int ny = chestPos.y + dirs[di][1];
-            if (!dung.inBounds(nx, ny)) continue;
-            if (!dung.isWalkable(nx, ny)) continue;
-            if (entityAt(nx, ny)) continue;
-            if (Vec2i{nx, ny} == dung.stairsUp || Vec2i{nx, ny} == dung.stairsDown) continue;
-            spawn = {nx, ny};
-            break;
-        }
-
-        // Worst-case: if surrounded, shove the player to a nearby free tile and spawn in place.
-        if (spawn.x < 0) {
-            Vec2i dst = chestPos;
-            for (int r = 2; r <= 6 && dst == chestPos; ++r) {
-                for (int y = chestPos.y - r; y <= chestPos.y + r; ++y) {
-                    for (int x = chestPos.x - r; x <= chestPos.x + r; ++x) {
-                        if (!dung.inBounds(x, y)) continue;
-                        if (!dung.isWalkable(x, y)) continue;
-                        if (entityAt(x, y)) continue;
-                        Vec2i cand{x, y};
-                        if (cand == dung.stairsUp || cand == dung.stairsDown) continue;
-                        dst = cand;
-                        break;
-                    }
-                    if (dst != chestPos) break;
-                }
-            }
-            if (dst != chestPos) {
-                playerMut().pos = dst;
-                pushMsg("THE MIMIC SHOVES YOU BACK!", MessageKind::Warning, true);
-            }
-            spawn = chestPos;
-        }
-
-        // Spawn the mimic.
-        Entity m;
-        m.id = nextEntityId++;
-        m.kind = EntityKind::Mimic;
-        m.speed = baseSpeedFor(m.kind);
-        m.energy = 0;
-        m.pos = spawn;
-        m.spriteSeed = rng.nextU32();
-        m.groupId = 0;
-        m.hpMax = 16;
-        m.baseAtk = 4;
-        m.baseDef = 2;
-        m.willFlee = false;
-
-        // Depth scaling (match regular monsters).
-        int dd = std::max(0, depth_ - 1);
-        if (dd > 0) {
-            m.hpMax += dd;
-            m.baseAtk += dd / 3;
-            m.baseDef += dd / 4;
-        }
-        m.hp = m.hpMax;
-        m.alerted = true;
-        m.lastKnownPlayerPos = player().pos;
-        m.lastKnownPlayerAge = 0;
-
-        ents.push_back(m);
+        revealMimicFromBait(chestPos, "THE CHEST WAS A MIMIC!", nullptr);
         return true; // Opening costs a turn.
     }
 
@@ -894,6 +935,26 @@ bool Game::pickupAtPlayer() {
         return false;
     }
 
+    // Item mimics: some bait items turn into a Mimic when you try to pick them up.
+    // If present on this tile, trigger the reveal before picking anything else.
+    for (size_t gi : idxs) {
+        if (gi >= ground.size()) continue;
+        const Item& it = ground[gi].item;
+        if (isChestKind(it.kind)) continue;
+        if (it.shopPrice > 0) continue; // should never happen (we do not seed shop mimics)
+        if (!itemIsMimicBait(it)) continue;
+
+        Item loot = it;
+        setItemMimicBait(loot, false);
+        loot.shopPrice = 0;
+        loot.shopDepth = 0;
+
+        ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(gi));
+
+        revealMimicFromBait(ppos, "THE " + displayItemName(loot) + " WAS A MIMIC!", &loot);
+        return true;
+    }
+
     const int maxInv = 26;
     bool pickedAny = false;
 
@@ -1279,6 +1340,21 @@ bool Game::useSelected() {
         }
     };
 
+    auto consumeOneNonStackable = [&]() {
+        if (invSel < 0 || invSel >= static_cast<int>(inv.size())) return;
+
+        // Reading/using an unpaid item still leaves you owing the shopkeeper.
+        if (it.shopPrice > 0 && it.shopDepth > 0) {
+            const int sd = it.shopDepth;
+            if (sd >= 1 && sd <= DUNGEON_MAX_DEPTH) {
+                shopDebtLedger_[sd] += it.shopPrice;
+            }
+        }
+
+        inv.erase(inv.begin() + invSel);
+        invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+    };
+
     if (it.kind == ItemKind::PotionHealing) {
         Entity& p = playerMut();        int heal = itemDef(it.kind).healAmount;
         int before = p.hp;
@@ -1311,6 +1387,65 @@ bool Game::useSelected() {
 
         (void)markIdentified(it.kind, false);
         consumeOneStackable();
+        return true;
+    }
+
+    if (it.kind == ItemKind::PotionEnergy) {
+        const int maxMana = std::max(0, playerManaMax());
+        int before = mana_;
+
+        int gain = std::max(2, maxMana / 2);
+        if (it.buc > 0) gain = maxMana;
+        else if (it.buc < 0) gain = std::max(1, maxMana / 4);
+
+        mana_ = clampi(mana_ + gain, 0, maxMana);
+
+        std::ostringstream ss;
+        if (it.buc > 0) {
+            ss << "ARCANE POWER SURGES THROUGH YOU! MANA " << before << "->" << mana_ << ".";
+            pushMsg(ss.str(), MessageKind::Success, true);
+        } else if (it.buc < 0) {
+            ss << "THE POTION TASTES FLAT... MANA " << before << "->" << mana_ << ".";
+            pushMsg(ss.str(), MessageKind::Info, true);
+        } else {
+            ss << "YOU FEEL ENERGIZED. MANA " << before << "->" << mana_ << ".";
+            pushMsg(ss.str(), MessageKind::Info, true);
+        }
+
+        (void)markIdentified(it.kind, false);
+        consumeOneStackable();
+        return true;
+    }
+
+    // Spellbooks (WIP): learn a spell and consume the book.
+    if (it.kind == ItemKind::SpellbookMagicMissile || it.kind == ItemKind::SpellbookBlink ||
+        it.kind == ItemKind::SpellbookMinorHeal || it.kind == ItemKind::SpellbookDetectTraps ||
+        it.kind == ItemKind::SpellbookFireball) {
+
+        SpellKind sk = SpellKind::MagicMissile;
+        switch (it.kind) {
+            case ItemKind::SpellbookMagicMissile: sk = SpellKind::MagicMissile; break;
+            case ItemKind::SpellbookBlink: sk = SpellKind::Blink; break;
+            case ItemKind::SpellbookMinorHeal: sk = SpellKind::MinorHeal; break;
+            case ItemKind::SpellbookDetectTraps: sk = SpellKind::DetectTraps; break;
+            case ItemKind::SpellbookFireball: sk = SpellKind::Fireball; break;
+            default: break;
+        }
+
+        const uint32_t idx = static_cast<uint32_t>(sk);
+        const uint32_t bit = (idx < 32u) ? (1u << idx) : 0u;
+        const bool already = (bit != 0u) && ((knownSpellsMask_ & bit) != 0u);
+
+        if (!already && bit != 0u) {
+            knownSpellsMask_ |= bit;
+            std::ostringstream ss;
+            ss << "YOU LEARN " << spellName(sk) << ".";
+            pushMsg(ss.str(), MessageKind::Success, true);
+        } else {
+            pushMsg("YOU STUDY THE BOOK, BUT LEARN NOTHING NEW.", MessageKind::Info, true);
+        }
+
+        consumeOneNonStackable();
         return true;
     }
 
@@ -1384,8 +1519,7 @@ bool Game::useSelected() {
         if (wasInShop && !nowInShop) {
             const int debt = shopDebtThisDepth();
             if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
-                setShopkeepersAlerted(ents, playerId_, dst, true);
-                pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+                triggerShopTheftAlarm(prevPos, dst);
             }
         }
         return true;

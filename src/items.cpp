@@ -149,6 +149,16 @@ const ItemDef& itemDef(ItemKind k) {
 
         // Perception / weirdness (append-only)
         { ItemKind::PotionHallucination, "POTION OF HALLUCINATION", true, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 70 },
+
+        // Mana / magic (append-only)
+        { ItemKind::PotionEnergy, "POTION OF ENERGY", true, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 85 },
+
+        // Spellbooks (append-only)
+        { ItemKind::SpellbookMagicMissile, "SPELLBOOK OF MAGIC MISSILE", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 3, 120 },
+        { ItemKind::SpellbookBlink, "SPELLBOOK OF BLINK", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 3, 160 },
+        { ItemKind::SpellbookMinorHeal, "SPELLBOOK OF MINOR HEAL", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 3, 140 },
+        { ItemKind::SpellbookDetectTraps, "SPELLBOOK OF DETECT TRAPS", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 3, 150 },
+        { ItemKind::SpellbookFireball, "SPELLBOOK OF FIREBALL", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 4, 300 },
     };
 
     static std::vector<ItemDef> defs;
@@ -372,6 +382,7 @@ bool tryStackItem(std::vector<Item>& inv, const Item& incoming) {
         if (it.enchant != incoming.enchant) continue;
         if (it.buc != incoming.buc) continue;
         if (it.ego != incoming.ego) continue;
+        if (it.flags != incoming.flags) continue;
         if (it.shopPrice != incoming.shopPrice) continue;
         if (it.shopDepth != incoming.shopDepth) continue;
 

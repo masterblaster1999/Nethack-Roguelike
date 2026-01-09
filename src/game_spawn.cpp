@@ -36,6 +36,26 @@ ItemEgo rollWeaponEgo(RNG& rng, ItemKind k, int depth, RoomType rt, bool fromSho
     return ItemEgo::Venom;
 }
 
+ItemKind pickSpellbookKind(RNG& rng, int depth) {
+    // Depth-based distribution for spellbooks (WIP).
+    // Fireball is deeper and rarer.
+    depth = std::max(1, depth);
+    const int roll = rng.range(0, 99);
+
+    // Deeper floors: small chance for Fireball.
+    if (depth >= 8 && roll >= 92) return ItemKind::SpellbookFireball;
+    if (depth >= 6 && roll >= 88) return ItemKind::SpellbookFireball;
+
+    // Utility spells become more common with depth.
+    if (depth >= 4 && roll >= 80) return ItemKind::SpellbookDetectTraps;
+
+    // Common starter books.
+    if (roll < 35) return ItemKind::SpellbookMagicMissile;
+    if (roll < 60) return ItemKind::SpellbookMinorHeal;
+    if (roll < 80) return ItemKind::SpellbookBlink;
+    return ItemKind::SpellbookDetectTraps;
+}
+
 } // namespace
 
 Vec2i Game::randomFreeTileInRoom(const Room& r, int tries) {
@@ -87,13 +107,13 @@ Vec2i Game::randomFreeTileInRoom(const Room& r, int tries) {
     return c;
 }
 
-Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear) {
+Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, uint32_t forcedSpriteSeed) {
     Entity e;
     e.id = nextEntityId++;
     e.kind = k;
     e.pos = pos;
     e.groupId = groupId;
-    e.spriteSeed = rng.nextU32();
+    e.spriteSeed = (forcedSpriteSeed != 0u) ? forcedSpriteSeed : rng.nextU32();
 
     // Monster turn scheduling (fix: ensure spawned monsters use their intended speed).
     e.speed = baseSpeedFor(k);
@@ -286,6 +306,24 @@ void Game::spawnMonsters() {
     int nextGroup = 1000;
 
     for (const Room& r : rooms) {
+        // Shops: spawn a single shopkeeper and keep the shop otherwise free of hostiles.
+        // (Shops already avoid trap placement; this makes them a safe-ish economic space.)
+        if (r.type == RoomType::Shop) {
+            // Prefer the room center so the shopkeeper doesn't block the doorway.
+            Vec2i sp{r.cx(), r.cy()};
+            if (!dung.inBounds(sp.x, sp.y) || !dung.isWalkable(sp.x, sp.y) || entityAt(sp.x, sp.y)) {
+                sp = randomFreeTileInRoom(r);
+            }
+            if (sp == dung.stairsUp || sp == dung.stairsDown) {
+                sp = randomFreeTileInRoom(r);
+            }
+
+            Entity& sk = spawnMonster(EntityKind::Shopkeeper, sp, 0, /*allowGear=*/false);
+            sk.alerted = false;
+            sk.energy = 0;
+            continue;
+        }
+
         const bool isStart = r.contains(dung.stairsUp.x, dung.stairsUp.y);
         int base = isStart ? 0 : 1;
 
@@ -496,7 +534,7 @@ void Game::spawnItems() {
     auto dropGoodItem = [&](const Room& r) {
         // Treasure rooms are where you find the "spicy" gear.
         // Expanded table to accommodate new gear (rings).
-        int roll = rng.range(0, 183);
+        int roll = rng.range(0, 199);
 
         if (roll < 18) dropItemAt(ItemKind::Sword, randomFreeTileInRoom(r));
         else if (roll < 30) dropItemAt(ItemKind::Axe, randomFreeTileInRoom(r));
@@ -553,7 +591,13 @@ void Game::spawnItems() {
         }
         else if (roll < 176) dropItemAt(ItemKind::RingMight, randomFreeTileInRoom(r), 1);
         else if (roll < 180) dropItemAt(ItemKind::RingAgility, randomFreeTileInRoom(r), 1);
-        else dropItemAt(ItemKind::RingFocus, randomFreeTileInRoom(r), 1);
+        else if (roll < 184) dropItemAt(ItemKind::RingFocus, randomFreeTileInRoom(r), 1);
+        else if (roll < 190) dropItemAt(ItemKind::PotionEnergy, randomFreeTileInRoom(r), 1);
+        else {
+            // Rare: a spellbook.
+            ItemKind bk = (depth_ >= 2) ? pickSpellbookKind(rng, depth_) : ItemKind::ScrollIdentify;
+            dropItemAt(bk, randomFreeTileInRoom(r), 1);
+        }
     };
 
     int keysPlacedThisFloor = 0;
@@ -712,29 +756,30 @@ void Game::spawnItems() {
                     else if (roll < 98) { k = ItemKind::ChainArmor; }
                     else { k = (depth_ >= 6 ? ItemKind::PlateArmor : ItemKind::ChainArmor); }
                 } else if (theme == 2) {
-                    // Magic shop
-                    if (roll < 14) { k = ItemKind::WandSparks; }
-                    else if (roll < 22) { k = ItemKind::WandDigging; }
-                    else if (roll < 26) { k = (depth_ >= 6 ? ItemKind::WandFireball : ItemKind::WandDigging); }
-                    else if (roll < 33) { k = ItemKind::ScrollTeleport; }
-                    else if (roll < 45) { k = ItemKind::ScrollMapping; }
-                    else if (roll < 60) { k = ItemKind::ScrollIdentify; }
-                    else if (roll < 66) { k = ItemKind::ScrollRemoveCurse; }
-                    else if (roll < 72) { k = ItemKind::ScrollFear; }
-                    else if (roll < 76) { k = ItemKind::ScrollEarth; }
-                    else if (roll < 78) { k = ItemKind::ScrollTaming; }
-                    else if (roll < 80) { k = ItemKind::PotionStrength; }
-                    else if (roll < 88) { k = ItemKind::PotionRegeneration; }
-                    else if (roll < 94) { k = ItemKind::PotionHaste; }
-                    else if (roll < 98) {
+                    // Magic shop (wands/scrolls/potions + occasional spellbooks)
+                    if (roll < 8) { k = pickSpellbookKind(rng, depth_); }
+                    else if (roll < 20) { k = ItemKind::WandSparks; }
+                    else if (roll < 28) { k = ItemKind::WandDigging; }
+                    else if (roll < 32) { k = (depth_ >= 6 ? ItemKind::WandFireball : ItemKind::WandDigging); }
+                    else if (roll < 40) { k = ItemKind::ScrollTeleport; }
+                    else if (roll < 52) { k = ItemKind::ScrollMapping; }
+                    else if (roll < 66) { k = ItemKind::ScrollIdentify; }
+                    else if (roll < 72) { k = ItemKind::ScrollRemoveCurse; }
+                    else if (roll < 78) { k = ItemKind::ScrollFear; }
+                    else if (roll < 82) { k = ItemKind::ScrollEarth; }
+                    else if (roll < 84) { k = ItemKind::ScrollTaming; }
+                    else if (roll < 86) { k = ItemKind::PotionStrength; }
+                    else if (roll < 92) { k = ItemKind::PotionRegeneration; }
+                    else if (roll < 96) { k = ItemKind::PotionHaste; }
+                    else if (roll < 98) { k = ItemKind::PotionEnergy; }
+                    else if (roll < 99) {
                         // A small chance of rings showing up in the magic shop.
                         const int rr = rng.range(0, 99);
                         if (rr < 40) k = ItemKind::RingProtection;
                         else if (rr < 65) k = ItemKind::RingMight;
                         else if (rr < 90) k = ItemKind::RingAgility;
                         else k = ItemKind::RingFocus;
-                    }
-                    else {
+                    } else {
                         // Rare traversal utility.
                         if (rng.chance(0.18f)) {
                             k = ItemKind::PotionHallucination;
@@ -872,6 +917,13 @@ void Game::spawnItems() {
 
             const int drops = rng.range(2, 4);
             for (int i = 0; i < drops; ++i) {
+                // Occasionally a spellbook shows up (more likely on deeper floors).
+                const float bookChance = std::min(0.24f, 0.06f + 0.02f * static_cast<float>(std::max(0, depth_ - 2)));
+                if (depth_ >= 2 && rng.chance(bookChance)) {
+                    dropItemAt(pickSpellbookKind(rng, depth_), randomFreeTileInRoom(r), 1);
+                    continue;
+                }
+
                 const int roll = rng.range(0, 99);
                 if (roll < 18) dropItemAt(ItemKind::ScrollIdentify, randomFreeTileInRoom(r), 1);
                 else if (roll < 32) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
@@ -1091,6 +1143,95 @@ void Game::spawnItems() {
         if (!entityAt(pos.x, pos.y)) {
             if (rng.chance(0.55f)) dropItemAt(ItemKind::Arrow, pos, rng.range(6, 14));
             else dropItemAt(ItemKind::Rock, pos, rng.range(4, 12));
+        }
+    }
+
+    // Item mimics: rare ground loot that turns into a Mimic when picked up.
+    // This complements chest mimics and gives Mimics a more NetHack-flavored role.
+    if (depth_ >= 2) {
+        struct Cand { size_t idx; int w; };
+        std::vector<Cand> cands;
+        cands.reserve(ground.size());
+        int totalW = 0;
+
+        for (size_t i = 0; i < ground.size(); ++i) {
+            const GroundItem& gi = ground[i];
+            const Item& it = gi.item;
+
+            // Never place item mimics in shops (too punishing / confusing with shop rules).
+            if (it.shopPrice > 0) continue;
+
+            // Skip world-interactables / noisy clutter.
+            if (isChestKind(it.kind)) continue;
+            if (isCorpseKind(it.kind)) continue;
+            if (it.kind == ItemKind::Gold) continue;
+            if (it.kind == ItemKind::AmuletYendor) continue;
+            if (isStackable(it.kind)) continue;
+
+            const ItemDef& def = itemDef(it.kind);
+            if (def.value <= 0) continue;
+
+            const RoomType rt = roomTypeAt(dung, gi.pos);
+            if (rt == RoomType::Shop) continue;
+
+            int roomW = 0;
+            switch (rt) {
+                case RoomType::Treasure:    roomW = 55; break;
+                case RoomType::Vault:       roomW = 70; break;
+                case RoomType::Secret:      roomW = 45; break;
+                case RoomType::Armory:      roomW = 40; break;
+                case RoomType::Library:     roomW = 35; break;
+                case RoomType::Laboratory:  roomW = 35; break;
+                default: break;
+            }
+            if (roomW <= 0) continue;
+
+            // Weight toward tempting, high-value single items.
+            int w = roomW;
+            w += std::min(120, def.value / 2);
+            w += std::min(30, depth_ * 2);
+            if (w <= 0) continue;
+
+            cands.push_back(Cand{i, w});
+            totalW += w;
+        }
+
+        auto pickWeightedIndex = [&]() -> size_t {
+            if (cands.empty() || totalW <= 0) return static_cast<size_t>(-1);
+            int r = rng.range(1, totalW);
+            for (const Cand& c : cands) {
+                r -= c.w;
+                if (r <= 0) return c.idx;
+            }
+            return cands.back().idx;
+        };
+
+        auto markOne = [&]() -> bool {
+            const size_t pick = pickWeightedIndex();
+            if (pick == static_cast<size_t>(-1) || pick >= ground.size()) return false;
+            setItemMimicBait(ground[pick].item, true);
+
+            // Remove from candidates so we don't double-mark the same item.
+            for (size_t ci = 0; ci < cands.size(); ++ci) {
+                if (cands[ci].idx == pick) {
+                    totalW -= cands[ci].w;
+                    cands.erase(cands.begin() + static_cast<std::vector<Cand>::difference_type>(ci));
+                    break;
+                }
+            }
+            return true;
+        };
+
+        // Chance to place 0..2 item mimics on a floor (rare, scaled gently with depth).
+        float p1 = 0.10f + 0.02f * static_cast<float>(std::min(8, std::max(0, depth_ - 2)));
+        p1 = std::min(0.35f, p1);
+        if (rng.chance(p1)) {
+            (void)markOne();
+
+            float p2 = std::min(0.18f, p1 * 0.6f);
+            if (depth_ >= 7 && rng.chance(p2)) {
+                (void)markOne();
+            }
         }
     }
 }
@@ -1896,6 +2037,25 @@ void Game::applyEndOfTurnEffects() {
             naturalRegenCounter = 0;
         }
     }
+
+    // Mana regeneration (deterministic; keyed off turnCount so save/load remains consistent).
+    // Intentionally slower than HP regen and primarily scaled by FOCUS.
+    {
+        const int manaMax = playerManaMax();
+        if (manaMax > 0 && mana_ < manaMax) {
+            const int focus = playerFocus();
+            const int level = std::max(1, playerCharLevel());
+            // Baseline: 1 mana per ~9 turns at low focus, improving with focus/level.
+            int interval = 11 - (focus / 2) - (level / 3);
+            interval = clampi(interval, 2, 12);
+            if (interval <= 0) interval = 2;
+
+            if ((turnCount % static_cast<uint32_t>(interval)) == 0u) {
+                mana_ = std::min(manaMax, mana_ + 1);
+            }
+        }
+    }
+
     // Hunger ticking (optional).
     if (hungerEnabled_) {
         if (hungerMax <= 0) hungerMax = 800;

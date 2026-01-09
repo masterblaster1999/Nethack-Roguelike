@@ -51,6 +51,7 @@ DiceExpr meleeDiceForMonster(EntityKind kind) {
         case EntityKind::Mimic:          return {1, 8, 0};
         case EntityKind::Minotaur:       return {2, 6, 0};
         case EntityKind::Shopkeeper:     return {2, 4, 0};
+        case EntityKind::Guard:          return {1, 6, 0};
         case EntityKind::Player:         return {1, 2, 0};
         default:                         return {1, 4, 0};
     }

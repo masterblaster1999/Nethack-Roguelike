@@ -166,7 +166,12 @@ std::string Game::describeAt(Vec2i p) const {
                     }
                 }
 
-                if (e->effects.fearTurns > 0) {
+                
+                if (!hallu && e->friendly && e->pocketConsumable.id != 0 && e->pocketConsumable.count > 0) {
+                    ss << " | PACK: " << displayItemName(e->pocketConsumable);
+                }
+
+if (e->effects.fearTurns > 0) {
                     ss << " | FEARED";
                 }
 

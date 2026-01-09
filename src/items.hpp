@@ -148,6 +148,16 @@ enum class ItemKind : uint8_t {
 
     // --- Perception / weirdness (append-only) ---
     PotionHallucination,
+
+    // --- Mana / magic (append-only) ---
+    PotionEnergy,
+
+    // --- Spellbooks (append-only) ---
+    SpellbookMagicMissile,
+    SpellbookBlink,
+    SpellbookMinorHeal,
+    SpellbookDetectTraps,
+    SpellbookFireball,
 };
 
 // Item "egos" (NetHack-style brands / special properties) applied to some gear.
@@ -186,7 +196,7 @@ inline int egoValueMultiplierPct(ItemEgo e) {
 }
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::PotionHallucination) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::SpellbookFireball) + 1;
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;
@@ -226,6 +236,7 @@ inline bool isPotionKind(ItemKind k) {
         case ItemKind::PotionClarity:
         case ItemKind::PotionLevitation:
         case ItemKind::PotionHallucination:
+        case ItemKind::PotionEnergy:
             return true;
         default:
             return false;
@@ -316,12 +327,26 @@ struct Item {
 
     // Item ego / brand (rare). Used primarily for melee weapons.
     ItemEgo ego = ItemEgo::None;
+
+    // Misc item flags (append-only).
+    // Used to tag special ground items (e.g. item mimics).
+    uint8_t flags = 0;
 };
 
 struct GroundItem {
     Item item;
     Vec2i pos;
 };
+
+// Item flags (append-only).
+// NOTE: flags are serialized; only add new bits at the end.
+inline constexpr uint8_t ITEM_FLAG_MIMIC_BAIT = 1u << 0;
+
+inline bool itemIsMimicBait(const Item& it) { return (it.flags & ITEM_FLAG_MIMIC_BAIT) != 0; }
+inline void setItemMimicBait(Item& it, bool v) {
+    if (v) it.flags = static_cast<uint8_t>(it.flags | ITEM_FLAG_MIMIC_BAIT);
+    else   it.flags = static_cast<uint8_t>(it.flags & static_cast<uint8_t>(~ITEM_FLAG_MIMIC_BAIT));
+}
 
 const ItemDef& itemDef(ItemKind k);
 

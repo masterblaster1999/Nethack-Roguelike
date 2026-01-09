@@ -707,6 +707,7 @@ float densityFor(EntityKind k) {
         case EntityKind::Ogre: return 0.72f;
         case EntityKind::Mimic: return 0.74f;
         case EntityKind::Shopkeeper: return 0.54f;
+        case EntityKind::Guard: return 0.60f;
         case EntityKind::Minotaur: return 0.76f;
         default: return 0.55f;
     }
@@ -733,6 +734,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::Ogre: return add({ 150, 120, 70, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Mimic: return add({ 150, 110, 60, 255 }, rng.range(-18,18), rng.range(-18,18), rng.range(-18,18));
         case EntityKind::Shopkeeper: return add({ 220, 200, 120, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
+        case EntityKind::Guard: return add({ 170, 185, 210, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
         case EntityKind::Minotaur: return add({ 160, 90, 60, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         default: return add({ 180, 180, 180, 255 }, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
     }
@@ -1207,6 +1209,12 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, boo
                 setPx(s, rightHand ? 10 : 5, 12, {255,255,255,110});
                 break;
             }
+            case EntityKind::Guard: {
+                // Sword + simple shield for silhouette.
+                drawBlade(handX, handY, dir, -1, 4, mul(metal, 0.95f), grip);
+                drawShield(rightHand ? 2 : 11, 8, add({120, 140, 170, 255}, rngVar.range(-10, 10), rngVar.range(-10, 10), rngVar.range(-10, 10)));
+                break;
+            }
             default:
                 break;
         }
@@ -1276,6 +1284,30 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
             int x = rng.range(2, 13);
             int y = rng.range(2, 13);
             setPx(s, x, y, {255,255,255,200});
+        }
+    };
+
+    auto drawSpellbook = [&](Color cover, Color rune) {
+        // Simple hardbound book with a rune on the cover.
+        outlineRect(s, 4, 4, 8, 10, mul(cover, 0.75f));
+        rect(s, 5, 5, 6, 8, cover);
+
+        // Spine
+        line(s, 4, 4, 4, 13, mul(cover, 0.6f));
+
+        // Clasp
+        rect(s, 10, 8, 1, 2, mul({220,220,220,255}, 0.85f));
+
+        // Rune (tiny cross-ish glyph)
+        setPx(s, 8, 8, rune);
+        setPx(s, 8, 9, rune);
+        setPx(s, 7, 8, rune);
+        setPx(s, 9, 8, rune);
+
+        if (frame % 2 == 1) {
+            // Cover highlight
+            setPx(s, 6, 6, {255,255,255,110});
+            setPx(s, 7, 6, {255,255,255,90});
         }
     };
 
@@ -1832,6 +1864,47 @@ case ItemKind::Arrow: {
                 int sx = 7 + static_cast<int>((sh >> (i * 5)) & 1u);
                 int sy = 6 + static_cast<int>((sh >> (i * 7)) % 6u);
                 setPx(s, sx, sy, {255,255,255,140});
+            }
+            break;
+        }
+
+        case ItemKind::PotionEnergy: {
+            // Bright cyan "mana" potion: glowing fluid + a couple sparkles.
+            Color glass = {200,200,220,180};
+            Color fluid = {90,240,230,220};
+
+            outlineRect(s, 6, 4, 4, 9, mul(glass, 0.9f));
+            rect(s, 7, 6, 2, 6, fluid);
+            rect(s, 6, 3, 4, 2, {140,140,150,220});
+
+            if (frame % 2 == 1) {
+                setPx(s, 8, 7, {255,255,255,170});
+                setPx(s, 9, 9, {255,255,255,120});
+                setPx(s, 9, 6, {255,255,255,170});
+            }
+            break;
+        }
+
+        case ItemKind::SpellbookMagicMissile: {
+            drawSpellbook({90,140,240,255}, {220,240,255,220});
+            break;
+        }
+        case ItemKind::SpellbookBlink: {
+            drawSpellbook({170,90,220,255}, {255,255,255,200});
+            break;
+        }
+        case ItemKind::SpellbookMinorHeal: {
+            drawSpellbook({90,200,120,255}, {240,255,240,210});
+            break;
+        }
+        case ItemKind::SpellbookDetectTraps: {
+            drawSpellbook({200,160,90,255}, {255,245,210,210});
+            break;
+        }
+        case ItemKind::SpellbookFireball: {
+            drawSpellbook({220,90,60,255}, {255,230,200,220});
+            if (frame % 2 == 1) {
+                setPx(s, 9, 6, {255,240,200,140});
             }
             break;
         }

@@ -249,6 +249,7 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     if (name == "message_history" || name == "messagehistory" || name == "messages" || name == "msghistory" || name == "msglog") return Action::MessageHistory;
     if (name == "codex" || name == "monster_codex" || name == "bestiary" || name == "monsters") return Action::Codex;
     if (name == "discoveries" || name == "discovery" || name == "identify_list") return Action::Discoveries;
+    if (name == "spells" || name == "spellbook" || name == "cast") return Action::Spells;
     if (name == "options") return Action::Options;
     if (name == "command" || name == "extcmd") return Action::Command;
 
@@ -327,6 +328,9 @@ KeyBinds KeyBinds::defaults() {
 
     add(Action::Inventory, SDLK_i);
     add(Action::Inventory, SDLK_TAB);
+
+    // Spellbook / spellcasting overlay (WIP)
+    add(Action::Spells, SDLK_z, KMOD_SHIFT);
 
     add(Action::Fire, SDLK_f);
     add(Action::Search, SDLK_c, KMOD_SHIFT);
@@ -484,6 +488,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::MessageHistory,
             Action::Codex,
             Action::Discoveries,
+            Action::Spells,
             Action::Scores,
             Action::Save,
             Action::Load,
@@ -524,6 +529,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::ToggleViewMode,
 
         Action::Inventory,
+        Action::Spells,
         Action::Fire,
         Action::Look,
         Action::Search,
@@ -599,6 +605,7 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
     {Action::MessageHistory, "message_history"},
     {Action::Codex, "codex"},
     {Action::Discoveries, "discoveries"},
+    {Action::Spells, "spells"},
     {Action::Options, "options"},
     {Action::Command, "command"},
     {Action::ToggleMinimap, "toggle_minimap"},

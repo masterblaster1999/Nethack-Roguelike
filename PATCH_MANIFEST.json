@@ -1,5 +1,5 @@
 {
-  "description": "Minimap usability upgrade: zoom controls, cursor info line, and discovered trap pips (with settings persistence).",
+  "description": "Merchant guild theft enforcement: add a new Guard monster, shop debt payment across depths, and a theft alarm that can spawn/pursue guards until you pay your bill.",
   "files": [
     "CMakeLists.txt",
     "PATCH_MANIFEST.json",
@@ -49,16 +49,14 @@
     "src/terrain_sculpt.hpp",
     "tests/test_main.cpp"
   ],
-  "patch_id": "roundN_plus73",
-  "previous_patch": "roundN_plus72",
+  "patch_id": "roundN_plus77",
+  "previous_patch": "roundN_plus76",
   "summary": [
-    "Minimap zoom: [ / ] while the minimap is open to scale the minimap tile size (also persisted via minimap_zoom in settings).",
-    "Minimap info: adds a third info line that shows the look-style description of the tile under the minimap cursor (truncated to fit).",
-    "Minimap traps: discovered traps now show as colored pips on the minimap (faded in fog-of-war).",
-    "Sneak mode stealth: monsters have a reduced visual detection range while you are sneaking (with penalties for heavy armor/encumbrance and partial resistance for keen-sensed monsters).",
-    "Sneak mode scent: sneaking leaves a weaker scent trail, making smell-capable monsters less reliable trackers (heavy armor/encumbrance reduce the benefit).",
-    "Sneak mode tradeoffs: sneaking is now slightly slower via occasional extra monster turns; door open/close/lock/pick interactions are also quieter while sneaking.",
-    "Determinism/testing: include sneakMode_ in determinismHash() and add a save/load regression test that preserves sneak state."
+    "New EntityKind::Guard (merchant guild enforcer) and sprite support.",
+    "Shop theft alarm refactored to a shared helper; stealing/attacking shopkeepers can now spawn guards.",
+    "Merchant guild pursuit: guards may appear on later floors if you flee with unpaid goods.",
+    "Shop debts can be paid across depths; clearing all debt makes guards stand down globally (current + stored levels).",
+    "Save format bumped to v42 to persist merchant guild pursuit state."
   ],
   "timestamp": "2026-01-08"
 }

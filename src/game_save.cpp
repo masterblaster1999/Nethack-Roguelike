@@ -565,7 +565,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 39u; // v39: persist monster AI memory + energy scheduling
+constexpr uint32_t SAVE_VERSION = 44u; // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -661,6 +661,11 @@ void writeItem(std::ostream& out, const Item& it) {
     // v37: item ego/brand (append-only)
     uint8_t ego = static_cast<uint8_t>(it.ego);
     writePod(out, ego);
+
+    // v41: item flags (append-only)
+    if constexpr (SAVE_VERSION >= 41u) {
+        writePod(out, it.flags);
+    }
 }
 
 bool readItem(std::istream& in, Item& it, uint32_t version) {
@@ -674,6 +679,7 @@ bool readItem(std::istream& in, Item& it, uint32_t version) {
     int32_t shopPrice = 0;
     int32_t shopDepth = 0;
     uint8_t ego = 0;
+    uint8_t flags = 0;
     if (!readPod(in, id)) return false;
     if (!readPod(in, kind)) return false;
     if (!readPod(in, count)) return false;
@@ -693,6 +699,11 @@ bool readItem(std::istream& in, Item& it, uint32_t version) {
         if (!readPod(in, ego)) return false;
         if (ego >= static_cast<uint8_t>(ITEM_EGO_COUNT)) ego = 0;
     }
+    if (version >= 41u) {
+        if (!readPod(in, flags)) return false;
+        // Clamp to known bits for safety.
+        flags = static_cast<uint8_t>(flags & ITEM_FLAG_MIMIC_BAIT);
+    }
     it.id = id;
     it.kind = static_cast<ItemKind>(kind);
     it.count = count;
@@ -703,6 +714,7 @@ bool readItem(std::istream& in, Item& it, uint32_t version) {
     it.shopPrice = static_cast<int>(shopPrice);
     it.shopDepth = static_cast<int>(shopDepth);
     it.ego = static_cast<ItemEgo>(ego);
+    it.flags = flags;
     return true;
 }
 
@@ -1253,6 +1265,24 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
             writePod(mem, static_cast<int32_t>(d));
             writePod(mem, static_cast<int32_t>(amt));
         }
+    }
+
+    // v42+: Merchant guild pursuit state (guards can pursue across floors)
+    if constexpr (SAVE_VERSION >= 42u) {
+        const uint8_t mgTmp = merchantGuildAlerted_ ? 1u : 0u;
+        writePod(mem, mgTmp);
+    }
+
+    // v43+: Shrine piety + prayer cooldown
+    if constexpr (SAVE_VERSION >= 43u) {
+        writePod(mem, static_cast<int32_t>(piety_));
+        writePod(mem, prayerCooldownUntilTurn_);
+    }
+
+    // v44+: Mana + known spells (WIP)
+    if constexpr (SAVE_VERSION >= 44u) {
+        writePod(mem, static_cast<int32_t>(mana_));
+        writePod(mem, knownSpellsMask_);
     }
 
     // Messages (for convenience)
@@ -1855,6 +1885,35 @@ bool Game::loadFromFile(const std::string& path) {
             }
         }
 
+        // v42+: Merchant guild pursuit state (guards can pursue across floors)
+        bool merchantGuildAlertedTmp = false;
+        if (ver >= 42u) {
+            uint8_t mgTmp = 0u;
+            if (!readPod(in, mgTmp)) return fail();
+            merchantGuildAlertedTmp = (mgTmp != 0u);
+        }
+
+        // v43+: Shrine piety + prayer cooldown
+        int32_t pietyTmp = 0;
+        uint32_t prayerCooldownUntilTurnTmp = 0u;
+        if (ver >= 43u) {
+            if (!readPod(in, pietyTmp)) return fail();
+            if (!readPod(in, prayerCooldownUntilTurnTmp)) return fail();
+            if (pietyTmp < 0) pietyTmp = 0;
+            if (pietyTmp > 999) pietyTmp = 999;
+        }
+
+        // v44+: Mana + known spells (WIP)
+        int32_t manaTmp = 0;
+        uint32_t knownSpellsMaskTmp = 0u;
+        if (ver >= 44u) {
+            if (!readPod(in, manaTmp)) return fail();
+            if (!readPod(in, knownSpellsMaskTmp)) return fail();
+        }
+        (void)manaTmp;
+        (void)knownSpellsMaskTmp;
+
+
         uint32_t msgCount = 0;
         if (!readPod(in, msgCount)) return fail();
         std::vector<Message> msgsTmp;
@@ -2336,6 +2395,20 @@ if (ver >= 33u) {
 
         inv = std::move(invTmp);
         shopDebtLedger_ = shopDebtLedgerTmp;
+        merchantGuildAlerted_ = merchantGuildAlertedTmp;
+        piety_ = static_cast<int>(pietyTmp);
+        prayerCooldownUntilTurn_ = prayerCooldownUntilTurnTmp;
+
+        // v44+: mana and learned spells
+        if (ver >= 44u) {
+            const int manaMax = playerManaMax();
+            mana_ = clampi(static_cast<int>(manaTmp), 0, manaMax);
+            const uint32_t validMask = (SPELL_KIND_COUNT >= 32) ? 0xFFFFFFFFu : ((1u << SPELL_KIND_COUNT) - 1u);
+            knownSpellsMask_ = knownSpellsMaskTmp & validMask;
+        } else {
+            mana_ = playerManaMax();
+            knownSpellsMask_ = 0u;
+        }
 
         // v21+: Yendor Doom state
         if (ver >= 21u) {
@@ -2429,6 +2502,110 @@ if (ver >= 33u) {
         // Keep the bookkeeping array initialized for determinism and to avoid
         // out-of-bounds issues in optional secret-hunting logic.
         autoExploreSearchTriedTurns.assign(MAP_W * MAP_H, 0);
+
+        // v40 migration: older saves (v39 and earlier) could generate shop rooms without a shopkeeper.
+        // Backfill a peaceful shopkeeper so the buy/sell/#pay loop works mid-run without forcing a new game.
+        if (ver < 40u) {
+            for (auto& [d, st] : levels) {
+                // Find the first shop room on this depth (if any).
+                bool hasShopRoom = false;
+                Room shopRoom{};
+                for (const Room& r : st.dung.rooms) {
+                    if (r.type == RoomType::Shop) {
+                        shopRoom = r;
+                        hasShopRoom = true;
+                        break;
+                    }
+                }
+                if (!hasShopRoom) {
+                    continue;
+                }
+
+                // Don't resurrect shopkeepers: if one exists (alive or dead), leave it alone.
+                bool anyShopkeeperEver = false;
+                for (const Entity& e : st.monsters) {
+                    if (e.kind == EntityKind::Shopkeeper) {
+                        anyShopkeeperEver = true;
+                        break;
+                    }
+                }
+                if (anyShopkeeperEver) {
+                    continue;
+                }
+
+                auto occupied = [&](Vec2i p) {
+                    for (const Entity& e : st.monsters) {
+                        if (e.hp > 0 && e.pos == p) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                auto groundAt = [&](Vec2i p) {
+                    for (const GroundItem& g : st.ground) {
+                        if (g.pos == p) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                auto isGoodSpawn = [&](Vec2i p, bool requireEmptyGround) {
+                    if (!st.dung.inBounds(p.x, p.y)) {
+                        return false;
+                    }
+                    if (!st.dung.isWalkable(p.x, p.y)) {
+                        return false;
+                    }
+                    if (occupied(p)) {
+                        return false;
+                    }
+                    if (requireEmptyGround && groundAt(p)) {
+                        return false;
+                    }
+                    return true;
+                };
+
+                // Deterministic spawn: prefer the center, then scan for the first usable interior tile.
+                Vec2i sp{shopRoom.cx(), shopRoom.cy()};
+                bool found = isGoodSpawn(sp, /*requireEmptyGround=*/true);
+                if (!found) {
+                    for (int y = shopRoom.y + 1; y < shopRoom.y + shopRoom.h - 1 && !found; ++y) {
+                        for (int x = shopRoom.x + 1; x < shopRoom.x + shopRoom.w - 1; ++x) {
+                            Vec2i p{x, y};
+                            if (isGoodSpawn(p, /*requireEmptyGround=*/true)) {
+                                sp = p;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!found) {
+                    for (int y = shopRoom.y + 1; y < shopRoom.y + shopRoom.h - 1 && !found; ++y) {
+                        for (int x = shopRoom.x + 1; x < shopRoom.x + shopRoom.w - 1; ++x) {
+                            Vec2i p{x, y};
+                            if (isGoodSpawn(p, /*requireEmptyGround=*/false)) {
+                                sp = p;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Avoid consuming RNG during load: derive a stable sprite seed instead of using rng.nextU32().
+                const uint32_t seedA = hash32(static_cast<uint32_t>(d));
+                const uint32_t seedB = hash32(static_cast<uint32_t>(sp.x) ^ (static_cast<uint32_t>(sp.y) << 16));
+                const uint32_t spriteSeed = hashCombine(seedA, seedB);
+
+                Entity sk = makeMonster(EntityKind::Shopkeeper, sp, 0, /*allowGear=*/false, spriteSeed);
+                sk.alerted = false;
+                sk.energy = 0;
+                st.monsters.push_back(sk);
+            }
+        }
 
         restoreLevel(depth_);
         recomputeFov();

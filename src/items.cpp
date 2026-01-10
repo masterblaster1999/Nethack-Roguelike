@@ -159,6 +159,11 @@ const ItemDef& itemDef(ItemKind k) {
         { ItemKind::SpellbookMinorHeal, "SPELLBOOK OF MINOR HEAL", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 3, 140 },
         { ItemKind::SpellbookDetectTraps, "SPELLBOOK OF DETECT TRAPS", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 3, 150 },
         { ItemKind::SpellbookFireball, "SPELLBOOK OF FIREBALL", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 4, 300 },
+        { ItemKind::SpellbookStoneskin, "SPELLBOOK OF STONESKIN", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 3, 180 },
+        { ItemKind::SpellbookHaste, "SPELLBOOK OF HASTE", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 3, 200 },
+        { ItemKind::SpellbookInvisibility, "SPELLBOOK OF INVISIBILITY", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 3, 220 },
+        { ItemKind::SpellbookPoisonCloud, "SPELLBOOK OF POISON CLOUD", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 4, 260 },
+        { ItemKind::RingSearching, "RING OF SEARCHING", false, false, false, EquipSlot::Ring, 0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock, 0, 0, 0, 1, 200, 0, 0, 0, 0 },
     };
 
     static std::vector<ItemDef> defs;

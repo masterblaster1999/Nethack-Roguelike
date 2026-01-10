@@ -264,6 +264,7 @@ std::vector<SpawnEntry> defaultRoomSpawnTable(int depth) {
             {EntityKind::Ogre, 5},
             {EntityKind::Wizard, 3},
             {EntityKind::Leprechaun, 2},
+            {EntityKind::Nymph, 1},
         };
     }
 
@@ -281,6 +282,7 @@ std::vector<SpawnEntry> defaultRoomSpawnTable(int depth) {
             {EntityKind::Ogre, 5},
             {EntityKind::Mimic, 3},
             {EntityKind::Leprechaun, 2},
+            {EntityKind::Nymph, 1},
         };
     }
 
@@ -304,6 +306,7 @@ std::vector<SpawnEntry> defaultRoomSpawnTable(int depth) {
             {EntityKind::Slime, 4},
             {EntityKind::Snake, 2},
             {EntityKind::Leprechaun, 1},
+            {EntityKind::Nymph, 1},
             {EntityKind::Minotaur, 1},
         };
     }
@@ -323,6 +326,7 @@ std::vector<SpawnEntry> defaultRoomSpawnTable(int depth) {
             {EntityKind::Wolf, 6},
             {EntityKind::KoboldSlinger, 4},
             {EntityKind::Leprechaun, 1},
+            {EntityKind::Nymph, 1},
         };
     }
 
@@ -341,6 +345,7 @@ std::vector<SpawnEntry> defaultRoomSpawnTable(int depth) {
             {EntityKind::Wolf, 4},
             {EntityKind::KoboldSlinger, 2},
             {EntityKind::Leprechaun, 1},
+            {EntityKind::Nymph, 1},
         };
     }
 
@@ -358,6 +363,7 @@ std::vector<SpawnEntry> defaultRoomSpawnTable(int depth) {
             {EntityKind::Spider, 3},
             {EntityKind::Wolf, 3},
             {EntityKind::Leprechaun, 1},
+            {EntityKind::Nymph, 1},
         };
     }
 
@@ -953,6 +959,10 @@ MonsterBaseStats baseMonsterStatsFor(EntityKind k) {
         case EntityKind::Leprechaun:
             // Fast, fragile thief: relies on stealing and blinking away rather than brawling.
             s.hpMax = 8; s.baseAtk = 2; s.baseDef = 1; s.willFlee = true;
+            break;
+        case EntityKind::Nymph:
+            // Seductive thief: targets inventory items and blinks away.
+            s.hpMax = 10; s.baseAtk = 3; s.baseDef = 1; s.willFlee = true;
             break;
         case EntityKind::Zombie:
             // Slow, tough undead: does not flee. Often created when corpses rise.

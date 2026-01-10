@@ -284,6 +284,7 @@ int hearingFor(EntityKind k) {
         case EntityKind::Spider:         return 8;
         case EntityKind::Goblin:         return 8;
         case EntityKind::Leprechaun:     return 11;
+        case EntityKind::Nymph:          return 10;
         case EntityKind::Orc:            return 8;
         case EntityKind::KoboldSlinger:  return 8;
         case EntityKind::SkeletonArcher: return 7;

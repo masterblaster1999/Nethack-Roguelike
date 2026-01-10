@@ -69,6 +69,8 @@ std::string Game::describeAt(Vec2i p) const {
         case TileType::Boulder: ss << "BOULDER"; break;
         case TileType::Chasm: ss << "CHASM"; break;
         case TileType::Floor: ss << "FLOOR"; break;
+        case TileType::Fountain: ss << "FOUNTAIN"; break;
+        case TileType::Altar: ss << "ALTAR"; break;
         case TileType::StairsUp: ss << "STAIRS UP"; break;
         case TileType::StairsDown: ss << "STAIRS DOWN"; break;
         case TileType::DoorClosed: ss << "DOOR (CLOSED)"; break;
@@ -233,6 +235,16 @@ if (e->effects.fearTurns > 0) {
     Vec2i pp = player().pos;
     int dist = std::abs(p.x - pp.x) + std::abs(p.y - pp.y);
     ss << " | DIST " << dist;
+
+    // Context hint for tile-interactables.
+    if (p == player().pos) {
+        const TileType tt = dung.at(p.x, p.y).type;
+        if (tt == TileType::Fountain) {
+            ss << " | ENTER: DRINK";
+        } else if (tt == TileType::Altar) {
+            ss << " | ENTER: PRAY";
+        }
+    }
 
     return ss.str();
 }

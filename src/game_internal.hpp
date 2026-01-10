@@ -487,6 +487,7 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
             case EntityKind::Dog:    return 'd';
             case EntityKind::Ghost:  return 'G';
             case EntityKind::Leprechaun: return 'l';
+            case EntityKind::Nymph: return 'N';
             case EntityKind::Zombie: return 'Z';
             case EntityKind::Troll:  return 'T';
             case EntityKind::Wizard: return 'W';
@@ -2466,6 +2467,7 @@ constexpr ItemKind RING_KINDS[] = {
     ItemKind::RingAgility,
     ItemKind::RingFocus,
     ItemKind::RingProtection,
+    ItemKind::RingSearching,
 };
 
 constexpr ItemKind WAND_KINDS[] = {

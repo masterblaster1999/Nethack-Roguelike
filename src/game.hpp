@@ -51,9 +51,12 @@ enum class EntityKind : uint8_t {
 
     // Merchant guild enforcement (append-only to keep save compatibility)
     Guard,
+
+    // Beautiful but dangerous thieves (append-only to keep save compatibility)
+    Nymph,
 };
 
-inline constexpr int ENTITY_KIND_COUNT = static_cast<int>(EntityKind::Guard) + 1;
+inline constexpr int ENTITY_KIND_COUNT = static_cast<int>(EntityKind::Nymph) + 1;
 
 inline const char* entityKindName(EntityKind k) {
     switch (k) {
@@ -78,6 +81,7 @@ inline const char* entityKindName(EntityKind k) {
         case EntityKind::Leprechaun: return "LEPRECHAUN";
         case EntityKind::Zombie: return "ZOMBIE";
         case EntityKind::Guard: return "GUARD";
+        case EntityKind::Nymph: return "NYMPH";
         default: return "UNKNOWN";
     }
 }
@@ -111,6 +115,7 @@ inline int baseSpeedFor(EntityKind k) {
         case EntityKind::Leprechaun: return 140;
         case EntityKind::Zombie: return 80;
         case EntityKind::Guard: return 110;
+        case EntityKind::Nymph: return 130;
         default: return 100;
     }
 }
@@ -151,7 +156,7 @@ MonsterBaseStats baseMonsterStatsFor(EntityKind k);
 
 inline int monsterDepthScale(EntityKind k, int depth) {
     int d = std::max(0, depth - 1);
-    if (k == EntityKind::Goblin || k == EntityKind::Bat || k == EntityKind::Slime || k == EntityKind::Snake || k == EntityKind::Leprechaun) {
+    if (k == EntityKind::Goblin || k == EntityKind::Bat || k == EntityKind::Slime || k == EntityKind::Snake || k == EntityKind::Leprechaun || k == EntityKind::Nymph) {
         d = d / 2;
     }
     if (k == EntityKind::Minotaur) {
@@ -1821,7 +1826,7 @@ private:
     // Targeting actions
     void beginTargeting();
     void beginSpellTargeting(SpellKind k);
-    void endTargeting(bool fire);
+    bool endTargeting(bool fire);
     void moveTargetCursor(int dx, int dy);
     void recomputeTargetLine();
     // Cycle between visible hostile targets while in targeting mode.
@@ -1873,6 +1878,8 @@ private:
     void spawnMonsters();
     void spawnItems();
     void spawnTraps();
+    void spawnFountains();
+    void spawnAltars();
 
     // Surface camp (depth 0) fixtures.
     void setupSurfaceCampInstallations();
@@ -1888,6 +1895,7 @@ private:
     // QoL / traps / status
     bool autoPickupAtPlayer();
     bool openChestAtPlayer();
+    bool drinkFromFountain();
     // Ambush mimics: used by chest mimics and item mimics.
     // `lootToDrop` (if non-null) will be carried by the mimic and dropped on death.
     void revealMimicFromBait(Vec2i baitPos, const std::string& revealMsg, const Item* lootToDrop);
@@ -1923,6 +1931,7 @@ private:
     std::vector<Vec2i> findPathBfs(Vec2i start, Vec2i goal, bool requireExplored, bool allowKnownTraps) const;
     void stopAutoMove(bool silent);
     bool searchForTraps(bool verbose = true, int* foundTrapsOut = nullptr, int* foundSecretsOut = nullptr);
+    void autoSearchTick();
     bool disarmTrap();
     bool closeDoor();
     bool lockDoor();

@@ -16,14 +16,20 @@ enum class SpellKind : uint8_t {
     MinorHeal,
     DetectTraps,
     Fireball,
+
+    // New spells (append-only)
+    Stoneskin,
+    Haste,
+    Invisibility,
+    PoisonCloud,
 };
 
-inline constexpr int SPELL_KIND_COUNT = static_cast<int>(SpellKind::Fireball) + 1;
+inline constexpr int SPELL_KIND_COUNT = static_cast<int>(SpellKind::PoisonCloud) + 1;
 
 struct SpellDef {
     SpellKind kind;
     const char* name;
-    const char* desc;
+    const char* description;
 
     int manaCost = 0;
 
@@ -41,3 +47,4 @@ struct SpellDef {
 const SpellDef& spellDef(SpellKind k);
 
 inline const char* spellName(SpellKind k) { return spellDef(k).name; }
+inline const char* spellDescription(SpellKind k) { return spellDef(k).description; }

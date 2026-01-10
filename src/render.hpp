@@ -243,6 +243,10 @@ private:
     std::vector<AnimTex> pillarOverlayVar;
     // Boulders are also overlays so they inherit the underlying room floor theme.
     std::vector<AnimTex> boulderOverlayVar;
+    // Fountains are rendered as overlays so they inherit the underlying themed floor.
+    std::vector<AnimTex> fountainOverlayVar;
+    // Altars are rendered as overlays so they inherit the underlying themed floor.
+    std::vector<AnimTex> altarOverlayVar;
 
     // Isometric terrain variants (generated lazily the first time you toggle into
     // ViewMode::Isometric). These are true 2:1 diamond tiles rather than squashed
@@ -252,6 +256,18 @@ private:
     std::vector<AnimTex> chasmVarIso;
     // 2.5D wall "blocks" (drawn as sprites in isometric view to add verticality).
     std::vector<AnimTex> wallBlockVarIso;
+    // 2.5D door "blocks" (drawn as sprites in isometric view so doors feel like
+    // real wall geometry instead of flat top-down overlays).
+    std::vector<AnimTex> doorBlockClosedVarIso;
+    std::vector<AnimTex> doorBlockLockedVarIso;
+    // 2.5D open door frames (drawn as sprites in isometric view) so doorways still
+    // read as vertical architecture even when the door is passable/open.
+    std::vector<AnimTex> doorBlockOpenVarIso;
+
+    // 2.5D prop blocks (drawn as sprites in isometric view) so pillars/boulders
+    // read as volumetric geometry instead of flat top-down overlays.
+    std::vector<AnimTex> pillarBlockVarIso;
+    std::vector<AnimTex> boulderBlockVarIso;
 
     // A few ground-plane overlays get isometric diamond variants so they sit properly
     // on the isometric grid.
@@ -267,6 +283,10 @@ private:
     std::vector<AnimTex> floorDecalVar;
     std::vector<AnimTex> wallDecalVar;
 
+    // Isometric variants for floor decals (diamond-projected transparent overlays).
+    // Generated lazily with the other isometric terrain assets.
+    std::vector<AnimTex> floorDecalVarIso;
+
     // Autotile overlays (transparent, layered on top of base tiles)
     // openMask bits: 1=N, 2=E, 4=S, 8=W (bit set means "edge exposed")
     static constexpr int AUTO_MASKS = 16;
@@ -275,6 +295,18 @@ private:
     int autoVarsUsed = AUTO_VARS;
     std::array<std::array<AnimTex, AUTO_VARS>, AUTO_MASKS> wallEdgeVar{};
     std::array<std::array<AnimTex, AUTO_VARS>, AUTO_MASKS> chasmRimVar{};
+
+    // Isometric edge shading overlays (diamond masks) for contact shadows / chasm rims.
+    // Generated lazily together with the other isometric terrain textures.
+    std::array<AnimTex, AUTO_MASKS> isoEdgeShadeVar{};
+
+    // Isometric cast shadow overlays (diamond masks) for tall occluders.
+    // These are soft shadows drawn on the ground plane to reinforce 2.5D depth.
+    std::array<AnimTex, AUTO_MASKS> isoCastShadowVar{};
+
+    // Isometric sprite ground shadow (diamond overlay) used to anchor entities to the floor.
+    // Generated lazily with other isometric terrain assets.
+    std::array<SDL_Texture*, FRAMES> isoEntityShadowTex{};
 
     // Confusion gas overlay (procedurally generated animated tiles)
     static constexpr int GAS_VARS = 8;

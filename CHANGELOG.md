@@ -4,6 +4,18 @@
 ## [0.22.0] - Unreleased
 
 ### Added
+- **Ring of Searching**: a new ring that grants **automatic searching** each turn, helping you uncover nearby **traps, trapped chests, and secret doors** without spending an extra action.
+- **Shrine altars**: shrine rooms now spawn a visible **altar** tile (overlay on themed floor).
+  - Press **Enter** while standing on the altar to invoke the existing **shrine prayer** interaction (including auto-identify when pious).
+- **Isometric depth shading**: isometric view now adds **procedurally generated diamond edge shading** (contact shadows against walls/objects + subtle chasm rim) so the 2.5D map reads with more depth.
+- **Isometric bevel lighting**: isometric diamond terrain tiles now apply a subtle **edge-only bevel ramp** (top-left highlight / bottom-right shadow) to reinforce the 2.5D ground plane.
+- **Isometric sprite grounding shadows**: entities (and hallucination phantoms) now draw a small **diamond ground shadow** under their feet in isometric view, improving depth cues and reducing the “floating sprite” effect.
+- **Isometric cast shadows**: floor tiles in isometric view now receive subtle **directional cast shadows** from nearby tall blockers (walls/closed doors/pillars/etc), improving 2.5D depth cues.
+- **Isometric floor decals**: themed floor decal overlays (cracks/runes/stains) are now projected to isometric diamonds, so special rooms retain their subtle floor detail in 2.5D view.
+- **Isometric door blocks**: closed and locked doors now render as **procedurally generated 2.5D door blocks** in isometric view, matching the wall block style (wood panels inset into stone faces) instead of using flat top-down overlay sprites.
+- **Isometric open door frames**: open doors now render as a **procedurally generated 2.5D doorway frame** in isometric view (a passable archway), so doorways keep their vertical depth instead of relying on a flat floor overlay.
+- **Isometric stairs depth overlays**: stairs up/down now use a purpose-built **procedural diamond overlay** (rim + interior shading + step lines) so stairwells read with more depth in 2.5D view.
+- **Isometric prop blocks**: pillars and boulders now render as **procedurally generated 2.5D blocks** in isometric view, matching the wall/door block style instead of relying on flat top-down overlay sprites.
 - **Procedural mines floors**: a new dungeon generator that builds **winding tunnel networks** connecting many small chambers.
   - Appears at **depth 2** and again at **depth 7**, adding mid-run navigational variety.
   - Tunnels are carved with a **biased random-walk** for more organic shapes (with safe fallback pathing).

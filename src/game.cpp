@@ -656,6 +656,7 @@ int Game::xpFor(EntityKind k) const {
         case EntityKind::Wizard: return 32;
         case EntityKind::Ghost: return 34;
         case EntityKind::Leprechaun: return 18;
+        case EntityKind::Nymph: return 24;
         case EntityKind::Zombie: return 18;
         case EntityKind::Mimic: return 22;
         case EntityKind::Minotaur: return 45;
@@ -1336,6 +1337,9 @@ void Game::newGame(uint32_t seed) {
     fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
     scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
+    // Shrines get a visible altar overlay tile (placed before graffiti/spawns so it stays clear).
+    spawnAltars();
+
     // Flavor graffiti/engravings are generated once per freshly created floor.
     spawnGraffiti();
 
@@ -1520,6 +1524,8 @@ void Game::newGame(uint32_t seed) {
 
     tryApplyBones();
 
+    spawnFountains();
+
     storeCurrentLevel();
 
     recomputeFov();
@@ -1631,6 +1637,9 @@ void Game::spawnGraffiti() {
     auto addGraffiti = [&](Vec2i pos, const std::string& text) {
         if (!dung.inBounds(pos.x, pos.y)) return;
         if (!dung.isWalkable(pos.x, pos.y)) return;
+        // Avoid placing graffiti on special interactable overlays (keeps them readable).
+        const TileType tt = dung.at(pos.x, pos.y).type;
+        if (tt == TileType::Altar || tt == TileType::Fountain) return;
         if (pos == dung.stairsUp || pos == dung.stairsDown) return; // don't clutter stairs
         if (text.empty()) return;
 
@@ -1661,6 +1670,9 @@ void Game::spawnGraffiti() {
         // Keep them rare and avoid stair tiles for readability.
         if (!dung.inBounds(pos.x, pos.y)) return;
         if (!dung.isWalkable(pos.x, pos.y)) return;
+        // Avoid placing sigils on special interactable overlays (keeps them readable).
+        const TileType tt = dung.at(pos.x, pos.y).type;
+        if (tt == TileType::Altar || tt == TileType::Fountain) return;
         if (pos == dung.stairsUp || pos == dung.stairsDown) return;
         if (keyword.empty()) return;
         if (uses == 0u) uses = 1u;
@@ -1707,6 +1719,9 @@ void Game::spawnGraffiti() {
             Vec2i p{rng.range(x0, x1), rng.range(y0, y1)};
             if (!dung.inBounds(p.x, p.y)) continue;
             if (!dung.isWalkable(p.x, p.y)) continue;
+            // Keep shrine overlays readable (altars/fountains should not be graffiti targets).
+            const TileType tt = dung.at(p.x, p.y).type;
+            if (tt == TileType::Altar || tt == TileType::Fountain) continue;
             if (p == dung.stairsUp || p == dung.stairsDown) continue;
             return p;
         }
@@ -2245,6 +2260,9 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
+        // Shrines get a visible altar overlay tile (placed before graffiti/spawns so it stays clear).
+        spawnAltars();
+
         // Flavor graffiti/engravings are generated once per freshly created floor.
         spawnGraffiti();
 
@@ -2295,6 +2313,8 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         }
 
         tryApplyBones();
+
+        spawnFountains();
 
         // Stair arrival is noisy: nearby monsters may wake and investigate.
         emitNoise(p.pos, 12);

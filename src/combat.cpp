@@ -21,6 +21,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Dog: return "DOG";
         case EntityKind::Ghost: return "GHOST";
         case EntityKind::Leprechaun: return "LEPRECHAUN";
+        case EntityKind::Nymph: return "NYMPH";
         case EntityKind::Zombie: return "ZOMBIE";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";

@@ -38,22 +38,36 @@ ItemEgo rollWeaponEgo(RNG& rng, ItemKind k, int depth, RoomType rt, bool fromSho
 
 ItemKind pickSpellbookKind(RNG& rng, int depth) {
     // Depth-based distribution for spellbooks (WIP).
-    // Fireball is deeper and rarer.
+    // New books unlock as depth increases; early floors mostly contain the basics.
     depth = std::max(1, depth);
-    const int roll = rng.range(0, 99);
 
-    // Deeper floors: small chance for Fireball.
-    if (depth >= 8 && roll >= 92) return ItemKind::SpellbookFireball;
-    if (depth >= 6 && roll >= 88) return ItemKind::SpellbookFireball;
+    struct Entry { ItemKind kind; int minDepth; int weight; };
+    static constexpr Entry table[] = {
+        { ItemKind::SpellbookMagicMissile, 1, 32 },
+        { ItemKind::SpellbookMinorHeal,    1, 28 },
+        { ItemKind::SpellbookBlink,        1, 22 },
+        { ItemKind::SpellbookDetectTraps,  2, 18 },
+        { ItemKind::SpellbookStoneskin,    3, 16 },
+        { ItemKind::SpellbookHaste,        4, 14 },
+        { ItemKind::SpellbookInvisibility, 5, 12 },
+        { ItemKind::SpellbookPoisonCloud,  6, 10 },
+        { ItemKind::SpellbookFireball,     8,  8 }, // deeper + rarer
+    };
 
-    // Utility spells become more common with depth.
-    if (depth >= 4 && roll >= 80) return ItemKind::SpellbookDetectTraps;
+    int total = 0;
+    for (const Entry& e : table) {
+        if (depth >= e.minDepth) total += e.weight;
+    }
+    if (total <= 0) return ItemKind::SpellbookMagicMissile;
 
-    // Common starter books.
-    if (roll < 35) return ItemKind::SpellbookMagicMissile;
-    if (roll < 60) return ItemKind::SpellbookMinorHeal;
-    if (roll < 80) return ItemKind::SpellbookBlink;
-    return ItemKind::SpellbookDetectTraps;
+    int r = rng.range(1, total);
+    for (const Entry& e : table) {
+        if (depth < e.minDepth) continue;
+        r -= e.weight;
+        if (r <= 0) return e.kind;
+    }
+
+    return table[0].kind;
 }
 
 } // namespace
@@ -589,9 +603,10 @@ void Game::spawnItems() {
                 dropItemAt(ItemKind::RingProtection, randomFreeTileInRoom(r), 1);
             }
         }
-        else if (roll < 176) dropItemAt(ItemKind::RingMight, randomFreeTileInRoom(r), 1);
-        else if (roll < 180) dropItemAt(ItemKind::RingAgility, randomFreeTileInRoom(r), 1);
-        else if (roll < 184) dropItemAt(ItemKind::RingFocus, randomFreeTileInRoom(r), 1);
+        else if (roll < 175) dropItemAt(ItemKind::RingMight, randomFreeTileInRoom(r), 1);
+        else if (roll < 178) dropItemAt(ItemKind::RingAgility, randomFreeTileInRoom(r), 1);
+        else if (roll < 181) dropItemAt(ItemKind::RingFocus, randomFreeTileInRoom(r), 1);
+        else if (roll < 184) dropItemAt(ItemKind::RingSearching, randomFreeTileInRoom(r), 1);
         else if (roll < 190) dropItemAt(ItemKind::PotionEnergy, randomFreeTileInRoom(r), 1);
         else {
             // Rare: a spellbook.
@@ -775,10 +790,11 @@ void Game::spawnItems() {
                     else if (roll < 99) {
                         // A small chance of rings showing up in the magic shop.
                         const int rr = rng.range(0, 99);
-                        if (rr < 40) k = ItemKind::RingProtection;
-                        else if (rr < 65) k = ItemKind::RingMight;
-                        else if (rr < 90) k = ItemKind::RingAgility;
-                        else k = ItemKind::RingFocus;
+                        if (rr < 30) k = ItemKind::RingProtection;
+                        else if (rr < 55) k = ItemKind::RingMight;
+                        else if (rr < 75) k = ItemKind::RingAgility;
+                        else if (rr < 90) k = ItemKind::RingFocus;
+                        else k = ItemKind::RingSearching;
                     } else {
                         // Rare traversal utility.
                         if (rng.chance(0.18f)) {
@@ -2828,4 +2844,184 @@ void Game::cleanupDead() {
     }), ents.end());
 
     // Player death handled in attack functions
+}
+
+void Game::spawnAltars() {
+    if (depth_ <= 0) return;
+
+    const auto& rooms = dung.rooms;
+    if (rooms.empty()) return;
+
+    auto nearDoor = [&](Vec2i p) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                const int x = p.x + dx;
+                const int y = p.y + dy;
+                if (!dung.inBounds(x, y)) continue;
+                const TileType tt = dung.at(x, y).type;
+                if (tt == TileType::DoorClosed || tt == TileType::DoorOpen || tt == TileType::DoorLocked) return true;
+            }
+        }
+        return false;
+    };
+
+    auto canPlace = [&](Vec2i p) {
+        if (!dung.inBounds(p.x, p.y)) return false;
+        if (p == dung.stairsUp || p == dung.stairsDown) return false;
+        if (dung.at(p.x, p.y).type != TileType::Floor) return false;
+        if (nearDoor(p)) return false;
+        return true;
+    };
+
+    // One altar per shrine room, placed near the center so it reads clearly.
+    for (const auto& r : rooms) {
+        if (r.type != RoomType::Shrine) continue;
+
+        Vec2i c{r.cx(), r.cy()};
+        const std::array<Vec2i, 9> cand = {{
+            c,
+            {c.x - 1, c.y},
+            {c.x + 1, c.y},
+            {c.x, c.y - 1},
+            {c.x, c.y + 1},
+            {c.x - 1, c.y - 1},
+            {c.x + 1, c.y - 1},
+            {c.x - 1, c.y + 1},
+            {c.x + 1, c.y + 1},
+        }};
+
+        for (const auto& p : cand) {
+            if (!canPlace(p)) continue;
+            dung.at(p.x, p.y).type = TileType::Altar;
+            break;
+        }
+    }
+}
+
+
+void Game::spawnFountains() {
+    if (depth_ <= 0) return;
+
+    const auto& rooms = dung.rooms;
+    if (rooms.empty()) return;
+
+    // Decide how many fountains to place.
+    // Kept deliberately sparse: fountains are flavorful but can be risky.
+    int want = 0;
+    float p1 = 0.35f;
+    if (depth_ >= 4) p1 = 0.45f;
+    if (depth_ >= 8) p1 = 0.55f;
+    if (depth_ >= 12) p1 = 0.60f;
+
+    if (rng.chance(p1)) want = 1;
+    if (depth_ >= 8 && rng.chance(0.20f)) want += 1;
+    if (depth_ >= 14 && rng.chance(0.10f)) want += 1;
+
+    want = clampi(want, 0, 3);
+    if (want <= 0) return;
+
+    auto hasTrapAt = [&](Vec2i p) {
+        for (const auto& t : trapsCur) {
+            if (t.pos == p) return true;
+        }
+        return false;
+    };
+
+    auto hasGroundItemAt = [&](Vec2i p) {
+        for (const auto& gi : ground) {
+            if (gi.pos == p) return true;
+        }
+        return false;
+    };
+
+    auto hasEngravingAt = [&](Vec2i p) {
+        for (const auto& e : engravings_) {
+            if (e.pos == p) return true;
+        }
+        return false;
+    };
+
+    auto nearDoor = [&](Vec2i p) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                const int x = p.x + dx;
+                const int y = p.y + dy;
+                if (!dung.inBounds(x, y)) continue;
+                const TileType tt = dung.at(x, y).type;
+                if (tt == TileType::DoorClosed || tt == TileType::DoorOpen || tt == TileType::DoorLocked || tt == TileType::DoorSecret) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    auto isBadPos = [&](Vec2i p) {
+        if (!dung.inBounds(p.x, p.y)) return true;
+        if (p == dung.stairsUp || p == dung.stairsDown) return true;
+
+        // Avoid stair adjacency so the entrance/exit areas remain readable.
+        if (chebyshev(p, dung.stairsUp) <= 2) return true;
+        if (chebyshev(p, dung.stairsDown) <= 2) return true;
+
+        // Only place fountains on plain floor tiles.
+        if (dung.at(p.x, p.y).type != TileType::Floor) return true;
+
+        // Don't overwrite other sparse systems.
+        if (hasTrapAt(p)) return true;
+        if (hasGroundItemAt(p)) return true;
+        if (hasEngravingAt(p)) return true;
+        if (entityAt(p.x, p.y) != nullptr) return true;
+
+        // Keep doorways uncluttered.
+        if (nearDoor(p)) return true;
+
+        // Avoid shops: shops are meant to feel safe-ish and consistent.
+        const RoomType rt = roomTypeAt(dung, p);
+        if (rt == RoomType::Shop) return true;
+        return false;
+    };
+
+    // Build a list of candidate rooms that have a usable interior.
+    std::vector<int> candidates;
+    candidates.reserve(rooms.size());
+
+    for (size_t i = 0; i < rooms.size(); ++i) {
+        const Room& r = rooms[i];
+        if (r.type == RoomType::Shop || r.type == RoomType::Camp) continue;
+        if (r.w < 4 || r.h < 4) continue;
+
+        // Avoid very tiny vault/secret rooms where fountains feel like visual noise.
+        if (r.type == RoomType::Vault || r.type == RoomType::Secret) continue;
+
+        candidates.push_back(static_cast<int>(i));
+    }
+
+    if (candidates.empty()) return;
+
+    int placed = 0;
+    int tries = 0;
+    const int maxTries = 120 + 80 * want;
+
+    while (placed < want && tries < maxTries) {
+        tries += 1;
+
+        const int ri = candidates[rng.range(0, static_cast<int>(candidates.size()) - 1)];
+        const Room& r = rooms[static_cast<size_t>(ri)];
+
+        // Choose a random interior tile (avoid walls).
+        const int x0 = r.x + 1;
+        const int y0 = r.y + 1;
+        const int x1 = r.x + r.w - 2;
+        const int y1 = r.y + r.h - 2;
+        if (x1 < x0 || y1 < y0) continue;
+
+        Vec2i p{rng.range(x0, x1), rng.range(y0, y1)};
+        if (isBadPos(p)) continue;
+
+        dung.at(p.x, p.y).type = TileType::Fountain;
+        placed += 1;
+    }
 }

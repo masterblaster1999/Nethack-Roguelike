@@ -570,10 +570,11 @@ bool Game::openChestAtPlayer() {
             // Rings (rare)
             int rr = rng.range(0, 99);
             ItemKind rk = ItemKind::RingProtection;
-            if (rr < 40) rk = ItemKind::RingProtection;
-            else if (rr < 65) rk = ItemKind::RingMight;
-            else if (rr < 90) rk = ItemKind::RingAgility;
-            else rk = ItemKind::RingFocus;
+            if (rr < 30) rk = ItemKind::RingProtection;
+            else if (rr < 55) rk = ItemKind::RingMight;
+            else if (rr < 75) rk = ItemKind::RingAgility;
+            else if (rr < 90) rk = ItemKind::RingFocus;
+            else rk = ItemKind::RingSearching;
             int ench = (rng.chance(0.20f + 0.08f * tier)) ? rng.range(1, 1 + tier) : 0;
             addItemToChest(rk, 1, ench);
         } else if (roll < 48) {
@@ -1420,7 +1421,9 @@ bool Game::useSelected() {
     // Spellbooks (WIP): learn a spell and consume the book.
     if (it.kind == ItemKind::SpellbookMagicMissile || it.kind == ItemKind::SpellbookBlink ||
         it.kind == ItemKind::SpellbookMinorHeal || it.kind == ItemKind::SpellbookDetectTraps ||
-        it.kind == ItemKind::SpellbookFireball) {
+        it.kind == ItemKind::SpellbookFireball || it.kind == ItemKind::SpellbookStoneskin ||
+        it.kind == ItemKind::SpellbookHaste || it.kind == ItemKind::SpellbookInvisibility ||
+        it.kind == ItemKind::SpellbookPoisonCloud) {
 
         SpellKind sk = SpellKind::MagicMissile;
         switch (it.kind) {
@@ -1429,6 +1432,10 @@ bool Game::useSelected() {
             case ItemKind::SpellbookMinorHeal: sk = SpellKind::MinorHeal; break;
             case ItemKind::SpellbookDetectTraps: sk = SpellKind::DetectTraps; break;
             case ItemKind::SpellbookFireball: sk = SpellKind::Fireball; break;
+            case ItemKind::SpellbookStoneskin: sk = SpellKind::Stoneskin; break;
+            case ItemKind::SpellbookHaste: sk = SpellKind::Haste; break;
+            case ItemKind::SpellbookInvisibility: sk = SpellKind::Invisibility; break;
+            case ItemKind::SpellbookPoisonCloud: sk = SpellKind::PoisonCloud; break;
             default: break;
         }
 

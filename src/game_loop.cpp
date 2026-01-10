@@ -1823,8 +1823,7 @@ if (optionsSel == 19) {
                 break;
             case Action::Confirm:
             case Action::Fire:
-                endTargeting(true);
-                acted = true;
+                acted = endTargeting(true);
                 break;
             case Action::Cancel:
                 endTargeting(false);
@@ -1951,7 +1950,20 @@ if (optionsSel == 19) {
                     acted = false; // opening the UI is instant; time passes when you move items
                 }
 
-                // If we didn't interact with a chest, allow picking up other items on the tile.
+                // 2) Fountains (tile-interactable): drink (consumes a turn).
+                if (!handled && dung.inBounds(p.pos.x, p.pos.y) && dung.at(p.pos.x, p.pos.y).type == TileType::Fountain) {
+                    acted = drinkFromFountain();
+                    handled = true;
+                }
+
+                // 3) Altars (tile-interactable): invoke shrine services (prayer).
+                // (This routes through the existing shrine interaction logic.)
+                if (!handled && dung.inBounds(p.pos.x, p.pos.y) && dung.at(p.pos.x, p.pos.y).type == TileType::Altar) {
+                    acted = prayAtShrine();
+                    handled = true;
+                }
+
+                // If we didn't interact with a chest, fountain, or altar, allow picking up other items on the tile.
                 if (!handled && hasPickableItem) {
                     acted = pickupAtPlayer();
                 } else if (!hasClosedChest && !hasOpenChest && !hasPickableItem) {
@@ -2436,6 +2448,7 @@ void Game::advanceAfterPlayerAction() {
 
     // Update per-level scent trail (used by smell-capable monsters).
     updateScentMap();
+    autoSearchTick();
 
     Entity& p = playerMut();
     bool runMonsters = true;

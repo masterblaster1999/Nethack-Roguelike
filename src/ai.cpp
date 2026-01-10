@@ -25,6 +25,7 @@ const char* kindName(EntityKind k) {
         case EntityKind::Dog: return "DOG";
         case EntityKind::Ghost: return "GHOST";
         case EntityKind::Leprechaun: return "LEPRECHAUN";
+        case EntityKind::Nymph: return "NYMPH";
         case EntityKind::Zombie: return "ZOMBIE";
         case EntityKind::Troll: return "TROLL";
         case EntityKind::Wizard: return "WIZARD";
@@ -1125,6 +1126,118 @@ void Game::monsterTurn() {
                 }
             }
 
+            // Nymph: steals a random inventory item (prefers valuables) and blinks away.
+            if (m.kind == EntityKind::Nymph && seesPlayer) {
+                const bool hasLoot = (m.pocketConsumable.id != 0 && m.pocketConsumable.count > 0);
+
+                auto blinkAway = [&](int minDist, int tries, const char* msg, MessageKind mk) -> bool {
+                    Vec2i dst = m.pos;
+                    for (int t = 0; t < tries; ++t) {
+                        Vec2i cand = dung.randomFloor(rng, true);
+                        if (entityAt(cand.x, cand.y)) continue;
+                        if (cand == dung.stairsUp || cand == dung.stairsDown) continue;
+                        if (manhattan(cand, p.pos) < minDist) continue;
+                        dst = cand;
+                        break;
+                    }
+                    if (dst != m.pos) {
+                        const bool wasVisible = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+                        m.pos = dst;
+                        if (wasVisible) pushMsg(msg, mk, false);
+                        return true;
+                    }
+                    return false;
+                };
+
+                // If already carrying loot, prioritize escape over fighting.
+                if (hasLoot) {
+                    if (blinkAway(7, 250, "THE NYMPH VANISHES!", MessageKind::Warning)) return;
+
+                    // Fallback: step away if blinking couldn't find a good spot.
+                    if (d0 >= 0) {
+                        Vec2i to = bestStepAway(m, costMap, pathMode);
+                        if (to != m.pos) {
+                            tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
+                            return;
+                        }
+                    }
+                    return; // spent the action trying to escape
+                }
+
+                // Otherwise try to steal a random eligible item from the player.
+                std::vector<size_t> candidates;
+                candidates.reserve(inv.size() * 2);
+
+                auto eligible = [&](const Item& it) -> bool {
+                    if (it.count <= 0) return false;
+                    if (it.kind == ItemKind::Gold) return false;
+                    if (it.kind == ItemKind::AmuletYendor) return false; // don't trivialize the win condition
+                    if (it.shopPrice > 0) return false; // don't launder shop debt
+                    if (isEquipped(it.id) && it.buc < 0) return false; // cursed worn gear can't be removed
+                    return true;
+                };
+
+                for (size_t ii = 0; ii < inv.size(); ++ii) {
+                    const Item& it = inv[ii];
+                    if (!eligible(it)) continue;
+
+                    int w = 1;
+                    if (isRingKind(it.kind)) w = 6;
+                    else if (isWandKind(it.kind)) w = 5;
+                    else if (isScrollKind(it.kind)) w = 4;
+                    else if (isPotionKind(it.kind)) w = 3;
+                    else if (isWearableGear(it.kind)) w = 2;
+
+                    for (int k = 0; k < w; ++k) candidates.push_back(ii);
+                }
+
+                if (!candidates.empty()) {
+                    const size_t pick = candidates[static_cast<size_t>(rng.range(0, static_cast<int>(candidates.size()) - 1))];
+                    Item stolen = inv[pick];
+
+                    const bool splitOne = (isStackable(stolen.kind) && stolen.count > 1);
+                    if (splitOne) {
+                        inv[pick].count -= 1;
+                        stolen.count = 1;
+                        stolen.id = nextItemId++;
+                    } else {
+                        const int itemId = stolen.id;
+                        if (itemId == equipMeleeId) equipMeleeId = 0;
+                        if (itemId == equipRangedId) equipRangedId = 0;
+                        if (itemId == equipArmorId) equipArmorId = 0;
+                        if (itemId == equipRing1Id) equipRing1Id = 0;
+                        if (itemId == equipRing2Id) equipRing2Id = 0;
+
+                        inv.erase(inv.begin() + static_cast<std::ptrdiff_t>(pick));
+                    }
+
+                    m.pocketConsumable = stolen;
+                    emitNoise(m.pos, 10);
+
+                    {
+                        std::ostringstream ss;
+                        ss << "THE NYMPH STEALS " << displayItemName(stolen) << "!";
+                        pushMsg(ss.str(), MessageKind::Warning, true);
+                    }
+
+                    // Blink away to a random safe floor tile.
+                    if (blinkAway(8, 400, "THE NYMPH VANISHES!", MessageKind::Warning)) return;
+
+                    // Fallback: step away if blink couldn't find a good spot.
+                    if (d0 >= 0) {
+                        Vec2i to = bestStepAway(m, costMap, pathMode);
+                        if (to != m.pos) {
+                            tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
+                            return;
+                        }
+                    }
+
+                    // If we can't escape, we still used our action stealing.
+                    return;
+                }
+            }
+
+
             attackMelee(m, pm);
             return;
         }
@@ -1330,6 +1443,31 @@ void Game::monsterTurn() {
             }
         }
 
+
+        // Nymph: blinks away aggressively once it has stolen an item.
+        if (m.kind == EntityKind::Nymph && seesPlayer) {
+            const bool hasLoot = (m.pocketConsumable.id != 0 && m.pocketConsumable.count > 0);
+            const bool close = (man <= 4);
+            if ((hasLoot && (close || rng.chance(0.35f))) || rng.chance(0.03f)) {
+                Vec2i dst = m.pos;
+                for (int tries = 0; tries < 250; ++tries) {
+                    Vec2i cand = dung.randomFloor(rng, true);
+                    if (entityAt(cand.x, cand.y)) continue;
+                    if (cand == dung.stairsUp || cand == dung.stairsDown) continue;
+                    if (manhattan(cand, p.pos) < 7) continue;
+                    dst = cand;
+                    break;
+                }
+
+                if (dst != m.pos) {
+                    const bool wasVisible = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+                    m.pos = dst;
+                    if (wasVisible) pushMsg("THE NYMPH VANISHES!", MessageKind::Warning, false);
+                    return;
+                }
+            }
+        }
+
         // If the monster reached the last-known spot but can't see the player, it will "search"
         // around for a little while and then eventually give up.
         if (!seesPlayer && m.pos == target) {
@@ -1410,7 +1548,8 @@ void Game::monsterTurn() {
         }
 
         // Fleeing behavior (away from whatever the monster is currently "hunting").
-        const bool fleeLoot = (m.kind == EntityKind::Leprechaun && m.stolenGold > 0 && seesPlayer);
+        const bool fleeLoot = ((m.kind == EntityKind::Leprechaun && m.stolenGold > 0 && seesPlayer) ||
+                              (m.kind == EntityKind::Nymph && m.pocketConsumable.id != 0 && m.pocketConsumable.count > 0 && seesPlayer));
         const bool feared = (m.effects.fearTurns > 0);
         const bool lowHpFlee = (m.willFlee && m.hp <= std::max(1, m.hpMax / 3));
         if ((feared || fleeLoot || lowHpFlee) && d0 >= 0) {

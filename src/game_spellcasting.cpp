@@ -93,10 +93,12 @@ bool Game::castSpell(SpellKind k) {
     mana_ = std::max(0, mana_ - sd.manaCost);
 
     Entity& p = playerMut();
+    const int focus = std::max(0, playerFocus());
+
     switch (k) {
         case SpellKind::MinorHeal: {
             const int before = p.hp;
-            const int heal = clampi(4 + playerFocus() / 2, 2, 18);
+            const int heal = clampi(4 + focus / 2, 2, 18);
             p.hp = std::min(p.hpMax, p.hp + heal);
             const int gained = p.hp - before;
             if (gained > 0) {
@@ -111,7 +113,7 @@ bool Game::castSpell(SpellKind k) {
 
         case SpellKind::DetectTraps: {
             // Reveal traps in a modest radius around the player.
-            const int radius = clampi(6 + playerFocus() / 2, 6, 12);
+            const int radius = clampi(6 + focus / 2, 6, 12);
             int found = 0;
             for (auto& tr : trapsCur) {
                 const int dist = chebyshev(p.pos, tr.pos);
@@ -121,7 +123,7 @@ bool Game::castSpell(SpellKind k) {
                     ++found;
                 }
                 if (dung.inBounds(tr.pos.x, tr.pos.y)) {
-                dung.at(tr.pos.x, tr.pos.y).explored = true;
+                    dung.at(tr.pos.x, tr.pos.y).explored = true;
                 }
             }
             if (found > 0) {
@@ -132,11 +134,34 @@ bool Game::castSpell(SpellKind k) {
             return true;
         }
 
+        case SpellKind::Stoneskin: {
+            const int dur = clampi(12 + focus * 2, 12, 42);
+            p.effects.shieldTurns = std::max(p.effects.shieldTurns, dur);
+            pushMsg("YOUR SKIN HARDENS LIKE STONE.", MessageKind::Success, true);
+            return true;
+        }
+
+        case SpellKind::Haste: {
+            const int add = clampi(6 + focus / 2, 6, 14);
+            p.effects.hasteTurns = std::min(40, p.effects.hasteTurns + add);
+            hastePhase = false; // ensure the next action is the "free" haste action
+            pushMsg("YOU FEEL QUICK!", MessageKind::Success, true);
+            return true;
+        }
+
+        case SpellKind::Invisibility: {
+            const int add = clampi(14 + focus / 2, 14, 30);
+            p.effects.invisTurns = std::min(60, p.effects.invisTurns + add);
+            pushMsg("YOU FADE FROM SIGHT!", MessageKind::Success, true);
+            return true;
+        }
+
         case SpellKind::MagicMissile:
         case SpellKind::Blink:
         case SpellKind::Fireball:
+        case SpellKind::PoisonCloud:
         default:
-            // Safety: if we somehow get here, do nothing.
+            // Safety: if we somehow get here, do nothing (mana already spent).
             pushMsg("NOTHING HAPPENS.", MessageKind::System, true);
             return true;
     }
@@ -201,8 +226,68 @@ bool Game::castSpellAt(SpellKind k, Vec2i target) {
             return true;
         }
 
+        case SpellKind::PoisonCloud: {
+            // Conjure a lingering poison gas field.
+            // The environmental tick will apply poison to anything standing in it.
+            if (!dung.inBounds(target.x, target.y)) {
+                pushMsg("OUT OF BOUNDS.", MessageKind::System, true);
+                return false;
+            }
+            if (!dung.at(target.x, target.y).visible) {
+                pushMsg("TARGET NOT VISIBLE.", MessageKind::System, true);
+                return false;
+            }
+            if (!dung.isWalkable(target.x, target.y)) {
+                pushMsg("THAT TILE CAN'T HOLD A CLOUD.", MessageKind::System, true);
+                return false;
+            }
+
+            mana_ = std::max(0, mana_ - sd.manaCost);
+
+            const size_t expect = static_cast<size_t>(dung.width * dung.height);
+            if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+
+            const int focus = std::max(0, playerFocus());
+            const uint8_t baseStrength = static_cast<uint8_t>(clampi(10 + focus / 2, 8, 18));
+            constexpr int radius = 2;
+
+            std::vector<uint8_t> mask;
+            dung.computeFovMask(target.x, target.y, radius, mask);
+
+            const int minX = std::max(0, target.x - radius);
+            const int maxX = std::min(dung.width - 1, target.x + radius);
+            const int minY = std::max(0, target.y - radius);
+            const int maxY = std::min(dung.height - 1, target.y + radius);
+
+            for (int y = minY; y <= maxY; ++y) {
+                for (int x = minX; x <= maxX; ++x) {
+                    const int dx = std::abs(x - target.x);
+                    const int dy = std::abs(y - target.y);
+                    const int dist = std::max(dx, dy);
+                    if (dist > radius) continue;
+
+                    const size_t i = static_cast<size_t>(y * dung.width + x);
+                    if (i >= mask.size()) continue;
+                    if (mask[i] == 0u) continue;
+                    if (!dung.isWalkable(x, y)) continue;
+
+                    const int s = static_cast<int>(baseStrength) - dist * 2;
+                    if (s <= 0) continue;
+                    const uint8_t ss = static_cast<uint8_t>(s);
+                    if (poisonGas_[i] < ss) poisonGas_[i] = ss;
+                }
+            }
+
+            pushMsg("A CLOUD OF TOXIC VAPOR BLOOMS.", MessageKind::Warning, true);
+            emitNoise(target, 8);
+            return true;
+        }
+
         case SpellKind::MinorHeal:
         case SpellKind::DetectTraps:
+        case SpellKind::Stoneskin:
+        case SpellKind::Haste:
+        case SpellKind::Invisibility:
         default:
             return castSpell(k);
     }

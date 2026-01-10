@@ -498,7 +498,7 @@ VoxelModel buildItemModel(ItemKind kind, uint32_t seed, int frame, const SpriteP
 
     // Rings: a flat torus-like loop.
     if (kind == ItemKind::RingMight || kind == ItemKind::RingAgility || kind == ItemKind::RingFocus ||
-        kind == ItemKind::RingProtection) {
+        kind == ItemKind::RingProtection || kind == ItemKind::RingSearching) {
         m = makeModel(W,H,D);
 
         Color metal = lerp(main, {235, 210, 120, 255}, 0.40f);

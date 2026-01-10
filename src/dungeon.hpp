@@ -22,6 +22,10 @@ enum class TileType : uint8_t {
     Pillar,
     // Append-only: pushable boulder obstacle; blocks movement but does NOT block line-of-sight.
     Boulder,
+    // Append-only: decorative/interactive feature (walkable) rendered as an overlay.
+    Fountain,
+    // Append-only: walkable altar overlay used to visually mark shrine rooms.
+    Altar,
 };
 
 struct Tile {

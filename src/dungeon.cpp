@@ -8528,14 +8528,14 @@ Dungeon::Dungeon(int w, int h) : width(w), height(h) {
 bool Dungeon::isWalkable(int x, int y) const {
     if (!inBounds(x, y)) return false;
     TileType t = at(x, y).type;
-    return (t == TileType::Floor || t == TileType::DoorOpen || t == TileType::StairsDown || t == TileType::StairsUp);
+    return (t == TileType::Floor || t == TileType::Fountain || t == TileType::Altar || t == TileType::DoorOpen || t == TileType::StairsDown || t == TileType::StairsUp);
 }
 
 bool Dungeon::isPassable(int x, int y) const {
     if (!inBounds(x, y)) return false;
     TileType t = at(x, y).type;
     // Note: locked doors are NOT passable for pathing/AI until unlocked.
-    return (t == TileType::Floor || t == TileType::DoorOpen || t == TileType::DoorClosed || t == TileType::StairsDown || t == TileType::StairsUp);
+    return (t == TileType::Floor || t == TileType::Fountain || t == TileType::Altar || t == TileType::DoorOpen || t == TileType::DoorClosed || t == TileType::StairsDown || t == TileType::StairsUp);
 }
 
 bool Dungeon::isOpaque(int x, int y) const {

@@ -66,10 +66,38 @@ SpritePixels projectToIsometricDiamond(const SpritePixels& src, uint32_t seed, i
 // Generates a simple 2.5D isometric wall "block" sprite (square output) that can be
 // drawn using the renderer's sprite anchoring (mapSpriteDst) to add verticality.
 SpritePixels generateIsometricWallBlockTile(uint32_t seed, int frame, int pxSize = 16);
+// 2.5D isometric door "block" sprites (square output) used in isometric view so
+// closed/locked doors read as volumetric pieces of wall geometry rather than flat
+// top-down overlays.
+SpritePixels generateIsometricDoorBlockTile(uint32_t seed, bool locked, int frame, int pxSize = 16);
+// 2.5D isometric open-door doorway frame (square output).
+// Used in isometric view so open doors still feel like vertical wall geometry
+// (a passable archway) instead of a purely flat floor overlay.
+SpritePixels generateIsometricDoorwayBlockTile(uint32_t seed, int frame, int pxSize = 16);
+// 2.5D isometric pillar/boulder sprites (square output) for props that should read as volumetric
+// blockers in isometric view.
+SpritePixels generateIsometricPillarBlockTile(uint32_t seed, int frame, int pxSize = 16);
+SpritePixels generateIsometricBoulderBlockTile(uint32_t seed, int frame, int pxSize = 16);
+// Isometric ground contact shadow / rim overlay (diamond, transparent).
+// Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is an occluder")
+SpritePixels generateIsometricEdgeShadeOverlay(uint32_t seed, uint8_t mask, int frame, int pxSize = 16);
+// Isometric cast shadow overlay (diamond, transparent).
+// Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is a tall shadow caster")
+// In the current lighting model (light from top-left), only N and W are used by the renderer.
+SpritePixels generateIsometricCastShadowOverlay(uint32_t seed, uint8_t mask, int frame, int pxSize = 16);
+// Isometric entity ground shadow overlay (diamond, transparent).
+// Intended to be drawn under sprites in isometric view to anchor them to the ground plane.
+SpritePixels generateIsometricEntityShadowOverlay(uint32_t seed, int frame, int pxSize = 16);
+// Isometric stairs overlay (diamond, transparent).
+// Intended to be drawn on top of the themed floor diamond so stairs read clearly
+// in 2.5D isometric view without relying on a projected top-down sprite.
+SpritePixels generateIsometricStairsOverlay(uint32_t seed, bool up, int frame, int pxSize = 16);
 // NOTE: Pillar/door/stairs tiles are generated as *transparent overlays*.
 // The renderer layers them on top of the underlying themed floor tile.
 SpritePixels generatePillarTile(uint32_t seed, int frame, int pxSize = 16);
 SpritePixels generateBoulderTile(uint32_t seed, int frame, int pxSize = 16);
+SpritePixels generateFountainTile(uint32_t seed, int frame, int pxSize = 16);
+SpritePixels generateAltarTile(uint32_t seed, int frame, int pxSize = 16);
 SpritePixels generateStairsTile(uint32_t seed, bool up, int frame, int pxSize = 16);
 SpritePixels generateDoorTile(uint32_t seed, bool open, int frame, int pxSize = 16);
 SpritePixels generateLockedDoorTile(uint32_t seed, int frame, int pxSize = 16);

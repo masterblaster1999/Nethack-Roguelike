@@ -115,6 +115,12 @@ std::string Game::targetingCombatPreviewText() const {
             return ss.str();
         }
 
+        if (sk == SpellKind::PoisonCloud) {
+            ss << " | GAS R2";
+            ss << " | LINGERS";
+            return ss.str();
+        }
+
         // Damage preview for projectile spells.
         ProjectileKind projKind = ProjectileKind::Spark;
         if (sk == SpellKind::Fireball) projKind = ProjectileKind::Fireball;
@@ -406,139 +412,152 @@ void Game::beginSpellTargeting(SpellKind k) {
 }
 
 
-void Game::endTargeting(bool fire) {
-    if (!targeting) return;
+bool Game::endTargeting(bool fire) {
+    if (!targeting) return false;
 
-    // Spell targeting: cast the selected spell instead of firing ranged weapons.
-    if (targetingMode_ == TargetingMode::Spell) {
-        if (fire) {
-            if (!targetValid) {
-                if (!targetStatusText_.empty()) pushMsg(targetStatusText_ + ".");
-                else pushMsg("NO CLEAR TARGET.");
-            } else {
-                (void)castSpellAt(targetingSpell_, targetPos);
-            }
-        }
-
+    auto closeTargeting = [&]() {
         targeting = false;
         targetLine.clear();
         targetValid = false;
         targetStatusText_.clear();
         targetingMode_ = TargetingMode::Ranged;
-        return;
-    }
+    };
 
-    if (fire) {
+    // Spell targeting: cast the selected spell instead of firing ranged weapons.
+    if (targetingMode_ == TargetingMode::Spell) {
+        if (!fire) {
+            closeTargeting();
+            return false;
+        }
+
         if (!targetValid) {
             if (!targetStatusText_.empty()) pushMsg(targetStatusText_ + ".");
-            else pushMsg("NO CLEAR SHOT.");
-        } else {
-            bool didAttack = false;
+            else pushMsg("NO CLEAR TARGET.");
+            // Keep targeting open; do not consume the turn.
+            return false;
+        }
 
-            // First choice: fire the equipped ranged weapon if it is ready.
-            int wIdx = equippedRangedIndex();
-            if (wIdx >= 0) {
-                // Copy weapon data up front so later inventory edits (ammo consumption) can't invalidate references.
-                const Item wCopy = inv[static_cast<size_t>(wIdx)];
-                const ItemDef& d = itemDef(wCopy.kind);
+        const bool casted = castSpellAt(targetingSpell_, targetPos);
+        if (casted) {
+            closeTargeting();
+            return true;
+        }
 
-                const bool weaponReady =
-                    (d.range > 0) &&
-                    ((d.maxCharges <= 0) || (wCopy.charges > 0)) &&
-                    ((d.ammo == AmmoKind::None) || (ammoCount(inv, d.ammo) > 0));
+        // If the cast failed (target changed, etc.), keep targeting open.
+        return false;
+    }
 
-                if (weaponReady) {
-                    Item projectile;
-                    const Item* projPtr = nullptr;
+    // Ranged targeting.
+    if (!fire) {
+        closeTargeting();
+        return false;
+    }
 
-                    // Consume charge (on the actual inventory item, not the copy).
-                    // Do this before consuming ammo, since ammo consumption can erase stacks and shift indices.
-                    bool sputtered = false;
-                    if (d.maxCharges > 0) {
-                        Item& wMut = inv[static_cast<size_t>(wIdx)];
-                        wMut.charges = std::max(0, wMut.charges - 1);
-                        sputtered = (wMut.charges <= 0);
-                    }
+    if (!targetValid) {
+        if (!targetStatusText_.empty()) pushMsg(targetStatusText_ + ".");
+        else pushMsg("NO CLEAR SHOT.");
+        // Keep targeting open; do not consume the turn.
+        return false;
+    }
 
-                    // Consume ammo and capture a 1-count template so recovered projectiles preserve metadata
-                    // (shopPrice/shopDepth, etc.).
-                    if (d.ammo != AmmoKind::None) {
-                        if (consumeOneAmmo(inv, d.ammo, &projectile)) {
-                            projPtr = &projectile;
-                        }
-                    }
+    bool didAttack = false;
 
-                    // d20 to-hit + dice damage handled in attackRanged().
-                    const int bucBonus = (wCopy.buc < 0 ? -1 : (wCopy.buc > 0 ? 1 : 0));
+    // First choice: fire the equipped ranged weapon if it is ready.
+    int wIdx = equippedRangedIndex();
+    if (wIdx >= 0) {
+        // Copy weapon data up front so later inventory edits (ammo consumption) can't invalidate references.
+        const Item wCopy = inv[static_cast<size_t>(wIdx)];
+        const ItemDef& d = itemDef(wCopy.kind);
 
-                    const bool isWand = isRangedWeapon(wCopy.kind) && d.maxCharges > 0 && d.ammo == AmmoKind::None;
+        const bool weaponReady =
+            (d.range > 0) &&
+            ((d.maxCharges <= 0) || (wCopy.charges > 0)) &&
+            ((d.ammo == AmmoKind::None) || (ammoCount(inv, d.ammo) > 0));
 
-                    // Talents: Agility improves physical ranged weapons; Focus empowers wands.
-                    int dmgBonus = wCopy.enchant + bucBonus;
-                    if (isWand) dmgBonus += playerFocus();
+        if (weaponReady) {
+            Item projectile;
+            const Item* projPtr = nullptr;
 
-                    const int baseSkill = player().baseAtk + (isWand ? playerFocus() : playerAgility());
-                    const int atkBonus = baseSkill + d.rangedAtk + wCopy.enchant + bucBonus;
+            // Consume charge (on the actual inventory item, not the copy).
+            // Do this before consuming ammo, since ammo consumption can erase stacks and shift indices.
+            bool sputtered = false;
+            if (d.maxCharges > 0) {
+                Item& wMut = inv[static_cast<size_t>(wIdx)];
+                wMut.charges = std::max(0, wMut.charges - 1);
+                sputtered = (wMut.charges <= 0);
+            }
 
-                    if (wCopy.kind == ItemKind::WandDigging) {
-                        zapDiggingWand(d.range);
-                    } else {
-                        attackRanged(playerMut(), targetPos, d.range, atkBonus, dmgBonus, d.projectile, true, projPtr, /*wandPowered=*/isWand);
-                    }
-
-                    if (isWand) {
-                        (void)markIdentified(wCopy.kind, false);
-                    }
-
-                    if (d.maxCharges > 0 && sputtered) {
-                        pushMsg("YOUR WAND SPUTTERS OUT.");
-                    }
-
-                    didAttack = true;
+            // Consume ammo and capture a 1-count template so recovered projectiles preserve metadata
+            // (shopPrice/shopDepth, etc.).
+            if (d.ammo != AmmoKind::None) {
+                if (consumeOneAmmo(inv, d.ammo, &projectile)) {
+                    projPtr = &projectile;
                 }
             }
 
+            // d20 to-hit + dice damage handled in attackRanged().
+            const int bucBonus = (wCopy.buc < 0 ? -1 : (wCopy.buc > 0 ? 1 : 0));
 
+            const bool isWand = isRangedWeapon(wCopy.kind) && d.maxCharges > 0 && d.ammo == AmmoKind::None;
 
+            // Talents: Agility improves physical ranged weapons; Focus empowers wands.
+            int dmgBonus = wCopy.enchant + bucBonus;
+            if (isWand) dmgBonus += playerFocus();
 
+            const int baseSkill = player().baseAtk + (isWand ? playerFocus() : playerAgility());
+            const int atkBonus = baseSkill + d.rangedAtk + wCopy.enchant + bucBonus;
 
-            // Fallback: if no ranged weapon is ready, allow throwing ammo by hand.
-            if (!didAttack) {
-                ThrowAmmoSpec spec;
-                if (choosePlayerThrowAmmo(inv, spec)) {
-                    // Consume one projectile from the inventory and keep a 1-count template so recovered ammo
-                    // preserves metadata (shopPrice/shopDepth, etc.).
-                    Item projectile;
-                    const Item* projPtr = nullptr;
-                    if (consumeOneAmmo(inv, spec.ammo, &projectile)) {
-                        projPtr = &projectile;
-                    }
-
-
-                    const int range = throwRangeFor(player(), spec.ammo);
-                    const int atkBonus = player().baseAtk - 1 + playerAgility();
-                    const int dmgBonus = 0;
-                    attackRanged(playerMut(), targetPos, range, atkBonus, dmgBonus, spec.proj, true, projPtr);
-                    didAttack = true;
-                }
+            if (wCopy.kind == ItemKind::WandDigging) {
+                zapDiggingWand(d.range);
+            } else {
+                attackRanged(playerMut(), targetPos, d.range, atkBonus, dmgBonus, d.projectile, true, projPtr, /*wandPowered=*/isWand);
             }
 
-            if (!didAttack) {
-                // Should be rare (inventory changed mid-targeting, etc).
-                std::string reason;
-                if (!playerHasRangedReady(&reason)) pushMsg(reason);
-                else pushMsg("YOU CAN'T FIRE RIGHT NOW.");
+            if (isWand) {
+                (void)markIdentified(wCopy.kind, false);
             }
+
+            if (d.maxCharges > 0 && sputtered) {
+                pushMsg("YOUR WAND SPUTTERS OUT.");
+            }
+
+            didAttack = true;
         }
     }
 
-    targeting = false;
-    targetLine.clear();
-    targetValid = false;
-    targetStatusText_.clear();
-    targetingMode_ = TargetingMode::Ranged;
-}
+    // Fallback: if no ranged weapon is ready, allow throwing ammo by hand.
+    if (!didAttack) {
+        ThrowAmmoSpec spec;
+        if (choosePlayerThrowAmmo(inv, spec)) {
+            // Consume one projectile from the inventory and keep a 1-count template so recovered ammo
+            // preserves metadata (shopPrice/shopDepth, etc.).
+            Item projectile;
+            const Item* projPtr = nullptr;
+            if (consumeOneAmmo(inv, spec.ammo, &projectile)) {
+                projPtr = &projectile;
+            }
 
+            const int range = throwRangeFor(player(), spec.ammo);
+            const int atkBonus = player().baseAtk - 1 + playerAgility();
+            const int dmgBonus = 0;
+            attackRanged(playerMut(), targetPos, range, atkBonus, dmgBonus, spec.proj, true, projPtr);
+            didAttack = true;
+        }
+    }
+
+    if (!didAttack) {
+        // Should be rare (inventory changed mid-targeting, etc).
+        std::string reason;
+        if (!playerHasRangedReady(&reason)) pushMsg(reason);
+        else pushMsg("YOU CAN'T FIRE RIGHT NOW.");
+
+        // Keep targeting open; do not consume the turn.
+        return false;
+    }
+
+    closeTargeting();
+    return true;
+}
 
 
 
@@ -599,6 +618,14 @@ void Game::recomputeTargetLine() {
                     targetStatusText_ = "SPACE OCCUPIED";
                     return;
                 }
+            }
+        }
+
+        if (targetingSpell_ == SpellKind::PoisonCloud) {
+            // Poison clouds only make sense on walkable tiles.
+            if (!dung.isWalkable(targetPos.x, targetPos.y)) {
+                targetStatusText_ = "CAN'T TARGET THERE";
+                return;
             }
         }
     } else {

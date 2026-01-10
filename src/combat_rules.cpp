@@ -36,6 +36,7 @@ DiceExpr meleeDiceForMonster(EntityKind kind) {
     switch (kind) {
         case EntityKind::Goblin:         return {1, 4, 0};
         case EntityKind::Leprechaun:     return {1, 4, 0};
+        case EntityKind::Nymph:          return {1, 6, 0};
         case EntityKind::Orc:            return {1, 6, 0};
         case EntityKind::Bat:            return {1, 3, 0};
         case EntityKind::Slime:          return {1, 5, 0};

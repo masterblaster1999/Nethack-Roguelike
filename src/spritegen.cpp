@@ -691,6 +691,7 @@ float densityFor(EntityKind k) {
         case EntityKind::Player: return 0.55f;
         case EntityKind::Goblin: return 0.58f;
         case EntityKind::Leprechaun: return 0.50f;
+        case EntityKind::Nymph: return 0.52f;
         case EntityKind::Zombie: return 0.60f;
         case EntityKind::Orc: return 0.62f;
         case EntityKind::Bat: return 0.40f;
@@ -718,6 +719,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
         case EntityKind::Player: return add({ 160, 200, 255, 255 }, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
         case EntityKind::Goblin: return add({ 80, 180, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Leprechaun: return add({ 60, 210, 90, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
+        case EntityKind::Nymph: return add({ 220, 160, 210, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Zombie: return add({ 120, 180, 120, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Orc: return add({ 70, 150, 60, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
         case EntityKind::Bat: return add({ 120, 100, 140, 255 }, rng.range(-20,20), rng.range(-20,20), rng.range(-20,20));
@@ -1265,7 +1267,7 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
                          : resampleSpriteToSize(s, pxSize);
         }
         if (kind == ItemKind::RingMight || kind == ItemKind::RingAgility || kind == ItemKind::RingFocus ||
-            kind == ItemKind::RingProtection) {
+            kind == ItemKind::RingProtection || kind == ItemKind::RingSearching) {
             drawRingAppearance(s, seed, rng, app, frame);
             finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
             return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
@@ -1908,6 +1910,32 @@ case ItemKind::Arrow: {
             }
             break;
         }
+        case ItemKind::SpellbookStoneskin: {
+            drawSpellbook({160,160,170,255}, {235,235,245,220});
+            break;
+        }
+        case ItemKind::SpellbookHaste: {
+            drawSpellbook({220,200,80,255}, {255,255,210,220});
+            if (frame % 2 == 1) {
+                setPx(s, 11, 7, {255,255,255,120});
+            }
+            break;
+        }
+        case ItemKind::SpellbookInvisibility: {
+            drawSpellbook({80,80,120,255}, {220,220,255,180});
+            if (frame % 2 == 1) {
+                setPx(s, 6, 7, {255,255,255,70});
+                setPx(s, 10, 11, {255,255,255,60});
+            }
+            break;
+        }
+        case ItemKind::SpellbookPoisonCloud: {
+            drawSpellbook({80,160,90,255}, {220,255,220,200});
+            if (frame % 2 == 1) {
+                setPx(s, 7, 11, {200,255,200,110});
+            }
+            break;
+        }
         case ItemKind::ScrollConfusion: {
             Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
             outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
@@ -2008,7 +2036,8 @@ case ItemKind::Arrow: {
         case ItemKind::RingMight:
         case ItemKind::RingAgility:
         case ItemKind::RingFocus:
-        case ItemKind::RingProtection: {
+        case ItemKind::RingProtection:
+        case ItemKind::RingSearching: {
             // A small gold ring with a colored gem. Rings are tiny, so we use
             // chunky pixels and strong contrast.
             Color gold = add({235, 205, 85, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
@@ -2026,6 +2055,7 @@ case ItemKind::Arrow: {
                 case ItemKind::RingAgility:    gem = {60, 200, 90, 240}; break;
                 case ItemKind::RingFocus:      gem = {90, 120, 255, 240}; break;
                 case ItemKind::RingProtection: gem = {180, 240, 255, 235}; break;
+                case ItemKind::RingSearching:  gem = {210, 180, 255, 240}; break;
                 default: break;
             }
 
@@ -2765,11 +2795,15 @@ SpritePixels projectToIsometricDiamond(const SpritePixels& src, uint32_t seed, i
     const float hh = std::max(1.0f, static_cast<float>(h) * 0.5f);
 
     // Diamond mask + subtle boundary shading (helps the diamond read against adjacent tiles).
+    // In addition to the silhouette darkening, we add a very gentle, *edge-only*
+    // bevel lighting ramp in isometric mode. This nudges the diamond to read as
+    // a 3D plane under a consistent light direction (top-left), without turning
+    // the interior into a distracting gradient.
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            const float dx = std::abs(static_cast<float>(x) - cx) / hw;
-            const float dy = std::abs(static_cast<float>(y) - cy) / hh;
-            const float d = dx + dy;
+            const float sx = (static_cast<float>(x) - cx) / hw; // [-1,1]
+            const float sy = (static_cast<float>(y) - cy) / hh; // [-1,1]
+            const float d = std::abs(sx) + std::abs(sy);
             if (d > 1.0f) continue;
 
             Color c = squashed.at(x, y);
@@ -2778,6 +2812,33 @@ SpritePixels projectToIsometricDiamond(const SpritePixels& src, uint32_t seed, i
             if (d > 0.90f) {
                 const float t = std::clamp((d - 0.90f) / 0.10f, 0.0f, 1.0f);
                 c = mul(c, 1.0f - 0.12f * t);
+            }
+
+            // Isometric bevel shading: highlight the top-left edges, darken the bottom-right edges.
+            // Only applied to terrain tiles (outline=true), so translucent overlays (gas/fire/etc)
+            // keep their intended colors.
+            if (outline && c.a != 0) {
+                const float edgeT = std::clamp((d - 0.55f) / 0.45f, 0.0f, 1.0f);
+                if (edgeT > 0.0f) {
+                    // Light comes from the top-left (screen space).
+                    float dir = (-sx - sy) * 0.5f; // [-1,1] approx
+                    dir = std::clamp(dir, -1.0f, 1.0f);
+
+                    // Stronger near corners, weaker along flat edges.
+                    const float ax = std::abs(sx);
+                    const float ay = std::abs(sy);
+                    const float edgeAniso = std::abs(ax - ay);
+                    const float cornerW = 1.0f - std::clamp(edgeAniso * 1.6f, 0.0f, 1.0f);
+
+                    const float kBevel = 0.11f; // subtle (~±11% at strongest edge pixels)
+                    float shade = 1.0f + kBevel * edgeT * dir;
+
+                    // Tiny corner AO so seam junctions feel grounded.
+                    shade *= (1.0f - 0.06f * edgeT * edgeT * cornerW);
+
+                    shade = std::clamp(shade, 0.70f, 1.30f);
+                    c = mul(c, shade);
+                }
             }
 
             // Tiny animated glint along the top ridge (torch shimmer).
@@ -2829,6 +2890,403 @@ SpritePixels projectToIsometricDiamond(const SpritePixels& src, uint32_t seed, i
 
     return out;
 }
+
+
+SpritePixels generateIsometricEdgeShadeOverlay(uint32_t seed, uint8_t mask, int frame, int pxSize) {
+    // A diamond-shaped, transparent overlay used for isometric contact shadows / chasm rims.
+    // The output is a true 2:1 diamond in pixel space (w=pxSize, h=pxSize/2).
+    (void)frame; // currently static (no animation)
+    pxSize = clampSpriteSize(pxSize);
+
+    const int w = pxSize;
+    const int h = std::max(1, pxSize / 2);
+
+    SpritePixels out = makeSprite(w, h, {0, 0, 0, 0});
+
+    if (mask == 0u) return out;
+
+    const float cx = (static_cast<float>(w) - 1.0f) * 0.5f;
+    const float cy = (static_cast<float>(h) - 1.0f) * 0.5f;
+    const float hw = std::max(1.0f, static_cast<float>(w) * 0.5f);
+    const float hh = std::max(1.0f, static_cast<float>(h) * 0.5f);
+
+    // Thickness of the shaded band near the diamond edge (in normalized diamond space).
+    constexpr float kEdgeBand = 0.22f;
+
+    auto gate = [&](float v) -> float {
+        // Gentle curve so the effect hugs the edge but still reaches corners.
+        v = std::clamp(v, 0.0f, 1.0f);
+        return std::sqrt(v);
+    };
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const float nx = (static_cast<float>(x) - cx) / hw; // [-1,1]
+            const float ny = (static_cast<float>(y) - cy) / hh; // [-1,1]
+            const float d = std::abs(nx) + std::abs(ny);
+            if (d > 1.0f) continue;
+
+            // Edge factor: 0 inside, 1 at the boundary.
+            const float t = std::clamp((d - (1.0f - kEdgeBand)) / kEdgeBand, 0.0f, 1.0f);
+            if (t <= 0.0f) continue;
+
+            // Directional gates (light from top-left, so SE edges read slightly darker).
+            float shade = 0.0f;
+            if (mask & 0x01u) shade += (t * t) * gate(-ny) * 0.85f; // N
+            if (mask & 0x02u) shade += (t * t) * gate(nx)  * 1.00f; // E
+            if (mask & 0x04u) shade += (t * t) * gate(ny)  * 1.05f; // S
+            if (mask & 0x08u) shade += (t * t) * gate(-nx) * 0.85f; // W
+
+            // Tiny ordered-dither modulation so the gradient stays pixel-art friendly.
+            const uint32_t n = hashCombine(seed ^ 0x150A0u, static_cast<uint32_t>(x + y * 131));
+            const float noise = ((n & 0xFFu) / 255.0f - 0.5f) * 0.06f;
+
+            shade = std::clamp(shade * (1.0f + noise), 0.0f, 1.0f);
+
+            // Quantize to 4 alpha levels with ordered dithering.
+            float levels = shade * 3.0f; // 0..3
+            int li = static_cast<int>(std::floor(levels));
+            float frac = levels - static_cast<float>(li);
+            if (li < 3 && frac > bayer4Threshold(x, y)) li++;
+
+            const uint8_t a = static_cast<uint8_t>(std::clamp((li * 255) / 3, 0, 255));
+
+            // White RGB so renderer can tint (black shadow, blue rim, etc.).
+            out.at(x, y) = {255, 255, 255, a};
+        }
+    }
+
+    return out;
+}
+
+SpritePixels generateIsometricCastShadowOverlay(uint32_t seed, uint8_t mask, int frame, int pxSize) {
+    // A soft, directional cast shadow used on the *ground plane* in isometric view.
+    // This is drawn on floor-like tiles adjacent to tall occluders (walls/closed doors/pillars/etc)
+    // to reinforce verticality without requiring any new hand-authored art.
+    //
+    // The renderer uses only N/W bits of the mask (light from top-left), but we keep
+    // the full 4-neighbor mask encoding for compatibility with other autotile overlays.
+    (void)frame; // currently static (no animation)
+    pxSize = clampSpriteSize(pxSize);
+
+    const int w = pxSize;
+    const int h = std::max(1, pxSize / 2);
+
+    SpritePixels out = makeSprite(w, h, {0, 0, 0, 0});
+    if (mask == 0u) return out;
+
+    const float cx = (static_cast<float>(w) - 1.0f) * 0.5f;
+    const float cy = (static_cast<float>(h) - 1.0f) * 0.5f;
+    const float hw = std::max(1.0f, static_cast<float>(w) * 0.5f);
+    const float hh = std::max(1.0f, static_cast<float>(h) * 0.5f);
+
+    // Shadow reach in normalized diamond units:
+    //  - 1.0 roughly reaches the diamond center (dist~=1 at center from the N/W edge formulas)
+    //  - >1 makes the shadow spill a bit past the center (useful for "tall walls").
+    constexpr float kReach = 1.25f;
+    constexpr float kMaxAlpha = 220.0f;
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const float nx = (static_cast<float>(x) - cx) / hw; // [-1,1]
+            const float ny = (static_cast<float>(y) - cy) / hh; // [-1,1]
+            const float d = std::abs(nx) + std::abs(ny);
+            if (d > 1.0f) continue;
+
+            float shade = 0.0f;
+
+            // Shadow from a tall occluder immediately north of this tile.
+            // Distance from the top diamond edge for this x: ny_edge = -(1 - |nx|).
+            if (mask & 0x01u) {
+                const float dist = ny + 1.0f - std::abs(nx); // 0 at boundary, ~1 at center
+                float t = 1.0f - (dist / kReach);
+                t = std::clamp(t, 0.0f, 1.0f);
+                shade += t * 0.75f;
+            }
+
+            // Shadow from a tall occluder immediately west of this tile.
+            // Distance from the left diamond edge for this y: nx_edge = -(1 - |ny|).
+            if (mask & 0x08u) {
+                const float dist = nx + 1.0f - std::abs(ny); // 0 at boundary, ~1 at center
+                float t = 1.0f - (dist / kReach);
+                t = std::clamp(t, 0.0f, 1.0f);
+                shade += t * 0.75f;
+            }
+
+            // Ignore E/S bits (present for compatibility with the 4-neighbor mask encoding).
+            shade = std::clamp(shade, 0.0f, 1.0f);
+
+            // Soft falloff so the shadow reads like lighting rather than a hard band.
+            shade *= shade;
+
+            // Preserve a crisp tile silhouette: slightly reduce shadow right at the diamond boundary.
+            shade *= (0.85f + 0.15f * (1.0f - std::clamp((d - 0.65f) / 0.35f, 0.0f, 1.0f)));
+
+            // Tiny ordered-dither modulation so the gradient stays pixel-art friendly.
+            const uint32_t n = hashCombine(seed ^ 0xCA57u, static_cast<uint32_t>(x + y * 131));
+            const float noise = ((n & 0xFFu) / 255.0f - 0.5f) * 0.10f;
+            shade = std::clamp(shade * (1.0f + noise), 0.0f, 1.0f);
+
+            // Quantize to 5 alpha levels with ordered dithering.
+            float levels = shade * 4.0f; // 0..4
+            int li = static_cast<int>(std::floor(levels));
+            float frac = levels - static_cast<float>(li);
+            if (li < 4 && frac > bayer4Threshold(x, y)) li++;
+
+            if (li <= 0) continue;
+
+            const uint8_t a = static_cast<uint8_t>(std::clamp((li * static_cast<int>(kMaxAlpha)) / 4, 0, 255));
+
+            // White RGB so the renderer can tint it (typically black).
+            out.at(x, y) = {255, 255, 255, a};
+        }
+    }
+
+    return out;
+}
+
+
+SpritePixels generateIsometricEntityShadowOverlay(uint32_t seed, int frame, int pxSize) {
+    // A small, soft diamond shadow used to anchor sprites to the ground plane in
+    // isometric view. This improves depth/readability without requiring per-entity
+    // authored shadows or expensive lighting.
+    (void)frame; // static
+    pxSize = clampSpriteSize(pxSize);
+
+    const int w = pxSize;
+    const int h = std::max(1, pxSize / 2);
+
+    SpritePixels out = makeSprite(w, h, {0, 0, 0, 0});
+
+    // Shadow shape parameters.
+    // We keep it smaller than the full tile diamond so it reads like a footprint
+    // shadow rather than 'darkening the tile'.
+    constexpr float kInner = 0.76f;
+    constexpr float kMaxAlpha = 230.0f;
+
+    const float hw = std::max(1.0f, static_cast<float>(w) * 0.5f);
+    const float hh = std::max(1.0f, static_cast<float>(h) * 0.5f);
+
+    // Bias the shadow slightly toward the bottom-right (light from top-left).
+    const float cx = (static_cast<float>(w) - 1.0f) * 0.5f + static_cast<float>(w) * 0.06f;
+    const float cy = (static_cast<float>(h) - 1.0f) * 0.5f + static_cast<float>(h) * 0.14f;
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const float nx = (static_cast<float>(x) - cx) / hw;
+            const float ny = (static_cast<float>(y) - cy) / hh;
+
+            float d = (std::abs(nx) + std::abs(ny)) / kInner;
+            if (d > 1.0f) continue;
+
+            // t=1 at the center, 0 at the boundary.
+            float t = std::clamp(1.0f - d, 0.0f, 1.0f);
+
+            // Sharpen the center but keep a soft falloff.
+            float a = t * t;
+
+            // Tiny pixel-noise modulation so the falloff doesn't look like a smooth ramp
+            // when upscaled.
+            const uint32_t n = hashCombine(seed ^ 0x5AD0F00u, static_cast<uint32_t>(x + y * 131));
+            const float noise = ((hash32(n) & 0xFFu) / 255.0f - 0.5f) * 0.10f;
+            a = std::clamp(a * (1.0f + noise), 0.0f, 1.0f);
+
+            // Quantize to a few alpha levels (ordered dithering) to stay pixel-art friendly.
+            float levels = a * 4.0f; // 0..4
+            int li = static_cast<int>(std::floor(levels));
+            float frac = levels - static_cast<float>(li);
+            if (li < 4 && frac > bayer4Threshold(x, y)) li++;
+
+            if (li <= 0) continue;
+            const uint8_t alpha = static_cast<uint8_t>(std::clamp((li * static_cast<int>(kMaxAlpha)) / 4, 0, 255));
+
+            // White RGB so the renderer can tint it (usually to black).
+            out.at(x, y) = {255, 255, 255, alpha};
+        }
+    }
+
+    return out;
+}
+
+
+SpritePixels generateIsometricStairsOverlay(uint32_t seed, bool up, int frame, int pxSize) {
+    // A purpose-built isometric (diamond) stairwell overlay.
+    //
+    // In earlier versions we simply projected the top-down stair overlay into a
+    // diamond. That works, but it tends to read a bit "flat" in 2.5D view.
+    // This generator draws directly in diamond space and uses rim + interior
+    // shading (with ordered dithering) so stairs feel more like a feature in the
+    // ground plane.
+    pxSize = clampSpriteSize(pxSize);
+
+    const int w = pxSize;
+    const int h = std::max(1, pxSize / 2);
+    SpritePixels out = makeSprite(w, h, {0, 0, 0, 0});
+
+    // Per-type seed salt so up/down stairs differ even if called with the same seed.
+    const uint32_t salt = up ? 0x515A1u : 0x515A2u;
+    RNG rng(hash32(seed ^ salt));
+
+    // Stone palette for the rim/steps.
+    Color stone = {185, 175, 155, 255};
+    stone = add(stone, rng.range(-12, 12), rng.range(-12, 12), rng.range(-12, 12));
+
+    // Dark interior for "stairs down".
+    Color holeBase = {28, 28, 36, 255};
+    holeBase = add(holeBase, rng.range(-4, 4), rng.range(-4, 4), rng.range(-4, 4));
+
+    const float cx = (static_cast<float>(w) - 1.0f) * 0.5f;
+    const float cy = (static_cast<float>(h) - 1.0f) * 0.5f;
+    const float hw = std::max(1.0f, static_cast<float>(w) * 0.5f);
+    const float hh = std::max(1.0f, static_cast<float>(h) * 0.5f);
+
+    // Geometry in normalized diamond distance (d=|nx|+|ny|).
+    // We intentionally leave a small outer margin so the underlying themed floor
+    // still frames the stairwell.
+    const float outerD = up ? 0.90f : 0.92f;
+    const float innerD = up ? 0.82f : 0.70f; // inner area (steps / hole)
+    const float shadowBand = up ? 0.06f : 0.00f;
+
+    // Helper: write a pixel only if it's inside the tile diamond.
+    auto inDiamond = [&](int px, int py) -> bool {
+        const float nx = (static_cast<float>(px) - cx) / hw;
+        const float ny = (static_cast<float>(py) - cy) / hh;
+        return (std::abs(nx) + std::abs(ny)) <= 1.0f;
+    };
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const float nx = (static_cast<float>(x) - cx) / hw; // [-1,1]
+            const float ny = (static_cast<float>(y) - cy) / hh; // [-1,1]
+            const float d = std::abs(nx) + std::abs(ny);
+            if (d > 1.0f) continue;
+
+            // Global light direction (top-left => brighter where (-nx - ny) is positive).
+            float dir = (-nx - ny) * 0.5f;
+            dir = std::clamp(dir, -1.0f, 1.0f);
+
+            // Tiny stable noise so surfaces don't look like a flat fill when upscaled.
+            const uint32_t n = hashCombine(seed ^ 0x57A1F5u ^ salt, static_cast<uint32_t>(x + y * 131 + frame * 17));
+            const float noise = ((n & 0xFFu) / 255.0f - 0.5f) * 0.08f;
+
+            if (up) {
+                if (d > (outerD + shadowBand)) continue;
+
+                // Soft shadow ring behind the raised steps (adds contact / depth).
+                if (d > outerD) {
+                    const float t = std::clamp((d - outerD) / std::max(0.001f, shadowBand), 0.0f, 1.0f);
+                    const uint8_t a = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(90.0f * (1.0f - t))), 0, 120));
+                    out.at(x, y) = {0, 0, 0, a};
+                    continue;
+                }
+
+                // Step surface.
+                if (d <= outerD) {
+                    float shade = 0.64f + 0.18f * dir + noise;
+
+                    // Step stripes (descending toward bottom-right).
+                    const float sv = (nx + ny + 1.0f) * 0.5f; // 0..1
+                    const float steps = sv * 6.0f;
+                    const float frac = steps - std::floor(steps);
+                    if (frac < 0.09f) shade *= 0.78f;          // edge line
+                    else if (frac > 0.92f) shade *= 0.90f;     // soft second line
+
+                    // Slight extra highlight near the top-left rim.
+                    if (d > (outerD - 0.10f) && dir > 0.15f) {
+                        const float t = std::clamp((d - (outerD - 0.10f)) / 0.10f, 0.0f, 1.0f);
+                        shade += 0.06f * t;
+                    }
+
+                    shade = std::clamp(shade, 0.0f, 1.0f);
+                    Color c = rampShadeTile(stone, shade, x, y);
+                    c.a = 255;
+                    out.at(x, y) = c;
+                }
+            } else {
+                // Stairs down: a rim + dark interior hole.
+                if (d > outerD) continue;
+
+                if (d > innerD) {
+                    // Rim band.
+                    const float t = std::clamp((d - innerD) / std::max(0.001f, (outerD - innerD)), 0.0f, 1.0f);
+                    float shade = 0.58f + 0.22f * dir + noise * 0.6f;
+
+                    // Make the inner edge a touch darker so the lip reads as a drop.
+                    shade *= (0.92f - 0.10f * (1.0f - t));
+
+                    shade = std::clamp(shade, 0.0f, 1.0f);
+                    Color c = rampShadeTile(stone, shade, x, y);
+                    c.a = 255;
+
+                    // Darken a few pixels right at the inner edge (dithered) to increase separation.
+                    if (t < 0.18f && (bayer4Threshold(x, y) > 0.25f)) {
+                        c = mul(c, 0.78f);
+                        c.a = 255;
+                    }
+                    out.at(x, y) = c;
+                } else {
+                    // Interior hole.
+                    const float t = std::clamp(d / std::max(0.001f, innerD), 0.0f, 1.0f);
+                    float shade = 0.30f + 0.10f * dir + 0.22f * t + noise * 0.5f;
+                    shade = std::clamp(shade, 0.0f, 1.0f);
+                    Color c = rampShadeTile(holeBase, shade, x, y);
+                    c.a = 255;
+
+                    // Subtle "step" highlights inside the hole (fades with depth).
+                    const float sv = (nx + ny + 1.0f) * 0.5f; // 0..1
+                    const float steps = sv * 6.0f;
+                    const float frac = steps - std::floor(steps);
+                    if (frac < 0.07f) {
+                        const float lift = (1.0f - sv) * 0.9f;
+                        c = add(c, static_cast<int>(std::lround(12.0f * lift)), static_cast<int>(std::lround(12.0f * lift)), static_cast<int>(std::lround(14.0f * lift)));
+                        c.a = 255;
+                    }
+
+                    out.at(x, y) = c;
+                }
+            }
+        }
+    }
+
+    // Arrow hint (blink) so stairs are easy to spot even on noisy floors.
+    // Keep it small and centered so it doesn't fight the room decals.
+    const uint8_t arrowA = static_cast<uint8_t>((frame % 2 == 0) ? 200 : 230);
+    const Color arrow = up ? Color{120, 255, 120, arrowA} : Color{255, 120, 120, arrowA};
+
+    const int ax = w / 2;
+    const int ay = h / 2;
+    const int ah = std::max(3, h / 3);
+    const int aw = std::max(2, w / 12);
+
+    auto put = [&](int px, int py) {
+        if (px < 0 || py < 0 || px >= w || py >= h) return;
+        if (!inDiamond(px, py)) return;
+
+        // Only stamp the arrow where the overlay already has pixels.
+        if (out.at(px, py).a == 0) return;
+
+        out.at(px, py) = arrow;
+    };
+
+    if (up) {
+        // Up arrow: stem + head.
+        for (int i = 0; i < ah; ++i) put(ax, ay + (ah / 2) - i);
+        for (int i = 0; i < aw + 1; ++i) {
+            put(ax - i, ay - (ah / 2) + i);
+            put(ax + i, ay - (ah / 2) + i);
+        }
+    } else {
+        // Down arrow.
+        for (int i = 0; i < ah; ++i) put(ax, ay - (ah / 2) + i);
+        for (int i = 0; i < aw + 1; ++i) {
+            put(ax - i, ay + (ah / 2) - i);
+            put(ax + i, ay + (ah / 2) - i);
+        }
+    }
+
+    return out;
+}
+
 
 SpritePixels generateIsometricWallBlockTile(uint32_t seed, int frame, int pxSize) {
     pxSize = clampSpriteSize(pxSize);
@@ -2959,6 +3417,655 @@ SpritePixels generateIsometricWallBlockTile(uint32_t seed, int frame, int pxSize
 
     return resampleSpriteToSize(s, pxSize);
 }
+
+SpritePixels generateIsometricDoorBlockTile(uint32_t seed, bool locked, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+
+    // Build in the 16x16 design grid, then upscale.
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    RNG rng(hash32(seed));
+
+    // Match the wall block palette so doors read as "wall geometry" in isometric mode.
+    Color stoneBase = { 70, 78, 92, 255 };
+    stoneBase = add(stoneBase, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
+    Color top = add(mul(stoneBase, 1.05f), 10, 10, 14);
+    Color leftStone = mul(stoneBase, 0.78f);
+    Color rightStone = mul(stoneBase, 0.88f);
+    Color outlineC = mul(stoneBase, 0.45f);
+    outlineC.a = 255;
+
+    // Door wood palette.
+    Color wood = add({140, 95, 55, 255}, rng.range(-12, 12), rng.range(-12, 12), rng.range(-12, 12));
+    Color woodDark = mul(wood, 0.66f);
+    Color woodHi = add(mul(wood, 1.06f), 10, 10, 12);
+
+    const int W = 16;
+    const int H = 16;
+    const int topH = 8;
+
+    auto lerpP = [&](Vec2i a, Vec2i b, float t) -> Vec2i {
+        t = std::clamp(t, 0.0f, 1.0f);
+        const float xf = static_cast<float>(a.x) + (static_cast<float>(b.x) - static_cast<float>(a.x)) * t;
+        const float yf = static_cast<float>(a.y) + (static_cast<float>(b.y) - static_cast<float>(a.y)) * t;
+        return { static_cast<int>(std::lround(xf)), static_cast<int>(std::lround(yf)) };
+    };
+
+    // Helper: scanline-fill a convex quad (same approach as the wall block generator).
+    auto fillQuad = [&](Vec2i p0, Vec2i p1, Vec2i p2, Vec2i p3, const Color& c0, float shadeMul, uint32_t salt) {
+        const Vec2i pts[4] = { p0, p1, p2, p3 };
+        int minY = pts[0].y, maxY = pts[0].y;
+        for (int i = 1; i < 4; ++i) {
+            minY = std::min(minY, pts[i].y);
+            maxY = std::max(maxY, pts[i].y);
+        }
+        minY = std::clamp(minY, 0, H - 1);
+        maxY = std::clamp(maxY, 0, H - 1);
+
+        for (int y = minY; y <= maxY; ++y) {
+            float xInts[8];
+            int nInts = 0;
+            for (int e = 0; e < 4; ++e) {
+                const Vec2i a = pts[e];
+                const Vec2i b = pts[(e + 1) & 3];
+                if (a.y == b.y) continue;
+                const int y0 = a.y;
+                const int y1 = b.y;
+                const bool inRange = (y >= std::min(y0, y1)) && (y < std::max(y0, y1));
+                if (!inRange) continue;
+                const float tt = (static_cast<float>(y) - static_cast<float>(y0)) / (static_cast<float>(y1 - y0));
+                xInts[nInts++] = static_cast<float>(a.x) + tt * static_cast<float>(b.x - a.x);
+            }
+            if (nInts < 2) continue;
+            float xMin = xInts[0], xMax = xInts[0];
+            for (int i = 1; i < nInts; ++i) {
+                xMin = std::min(xMin, xInts[i]);
+                xMax = std::max(xMax, xInts[i]);
+            }
+            int xi0 = std::clamp(static_cast<int>(std::floor(xMin)), 0, W - 1);
+            int xi1 = std::clamp(static_cast<int>(std::ceil(xMax)), 0, W - 1);
+            for (int x = xi0; x <= xi1; ++x) {
+                const uint32_t n = hashCombine(seed ^ salt, static_cast<uint32_t>(x + y * 37 + frame * 101));
+                const float noise = (n & 0xFFu) / 255.0f;
+                float f = (0.92f + noise * 0.16f) * shadeMul;
+                f *= (0.94f + 0.06f * ((15.0f - static_cast<float>(y)) / 15.0f));
+                Color cc = rampShadeTile(c0, f, x, y);
+                cc.a = 255;
+                s.at(x, y) = cc;
+            }
+        }
+    };
+
+    // Stone side faces.
+    fillQuad({0, 4}, {8, 7}, {8, 15}, {0, 12}, leftStone, 0.95f, 0xB10Cu);
+    fillQuad({15, 4}, {15, 12}, {8, 15}, {8, 7}, rightStone, 1.00f, 0xB10Du);
+
+    // Door panels inset into the side faces.
+    // (We draw on both faces so orientation doesn't matter.)
+    const Vec2i lp0{1, 5}, lp1{7, 8}, lp2{7, 14}, lp3{1, 11};
+    const Vec2i rp0{9, 8}, rp1{14, 5}, rp2{14, 11}, rp3{9, 14};
+
+    fillQuad(lp0, lp1, lp2, lp3, wood, 1.02f, 0xD00D0u);
+    fillQuad(rp0, rp1, rp2, rp3, wood, 1.00f, 0xD00D1u);
+
+    // Panel borders.
+    line(s, lp0.x, lp0.y, lp1.x, lp1.y, woodDark);
+    line(s, lp1.x, lp1.y, lp2.x, lp2.y, woodDark);
+    line(s, lp2.x, lp2.y, lp3.x, lp3.y, woodDark);
+    line(s, lp3.x, lp3.y, lp0.x, lp0.y, woodDark);
+
+    line(s, rp0.x, rp0.y, rp1.x, rp1.y, woodDark);
+    line(s, rp1.x, rp1.y, rp2.x, rp2.y, woodDark);
+    line(s, rp2.x, rp2.y, rp3.x, rp3.y, woodDark);
+    line(s, rp3.x, rp3.y, rp0.x, rp0.y, woodDark);
+
+    // Plank seams (a couple of slanted dividers) so the door doesn't read as a flat blob.
+    for (int k = 1; k <= 2; ++k) {
+        const float t = static_cast<float>(k) / 3.0f;
+        Vec2i a0 = lerpP(lp0, lp3, t);
+        Vec2i a1 = lerpP(lp1, lp2, t);
+        line(s, a0.x, a0.y, a1.x, a1.y, mul(wood, 0.82f));
+
+        Vec2i b0 = lerpP(rp0, rp3, t);
+        Vec2i b1 = lerpP(rp1, rp2, t);
+        line(s, b0.x, b0.y, b1.x, b1.y, mul(wood, 0.82f));
+    }
+
+    // Knobs (gold-ish) and a tiny animated glint.
+    const Color knob{200, 190, 80, 255};
+    circle(s, 6, 10, 1, knob);
+    circle(s, 11, 10, 1, knob);
+    if (frame % 2 == 1) {
+        setPx(s, 7, 9, {255,255,255,110});
+        setPx(s, 12, 9, {255,255,255,95});
+    }
+
+    // Locked variant: add a tiny padlock on each face for readability.
+    if (locked) {
+        const Color lockBody { 210, 185, 70, 255 };
+        const Color lockOutline { 120, 90, 25, 255 };
+        const Color keyhole { 30, 22, 10, 255 };
+
+        auto tinyLock = [&](int cx, int cy) {
+            // Shackle
+            setPx(s, cx - 1, cy - 2, lockOutline);
+            setPx(s, cx,     cy - 2, lockOutline);
+            setPx(s, cx + 1, cy - 2, lockOutline);
+            setPx(s, cx - 1, cy - 1, lockOutline);
+            setPx(s, cx + 1, cy - 1, lockOutline);
+
+            // Body
+            rect(s, cx - 1, cy, 3, 2, lockBody);
+            outlineRect(s, cx - 1, cy, 3, 2, lockOutline);
+            setPx(s, cx, cy + 1, keyhole);
+        };
+
+        tinyLock(5, 11);
+        tinyLock(12, 11);
+    }
+
+    // Top face (diamond) drawn last.
+    const float cx = (static_cast<float>(W) - 1.0f) * 0.5f;
+    const float cy = (static_cast<float>(topH) - 1.0f) * 0.5f;
+    const float hw = static_cast<float>(W) * 0.5f;
+    const float hh = static_cast<float>(topH) * 0.5f;
+    for (int y = 0; y < topH; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const float dx = std::abs(static_cast<float>(x) - cx) / hw;
+            const float dy = std::abs(static_cast<float>(y) - cy) / hh;
+            if ((dx + dy) > 1.0f) continue;
+
+            const uint32_t n = hashCombine(seed ^ 0x70F1u, static_cast<uint32_t>(x + y * 53 + frame * 97));
+            const float noise = (n & 0xFFu) / 255.0f;
+
+            // Subtle top-left highlight so the block reads as 3D.
+            const float lx = (15.0f - static_cast<float>(x)) / 15.0f;
+            const float ly = (15.0f - static_cast<float>(y)) / 15.0f;
+
+            float f = 0.88f + noise * 0.18f;
+            f *= (0.92f + 0.08f * (0.60f * lx + 0.40f * ly));
+
+            Color cc = rampShadeTile(top, f, x, y);
+            cc.a = 255;
+            s.at(x, y) = cc;
+        }
+    }
+
+    // Outline cube edges.
+    line(s, 8, 0, 0, 4, outlineC);   // top-left
+    line(s, 8, 0, 15, 4, outlineC);  // top-right
+    line(s, 0, 4, 8, 7, outlineC);   // left->bottom (top)
+    line(s, 15, 4, 8, 7, outlineC);  // right->bottom (top)
+    line(s, 0, 4, 0, 12, outlineC);  // left vertical
+    line(s, 15, 4, 15, 12, outlineC);// right vertical
+    line(s, 8, 7, 8, 15, outlineC);  // middle vertical
+    line(s, 0, 12, 8, 15, outlineC); // bottom-left
+    line(s, 15, 12, 8, 15, outlineC);// bottom-right
+
+    // Small highlight on the top ridge to keep doors from looking too flat.
+    if (frame % 2 == 1) {
+        setPx(s, 8, 1, add(s.at(8, 1), 18, 18, 22));
+        setPx(s, 9, 2, add(s.at(9, 2), 10, 10, 12));
+    }
+
+    return resampleSpriteToSize(s, pxSize);
+}
+
+
+SpritePixels generateIsometricDoorwayBlockTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+
+    // Build in the 16x16 design grid, then upscale.
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    RNG rng(hash32(seed));
+
+    // Reuse the wall/door stone palette so doorway frames feel like part of the wall geometry.
+    Color stoneBase = { 70, 78, 92, 255 };
+    stoneBase = add(stoneBase, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
+    Color top = add(mul(stoneBase, 1.05f), 10, 10, 14);
+    Color leftStone = mul(stoneBase, 0.78f);
+    Color rightStone = mul(stoneBase, 0.88f);
+    Color outlineC = mul(stoneBase, 0.45f);
+    outlineC.a = 255;
+
+    const int W = 16;
+    const int H = 16;
+    const int topH = 8;
+
+    // Helper: scanline-fill a convex quad (same approach as the wall/door block generator).
+    auto fillQuad = [&](Vec2i p0, Vec2i p1, Vec2i p2, Vec2i p3, const Color& c0, float shadeMul, uint32_t salt) {
+        const Vec2i pts[4] = { p0, p1, p2, p3 };
+        int minY = pts[0].y, maxY = pts[0].y;
+        for (int i = 1; i < 4; ++i) {
+            minY = std::min(minY, pts[i].y);
+            maxY = std::max(maxY, pts[i].y);
+        }
+        minY = std::clamp(minY, 0, H - 1);
+        maxY = std::clamp(maxY, 0, H - 1);
+
+        for (int y = minY; y <= maxY; ++y) {
+            float xInts[8];
+            int nInts = 0;
+            for (int e = 0; e < 4; ++e) {
+                const Vec2i a = pts[e];
+                const Vec2i b = pts[(e + 1) & 3];
+                if (a.y == b.y) continue;
+                const int y0 = a.y;
+                const int y1 = b.y;
+                const bool inRange = (y >= std::min(y0, y1)) && (y < std::max(y0, y1));
+                if (!inRange) continue;
+                const float tt = (static_cast<float>(y) - static_cast<float>(y0)) / (static_cast<float>(y1 - y0));
+                xInts[nInts++] = static_cast<float>(a.x) + tt * static_cast<float>(b.x - a.x);
+            }
+            if (nInts < 2) continue;
+            float xMin = xInts[0], xMax = xInts[0];
+            for (int i = 1; i < nInts; ++i) {
+                xMin = std::min(xMin, xInts[i]);
+                xMax = std::max(xMax, xInts[i]);
+            }
+            int xi0 = std::clamp(static_cast<int>(std::floor(xMin)), 0, W - 1);
+            int xi1 = std::clamp(static_cast<int>(std::ceil(xMax)), 0, W - 1);
+            for (int x = xi0; x <= xi1; ++x) {
+                const uint32_t n = hashCombine(seed ^ salt, static_cast<uint32_t>(x + y * 37 + frame * 101));
+                const float noise = (n & 0xFFu) / 255.0f;
+                float f = (0.92f + noise * 0.16f) * shadeMul;
+                f *= (0.94f + 0.06f * ((15.0f - static_cast<float>(y)) / 15.0f));
+                Color cc = rampShadeTile(c0, f, x, y);
+                cc.a = 255;
+                s.at(x, y) = cc;
+            }
+        }
+    };
+
+    // Helper: fill a quad with a semi-transparent interior shade (no noise) so the floor
+    // beneath the doorway reads slightly darker (suggesting thickness/depth).
+    auto fillQuadInterior = [&](Vec2i p0, Vec2i p1, Vec2i p2, Vec2i p3, uint8_t aTop, uint8_t aBot) {
+        const Vec2i pts[4] = { p0, p1, p2, p3 };
+        int minY = pts[0].y, maxY = pts[0].y;
+        for (int i = 1; i < 4; ++i) {
+            minY = std::min(minY, pts[i].y);
+            maxY = std::max(maxY, pts[i].y);
+        }
+        minY = std::clamp(minY, 0, H - 1);
+        maxY = std::clamp(maxY, 0, H - 1);
+
+        const int denom = std::max(1, maxY - minY);
+
+        for (int y = minY; y <= maxY; ++y) {
+            float xInts[8];
+            int nInts = 0;
+            for (int e = 0; e < 4; ++e) {
+                const Vec2i a = pts[e];
+                const Vec2i b = pts[(e + 1) & 3];
+                if (a.y == b.y) continue;
+                const int y0 = a.y;
+                const int y1 = b.y;
+                const bool inRange = (y >= std::min(y0, y1)) && (y < std::max(y0, y1));
+                if (!inRange) continue;
+                const float tt = (static_cast<float>(y) - static_cast<float>(y0)) / (static_cast<float>(y1 - y0));
+                xInts[nInts++] = static_cast<float>(a.x) + tt * static_cast<float>(b.x - a.x);
+            }
+            if (nInts < 2) continue;
+            float xMin = xInts[0], xMax = xInts[0];
+            for (int i = 1; i < nInts; ++i) {
+                xMin = std::min(xMin, xInts[i]);
+                xMax = std::max(xMax, xInts[i]);
+            }
+            int xi0 = std::clamp(static_cast<int>(std::floor(xMin)), 0, W - 1);
+            int xi1 = std::clamp(static_cast<int>(std::ceil(xMax)), 0, W - 1);
+
+            const int a = static_cast<int>(aTop) + (static_cast<int>(aBot) - static_cast<int>(aTop)) * (y - minY) / denom;
+            Color cc{0, 0, 0, static_cast<uint8_t>(std::clamp(a, 0, 255))};
+
+            for (int x = xi0; x <= xi1; ++x) {
+                s.at(x, y) = cc;
+            }
+        }
+    };
+
+    // Stone side faces.
+    fillQuad({0, 4}, {8, 7}, {8, 15}, {0, 12}, leftStone, 0.95f, 0xB10Cu);
+    fillQuad({15, 4}, {15, 12}, {8, 15}, {8, 7}, rightStone, 1.00f, 0xB10Du);
+
+    // Carve a passable doorway by shading the interior lightly (so underlying floor shows through).
+    // We intentionally keep this symmetric because the roguelike door tile does not encode orientation.
+    const Vec2i lp0{2, 6}, lp1{7, 9}, lp2{7, 14}, lp3{2, 11};
+    const Vec2i rp0{9, 9}, rp1{13, 6}, rp2{13, 11}, rp3{9, 14};
+
+    fillQuadInterior(lp0, lp1, lp2, lp3, /*aTop=*/28, /*aBot=*/85);
+    fillQuadInterior(rp0, rp1, rp2, rp3, /*aTop=*/28, /*aBot=*/85);
+
+    // Inner opening outlines (darker) + tiny highlight to sell the thickness.
+    const Color innerEdge{0, 0, 0, 190};
+    const Color innerHi{255, 255, 255, 55};
+
+    line(s, lp0.x, lp0.y, lp1.x, lp1.y, innerEdge);
+    line(s, lp1.x, lp1.y, lp2.x, lp2.y, innerEdge);
+    line(s, lp2.x, lp2.y, lp3.x, lp3.y, innerEdge);
+    line(s, lp3.x, lp3.y, lp0.x, lp0.y, innerEdge);
+
+    line(s, rp0.x, rp0.y, rp1.x, rp1.y, innerEdge);
+    line(s, rp1.x, rp1.y, rp2.x, rp2.y, innerEdge);
+    line(s, rp2.x, rp2.y, rp3.x, rp3.y, innerEdge);
+    line(s, rp3.x, rp3.y, rp0.x, rp0.y, innerEdge);
+
+    // A couple of highlight pixels near the top of the opening.
+    if (frame % 2 == 1) {
+        setPx(s, 7, 9, innerHi);
+        setPx(s, 9, 9, innerHi);
+    }
+
+    // Top face (diamond) drawn last.
+    const float cx = (static_cast<float>(W) - 1.0f) * 0.5f;
+    const float cy = (static_cast<float>(topH) - 1.0f) * 0.5f;
+    const float hw = static_cast<float>(W) * 0.5f;
+    const float hh = static_cast<float>(topH) * 0.5f;
+    for (int y = 0; y < topH; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const float dx = std::abs(static_cast<float>(x) - cx) / hw;
+            const float dy = std::abs(static_cast<float>(y) - cy) / hh;
+            if ((dx + dy) > 1.0f) continue;
+
+            const uint32_t n = hashCombine(seed ^ 0x70F1u, static_cast<uint32_t>(x + y * 53 + frame * 97));
+            const float noise = (n & 0xFFu) / 255.0f;
+
+            // Subtle top-left highlight so the frame reads as 3D.
+            const float lx = (15.0f - static_cast<float>(x)) / 15.0f;
+            const float ly = (15.0f - static_cast<float>(y)) / 15.0f;
+
+            float f = 0.88f + noise * 0.18f;
+            f *= (0.92f + 0.08f * (0.60f * lx + 0.40f * ly));
+
+            Color cc = rampShadeTile(top, f, x, y);
+            cc.a = 255;
+            s.at(x, y) = cc;
+        }
+    }
+
+    // Outline cube edges.
+    line(s, 8, 0, 0, 4, outlineC);   // top-left
+    line(s, 8, 0, 15, 4, outlineC);  // top-right
+    line(s, 0, 4, 8, 7, outlineC);   // left->bottom (top)
+    line(s, 15, 4, 8, 7, outlineC);  // right->bottom (top)
+    line(s, 0, 4, 0, 12, outlineC);  // left vertical
+    line(s, 15, 4, 15, 12, outlineC);// right vertical
+    line(s, 8, 7, 8, 15, outlineC);  // middle vertical
+    line(s, 0, 12, 8, 15, outlineC); // bottom-left
+    line(s, 15, 12, 8, 15, outlineC);// bottom-right
+
+    // Tiny flicker glint on the top ridge.
+    if (frame % 2 == 1) {
+        setPx(s, 8, 1, add(s.at(8, 1), 18, 18, 22));
+        setPx(s, 9, 2, add(s.at(9, 2), 10, 10, 12));
+    }
+
+    return resampleSpriteToSize(s, pxSize);
+}
+
+
+SpritePixels generateIsometricPillarBlockTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+
+    // Build in the 16x16 design grid, then upscale.
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    RNG rng(hash32(seed));
+
+    // Slightly lighter stone than wall blocks so pillars pop as "props".
+    Color base = { 92, 98, 112, 255 };
+    base = add(base, rng.range(-12, 12), rng.range(-12, 12), rng.range(-12, 12));
+    Color top = add(mul(base, 1.06f), 10, 10, 14);
+    Color left = mul(base, 0.75f);
+    Color right = mul(base, 0.86f);
+    Color outlineC = mul(base, 0.42f);
+    outlineC.a = 255;
+
+    const int W = 16;
+    const int H = 16;
+
+    // Pillar footprint points (narrower than a full wall block).
+    const Vec2i pTop{8, 1};
+    const Vec2i pLeft{3, 4};
+    const Vec2i pRight{13, 4};
+    const Vec2i pBot{8, 7};
+
+    const Vec2i pLeftD{3, 12};
+    const Vec2i pRightD{13, 12};
+    const Vec2i pBotD{8, 15};
+
+    // Helper: scanline-fill a convex quad (same technique as wall/door blocks).
+    auto fillQuad = [&](Vec2i p0, Vec2i p1, Vec2i p2, Vec2i p3, const Color& c0, float shadeMul, uint32_t salt) {
+        const Vec2i pts[4] = { p0, p1, p2, p3 };
+        int minY = pts[0].y, maxY = pts[0].y;
+        for (int i = 1; i < 4; ++i) {
+            minY = std::min(minY, pts[i].y);
+            maxY = std::max(maxY, pts[i].y);
+        }
+        minY = std::clamp(minY, 0, H - 1);
+        maxY = std::clamp(maxY, 0, H - 1);
+
+        for (int y = minY; y <= maxY; ++y) {
+            float xInts[8];
+            int nInts = 0;
+            for (int e = 0; e < 4; ++e) {
+                const Vec2i a = pts[e];
+                const Vec2i b = pts[(e + 1) & 3];
+                if (a.y == b.y) continue;
+                const int y0 = a.y;
+                const int y1 = b.y;
+                const bool inRange = (y >= std::min(y0, y1)) && (y < std::max(y0, y1));
+                if (!inRange) continue;
+                const float t = (static_cast<float>(y) - static_cast<float>(y0)) / (static_cast<float>(y1 - y0));
+                xInts[nInts++] = static_cast<float>(a.x) + t * static_cast<float>(b.x - a.x);
+            }
+            if (nInts < 2) continue;
+            float xMin = xInts[0], xMax = xInts[0];
+            for (int i = 1; i < nInts; ++i) {
+                xMin = std::min(xMin, xInts[i]);
+                xMax = std::max(xMax, xInts[i]);
+            }
+            int xi0 = std::clamp(static_cast<int>(std::floor(xMin)), 0, W - 1);
+            int xi1 = std::clamp(static_cast<int>(std::ceil(xMax)), 0, W - 1);
+            for (int x = xi0; x <= xi1; ++x) {
+                const uint32_t n = hashCombine(seed ^ salt, static_cast<uint32_t>(x + y * 37 + frame * 101));
+                const float noise = (n & 0xFFu) / 255.0f;
+                float f = (0.92f + noise * 0.16f) * shadeMul;
+                f *= (0.94f + 0.06f * ((15.0f - static_cast<float>(y)) / 15.0f));
+                Color cc = rampShadeTile(c0, f, x, y);
+                cc.a = 255;
+                s.at(x, y) = cc;
+            }
+        }
+    };
+
+    // Side faces first.
+    fillQuad(pLeft, pBot, pBotD, pLeftD, left, 0.98f, 0x9111A0u);
+    fillQuad(pRight, pRightD, pBotD, pBot, right, 1.03f, 0x9111A1u);
+
+    // Light vertical fluting on the faces (masked so it only affects pillar pixels).
+    auto lineMasked = [&](int x0, int y0, int x1, int y1, Color c) {
+        int dx = std::abs(x1 - x0);
+        int sx = x0 < x1 ? 1 : -1;
+        int dy = -std::abs(y1 - y0);
+        int sy = y0 < y1 ? 1 : -1;
+        int err = dx + dy;
+        int x = x0;
+        int y = y0;
+        while (true) {
+            if (x >= 0 && y >= 0 && x < W && y < H) {
+                if (s.at(x, y).a != 0) s.at(x, y) = c;
+            }
+            if (x == x1 && y == y1) break;
+            int e2 = 2 * err;
+            if (e2 >= dy) { err += dy; x += sx; } 
+            if (e2 <= dx) { err += dx; y += sy; }
+        }
+    };
+
+    // We'll implement flutes by slightly darkening a few interior columns.
+    const Color groove = mul(base, 0.62f);
+    lineMasked(6, 6, 6, 15, groove);
+    lineMasked(10, 6, 10, 15, groove);
+    // Tiny highlight stripe between grooves.
+    const Color hiStripe = add(mul(base, 1.02f), 12, 12, 14);
+    lineMasked(8, 6, 8, 15, hiStripe);
+
+    // Top face (small diamond) drawn last.
+    const float cx = 8.0f;
+    const float cy = 4.0f;
+    const float hw = 5.0f;
+    const float hh = 3.0f;
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const float dx = std::abs(static_cast<float>(x) - cx) / hw;
+            const float dy = std::abs(static_cast<float>(y) - cy) / hh;
+            if ((dx + dy) > 1.0f) continue;
+
+            const uint32_t n = hashCombine(seed ^ 0x9111u, static_cast<uint32_t>(x + y * 53 + frame * 97));
+            const float noise = (n & 0xFFu) / 255.0f;
+
+            // Top-left highlight so the cap reads.
+            const float lx = (15.0f - static_cast<float>(x)) / 15.0f;
+            const float ly = (7.0f - static_cast<float>(y)) / 7.0f;
+
+            float f = 0.90f + noise * 0.16f;
+            f *= (0.92f + 0.08f * (0.65f * lx + 0.35f * ly));
+
+            Color cc = rampShadeTile(top, f, x, y);
+            cc.a = 255;
+            s.at(x, y) = cc;
+        }
+    }
+
+    // Outline edges.
+    line(s, pTop.x, pTop.y, pLeft.x, pLeft.y, outlineC);
+    line(s, pTop.x, pTop.y, pRight.x, pRight.y, outlineC);
+    line(s, pLeft.x, pLeft.y, pBot.x, pBot.y, outlineC);
+    line(s, pRight.x, pRight.y, pBot.x, pBot.y, outlineC);
+
+    line(s, pLeft.x, pLeft.y, pLeftD.x, pLeftD.y, outlineC);
+    line(s, pRight.x, pRight.y, pRightD.x, pRightD.y, outlineC);
+    line(s, pBot.x, pBot.y, pBotD.x, pBotD.y, outlineC);
+
+    line(s, pLeftD.x, pLeftD.y, pBotD.x, pBotD.y, outlineC);
+    line(s, pRightD.x, pRightD.y, pBotD.x, pBotD.y, outlineC);
+
+    // Small animated glint on the cap ridge.
+    if (frame % 2 == 1) {
+        setPx(s, 8, 2, add(s.at(8, 2), 18, 18, 22));
+        setPx(s, 9, 3, add(s.at(9, 3), 10, 10, 12));
+    }
+
+    return resampleSpriteToSize(s, pxSize);
+}
+
+SpritePixels generateIsometricBoulderBlockTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+
+    // Build in the 16x16 design grid, then upscale.
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    RNG rng(hash32(seed));
+
+    // Boulder palette: slightly warmer rock so it reads distinct from walls/pillars.
+    Color base = { 100, 92, 82, 255 };
+    base = add(base, rng.range(-16, 16), rng.range(-16, 16), rng.range(-16, 16));
+    Color outlineC = mul(base, 0.44f);
+    outlineC.a = 255;
+
+    const int W = 16;
+    const int H = 16;
+
+    // Boulder is shorter than wall blocks: keep some transparent headroom so it doesn't
+    // compete with walls/doors.
+    const float cx = 8.0f;
+    const float cy = 11.0f;
+    const float rx = 5.6f;
+    const float ry = 4.2f;
+
+    // Fill a slightly irregular ellipsoid with a simple directional lighting model.
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const float nx = (static_cast<float>(x) - cx) / rx;
+            const float ny = (static_cast<float>(y) - cy) / ry;
+            const float d2 = nx * nx + ny * ny;
+
+            // Boundary jitter for a more organic silhouette.
+            const uint32_t hn = hashCombine(seed ^ 0xB011D3u, static_cast<uint32_t>(x + y * 37 + frame * 11));
+            const float noise = (hn & 0xFFu) / 255.0f;
+            const float jitter = (noise - 0.5f) * 0.18f;
+            const float boundary = 1.0f + jitter;
+
+            if (d2 > boundary * boundary) continue;
+
+            // Fake "sphere" depth for shading.
+            const float z = std::sqrt(std::max(0.0f, 1.0f - (d2 / std::max(0.001f, boundary * boundary))));
+
+            // Light from top-left: brighter where (x,y) are smaller.
+            const float dir = 0.5f * ((-nx) + (-ny)); // positive on top-left
+            float shade = 0.55f + 0.35f * z + 0.10f * dir + (noise - 0.5f) * 0.10f;
+
+            // Ground contact: a touch darker near the bottom.
+            const float down = std::clamp((static_cast<float>(y) - (cy + 1.0f)) / 5.0f, 0.0f, 1.0f);
+            shade *= (0.92f - 0.15f * down);
+
+            shade = std::clamp(shade, 0.0f, 1.0f);
+            Color c = rampShadeTile(base, shade, x, y);
+            c.a = 255;
+            s.at(x, y) = c;
+        }
+    }
+
+    // Outline: darken boundary pixels for readability on noisy floors.
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            if (s.at(x, y).a == 0) continue;
+            bool edge = false;
+            const int dx[4] = {1, -1, 0, 0};
+            const int dy[4] = {0, 0, 1, -1};
+            for (int k = 0; k < 4; ++k) {
+                const int xx = x + dx[k];
+                const int yy = y + dy[k];
+                if (xx < 0 || yy < 0 || xx >= W || yy >= H) { edge = true; break; }
+                if (s.at(xx, yy).a == 0) { edge = true; break; }
+            }
+            if (edge) s.at(x, y) = outlineC;
+        }
+    }
+
+    // A couple of subtle cracks (masked so they only draw on boulder pixels).
+    auto lineMasked = [&](int x0, int y0, int x1, int y1, Color c) {
+        int dx = std::abs(x1 - x0);
+        int sx = x0 < x1 ? 1 : -1;
+        int dy = -std::abs(y1 - y0);
+        int sy = y0 < y1 ? 1 : -1;
+        int err = dx + dy;
+        int x = x0;
+        int y = y0;
+        while (true) {
+            if (x >= 0 && y >= 0 && x < W && y < H) {
+                if (s.at(x, y).a != 0) s.at(x, y) = c;
+            }
+            if (x == x1 && y == y1) break;
+            int e2 = 2 * err;
+            if (e2 >= dy) { err += dy; x += sx; }
+            if (e2 <= dx) { err += dx; y += sy; }
+        }
+    };
+
+    const Color crack = mul(base, 0.55f);
+    lineMasked(6, 10, 12, 13, crack);
+    lineMasked(5, 12, 11, 14, mul(crack, 0.9f));
+
+    // Tiny animated highlight on the top-left shoulder.
+    if (frame % 2 == 1) {
+        for (int yy = 7; yy <= 8; ++yy) {
+            for (int xx = 6; xx <= 7; ++xx) {
+                if (s.at(xx, yy).a != 0) s.at(xx, yy) = add(s.at(xx, yy), 18, 18, 20);
+            }
+        }
+    }
+
+    return resampleSpriteToSize(s, pxSize);
+}
+
 
 SpritePixels generatePillarTile(uint32_t seed, int frame, int pxSize) {
     pxSize = clampSpriteSize(pxSize);
@@ -3114,6 +4221,217 @@ SpritePixels generateBoulderTile(uint32_t seed, int frame, int pxSize) {
 
     return resampleSpriteToSize(s, pxSize);
 }
+
+
+SpritePixels generateFountainTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    RNG rng(hash32(seed ^ 0xF00F7A1u));
+
+    // Fountain is a transparent overlay layered on top of the themed floor.
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+
+    // Stone basin palette (slightly varied per seed so fountains don't look identical).
+    Color stone = { 138, 142, 152, 255 };
+    stone = add(stone, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
+    Color light = add(mul(stone, 1.10f), 12, 12, 14);
+
+    // Water palette.
+    Color water = { 64, 132, 210, 210 };
+    Color waterDark = { 42, 92, 160, 210 };
+    Color waterLight = { 96, 170, 240, 220 };
+
+    auto rand01 = [&](uint32_t v) -> float {
+        return static_cast<float>(v) / 4294967295.0f;
+    };
+
+    // Soft shadow on the floor under the basin.
+    for (int y = 10; y < 16; ++y) {
+        for (int x = 2; x < 14; ++x) {
+            float cx = (x - 7.5f) / 6.0f;
+            float cy = (y - 13.0f) / 2.8f;
+            float d2 = cx * cx + cy * cy;
+            if (d2 > 1.0f) continue;
+            int a = static_cast<int>(std::lround((1.0f - d2) * 95.0f));
+            a = std::clamp(a, 0, 95);
+            setPx(s, x, y, Color{0, 0, 0, static_cast<uint8_t>(a)});
+        }
+    }
+
+    // Basin geometry (ellipse ring + inner water pool).
+    const float cx = 7.5f;
+    const float cy = 8.0f;
+    const float rx = 6.3f;
+    const float ry = 4.6f;
+
+    for (int y = 1; y < 15; ++y) {
+        for (int x = 1; x < 15; ++x) {
+            float nx = (static_cast<float>(x) - cx) / rx;
+            float ny = (static_cast<float>(y) - cy) / ry;
+            float d2 = nx * nx + ny * ny;
+
+            if (d2 > 1.02f) continue;
+
+            const bool ring = (d2 > 0.72f); // outer basin wall thickness
+
+            if (ring) {
+                // Lighting: brighter toward top-left.
+                float shade = 0.82f + (-nx * 0.10f) + (-ny * 0.14f);
+                shade = std::clamp(shade, 0.55f, 1.12f);
+                Color c = rampShadeTile(stone, shade, x, y);
+                c.a = 255;
+
+                // Darken extreme rim for definition.
+                if (d2 > 0.95f) c = mul(c, 0.82f);
+
+                setPx(s, x, y, c);
+            } else {
+                // Water pool: animated ripples.
+                uint32_t hv = hash32(seed ^ static_cast<uint32_t>(x * 73856093) ^ static_cast<uint32_t>(y * 19349663) ^ static_cast<uint32_t>(frame * 83492791));
+                float n = rand01(hv);
+
+                // Simple ripple bands that shift each frame.
+                const float band = std::sin((static_cast<float>(x + y) * 0.8f) + (frame ? 1.4f : 0.0f));
+                float ripple = (band * 0.5f + 0.5f) * 0.35f; // 0..~0.35
+                ripple += (n - 0.5f) * 0.12f; // subtle noise
+
+                Color c = lerp(waterDark, water, 0.55f + ripple);
+                c = lerp(c, waterLight, std::clamp(ripple, 0.0f, 0.35f));
+                c.a = water.a;
+
+                // Slight highlight near top-left.
+                if (x < 7 && y < 7) c = add(c, 8, 10, 12);
+
+                setPx(s, x, y, c);
+            }
+        }
+    }
+
+    // Small central spout / sparkle.
+    if (frame % 2 == 1) {
+        setPx(s, 8, 6, add(s.at(8, 6), 18, 22, 26));
+        setPx(s, 7, 7, add(s.at(7, 7), 10, 12, 14));
+    } else {
+        setPx(s, 8, 6, add(s.at(8, 6), 10, 12, 14));
+    }
+
+    // Crisp outline on the basin rim.
+    for (int y = 1; y < 15; ++y) {
+        for (int x = 1; x < 15; ++x) {
+            if (s.at(x, y).a == 0) continue;
+            bool edgePx = false;
+            for (int oy = -1; oy <= 1; ++oy) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    if (ox == 0 && oy == 0) continue;
+                    int nx = x + ox;
+                    int ny = y + oy;
+                    if (nx < 0 || nx >= 16 || ny < 0 || ny >= 16) { edgePx = true; continue; }
+                    if (s.at(nx, ny).a == 0) edgePx = true;
+                }
+            }
+            if (edgePx && s.at(x, y).a == 255) {
+                setPx(s, x, y, mul(s.at(x, y), 0.88f));
+            }
+        }
+    }
+
+    // Highlight stroke on the top-left rim.
+    line(s, 3, 7, 5, 5, light);
+    line(s, 4, 8, 6, 6, add(light, -12, -12, -12));
+
+    return resampleSpriteToSize(s, pxSize);
+}
+
+
+SpritePixels generateAltarTile(uint32_t seed, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    RNG rng(hash32(seed ^ 0xA17A12u));
+
+    // Altar is a transparent overlay layered on top of the themed floor.
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+
+    // Stone palette (slight per-seed variation).
+    Color stone = { 150, 152, 162, 255 };
+    stone = add(stone, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
+    Color dark = mul(stone, 0.72f);
+    Color light = add(mul(stone, 1.10f), 10, 10, 12);
+
+    // Soft shadow under the altar (helps it read on noisy floors).
+    for (int y = 9; y < 16; ++y) {
+        for (int x = 2; x < 14; ++x) {
+            float cx = (x - 7.5f) / 6.0f;
+            float cy = (y - 12.8f) / 3.2f;
+            float d2 = cx * cx + cy * cy;
+            if (d2 > 1.0f) continue;
+            int a = static_cast<int>(std::lround((1.0f - d2) * 80.0f));
+            a = std::clamp(a, 0, 80);
+            setPx(s, x, y, Color{0, 0, 0, static_cast<uint8_t>(a)});
+        }
+    }
+
+    // Top slab (slightly wider than the base).
+    for (int y = 6; y <= 8; ++y) {
+        for (int x = 3; x <= 12; ++x) {
+            float shade = 0.95f + (8 - y) * 0.03f + (7 - x) * 0.01f;
+            shade = std::clamp(shade, 0.75f, 1.15f);
+            Color c = rampShadeTile(stone, shade, x, y);
+            c.a = 255;
+            setPx(s, x, y, c);
+        }
+    }
+
+    // Base block.
+    for (int y = 9; y <= 12; ++y) {
+        for (int x = 4; x <= 11; ++x) {
+            float shade = 0.82f + (9 - y) * 0.02f + (7 - x) * 0.01f;
+            shade = std::clamp(shade, 0.60f, 1.05f);
+            Color c = rampShadeTile(stone, shade, x, y);
+            c.a = 255;
+            setPx(s, x, y, c);
+        }
+    }
+
+    // Crisp outlines.
+    outlineRect(s, 3, 6, 10, 3, mul(dark, 0.95f));
+    outlineRect(s, 4, 9, 8, 4, mul(dark, 0.92f));
+
+    // Cloth runner on top.
+    Color cloth = { 150, 45, 55, 235 };
+    if (frame % 2 == 1) cloth = add(cloth, 6, 2, 2);
+    rect(s, 5, 7, 6, 1, cloth);
+    rect(s, 6, 6, 4, 1, mul(cloth, 0.92f));
+
+    // Simple holy symbol (gold cross) on the cloth.
+    Color gold = { 220, 190, 70, 245 };
+    if (frame % 2 == 1) gold = add(gold, 10, 8, 0);
+    setPx(s, 8, 6, gold);
+    setPx(s, 8, 7, gold);
+    setPx(s, 8, 8, gold);
+    setPx(s, 7, 7, gold);
+    setPx(s, 9, 7, gold);
+
+    // Candles (two small ones) with flickering flame.
+    Color wax = { 235, 230, 220, 255 };
+    Color flame = { 255, 170, 60, 240 };
+    if (frame % 2 == 1) flame = add(flame, 0, 25, 20);
+
+    auto candle = [&](int x, int y) {
+        setPx(s, x, y, wax);
+        setPx(s, x, y - 1, flame);
+        if (frame % 2 == 1) {
+            setPx(s, x, y - 2, Color{255, 240, 140, 180});
+        }
+    };
+
+    candle(5, 5);
+    candle(11, 5);
+
+    // Highlight stroke on top-left rim.
+    line(s, 4, 7, 6, 6, light);
+    line(s, 5, 8, 7, 7, add(light, -12, -12, -12));
+
+    return resampleSpriteToSize(s, pxSize);
+}
+
 
 SpritePixels generateStairsTile(uint32_t seed, bool up, int frame, int pxSize) {
     pxSize = clampSpriteSize(pxSize);

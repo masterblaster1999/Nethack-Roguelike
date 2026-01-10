@@ -1337,6 +1337,112 @@ bool Game::searchForTraps(bool verbose, int* foundTrapsOut, int* foundSecretsOut
 }
 
 
+
+
+void Game::autoSearchTick() {
+    if (gameOver || gameWon) return;
+
+    // Requires at least one Ring of Searching equipped.
+    int bestPower = -9999;
+    bool hasRing = false;
+
+    auto consider = [&](const Item* r) {
+        if (!r) return;
+        if (r->kind != ItemKind::RingSearching) return;
+        hasRing = true;
+
+        int p = r->enchant;
+        if (r->buc < 0) p -= 1;
+        else if (r->buc > 0) p += 1;
+
+        bestPower = std::max(bestPower, p);
+    };
+
+    consider(equippedRing1());
+    consider(equippedRing2());
+
+    if (!hasRing) return;
+
+    Entity& pl = playerMut();
+
+    // A subtle, automatic search around the player each turn.
+    // This is intentionally weaker than the explicit SEARCH action.
+    int radius = 1;
+    if (bestPower >= 2) radius = 2;
+
+    float baseChance = 0.08f + 0.015f * static_cast<float>(charLevel);
+    baseChance += 0.0075f * static_cast<float>(playerFocus());
+    baseChance += 0.04f * static_cast<float>(bestPower);
+    baseChance = std::min(0.65f, std::max(0.05f, baseChance));
+
+    int foundTraps = 0;
+    int foundSecrets = 0;
+
+    // Traps
+    for (auto& t : trapsCur) {
+        if (t.discovered) continue;
+        int dx = std::abs(t.pos.x - pl.pos.x);
+        int dy = std::abs(t.pos.y - pl.pos.y);
+        int cheb = std::max(dx, dy);
+        if (cheb > radius) continue;
+
+        float chance = baseChance;
+        if (cheb <= 1) chance = std::min(0.75f, chance + 0.12f);
+        if (rng.chance(chance)) {
+            t.discovered = true;
+            foundTraps += 1;
+        }
+    }
+
+    // Trapped chests behave like traps for detection purposes.
+    for (auto& gi : ground) {
+        if (gi.item.kind != ItemKind::Chest) continue;
+        if (!chestTrapped(gi.item)) continue;
+        if (chestTrapKnown(gi.item)) continue;
+
+        int dx = std::abs(gi.pos.x - pl.pos.x);
+        int dy = std::abs(gi.pos.y - pl.pos.y);
+        int cheb = std::max(dx, dy);
+        if (cheb > radius) continue;
+
+        float chance = baseChance;
+        if (cheb <= 1) chance = std::min(0.75f, chance + 0.12f);
+        if (rng.chance(chance)) {
+            setChestTrapKnown(gi.item, true);
+            foundTraps += 1;
+        }
+    }
+
+    // Secret doors (TileType::DoorSecret -> DoorClosed)
+    for (int y = pl.pos.y - radius; y <= pl.pos.y + radius; ++y) {
+        for (int x = pl.pos.x - radius; x <= pl.pos.x + radius; ++x) {
+            if (!dung.inBounds(x, y)) continue;
+            Tile& t = dung.at(x, y);
+            if (t.type != TileType::DoorSecret) continue;
+
+            int dx = std::abs(x - pl.pos.x);
+            int dy = std::abs(y - pl.pos.y);
+            int cheb = std::max(dx, dy);
+            if (cheb > radius) continue;
+
+            float chance = std::max(0.05f, baseChance - 0.12f);
+            if (cheb <= 1) chance = std::min(0.75f, chance + 0.12f);
+
+            if (rng.chance(chance)) {
+                t.type = TileType::DoorClosed;
+                t.explored = true;
+                foundSecrets += 1;
+            }
+        }
+    }
+
+    if (foundTraps > 0 || foundSecrets > 0) {
+        // Keep the messaging terse; this can trigger often.
+        pushMsg(formatSearchDiscoveryMessage(foundTraps, foundSecrets), MessageKind::Info, /*fromPlayer=*/false);
+    }
+}
+
+
 bool Game::disarmTrap() {
     if (gameOver || gameWon) return false;
 
@@ -2433,7 +2539,7 @@ bool Game::sacrificeAtShrine() {
             case ItemKind::CorpseOrc:      ek = EntityKind::Orc; break;
             case ItemKind::CorpseBat:      ek = EntityKind::Bat; break;
             case ItemKind::CorpseSlime:    ek = EntityKind::Slime; break;
-            case ItemKind::CorpseKobold:   ek = EntityKind::Kobold; break;
+            case ItemKind::CorpseKobold:   ek = EntityKind::KoboldSlinger; break;
             case ItemKind::CorpseWolf:     ek = EntityKind::Wolf; break;
             case ItemKind::CorpseTroll:    ek = EntityKind::Troll; break;
             case ItemKind::CorpseWizard:   ek = EntityKind::Wizard; break;
@@ -3212,3 +3318,320 @@ bool Game::engraveHere(const std::string& rawText) {
 }
 
 
+
+bool Game::drinkFromFountain() {
+    Entity& p = playerMut();
+    if (!dung.inBounds(p.pos.x, p.pos.y)) return false;
+
+    Tile& tile = dung.at(p.pos.x, p.pos.y);
+    if (tile.type != TileType::Fountain) {
+        pushMsg("THERE IS NO FOUNTAIN HERE.", MessageKind::Info, true);
+        return false;
+    }
+
+    // Drinking is fairly loud (splashing / slurping), but not as loud as combat.
+    emitNoise(p.pos, 6);
+
+    pushMsg("YOU DRINK FROM THE FOUNTAIN.", MessageKind::Info, true);
+
+    auto maybeDryUp = [&]() {
+        // NetHack-inspired: fountains often dry up after use.
+        if (tile.type == TileType::Fountain && rng.chance(0.33f)) {
+            tile.type = TileType::Floor;
+            pushMsg("THE FOUNTAIN DRIES UP.", MessageKind::System, true);
+        }
+    };
+
+    auto applyHungerDelta = [&](int delta) {
+        if (!hungerEnabled_) return;
+        if (hungerMax <= 0) hungerMax = 800;
+
+        const int beforeState = hungerStateFor(hunger, hungerMax);
+        hunger = clampi(hunger + delta, 0, hungerMax);
+        const int afterState = hungerStateFor(hunger, hungerMax);
+
+        if (afterState < beforeState) {
+            if (beforeState >= 2 && afterState < 2) {
+                pushMsg("YOU FEEL LESS STARVED.", MessageKind::System, true);
+            } else if (beforeState >= 1 && afterState == 0) {
+                pushMsg("YOU FEEL SATIATED.", MessageKind::System, true);
+            }
+        } else if (afterState > beforeState) {
+            if (afterState == 1) {
+                pushMsg("YOU FEEL HUNGRY.", MessageKind::System, true);
+            } else if (afterState >= 2) {
+                pushMsg("YOU ARE STARVING!", MessageKind::Warning, true);
+            }
+        }
+
+        // Sync throttling so the next hunger tick doesn't immediately re-announce.
+        hungerStatePrev = hungerStateFor(hunger, hungerMax);
+    };
+
+    auto findSpawnAdj = [&]() -> Vec2i {
+        std::vector<Vec2i> opts;
+        opts.reserve(8);
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                Vec2i q{p.pos.x + dx, p.pos.y + dy};
+                if (!dung.inBounds(q.x, q.y)) continue;
+                if (q == dung.stairsUp || q == dung.stairsDown) continue;
+                if (!dung.isWalkable(q.x, q.y)) continue;
+                if (entityAt(q.x, q.y) != nullptr) continue;
+                opts.push_back(q);
+            }
+        }
+        if (opts.empty()) return {-1, -1};
+        const int i = rng.range(0, static_cast<int>(opts.size()) - 1);
+        return opts[static_cast<size_t>(i)];
+    };
+
+    auto spawnHostile = [&](EntityKind k) -> bool {
+        const Vec2i sp = findSpawnAdj();
+        if (!dung.inBounds(sp.x, sp.y)) return false;
+
+        Entity& m = spawnMonster(k, sp, /*groupId=*/0, /*allowGear=*/false);
+        m.alerted = true;
+        m.lastKnownPlayerPos = p.pos;
+        m.lastKnownPlayerAge = 0;
+        return true;
+    };
+
+    // Roll a NetHack-ish 1d30 table (simplified / adapted to this game's mechanics).
+    const int r = rng.range(0, 29);
+
+    // Common outcomes.
+    if (r < 9) {
+        // 9/30: refresh
+        pushMsg("THE COOL DRAUGHT REFRESHES YOU.", MessageKind::Success, true);
+
+        // Small heal, tiny mana refill, and a bit of nourishment.
+        if (p.hp < p.hpMax) {
+            const int heal = 2 + rng.range(0, 4);
+            p.hp = std::min(p.hpMax, p.hp + heal);
+        }
+
+        // Clear some common ailments.
+        if (p.effects.poisonTurns > 0) p.effects.poisonTurns = 0;
+        if (p.effects.burnTurns > 0) p.effects.burnTurns = 0;
+        if (p.effects.confusionTurns > 0) p.effects.confusionTurns = 0;
+
+        // A little mana back.
+        const int manaMax = playerManaMax();
+        if (manaMax > 0) {
+            mana_ = std::min(manaMax, mana_ + 2 + rng.range(0, 2));
+        }
+
+        applyHungerDelta(30);
+        maybeDryUp();
+        return true;
+    }
+
+    if (r < 18) {
+        // 9/30: no effect
+        pushMsg("THIS TEPID WATER IS TASTELESS.", MessageKind::Info, true);
+        maybeDryUp();
+        return true;
+    }
+
+    // Rare outcomes.
+    switch (r) {
+        case 18: {
+            // "Self-knowledge" / detect monsters (lite): report nearby hostiles.
+            int hostile = 0;
+            for (const auto& e : ents) {
+                if (e.id == playerId_) continue;
+                if (e.hp <= 0) continue;
+                if (e.friendly) continue;
+                if (e.kind == EntityKind::Shopkeeper) continue;
+                if (manhattan(e.pos, p.pos) <= 14) hostile += 1;
+            }
+
+            if (hostile <= 0) {
+                pushMsg("YOU FEEL SELF-KNOWLEDGEABLE... AND ALONE.", MessageKind::Info, true);
+            } else if (hostile == 1) {
+                pushMsg("YOU SENSE A CREATURE NEARBY.", MessageKind::Info, true);
+            } else {
+                pushMsg("YOU SENSE " + std::to_string(hostile) + " CREATURES NEARBY.", MessageKind::Info, true);
+            }
+
+            // A tiny wisdom/perception bump (mechanically: brief vision).
+            p.effects.visionTurns = std::max(p.effects.visionTurns, 10);
+            recomputeFov();
+            maybeDryUp();
+            return true;
+        }
+
+        case 19: {
+            // "Stalking image" -> brief heightened senses.
+            pushMsg("YOU SEE AN IMAGE OF SOMEONE STALKING YOU... BUT IT FADES.", MessageKind::Warning, true);
+            p.effects.visionTurns = std::max(p.effects.visionTurns, 18);
+            recomputeFov();
+            maybeDryUp();
+            return true;
+        }
+
+        case 20: {
+            // Find some coins.
+            const int amt = 3 + rng.range(0, 4) + std::min(12, depth_);
+
+            Item g;
+            g.id = nextItemId++;
+            g.kind = ItemKind::Gold;
+            g.count = amt;
+            g.spriteSeed = rng.nextU32();
+
+            if (!tryStackItem(inv, g)) {
+                inv.push_back(g);
+            }
+
+            pushMsg("YOU FIND SOME COINS IN THE WATER!", MessageKind::Loot, true);
+            maybeDryUp();
+            return true;
+        }
+
+        case 21: {
+            // Bad breath: briefly frighten nearby hostiles.
+            pushMsg("THIS WATER GIVES YOU BAD BREATH!", MessageKind::Warning, true);
+
+            int affected = 0;
+            for (auto& e : ents) {
+                if (e.id == playerId_) continue;
+                if (e.hp <= 0) continue;
+                if (e.friendly) continue;
+                if (e.kind == EntityKind::Shopkeeper) continue;
+                if (manhattan(e.pos, p.pos) > 10) continue;
+                e.effects.fearTurns = std::max(e.effects.fearTurns, 4);
+                affected += 1;
+            }
+
+            if (affected > 0) {
+                pushMsg("MONSTERS RECOIL FROM YOU!", MessageKind::Info, true);
+            }
+
+            maybeDryUp();
+            return true;
+        }
+
+        case 22: {
+            // Bad water.
+            pushMsg("THIS WATER'S NO GOOD!", MessageKind::Warning, true);
+
+            // Make you hungrier and a bit confused.
+            applyHungerDelta(-40);
+            p.effects.confusionTurns = std::max(p.effects.confusionTurns, 6 + rng.range(0, 5));
+
+            // Small chance to also poison.
+            if (rng.chance(0.40f)) {
+                p.effects.poisonTurns = std::max(p.effects.poisonTurns, 6 + rng.range(0, 5));
+            }
+
+            maybeDryUp();
+            return true;
+        }
+
+        case 23: {
+            // Water gushes forth: extinguish nearby flames.
+            pushMsg("WATER GUSHES FORTH!", MessageKind::Warning, true);
+            emitNoise(p.pos, 10);
+
+            if (p.effects.burnTurns > 0) {
+                p.effects.burnTurns = 0;
+                pushMsg("THE WATER EXTINGUISHES THE FLAMES.", MessageKind::Success, true);
+            }
+
+            const size_t expect = static_cast<size_t>(dung.width * dung.height);
+            if (fireField_.size() == expect) {
+                auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * dung.width + x); };
+
+                constexpr int radius = 2;
+                for (int dy = -radius; dy <= radius; ++dy) {
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        const int x = p.pos.x + dx;
+                        const int y = p.pos.y + dy;
+                        if (!dung.inBounds(x, y)) continue;
+                        const size_t ii = idx(x, y);
+                        if (ii >= fireField_.size()) continue;
+                        fireField_[ii] = 0;
+                    }
+                }
+            }
+
+            maybeDryUp();
+            return true;
+        }
+
+        case 24: {
+            // Snakes!
+            pushMsg("SOMETHING WRIGGLES OUT OF THE FOUNTAIN!", MessageKind::Warning, true);
+            const int n = 1 + rng.range(0, 1) + (depth_ >= 6 ? 1 : 0);
+            int spawned = 0;
+            for (int i = 0; i < n; ++i) {
+                if (spawnHostile(EntityKind::Snake)) spawned += 1;
+            }
+            if (spawned <= 0) {
+                pushMsg("...BUT IT SLIPS AWAY.", MessageKind::Info, true);
+            }
+            maybeDryUp();
+            return true;
+        }
+
+        case 25: {
+            // Water nymph analogue.
+            pushMsg("A SLY CREATURE EMERGES FROM THE WATER!", MessageKind::Warning, true);
+            (void)spawnHostile(EntityKind::Leprechaun);
+            maybeDryUp();
+            return true;
+        }
+
+        case 26: {
+            // Water demon analogue.
+            pushMsg("A MALEVOLENT PRESENCE RISES FROM THE FOUNTAIN!", MessageKind::Warning, true);
+            if (depth_ >= 7) (void)spawnHostile(EntityKind::Ghost);
+            else (void)spawnHostile(EntityKind::Slime);
+            maybeDryUp();
+            return true;
+        }
+
+        case 27: {
+            // Polluted water -> poison.
+            pushMsg("THE WATER BURNS YOUR THROAT!", MessageKind::Warning, true);
+            p.effects.poisonTurns = std::max(p.effects.poisonTurns, 8 + rng.range(0, 6));
+            maybeDryUp();
+            return true;
+        }
+
+        case 28: {
+            // Big boon.
+            pushMsg("WOW! THIS MAKES YOU FEEL GREAT!", MessageKind::Success, true);
+
+            p.hp = p.hpMax;
+            p.effects.poisonTurns = 0;
+            p.effects.burnTurns = 0;
+            p.effects.confusionTurns = 0;
+            p.effects.hallucinationTurns = 0;
+
+            p.effects.regenTurns = std::max(p.effects.regenTurns, 12);
+
+            const int manaMax = playerManaMax();
+            if (manaMax > 0) mana_ = manaMax;
+
+            applyHungerDelta(80);
+
+            // This kind of magic tends to exhaust the fountain.
+            if (tile.type == TileType::Fountain) {
+                tile.type = TileType::Floor;
+                pushMsg("THE FOUNTAIN RUNS DRY.", MessageKind::System, true);
+            }
+            return true;
+        }
+
+        case 29:
+        default: {
+            pushMsg("A STRANGE TINGLING RUNS UP YOUR ARM.", MessageKind::Info, true);
+            maybeDryUp();
+            return true;
+        }
+    }
+}

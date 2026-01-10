@@ -3157,13 +3157,13 @@ void Renderer::render(const Game& game) {
                         // diamond ground shadow used by real entities.
                         SDL_Texture* sh = isoEntityShadowTex[static_cast<size_t>(frame % FRAMES)];
                         if (sh) {
-                            const SDL_Rect base = mapTileDst(p.pos.x, p.pos.y);
-                            const int cx = base.x + base.w / 2;
-                            const int cy = base.y + base.h / 2 + (base.h / 4);
+                            const SDL_Rect baseRect = mapTileDst(p.pos.x, p.pos.y);
+                            const int cx = baseRect.x + baseRect.w / 2;
+                            const int cy = baseRect.y + baseRect.h / 2 + (baseRect.h / 4);
 
-                            SDL_Rect sd = base;
-                            sd.w = (base.w * 3) / 4;
-                            sd.h = (base.h * 3) / 4;
+                            SDL_Rect sd = baseRect;
+                            sd.w = (baseRect.w * 3) / 4;
+                            sd.h = (baseRect.h * 3) / 4;
                             sd.x = cx - sd.w / 2;
                             sd.y = cy - sd.h / 2;
 

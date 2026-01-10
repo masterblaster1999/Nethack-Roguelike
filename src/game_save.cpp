@@ -2534,35 +2534,35 @@ if (ver >= 33u) {
                     continue;
                 }
 
-                auto occupied = [&](Vec2i p) {
+                auto occupied = [&](Vec2i pos) {
                     for (const Entity& e : st.monsters) {
-                        if (e.hp > 0 && e.pos == p) {
+                        if (e.hp > 0 && e.pos == pos) {
                             return true;
                         }
                     }
                     return false;
                 };
 
-                auto groundAt = [&](Vec2i p) {
+                auto groundAt = [&](Vec2i pos) {
                     for (const GroundItem& g : st.ground) {
-                        if (g.pos == p) {
+                        if (g.pos == pos) {
                             return true;
                         }
                     }
                     return false;
                 };
 
-                auto isGoodSpawn = [&](Vec2i p, bool requireEmptyGround) {
-                    if (!st.dung.inBounds(p.x, p.y)) {
+                auto isGoodSpawn = [&](Vec2i pos, bool requireEmptyGround) {
+                    if (!st.dung.inBounds(pos.x, pos.y)) {
                         return false;
                     }
-                    if (!st.dung.isWalkable(p.x, p.y)) {
+                    if (!st.dung.isWalkable(pos.x, pos.y)) {
                         return false;
                     }
-                    if (occupied(p)) {
+                    if (occupied(pos)) {
                         return false;
                     }
-                    if (requireEmptyGround && groundAt(p)) {
+                    if (requireEmptyGround && groundAt(pos)) {
                         return false;
                     }
                     return true;
@@ -2574,9 +2574,9 @@ if (ver >= 33u) {
                 if (!found) {
                     for (int y = shopRoom.y + 1; y < shopRoom.y + shopRoom.h - 1 && !found; ++y) {
                         for (int x = shopRoom.x + 1; x < shopRoom.x + shopRoom.w - 1; ++x) {
-                            Vec2i p{x, y};
-                            if (isGoodSpawn(p, /*requireEmptyGround=*/true)) {
-                                sp = p;
+                            Vec2i cand{x, y};
+                            if (isGoodSpawn(cand, /*requireEmptyGround=*/true)) {
+                                sp = cand;
                                 found = true;
                                 break;
                             }
@@ -2586,9 +2586,9 @@ if (ver >= 33u) {
                 if (!found) {
                     for (int y = shopRoom.y + 1; y < shopRoom.y + shopRoom.h - 1 && !found; ++y) {
                         for (int x = shopRoom.x + 1; x < shopRoom.x + shopRoom.w - 1; ++x) {
-                            Vec2i p{x, y};
-                            if (isGoodSpawn(p, /*requireEmptyGround=*/false)) {
-                                sp = p;
+                            Vec2i cand{x, y};
+                            if (isGoodSpawn(cand, /*requireEmptyGround=*/false)) {
+                                sp = cand;
                                 found = true;
                                 break;
                             }

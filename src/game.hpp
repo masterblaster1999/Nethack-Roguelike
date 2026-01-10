@@ -1426,6 +1426,10 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     void setLookCursor(Vec2i p);
     void setTargetCursor(Vec2i p);
 
+    // Describe the tile/entity at a map coordinate (used by UI tooltips such as the minimap cursor info line).
+    // Returns "UNKNOWN" for unexplored tiles and avoids spoiling secret doors.
+    std::string describeAt(Vec2i p) const;
+
     // Unit-test access hook.
     friend struct GameTestAccess;
 
@@ -1982,7 +1986,6 @@ private:
     void beginLook();
     void endLook();
     void moveLookCursor(int dx, int dy);
-    std::string describeAt(Vec2i p) const;
 
     // Rest action
     void restUntilSafe();

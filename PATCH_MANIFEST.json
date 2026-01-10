@@ -1,5 +1,5 @@
 {
-  "description": "Cumulative patch through roundN_plus92: adds 2.5D isometric doorway frames for open doors (procedural spritegen + renderer integration) and associated isometric shadowing.",
+  "description": "Cumulative patch through roundN_plus93: fixes MSVC shadowing warnings and exposes Game::describeAt for UI tooltips (minimap cursor info).",
   "files": [
     "CHANGELOG.md",
     "CMakeLists.txt",
@@ -52,16 +52,16 @@
     "src/ui_font.hpp",
     "tests/test_main.cpp"
   ],
-  "patch_id": "roundN_plus92_patch",
-  "previous_patch": "roundN_plus91_patch",
+  "patch_id": "roundN_plus93_patch",
+  "previous_patch": "roundN_plus92_patch",
   "summary": [
-    "Add a new procedural sprite generator for isometric 2.5D open-door doorway frames (square sprite with stone faces + passable opening shading).",
-    "Generate and cache open-door frame variants lazily alongside other isometric terrain assets (doorBlockOpenVarIso).",
-    "Render DoorOpen tiles using the new 2.5D doorway frames in ViewMode::Isometric (and include them as occluders/shadow casters for better depth cues)."
+    "Fix MSVC C4456 warnings by renaming shadowing locals in save migration and isometric phantom rendering.",
+    "Expose Game::describeAt as a public UI helper so renderer can show minimap cursor tile descriptions without friending internal helpers.",
+    "Unblock MSVC build by resolving private-member access error in render minimap tooltip code."
   ],
-  "timestamp": "2026-01-10T00:00:00Z",
+  "timestamp": "2026-01-10T10:55:20Z",
   "notes": [
-    "Open doors are passable but still represent architectural wall openings; in isometric view they now render as a 2.5D doorway frame so the map reads with more vertical depth.",
-    "When doorway frames are available, the renderer suppresses the flat projected floor overlay for DoorOpen to avoid visual clutter/double-drawing."
+    "This patch is intentionally small but critical: it restores MSVC builds and enables the new minimap cursor info line to compile.",
+    "No gameplay balance changes; only UI helper exposure and warning cleanups."
   ]
 }

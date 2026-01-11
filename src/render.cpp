@@ -96,6 +96,118 @@ inline void fillIsoDiamond(SDL_Renderer* r, int cx, int cy, int halfW, int halfH
     }
 }
 
+
+// --- Coherent procedural variation helpers ---------------------------------
+//
+// Tile variants were previously selected purely via (hash % N), which can read as
+// high-frequency "TV static" across large floor/wall fields.  These helpers use
+// a cheap deterministic value-noise field to pick variants more coherently in
+// space, producing larger patches of consistent texture while keeping per-tile
+// uniqueness and replay determinism.
+//
+// Note: This is intentionally lightweight (a few hash mixes + lerps) and does
+// not require any external noise library.
+
+inline float smoothstep01(float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+inline float lerpf(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+inline float hash01_16(uint32_t h) {
+    // Map a stable 16-bit slice of the hash to [0,1].  Using 16 bits keeps this
+    // deterministic and fast while still looking "continuous" once interpolated.
+    return static_cast<float>(hash32(h) & 0xFFFFu) / 65535.0f;
+}
+
+inline float valueNoise2D01(int x, int y, uint32_t seed, int period) {
+    period = std::max(1, period);
+
+    const int x0 = x / period;
+    const int y0 = y / period;
+
+    const float fx = static_cast<float>(x - x0 * period) / static_cast<float>(period);
+    const float fy = static_cast<float>(y - y0 * period) / static_cast<float>(period);
+
+    const uint32_t v00 = hashCombine(seed, hashCombine(static_cast<uint32_t>(x0),     static_cast<uint32_t>(y0)));
+    const uint32_t v10 = hashCombine(seed, hashCombine(static_cast<uint32_t>(x0 + 1), static_cast<uint32_t>(y0)));
+    const uint32_t v01 = hashCombine(seed, hashCombine(static_cast<uint32_t>(x0),     static_cast<uint32_t>(y0 + 1)));
+    const uint32_t v11 = hashCombine(seed, hashCombine(static_cast<uint32_t>(x0 + 1), static_cast<uint32_t>(y0 + 1)));
+
+    const float n00 = hash01_16(v00);
+    const float n10 = hash01_16(v10);
+    const float n01 = hash01_16(v01);
+    const float n11 = hash01_16(v11);
+
+    const float u = smoothstep01(fx);
+    const float v = smoothstep01(fy);
+
+    const float a = lerpf(n00, n10, u);
+    const float b = lerpf(n01, n11, u);
+    return lerpf(a, b, v);
+}
+
+inline float fractalNoise2D01(int x, int y, uint32_t seed) {
+    // A tiny 3-octave fractal sum (fixed weights) for more natural variation.
+    // Larger periods dominate, smaller ones add gentle detail.
+    const float n0 = valueNoise2D01(x, y, seed ^ 0xA531F00Du, 12);
+    const float n1 = valueNoise2D01(x, y, seed ^ 0xC0FFEE11u, 6);
+    const float n2 = valueNoise2D01(x, y, seed ^ 0x1234BEEFu, 3);
+    return (n0 * 0.55f) + (n1 * 0.30f) + (n2 * 0.15f);
+}
+
+inline size_t pickCoherentVariantIndex(int x, int y, uint32_t seed, size_t count) {
+    if (count == 0) return 0;
+
+    const float n = fractalNoise2D01(x, y, seed);
+    size_t idx = static_cast<size_t>(std::floor(n * static_cast<float>(count)));
+    if (idx >= count) idx = count - 1;
+
+    // Micro-jitter (very small) keeps the texture from looking "too smooth" while
+    // preserving the large-scale coherence.
+    const uint32_t jh = hash32(hashCombine(seed ^ 0x91E10DAAu,
+                                          hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y))));
+    const int j = static_cast<int>(jh % 3u) - 1; // -1..+1
+    int ii = static_cast<int>(idx) + j;
+    ii %= static_cast<int>(count);
+    if (ii < 0) ii += static_cast<int>(count);
+    return static_cast<size_t>(ii);
+}
+
+// Select at most one "decal anchor" per small grid cell (jittered position).
+// This spreads decals out more evenly than per-tile independent RNG.
+inline bool jitteredCellAnchor(int x, int y, uint32_t seed, int cellSize, uint32_t& outCellRand) {
+    cellSize = std::max(2, cellSize);
+
+    // Offset the grid per-seed so it doesn't align to the origin every run.
+    const int ox = static_cast<int>((seed      ) & 0xFFu) % cellSize;
+    const int oy = static_cast<int>((seed >> 8 ) & 0xFFu) % cellSize;
+
+    const int gx = x + ox;
+    const int gy = y + oy;
+
+    const int cx = gx / cellSize;
+    const int cy = gy / cellSize;
+
+    outCellRand = hash32(hashCombine(seed, hashCombine(static_cast<uint32_t>(cx), static_cast<uint32_t>(cy))));
+
+    const int px = static_cast<int>(outCellRand % static_cast<uint32_t>(cellSize));
+    const int py = static_cast<int>((outCellRand >> 8) % static_cast<uint32_t>(cellSize));
+
+    if ((gx % cellSize) != px) return false;
+    if ((gy % cellSize) != py) return false;
+    return true;
+}
+
+inline bool shouldPlaceDecalJittered(int x, int y, uint32_t seed, int cellSize, uint8_t chance, uint32_t& outCellRand) {
+    if (!jitteredCellAnchor(x, y, seed, cellSize, outCellRand)) return false;
+    const uint8_t roll = static_cast<uint8_t>((outCellRand >> 16) & 0xFFu);
+    return roll < chance;
+}
+
 } // namespace
 
 
@@ -269,11 +381,14 @@ for (int mask = 0; mask < AUTO_MASKS; ++mask) {
     for (int v = 0; v < autoVarsUsed; ++v) {
         const uint32_t wSeed = hashCombine(0xE0D6E00u + static_cast<uint32_t>(mask) * 131u, static_cast<uint32_t>(v));
         const uint32_t cSeed = hashCombine(0xC0A5E00u + static_cast<uint32_t>(mask) * 191u, static_cast<uint32_t>(v));
+        const uint32_t sSeed = hashCombine(0x5EAD0DEu + static_cast<uint32_t>(mask) * 227u, static_cast<uint32_t>(v));
         for (int f = 0; f < FRAMES; ++f) {
             wallEdgeVar[static_cast<size_t>(mask)][static_cast<size_t>(v)][static_cast<size_t>(f)] =
                 (mask == 0) ? nullptr : textureFromSprite(generateWallEdgeOverlay(wSeed, static_cast<uint8_t>(mask), v, f, spritePx));
             chasmRimVar[static_cast<size_t>(mask)][static_cast<size_t>(v)][static_cast<size_t>(f)] =
                 (mask == 0) ? nullptr : textureFromSprite(generateChasmRimOverlay(cSeed, static_cast<uint8_t>(mask), v, f, spritePx));
+            topDownWallShadeVar[static_cast<size_t>(mask)][static_cast<size_t>(v)][static_cast<size_t>(f)] =
+                (mask == 0) ? nullptr : textureFromSprite(generateTopDownWallShadeOverlay(sSeed, static_cast<uint8_t>(mask), v, f, spritePx));
         }
     }
 }
@@ -466,6 +581,14 @@ for (auto& anim : isoEdgeShadeVar) {
     }
 }
 
+// Isometric chasm gloom overlays
+for (auto& anim : isoChasmGloomVar) {
+    for (SDL_Texture*& t : anim) {
+        if (t) SDL_DestroyTexture(t);
+        t = nullptr;
+    }
+}
+
 // Isometric cast shadow overlays
 for (auto& anim : isoCastShadowVar) {
     for (SDL_Texture*& t : anim) {
@@ -485,6 +608,15 @@ for (auto& maskArr : wallEdgeVar) {
     }
 }
 for (auto& maskArr : chasmRimVar) {
+    for (auto& anim : maskArr) {
+        for (SDL_Texture*& t : anim) {
+            if (t) SDL_DestroyTexture(t);
+            t = nullptr;
+        }
+    }
+}
+
+for (auto& maskArr : topDownWallShadeVar) {
     for (auto& anim : maskArr) {
         for (SDL_Texture*& t : anim) {
             if (t) SDL_DestroyTexture(t);
@@ -733,8 +865,13 @@ void Renderer::updateCamera(const Game& game) {
     clampCam();
 }
 
-bool Renderer::windowToMapTile(int winX, int winY, int& tileX, int& tileY) const {
+bool Renderer::windowToMapTile(const Game& game, int winX, int winY, int& tileX, int& tileY) const {
     if (!renderer) return false;
+
+    const Dungeon& d = game.dungeon();
+    const int W = d.width;
+    const int H = d.height;
+    if (W <= 0 || H <= 0) return false;
 
     float lx = 0.0f, ly = 0.0f;
     SDL_RenderWindowToLogical(renderer, winX, winY, &lx, &ly);
@@ -803,7 +940,7 @@ bool Renderer::windowToMapTile(int winX, int winY, int& tileX, int& tileY) const
             for (int ox = -1; ox <= 1; ++ox) {
                 const int candX = rx + ox;
                 const int candY = ry + oy;
-                if (candX < 0 || candY < 0 || candX >= Game::MAP_W || candY >= Game::MAP_H) continue;
+                if (candX < 0 || candY < 0 || candX >= W || candY >= H) continue;
 
                 const SDL_Rect rect = isoTileRectStable(candX, candY);
                 if (!pointInIsoDiamond(mx, my, rect)) continue;
@@ -826,7 +963,7 @@ bool Renderer::windowToMapTile(int winX, int winY, int& tileX, int& tileY) const
         tileX = found ? bestX : rx;
         tileY = found ? bestY : ry;
 
-        if (tileX < 0 || tileY < 0 || tileX >= Game::MAP_W || tileY >= Game::MAP_H) return false;
+        if (tileX < 0 || tileY < 0 || tileX >= W || tileY >= H) return false;
         return true;
     }
 
@@ -839,7 +976,7 @@ bool Renderer::windowToMapTile(int winX, int winY, int& tileX, int& tileY) const
     tileX = localX + camX;
     tileY = localY + camY;
 
-    if (tileX < 0 || tileY < 0 || tileX >= Game::MAP_W || tileY >= Game::MAP_H) return false;
+    if (tileX < 0 || tileY < 0 || tileX >= W || tileY >= H) return false;
     return true;
 }
 
@@ -912,13 +1049,8 @@ SDL_Texture* Renderer::textureFromSprite(const SpritePixels& s) {
 }
 
 SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int frame, int roomStyle) {
-    uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(level), static_cast<uint32_t>(x)),
-                             static_cast<uint32_t>(y));
-
-    // Slightly decorrelate themed floors between styles.
-    h = hashCombine(h, static_cast<uint32_t>(roomStyle));
-
     const bool iso = (viewMode_ == ViewMode::Isometric);
+    const uint32_t lvl = static_cast<uint32_t>(level);
 
     switch (t) {
         case TileType::Floor: {
@@ -927,18 +1059,25 @@ SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int fram
                                 ? floorThemeVarIso[static_cast<size_t>(s)]
                                 : floorThemeVar[static_cast<size_t>(s)];
             if (vec.empty()) return nullptr;
-            size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(vec.size()));
+
+            // Coherent spatial noise keeps large floors from looking like high-frequency static.
+            const uint32_t seed = hashCombine(lvl ^ (static_cast<uint32_t>(s) * 0x9E3779B9u), 0xF100CAFEu);
+            const size_t idx = pickCoherentVariantIndex(x, y, seed, vec.size());
             return vec[idx][static_cast<size_t>(frame % FRAMES)];
         }
         case TileType::Wall: {
             if (wallVar.empty()) return nullptr;
-            size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(wallVar.size()));
+
+            const uint32_t seed = hashCombine(lvl ^ 0x511A11u, 0x0A11EDu);
+            const size_t idx = pickCoherentVariantIndex(x, y, seed, wallVar.size());
             return wallVar[idx][static_cast<size_t>(frame % FRAMES)];
         }
         case TileType::Chasm: {
             const auto& vec = (iso && !chasmVarIso.empty()) ? chasmVarIso : chasmVar;
             if (vec.empty()) return nullptr;
-            size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(vec.size()));
+
+            const uint32_t seed = hashCombine(lvl ^ 0x000C11A5u, 0x00C4A5Au);
+            const size_t idx = pickCoherentVariantIndex(x, y, seed, vec.size());
             return vec[idx][static_cast<size_t>(frame % FRAMES)];
         }
         // Pillars/doors/stairs are rendered as overlays layered on top of the underlying floor.
@@ -952,7 +1091,9 @@ SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int fram
         case TileType::DoorSecret: {
             // Draw secret doors as walls until discovered (tile is converted to DoorClosed).
             if (wallVar.empty()) return nullptr;
-            size_t idx = static_cast<size_t>(h % static_cast<uint32_t>(wallVar.size()));
+
+            const uint32_t seed = hashCombine(lvl ^ 0x511A11u, 0x0A11EDu);
+            const size_t idx = pickCoherentVariantIndex(x, y, seed, wallVar.size());
             return wallVar[idx][static_cast<size_t>(frame % FRAMES)];
         }
         case TileType::StairsUp:
@@ -967,6 +1108,7 @@ SDL_Texture* Renderer::tileTexture(TileType t, int x, int y, int level, int fram
 }
 
 namespace {
+
     // Sprite cache categories (packed into the high byte of the cache key).
     constexpr uint8_t CAT_ENTITY = 1;
     constexpr uint8_t CAT_ITEM = 2;
@@ -1236,6 +1378,13 @@ void Renderer::ensureIsoTerrainAssets() {
         }
     }
 
+    for (auto& anim : isoChasmGloomVar) {
+        for (SDL_Texture*& t : anim) {
+            if (t) SDL_DestroyTexture(t);
+            t = nullptr;
+        }
+    }
+
     for (auto& anim : isoCastShadowVar) {
         for (SDL_Texture*& t : anim) {
             if (t) SDL_DestroyTexture(t);
@@ -1263,15 +1412,15 @@ void Renderer::ensureIsoTerrainAssets() {
     floorDecalVarIso.clear();
 
     // --- Build isometric terrain ---
-    // Floors/chasm are converted to true 2:1 diamond tiles via projectToIsometricDiamond().
+    // Floors are generated directly as 2:1 diamond tiles in diamond space (no projection).
     for (int st = 0; st < ROOM_STYLES; ++st) {
         auto& vec = floorThemeVarIso[static_cast<size_t>(st)];
         vec.resize(static_cast<size_t>(tileVars));
         for (int i = 0; i < tileVars; ++i) {
             for (int f = 0; f < FRAMES; ++f) {
-                const uint32_t seed = hashCombine(0xC011Du, static_cast<uint32_t>(i * 1000 + f * 17));
-                const SpritePixels sq = generateThemedFloorTile(seed, static_cast<uint8_t>(st), f, spritePx);
-                const SpritePixels iso = projectToIsometricDiamond(sq, hashCombine(seed, static_cast<uint32_t>(st)), f, /*outline=*/true);
+                const uint32_t seed = hashCombine(0xC011Du ^ (static_cast<uint32_t>(st) * 0x9E3779B9u),
+                                                  static_cast<uint32_t>(i * 1000 + f * 17));
+                const SpritePixels iso = generateIsometricThemedFloorTile(seed, static_cast<uint8_t>(st), f, spritePx);
                 vec[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
             }
         }
@@ -1281,8 +1430,7 @@ void Renderer::ensureIsoTerrainAssets() {
     for (int i = 0; i < tileVars; ++i) {
         const uint32_t seed = hashCombine(0xC1A500u, static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
-            const SpritePixels sq = generateChasmTile(seed, f, spritePx);
-            const SpritePixels iso = projectToIsometricDiamond(sq, seed, f, /*outline=*/true);
+            const SpritePixels iso = generateIsometricChasmTile(seed, f, spritePx);
             chasmVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
         }
     }
@@ -1344,6 +1492,21 @@ void Renderer::ensureIsoTerrainAssets() {
         }
     }
 
+    // Isometric chasm gloom overlays (deeper pit adjacency darkening).
+    // These extend farther inward than the rim band so tiles beside chasms read as
+    // slightly darker "drop-off" zones in 2.5D view.
+    for (int m = 0; m < AUTO_MASKS; ++m) {
+        for (int f = 0; f < FRAMES; ++f) {
+            if (m == 0) {
+                isoChasmGloomVar[static_cast<size_t>(m)][static_cast<size_t>(f)] = nullptr;
+                continue;
+            }
+            const uint32_t seed = hashCombine(0xC11A500u, static_cast<uint32_t>(m * 97 + f * 19));
+            isoChasmGloomVar[static_cast<size_t>(m)][static_cast<size_t>(f)] =
+                textureFromSprite(generateIsometricChasmGloomOverlay(seed, static_cast<uint8_t>(m), f, spritePx));
+        }
+    }
+
     // Isometric cast shadow overlays (soft directional shadows from tall occluders).
     // These are transparent diamond tiles keyed by the same 4-neighbor mask encoding as other overlays.
     for (int m = 0; m < AUTO_MASKS; ++m) {
@@ -1386,8 +1549,8 @@ void Renderer::ensureIsoTerrainAssets() {
         }
     }
 
-    // Isometric floor decals: project decal overlays onto the diamond grid so themed
-    // rooms keep their subtle detail in 2.5D view.
+    // Isometric floor decals: generate decals directly in diamond space (instead of projecting
+    // top-down squares) so thin lines stay crisp and patterns align better with the 2.5D grid.
     floorDecalVarIso.clear();
     floorDecalVarIso.resize(static_cast<size_t>(DECAL_STYLES * static_cast<size_t>(decalsPerStyleUsed)));
     for (int st = 0; st < DECAL_STYLES; ++st) {
@@ -1395,8 +1558,7 @@ void Renderer::ensureIsoTerrainAssets() {
             const uint32_t fSeed = hashCombine(0xD3CA10u + static_cast<uint32_t>(st) * 131u, static_cast<uint32_t>(i));
             const size_t idx = static_cast<size_t>(st * decalsPerStyleUsed + i);
             for (int f = 0; f < FRAMES; ++f) {
-                const SpritePixels sq = generateFloorDecalTile(fSeed, static_cast<uint8_t>(st), f, spritePx);
-                const SpritePixels iso = projectToIsometricDiamond(sq, fSeed, f, /*outline=*/false);
+                const SpritePixels iso = generateIsometricFloorDecalOverlay(fSeed, static_cast<uint8_t>(st), f, spritePx);
                 floorDecalVarIso[idx][static_cast<size_t>(f)] = textureFromSprite(iso);
             }
         }
@@ -1406,16 +1568,14 @@ void Renderer::ensureIsoTerrainAssets() {
     for (int i = 0; i < GAS_VARS; ++i) {
         const uint32_t gSeed = hashCombine(0x6A5u, static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
-            const SpritePixels sq = generateConfusionGasTile(gSeed, f, spritePx);
-            const SpritePixels iso = projectToIsometricDiamond(sq, gSeed, f, /*outline=*/false);
+            const SpritePixels iso = generateIsometricGasTile(gSeed, f, spritePx);
             gasVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
         }
     }
     for (int i = 0; i < FIRE_VARS; ++i) {
         const uint32_t fSeed = hashCombine(0xF17Eu, static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
-            const SpritePixels sq = generateFireTile(fSeed, f, spritePx);
-            const SpritePixels iso = projectToIsometricDiamond(sq, fSeed, f, /*outline=*/false);
+            const SpritePixels iso = generateIsometricFireTile(fSeed, f, spritePx);
             fireVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
         }
     }
@@ -1576,6 +1736,55 @@ static void drawVignette(SDL_Renderer* r, const SDL_Rect& area, int thickness, i
 
 void Renderer::render(const Game& game) {
     if (!initialized) return;
+
+    // Frame timing (for the optional perf overlay).
+    if (perfFreq_ == 0) perfFreq_ = SDL_GetPerformanceFrequency();
+    const Uint64 nowCounter = SDL_GetPerformanceCounter();
+    float frameDt = 0.0f;
+    if (perfPrevCounter_ != 0 && perfFreq_ != 0) {
+        const double dt = static_cast<double>(nowCounter - perfPrevCounter_) / static_cast<double>(perfFreq_);
+        // Clamp extreme pauses (debugger break / alt-tab) so EMA doesn't explode.
+        frameDt = static_cast<float>(std::clamp(dt, 0.0, 0.5));
+    }
+    perfPrevCounter_ = nowCounter;
+
+    if (frameDt > 0.0f) {
+        const float instFps = 1.0f / frameDt;
+        const float instMs = frameDt * 1000.0f;
+        const float a = 0.08f; // EMA alpha (small = smoother)
+        if (perfFpsEMA_ <= 0.0f) perfFpsEMA_ = instFps;
+        else perfFpsEMA_ = perfFpsEMA_ * (1.0f - a) + instFps * a;
+        if (perfMsEMA_ <= 0.0f) perfMsEMA_ = instMs;
+        else perfMsEMA_ = perfMsEMA_ * (1.0f - a) + instMs * a;
+
+        perfUpdateTimer_ += frameDt;
+    }
+
+    if (game.perfOverlayEnabled() && perfUpdateTimer_ >= 0.25f) {
+        perfUpdateTimer_ = 0.0f;
+        // Cache formatted text at a low rate to reduce per-frame string churn.
+        const size_t usedB = spriteTex.usedBytes();
+        const size_t usedMB = usedB / (1024u * 1024u);
+        const size_t budgetMB = (textureCacheMB <= 0) ? 0u : static_cast<size_t>(textureCacheMB);
+
+        std::ostringstream l1;
+        l1.setf(std::ios::fixed); l1.precision(1);
+        l1 << "FPS " << perfFpsEMA_ << "  " << perfMsEMA_ << "ms";
+        perfLine1_ = l1.str();
+
+        std::ostringstream l2;
+        l2 << "SPRITES " << spriteTex.size() << "  VRAM " << usedMB;
+        if (budgetMB > 0) l2 << "/" << budgetMB;
+        l2 << "MB  H/M " << spriteTex.hits() << "/" << spriteTex.misses() << "  E " << spriteTex.evictions();
+        perfLine2_ = l2.str();
+
+        std::ostringstream l3;
+        l3 << "TURN " << game.turns() << "  SEED " << game.seed();
+        // Determinism hash is potentially expensive; compute it only at this low rate.
+        const uint64_t h = game.determinismHash();
+        l3 << "  HASH " << std::hex << std::uppercase << (h & 0xFFFFFFFFull);
+        perfLine3_ = l3.str();
+    }
 
     // Keep renderer-side view mode synced (main also calls setViewMode each frame).
     viewMode_ = game.viewMode();
@@ -1880,6 +2089,23 @@ void Renderer::render(const Game& game) {
         return m;
     };
 
+
+
+    auto isShadeOccluder = [&](TileType tt) -> bool {
+        // Superset of wall-mass: also treat a few tall overlay props as occluders for floor contact shadows.
+        return isWallMass(tt) || (tt == TileType::Boulder) || (tt == TileType::Fountain) || (tt == TileType::Altar);
+    };
+
+    // Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is a shade occluder")
+    auto wallOccMaskAt = [&](int tx, int ty) -> uint8_t {
+        uint8_t m = 0;
+        if (d.inBounds(tx, ty - 1) && isShadeOccluder(d.at(tx, ty - 1).type)) m |= 0x01u; // N
+        if (d.inBounds(tx + 1, ty) && isShadeOccluder(d.at(tx + 1, ty).type)) m |= 0x02u; // E
+        if (d.inBounds(tx, ty + 1) && isShadeOccluder(d.at(tx, ty + 1).type)) m |= 0x04u; // S
+        if (d.inBounds(tx - 1, ty) && isShadeOccluder(d.at(tx - 1, ty).type)) m |= 0x08u; // W
+        return m;
+    };
+
     auto chasmOpenMaskAt = [&](int tx, int ty) -> uint8_t {
         uint8_t m = 0;
         auto isCh = [&](int xx, int yy) -> bool {
@@ -1934,13 +2160,15 @@ void Renderer::render(const Game& game) {
             if (base == TileType::Floor && t.type != TileType::Wall && t.type != TileType::DoorSecret && !floorDecalVarIso.empty()) {
                 const int dStyle = style;
 
-                const uint32_t h2 = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
-                                                static_cast<uint32_t>(y)) ^ 0xDECA151u;
-                const uint32_t r = hash32(h2);
-                const uint8_t roll = static_cast<uint8_t>(r & 0xFFu);
+                // Jittered-grid placement gives a more even, less clumpy distribution than independent per-tile RNG.
+                const uint32_t dSeed = hashCombine(static_cast<uint32_t>(game.depth()) ^ 0xDECA151u,
+                                                  static_cast<uint32_t>(dStyle) * 0x9E3779B9u);
+                uint32_t cellR = 0;
+                const int cell = 3;
 
-                if (dStyle >= 0 && dStyle < DECAL_STYLES && roll < decalChance[static_cast<size_t>(dStyle)]) {
-                    const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(decalsPerStyleUsed));
+                if (dStyle >= 0 && dStyle < DECAL_STYLES &&
+                    shouldPlaceDecalJittered(x, y, dSeed, cell, decalChance[static_cast<size_t>(dStyle)], cellR)) {
+                    const int var = static_cast<int>((cellR >> 24) % static_cast<uint32_t>(decalsPerStyleUsed));
                     const size_t di = static_cast<size_t>(dStyle * decalsPerStyleUsed + var);
 
                     if (di < floorDecalVarIso.size()) {
@@ -1954,6 +2182,7 @@ void Renderer::render(const Game& game) {
                         }
                     }
                 }
+
             }
 
             // Ground-plane overlays that should stay on the diamond tile.
@@ -2039,6 +2268,45 @@ void Renderer::render(const Game& game) {
                             a2 = (a2 * static_cast<int>(lm)) / 255;
                             if (!t.visible) a2 = std::min(a2, 26);
 
+                            // Scale shadow strength by caster type: walls/closed doors should feel taller
+                            // than props like altars/fountains, so their cast shadow reads more clearly.
+                            auto shadowStrengthFor = [&](TileType tt) -> float {
+                                switch (tt) {
+                                    case TileType::Wall:
+                                    case TileType::DoorSecret:
+                                        return 1.00f;
+                                    case TileType::DoorClosed:
+                                    case TileType::DoorLocked:
+                                        return 0.95f;
+                                    case TileType::Pillar:
+                                        return 0.85f;
+                                    case TileType::Boulder:
+                                        return 0.80f;
+                                    case TileType::Fountain:
+                                        return 0.72f;
+                                    case TileType::Altar:
+                                        return 0.68f;
+                                    case TileType::DoorOpen:
+                                        return 0.65f;
+                                    default:
+                                        return 0.80f;
+                                }
+                            };
+
+                            float strength = 0.0f;
+                            auto considerStrength = [&](int nx, int ny) {
+                                if (!d.inBounds(nx, ny)) return;
+                                const TileType nt = d.at(nx, ny).type;
+                                if (isIsoShadowCaster(nt)) strength = std::max(strength, shadowStrengthFor(nt));
+                            };
+                            considerStrength(x, y - 1);
+                            considerStrength(x - 1, y);
+                            considerStrength(x - 1, y - 1);
+
+                            if (strength > 0.0f) {
+                                a2 = static_cast<int>(std::lround(static_cast<float>(a2) * strength));
+                            }
+
                             SDL_SetTextureColorMod(stex, 0, 0, 0);
                             SDL_SetTextureAlphaMod(stex, static_cast<Uint8>(std::clamp(a2, 0, 255)));
                             SDL_RenderCopy(renderer, stex, nullptr, &dst);
@@ -2106,8 +2374,25 @@ void Renderer::render(const Game& game) {
                             SDL_SetTextureAlphaMod(etex, 255);
                         };
 
+                        auto drawGloom = [&](uint8_t mask, Color col, int alpha) {
+                            if (mask == 0u || alpha <= 0) return;
+                            if (alpha > 255) alpha = 255;
+                            SDL_Texture* gtex = isoChasmGloomVar[static_cast<size_t>(mask)][static_cast<size_t>(frame % FRAMES)];
+                            if (!gtex) return;
+                            SDL_SetTextureColorMod(gtex, col.r, col.g, col.b);
+                            SDL_SetTextureAlphaMod(gtex, static_cast<Uint8>(alpha));
+                            SDL_RenderCopy(renderer, gtex, nullptr, &dst);
+                            SDL_SetTextureColorMod(gtex, 255, 255, 255);
+                            SDL_SetTextureAlphaMod(gtex, 255);
+                        };
+
                         // Chasm edges: faint blue rim + darkness.
                         if (chMask != 0u) {
+                            // Extra interior darkening to suggest the "drop" into the chasm.
+                            int gloomA = baseA2 + 18;
+                            if (!t.visible) gloomA = std::min(gloomA, baseA2 + 10);
+                            drawGloom(chMask, {0, 0, 0, 255}, std::max(12, gloomA));
+
                             drawEdge(chMask, {40, 80, 160, 255}, std::max(8, baseA2 / 2));
                             drawEdge(chMask, {0, 0, 0, 255}, baseA2);
                         }
@@ -2131,9 +2416,8 @@ void Renderer::render(const Game& game) {
 
             if (t.type == TileType::Wall || t.type == TileType::DoorSecret) {
                 if (!wallBlockVarIso.empty()) {
-                    const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
-                                                   static_cast<uint32_t>(y)) ^ 0xAA110u ^ 0xB10Cu;
-                    const size_t v = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(wallBlockVarIso.size()));
+                    const uint32_t seed = hashCombine(static_cast<uint32_t>(game.depth()) ^ 0x00AA110u, 0x000B10Cu);
+                    const size_t v = pickCoherentVariantIndex(x, y, seed, wallBlockVarIso.size());
                     SDL_Texture* wtex = wallBlockVarIso[v][static_cast<size_t>(frame % FRAMES)];
                     // Wall blocks are already outlined in their procedural art.
                     drawTall(wtex, /*outline=*/false);
@@ -2238,13 +2522,15 @@ void Renderer::render(const Game& game) {
         if (baseType == TileType::Floor && !floorDecalVar.empty()) {
             const int style = floorStyle;
 
-            const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
-                                           static_cast<uint32_t>(y)) ^ 0xDECA151u;
-            const uint32_t r = hash32(h);
-            const uint8_t roll = static_cast<uint8_t>(r & 0xFFu);
+            // Jittered-grid placement gives a more even, less clumpy distribution than independent per-tile RNG.
+            const uint32_t dSeed = hashCombine(static_cast<uint32_t>(game.depth()) ^ 0xDECA151u,
+                                              static_cast<uint32_t>(style) * 0x9E3779B9u);
+            uint32_t cellR = 0;
+            const int cell = 3;
 
-            if (roll < decalChance[static_cast<size_t>(style)]) {
-                const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(decalsPerStyleUsed));
+            if (style >= 0 && style < DECAL_STYLES &&
+                shouldPlaceDecalJittered(x, y, dSeed, cell, decalChance[static_cast<size_t>(style)], cellR)) {
+                const int var = static_cast<int>((cellR >> 24) % static_cast<uint32_t>(decalsPerStyleUsed));
                 const size_t di = static_cast<size_t>(style * decalsPerStyleUsed + var);
 
                 if (di < floorDecalVar.size()) {
@@ -2261,38 +2547,84 @@ void Renderer::render(const Game& game) {
             }
         }
 
+
+        // Top-down wall contact shadows (ambient occlusion): subtle depth shading on floors next to walls.
+        if (baseType == TileType::Floor) {
+            const uint8_t occMask = wallOccMaskAt(x, y);
+            if (occMask != 0u) {
+                const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                                               static_cast<uint32_t>(y)) ^ 0x5EAD0DEu ^ static_cast<uint32_t>(occMask);
+                const uint32_t r = hash32(h);
+                const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(autoVarsUsed));
+
+                SDL_Texture* stex = topDownWallShadeVar[static_cast<size_t>(occMask)][v][static_cast<size_t>(frame % FRAMES)];
+                if (stex) {
+                    // Keep subtle: stronger when visible, weaker when only "explored".
+                    const Uint8 a = t.visible ? 140 : (game.darknessActive() ? 70 : 95);
+                    SDL_SetTextureColorMod(stex, 255, 255, 255);
+                    SDL_SetTextureAlphaMod(stex, a);
+                    SDL_RenderCopy(renderer, stex, nullptr, &dst);
+                    SDL_SetTextureColorMod(stex, 255, 255, 255);
+                    SDL_SetTextureAlphaMod(stex, 255);
+                }
+            }
+        }
+
         // Occasional wall stains/cracks (very low frequency; helps break large flat walls).
         if ((t.type == TileType::Wall || t.type == TileType::DoorSecret) && !wallDecalVar.empty()) {
             const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
                                            static_cast<uint32_t>(y)) ^ 0xBADC0DEu;
             const uint32_t r = hash32(h);
-            if (static_cast<uint8_t>(r & 0xFFu) < 18u) {
-                int style = 0;
-                // If a neighboring floor belongs to a special room, bias the wall decal style.
-                const int dx[4] = {1,-1,0,0};
-                const int dy[4] = {0,0,1,-1};
+            const uint8_t roll = static_cast<uint8_t>(r & 0xFFu);
+            if (roll < 18u) {
+                // Avoid clumps: only render if this tile is the lowest-roll candidate among immediate wall neighbors.
+                bool keep = true;
+                const int ndx[4] = {1, -1, 0, 0};
+                const int ndy[4] = {0, 0, 1, -1};
                 for (int k = 0; k < 4; ++k) {
-                    const int nx = x + dx[k];
-                    const int ny = y + dy[k];
+                    const int nx = x + ndx[k];
+                    const int ny = y + ndy[k];
                     if (!d.inBounds(nx, ny)) continue;
-                    if (d.at(nx, ny).type != TileType::Floor) continue;
-                    const size_t jj = static_cast<size_t>(ny * d.width + nx);
-                    if (jj >= roomTypeCache.size()) continue;
-                    const int s2 = styleForRoomType(roomTypeCache[jj]);
-                    if (s2 != 0) { style = s2; break; }
+                    const TileType nt = d.at(nx, ny).type;
+                    if (nt != TileType::Wall && nt != TileType::DoorSecret) continue;
+
+                    const uint32_t nh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(nx)),
+                                                    static_cast<uint32_t>(ny)) ^ 0xBADC0DEu;
+                    const uint32_t nr = hash32(nh);
+                    const uint8_t nroll = static_cast<uint8_t>(nr & 0xFFu);
+                    if (nroll < 18u && nroll < roll) { keep = false; break; }
                 }
 
-                const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(decalsPerStyleUsed));
-                const size_t di = static_cast<size_t>(style * decalsPerStyleUsed + var);
-                if (di < wallDecalVar.size()) {
-                    SDL_Texture* dtex = wallDecalVar[di][static_cast<size_t>(frame % FRAMES)];
-                    if (dtex) {
-                        const Uint8 a = t.visible ? 220 : 120;
-                        SDL_SetTextureColorMod(dtex, mod.r, mod.g, mod.b);
-                        SDL_SetTextureAlphaMod(dtex, a);
-                        SDL_RenderCopy(renderer, dtex, nullptr, &dst);
-                        SDL_SetTextureColorMod(dtex, 255, 255, 255);
-                        SDL_SetTextureAlphaMod(dtex, 255);
+                if (!keep) {
+                    // A neighboring wall tile "won" this cluster; skip to keep stains sparse and nicely distributed.
+                } else {
+                    int style = 0;
+                    // If a neighboring floor belongs to a special room, bias the wall decal style.
+                    const int dx[4] = {1,-1,0,0};
+                    const int dy[4] = {0,0,1,-1};
+                    for (int k = 0; k < 4; ++k) {
+                        const int nx = x + dx[k];
+                        const int ny = y + dy[k];
+                        if (!d.inBounds(nx, ny)) continue;
+                        if (d.at(nx, ny).type != TileType::Floor) continue;
+                        const size_t jj = static_cast<size_t>(ny * d.width + nx);
+                        if (jj >= roomTypeCache.size()) continue;
+                        const int s2 = styleForRoomType(roomTypeCache[jj]);
+                        if (s2 != 0) { style = s2; break; }
+                    }
+    
+                    const int var = static_cast<int>((r >> 8) % static_cast<uint32_t>(decalsPerStyleUsed));
+                    const size_t di = static_cast<size_t>(style * decalsPerStyleUsed + var);
+                    if (di < wallDecalVar.size()) {
+                        SDL_Texture* dtex = wallDecalVar[di][static_cast<size_t>(frame % FRAMES)];
+                        if (dtex) {
+                            const Uint8 a = t.visible ? 220 : 120;
+                            SDL_SetTextureColorMod(dtex, mod.r, mod.g, mod.b);
+                            SDL_SetTextureAlphaMod(dtex, a);
+                            SDL_RenderCopy(renderer, dtex, nullptr, &dst);
+                            SDL_SetTextureColorMod(dtex, 255, 255, 255);
+                            SDL_SetTextureAlphaMod(dtex, 255);
+                        }
                     }
                 }
             }
@@ -2748,7 +3080,7 @@ void Renderer::render(const Game& game) {
     {
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
-        const bool haveGasTex = (gasVar[0][0] != nullptr);
+        const bool haveGasTex = isoView ? (gasVarIso[0][0] != nullptr) : (gasVar[0][0] != nullptr);
 
         for (int y = 0; y < d.height; ++y) {
             for (int x = 0; x < d.width; ++x) {
@@ -2776,7 +3108,7 @@ void Renderer::render(const Game& game) {
                     const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(GAS_VARS));
                     const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
 
-                    SDL_Texture* gtex = gasVar[vi][fi];
+                    SDL_Texture* gtex = (isoView && gasVarIso[0][0] != nullptr) ? gasVarIso[vi][fi] : gasVar[vi][fi];
                     if (gtex) {
                         // Multiply a "signature" green by the tile lighting/tint so it feels embedded in the world.
                         const Color lmod = tileColorMod(x, y, /*visible=*/true);
@@ -3414,6 +3746,10 @@ void Renderer::render(const Game& game) {
 
     if (game.isCommandOpen()) {
         drawCommandOverlay(game);
+    }
+
+    if (game.perfOverlayEnabled()) {
+        drawPerfOverlay(game);
     }
 
     SDL_RenderPresent(renderer);
@@ -4552,6 +4888,49 @@ void Renderer::drawCommandOverlay(const Game& game) {
     drawText5x7(renderer, x, y, 1, gray, "ENTER RUN  ESC CANCEL  UP/DOWN HISTORY  TAB COMPLETE");
 }
 
+
+void Renderer::drawPerfOverlay(const Game& game) {
+    (void)game;
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    const Color white{255, 255, 255, 255};
+    const Color gray{200, 200, 200, 255};
+
+    // Use cached strings (updated at a low rate in render()) to avoid per-frame churn.
+    const std::string& l1 = perfLine1_;
+    const std::string& l2 = perfLine2_;
+    const std::string& l3 = perfLine3_;
+
+    const int scale = 1;
+    const int pad = 6;
+    const int lineH = 10 * scale; // 5x7 font + spacing
+    const int charW = 6 * scale;
+
+    int maxChars = 0;
+    maxChars = std::max(maxChars, static_cast<int>(l1.size()));
+    maxChars = std::max(maxChars, static_cast<int>(l2.size()));
+    maxChars = std::max(maxChars, static_cast<int>(l3.size()));
+
+    // Keep compact and avoid covering too much of the map.
+    const int w = std::clamp(pad * 2 + maxChars * charW, 120, winW - 16);
+    const int h = pad * 2 + 3 * lineH + 2;
+    const int x = 8;
+    const int y = 8;
+
+    SDL_Rect bg{x, y, w, h};
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 160);
+    SDL_RenderFillRect(renderer, &bg);
+
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 80);
+    SDL_RenderDrawRect(renderer, &bg);
+
+    int ty = y + pad;
+    if (!l1.empty()) { drawText5x7(renderer, x + pad, ty, scale, white, l1); ty += lineH; }
+    if (!l2.empty()) { drawText5x7(renderer, x + pad, ty, scale, gray, l2); ty += lineH; }
+    if (!l3.empty()) { drawText5x7(renderer, x + pad, ty, scale, gray, l3); ty += lineH; }
+}
+
+
 void Renderer::drawHelpOverlay(const Game& game) {
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
@@ -4601,6 +4980,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     lineGray("F2 OPTIONS  # EXTENDED COMMANDS  (TYPE + ENTER)");
     lineGray("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART");
     lineGray("F11 FULLSCREEN  F12 SCREENSHOT (BINDABLE)");
+    lineGray("SHIFT+F10 PERF OVERLAY (BINDABLE)");
     lineGray("F3/SHIFT+M MESSAGE HISTORY  (/ SEARCH, CTRL+L CLEAR)");
     lineGray("F4 MONSTER CODEX  (TAB SORT, LEFT/RIGHT FILTER)");
     lineGray("\\ DISCOVERIES  (TAB/LEFT/RIGHT FILTER, SHIFT+S SORT)");
@@ -4608,7 +4988,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
 
     y += 6;
     lineWhite("EXTENDED COMMAND EXAMPLES:");
-    lineGray("save | load | loadauto | quit | version | seed | name | scores");
+    lineGray("save | load | loadauto | quit | version | seed | name | scores | perf");
     lineGray("autopickup off/gold/all");
     lineGray("mark [note|danger|loot] <label>  marks  travel <index|label>");
     lineGray("name <text>  scores [N]");
@@ -5788,6 +6168,7 @@ void Renderer::drawDiscoveriesOverlay(const Game& game) {
                 case ItemKind::RingFocus:           return {"PASSIVE FOCUS BONUS.", "", ""};
                 case ItemKind::RingProtection:      return {"PASSIVE DEFENSE BONUS.", "", ""};
                 case ItemKind::RingSearching:       return {"PASSIVE SEARCHING.", "(AUTO-SEARCHES AROUND YOU)", "(ENCHANT/BUC BOOSTS POTENCY)"};
+                case ItemKind::RingSustenance:     return {"PASSIVE SUSTENANCE.", "(SLOWS HUNGER LOSS IF ENABLED)", "(ENCHANT/BUC BOOSTS POTENCY)"};
 
                 // Wands
                 case ItemKind::WandSparks:          return {"FIRES SPARKS.", "(RANGED, USES CHARGES)", ""};

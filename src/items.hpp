@@ -165,6 +165,7 @@ enum class ItemKind : uint8_t {
 
     // --- New rings (append-only; keep ids stable for save compatibility) ---
     RingSearching,
+    RingSustenance,
 };
 
 // Item "egos" (NetHack-style brands / special properties) applied to some gear.
@@ -203,7 +204,7 @@ inline int egoValueMultiplierPct(ItemEgo e) {
 }
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::RingSearching) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::RingSustenance) + 1;
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;

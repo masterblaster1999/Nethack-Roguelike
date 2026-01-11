@@ -60,6 +60,10 @@ Comments start with `#` or `;`.
 - `show_effect_timers` (`true/false`, default `true`)
   - When `true`, status tags show remaining turns (example: `POISON(6)`).
 
+- `show_perf_overlay` (`true/false`, default `false`)
+  - Shows a tiny **performance HUD** (FPS + sprite cache stats) in the top-left.
+  - Toggle in-game via **Shift+F10** (default) or `#perf on/off`.
+
 - `vsync` (`true/false`, default `true`)
   - When `true`, the renderer uses vsync (smoother animation, lower CPU usage).
 
@@ -203,7 +207,7 @@ Available actions:
 **UI / Meta**
 - `help`, `options`, `command`
 - `message_history`, `codex`, `discoveries`
-- `toggle_minimap`, `minimap_zoom_in`, `minimap_zoom_out`, `toggle_stats`
+- `toggle_minimap`, `minimap_zoom_in`, `minimap_zoom_out`, `toggle_stats`, `toggle_perf_overlay`
 - `fullscreen`, `screenshot`
 - `save`, `load`, `load_auto`, `restart`
 - `log_up`, `log_down`

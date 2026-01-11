@@ -63,6 +63,20 @@ SpritePixels generateChasmTile(uint32_t seed, int frame, int pxSize = 16);
 // NOTE: The input is assumed to be a square sprite.
 SpritePixels projectToIsometricDiamond(const SpritePixels& src, uint32_t seed, int frame, bool outline = true);
 
+// Purpose-built isometric themed floor tile (diamond output).
+// Generated directly in diamond space so floor patterns align with the 2:1 isometric grid
+// (no projection artifacts), improving crispness and material readability in 2.5D view.
+//
+// style mapping matches generateThemedFloorTile():
+//  0 = Normal, 1 = Treasure, 2 = Lair, 3 = Shrine, 4 = Secret, 5 = Vault, 6 = Shop
+SpritePixels generateIsometricThemedFloorTile(uint32_t seed, uint8_t style, int frame, int pxSize = 16);
+
+
+// Purpose-built isometric chasm tile (diamond output).
+// Drawn directly in diamond space so chasms read with an inner rim + shaded walls
+// (depth cue) in 2.5D view, rather than relying on a projected top-down tile.
+SpritePixels generateIsometricChasmTile(uint32_t seed, int frame, int pxSize = 16);
+
 // Generates a simple 2.5D isometric wall "block" sprite (square output) that can be
 // drawn using the renderer's sprite anchoring (mapSpriteDst) to add verticality.
 SpritePixels generateIsometricWallBlockTile(uint32_t seed, int frame, int pxSize = 16);
@@ -81,6 +95,11 @@ SpritePixels generateIsometricBoulderBlockTile(uint32_t seed, int frame, int pxS
 // Isometric ground contact shadow / rim overlay (diamond, transparent).
 // Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is an occluder")
 SpritePixels generateIsometricEdgeShadeOverlay(uint32_t seed, uint8_t mask, int frame, int pxSize = 16);
+// Isometric chasm "gloom" overlay (diamond, transparent).
+// This extends farther inward than the thin rim/edge shade and is used to subtly
+// darken floor tiles adjacent to chasms in isometric view (stronger depth cue).
+// Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is a chasm")
+SpritePixels generateIsometricChasmGloomOverlay(uint32_t seed, uint8_t mask, int frame, int pxSize = 16);
 // Isometric cast shadow overlay (diamond, transparent).
 // Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is a tall shadow caster")
 // In the current lighting model (light from top-left), only N and W are used by the renderer.
@@ -108,6 +127,9 @@ SpritePixels generateUIOrnamentTile(UITheme theme, uint32_t seed, int frame, int
 
 // Transparent overlay decals (extra tile variety / room theming)
 SpritePixels generateFloorDecalTile(uint32_t seed, uint8_t style, int frame, int pxSize = 16);
+// Isometric floor decal overlay (diamond, transparent).
+// Drawn directly in diamond space to avoid projection artifacts in isometric view.
+SpritePixels generateIsometricFloorDecalOverlay(uint32_t seed, uint8_t style, int frame, int pxSize = 16);
 SpritePixels generateWallDecalTile(uint32_t seed, uint8_t style, int frame, int pxSize = 16);
 
 // Transparent autotile overlays (edge/corner shaping for walls/chasm)
@@ -115,11 +137,21 @@ SpritePixels generateWallDecalTile(uint32_t seed, uint8_t style, int frame, int 
 SpritePixels generateWallEdgeOverlay(uint32_t seed, uint8_t openMask, int variant, int frame, int pxSize = 16);
 SpritePixels generateChasmRimOverlay(uint32_t seed, uint8_t openMask, int variant, int frame, int pxSize = 16);
 
+// Top-down ground contact shadow / ambient-occlusion overlay (square, transparent).
+// Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is a wall-mass occluder")
+SpritePixels generateTopDownWallShadeOverlay(uint32_t seed, uint8_t mask, int variant, int frame, int pxSize = 16);
+
 // Environmental field tile (confusion gas), drawn as a translucent overlay.
 SpritePixels generateConfusionGasTile(uint32_t seed, int frame, int pxSize = 16);
 
 // Environmental field tile (fire), drawn as a translucent overlay.
 SpritePixels generateFireTile(uint32_t seed, int frame, int pxSize = 16);
+
+// Isometric variants for environmental overlays (diamond, transparent).
+// Generated directly in diamond space (no projection) so animated VFX align cleanly
+// with the 2:1 isometric grid in ViewMode::Isometric.
+SpritePixels generateIsometricGasTile(uint32_t seed, int frame, int pxSize = 16);
+SpritePixels generateIsometricFireTile(uint32_t seed, int frame, int pxSize = 16);
 
 // HUD/status icon (procedural). Defaults to 16x16.
 SpritePixels generateEffectIcon(EffectKind kind, int frame, int pxSize = 16);

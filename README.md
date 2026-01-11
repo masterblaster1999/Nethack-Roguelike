@@ -71,6 +71,7 @@ A tiny NetHack-inspired roguelike with:
   - Procedural entity/item/projectile sprites are now cached with an **LRU texture cache** instead of growing unbounded.
   - New setting: `texture_cache_mb` (0 = unlimited) to cap approximate VRAM usage for cached sprites.
   - The **Stats** overlay (Shift+Tab) shows cache usage, hits/misses, and evictions.
+  - New: a tiny **Perf overlay** (Shift+F10 by default, or `#perf on/off`) shows FPS/frame time plus a low-rate determinism hash for debugging.
   - When using very large tiles, the renderer also reduces decal/autotile-variant counts to keep texture memory reasonable.
 
 - **Configurable keybindings**: add `bind_*` entries in `procrogue_settings.ini` (multiple keys per action).

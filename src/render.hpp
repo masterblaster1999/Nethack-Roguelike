@@ -179,7 +179,7 @@ public:
     // Input helpers
     // Converts a window pixel coordinate to a map tile coordinate.
     // Returns false if the coordinate is outside the map region.
-    bool windowToMapTile(int winX, int winY, int& tileX, int& tileY) const;
+    bool windowToMapTile(const Game& game, int winX, int winY, int& tileX, int& tileY) const;
 
     // Converts a window pixel coordinate to a minimap tile coordinate.
     // Returns false if the coordinate is outside the minimap map region.
@@ -202,6 +202,16 @@ private:
     int tile = 32;
     int hudH = 160;
     bool vsyncEnabled = false;
+
+    // Perf overlay state (UI-only).
+    Uint64 perfFreq_ = 0;
+    Uint64 perfPrevCounter_ = 0;
+    float perfFpsEMA_ = 0.0f;
+    float perfMsEMA_ = 0.0f;
+    float perfUpdateTimer_ = 0.0f;
+    std::string perfLine1_;
+    std::string perfLine2_;
+    std::string perfLine3_;
 
     // Viewport size in tiles (derived from winW/winH and tile size).
     // When this is smaller than the dungeon dimensions, a scrolling camera is used.
@@ -296,9 +306,17 @@ private:
     std::array<std::array<AnimTex, AUTO_VARS>, AUTO_MASKS> wallEdgeVar{};
     std::array<std::array<AnimTex, AUTO_VARS>, AUTO_MASKS> chasmRimVar{};
 
+    // Top-down ambient occlusion / contact shadow overlays for ground tiles near wall-mass neighbors.
+    // Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is a wall-mass occluder")
+    std::array<std::array<AnimTex, AUTO_VARS>, AUTO_MASKS> topDownWallShadeVar{};
+
     // Isometric edge shading overlays (diamond masks) for contact shadows / chasm rims.
     // Generated lazily together with the other isometric terrain textures.
     std::array<AnimTex, AUTO_MASKS> isoEdgeShadeVar{};
+
+    // Isometric chasm gloom overlays (diamond masks) that extend farther inward than
+    // the rim band, darkening floor tiles adjacent to chasms for stronger depth cues.
+    std::array<AnimTex, AUTO_MASKS> isoChasmGloomVar{};
 
     // Isometric cast shadow overlays (diamond masks) for tall occluders.
     // These are soft shadows drawn on the ground plane to reinforce 2.5D depth.
@@ -397,4 +415,7 @@ private:
     void drawMinimapOverlay(const Game& game);
     void drawStatsOverlay(const Game& game);
     void drawLevelUpOverlay(const Game& game);
+
+    // Debug UI
+    void drawPerfOverlay(const Game& game);
 };

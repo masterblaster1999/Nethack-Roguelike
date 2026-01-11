@@ -77,6 +77,39 @@ void Game::monsterTurn() {
 
     const int dirs[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
 
+    // Discovered traps are visible in the world; most creatures will try to route around them
+    // when possible. Build a per-tile penalty map so pathfinding can be trap-aware without
+    // doing an O(traps) lookup per tile expansion.
+    const size_t nTiles = static_cast<size_t>(W * H);
+    std::vector<int> discoveredTrapPenalty;
+    discoveredTrapPenalty.assign(nTiles, 0);
+
+    auto trapPenaltyForAi = [](TrapKind k) -> int {
+        switch (k) {
+            case TrapKind::TrapDoor:       return 18;
+            case TrapKind::RollingBoulder: return 17;
+            case TrapKind::PoisonDart:     return 14;
+            case TrapKind::Spike:          return 14;
+            case TrapKind::PoisonGas:      return 13;
+            case TrapKind::ConfusionGas:   return 12;
+            case TrapKind::Web:            return 10;
+            case TrapKind::LetheMist:      return 9;
+            case TrapKind::Alarm:          return 7;
+            case TrapKind::Teleport:       return 6;
+            default: return 12;
+        }
+    };
+
+    for (const auto& tr : trapsCur) {
+        if (!tr.discovered) continue;
+        if (!dung.inBounds(tr.pos.x, tr.pos.y)) continue;
+        const size_t i = static_cast<size_t>(idx(tr.pos.x, tr.pos.y));
+        if (i >= discoveredTrapPenalty.size()) continue;
+        const int p = trapPenaltyForAi(tr.kind);
+        if (p > discoveredTrapPenalty[i]) discoveredTrapPenalty[i] = p;
+    }
+
+
     // Some monsters can bash through locked doors while hunting.
     // We model this in pathfinding by treating locked doors as passable
     // with a steep movement cost (representing repeated smash attempts).
@@ -149,6 +182,21 @@ void Game::monsterTurn() {
         if (g > 0u) {
             // Moderate penalty so monsters avoid lingering gas clouds when possible.
             cost += 6 + static_cast<int>(g) / 32; // +6..+13
+        }
+
+        const uint8_t pg = this->poisonGasAt(x, y);
+        if (pg > 0u) {
+            // Poison gas is dangerous; prefer to route around it when possible.
+            cost += 7 + static_cast<int>(pg) / 32; // +7..+14
+        }
+
+        const size_t ti = static_cast<size_t>(idx(x, y));
+        if (ti < discoveredTrapPenalty.size()) {
+            const int tp = discoveredTrapPenalty[ti];
+            if (tp > 0) {
+                // Traps are a known hazard: monsters path around discovered traps if there is a reasonable alternative.
+                cost += tp;
+            }
         }
 
         return cost;

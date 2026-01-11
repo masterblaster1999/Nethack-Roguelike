@@ -2502,7 +2502,7 @@ if (ver >= 33u) {
         autoExploreSearchAnnounced = false;
         // Keep the bookkeeping array initialized for determinism and to avoid
         // out-of-bounds issues in optional secret-hunting logic.
-        autoExploreSearchTriedTurns.assign(MAP_W * MAP_H, 0);
+        autoExploreSearchTriedTurns.clear();
 
         // v40 migration: older saves (v39 and earlier) could generate shop rooms without a shopkeeper.
         // Backfill a peaceful shopkeeper so the buy/sell/#pay loop works mid-run without forcing a new game.
@@ -2609,6 +2609,10 @@ if (ver >= 33u) {
         }
 
         restoreLevel(depth_);
+
+        // Auto-explore bookkeeping is transient per-floor; size it to this dungeon.
+        autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+
         recomputeFov();
 
         // Encumbrance message throttling: avoid spurious "YOU FEEL BURDENED" on the first post-load turn.

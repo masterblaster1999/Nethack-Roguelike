@@ -28,15 +28,15 @@ void Game::beginLookAt(Vec2i p) {
 
 void Game::setLookCursor(Vec2i p) {
     if (!looking) return;
-    p.x = clampi(p.x, 0, MAP_W - 1);
-    p.y = clampi(p.y, 0, MAP_H - 1);
+    p.x = clampi(p.x, 0, dung.width - 1);
+    p.y = clampi(p.y, 0, dung.height - 1);
     lookPos = p;
 }
 
 void Game::setTargetCursor(Vec2i p) {
     if (!targeting) return;
-    p.x = clampi(p.x, 0, MAP_W - 1);
-    p.y = clampi(p.y, 0, MAP_H - 1);
+    p.x = clampi(p.x, 0, dung.width - 1);
+    p.y = clampi(p.y, 0, dung.height - 1);
     targetPos = p;
     recomputeTargetLine();
 }
@@ -44,8 +44,8 @@ void Game::setTargetCursor(Vec2i p) {
 void Game::moveLookCursor(int dx, int dy) {
     if (!looking) return;
     Vec2i p = lookPos;
-    p.x = clampi(p.x + dx, 0, MAP_W - 1);
-    p.y = clampi(p.y + dy, 0, MAP_H - 1);
+    p.x = clampi(p.x + dx, 0, dung.width - 1);
+    p.y = clampi(p.y + dy, 0, dung.height - 1);
     lookPos = p;
 }
 
@@ -258,9 +258,18 @@ void Game::restUntilSafe() {
     if (isFinished()) return;
     if (inputLock) return;
 
+    // Cancel auto-move to avoid fighting the stepper.
+    if (autoMode != AutoMoveMode::None) {
+        stopAutoMove(true);
+    }
+
+    const int manaMax = playerManaMax();
+    const bool needHp = (player().hp < player().hpMax);
+    const bool needMana = (manaMax > 0 && mana_ < manaMax);
+
     // If nothing to do, don't burn time.
-    if (player().hp >= player().hpMax) {
-        pushMsg("YOU ARE ALREADY AT FULL HEALTH.", MessageKind::System, true);
+    if (!needHp && !needMana) {
+        pushMsg("YOU ARE ALREADY FULLY RESTED.", MessageKind::System, true);
         return;
     }
 
@@ -270,24 +279,81 @@ void Game::restUntilSafe() {
         return;
     }
 
+    // Don't auto-rest with danger in sight.
+    if (anyVisibleHostiles()) {
+        pushMsg("TOO DANGEROUS TO REST!", MessageKind::Warning, true);
+        return;
+    }
+
+    // Hunger safety: if starvation is enabled and you're starving, don't auto-rest so you can eat.
+    if (hungerEnabled_ && hungerStateFor(hunger, hungerMax) >= 2) {
+        pushMsg("YOU ARE TOO HUNGRY TO REST!", MessageKind::Warning, true);
+        return;
+    }
+
     pushMsg("YOU REST...", MessageKind::Info, true);
 
     // Safety valve to prevent accidental infinite loops.
     const int maxSteps = 2000;
     int steps = 0;
+
     while (!isFinished() && steps < maxSteps) {
+        // Abort if something hostile comes into view.
         if (anyVisibleHostiles()) {
             pushMsg("REST INTERRUPTED!", MessageKind::Warning, true);
             break;
         }
-        if (player().hp >= player().hpMax) {
+
+        const int manaMaxNow = playerManaMax();
+        const bool needHpNow = (player().hp < player().hpMax);
+        const bool needManaNow = (manaMaxNow > 0 && mana_ < manaMaxNow);
+
+        if (!needHpNow && !needManaNow) {
             pushMsg("YOU FEEL RESTED.", MessageKind::Success, true);
             break;
         }
 
+        // Resting while burning/standing in fire is never safe.
+        if (player().effects.burnTurns > 0 || fireAt(player().pos.x, player().pos.y) > 0u) {
+            pushMsg("REST INTERRUPTED!", MessageKind::Warning, true);
+            break;
+        }
+
+        // Hunger safety: stop before starvation damage.
+        if (hungerEnabled_ && hungerStateFor(hunger, hungerMax) >= 2) {
+            pushMsg("REST STOPPED (YOU ARE STARVING).", MessageKind::Warning, true);
+            break;
+        }
+
+        const int hpBefore = player().hp;
+
         // Consume a "wait" turn without spamming the log.
         advanceAfterPlayerAction();
         ++steps;
+
+        if (isFinished()) break;
+
+        // Stop if we took damage while resting (poison/burn/starvation/ambush/etc.).
+        if (player().hp < hpBefore) {
+            pushMsg("REST INTERRUPTED (YOU TOOK DAMAGE).", MessageKind::Warning, true);
+            break;
+        }
+
+        // If hunger crossed into starvation, stop so the player can eat.
+        if (hungerEnabled_ && hungerStateFor(hunger, hungerMax) >= 2) {
+            pushMsg("REST STOPPED (YOU ARE STARVING).", MessageKind::Warning, true);
+            break;
+        }
+
+        // If we became on fire during the wait, stop immediately.
+        if (player().effects.burnTurns > 0 || fireAt(player().pos.x, player().pos.y) > 0u) {
+            pushMsg("REST INTERRUPTED!", MessageKind::Warning, true);
+            break;
+        }
+    }
+
+    if (!isFinished() && steps >= maxSteps) {
+        pushMsg("REST STOPPED (TOO LONG).", MessageKind::System, true);
     }
 }
 

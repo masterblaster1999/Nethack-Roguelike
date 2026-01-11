@@ -161,7 +161,16 @@ bool Game::requestAutoTravel(Vec2i goal) {
 
     stopAutoMove(true);
 
-    if (!buildAutoTravelPath(goal, /*requireExplored*/true, /*allowKnownTraps*/true)) {
+    bool ok = buildAutoTravelPath(goal, /*requireExplored*/true, /*allowKnownTraps*/false);
+    if (!ok) {
+        // Fallback: allow routes that approach known traps (the stepper will still refuse to step onto one).
+        ok = buildAutoTravelPath(goal, /*requireExplored*/true, /*allowKnownTraps*/true);
+        if (ok) {
+            pushMsg("AUTO-TRAVEL: NO SAFE PATH (KNOWN TRAPS).", MessageKind::Warning);
+        }
+    }
+
+    if (!ok) {
         pushMsg("NO PATH FOUND.", MessageKind::Warning);
         return false;
     }
@@ -242,15 +251,19 @@ bool Game::stepAutoMove() {
     // Auto-explore: optional secret-hunting pass. If we're at a chosen search spot, spend turns searching
     // before declaring the floor fully explored.
     if (autoMode == AutoMoveMode::Explore && autoExploreGoalIsSearch && player().pos == autoExploreSearchGoalPos) {
+        const int W = std::max(1, dung.width);
+        const int H = std::max(1, dung.height);
+        const size_t expect = static_cast<size_t>(W * H);
+
         // Lazily size the per-tile search budget grid (not serialized; purely transient).
-        if (autoExploreSearchTriedTurns.size() != MAP_W * MAP_H) {
-            autoExploreSearchTriedTurns.assign(MAP_W * MAP_H, 0);
+        if (autoExploreSearchTriedTurns.size() != expect) {
+            autoExploreSearchTriedTurns.assign(expect, 0u);
         }
 
         constexpr int kMaxSearchTurnsPerSpot = 4;
 
         const Vec2i here = player().pos;
-        const int idx = here.y * MAP_W + here.x;
+        const int idx = here.y * W + here.x;
         const int tried = (idx >= 0 && static_cast<size_t>(idx) < autoExploreSearchTriedTurns.size())
                               ? static_cast<int>(autoExploreSearchTriedTurns[static_cast<size_t>(idx)])
                               : 0;
@@ -631,8 +644,10 @@ Vec2i Game::findNearestExploreFrontier() const {
 
     const Vec2i start = player().pos;
     const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
+    const int W = std::max(1, dung.width);
+    const int H = std::max(1, dung.height);
 
-    auto idxOf = [](int x, int y) -> int { return x + y * MAP_W; };
+    auto idxOf = [W](int x, int y) -> int { return x + y * W; };
     auto isKnownTrap = [&](int x, int y) -> bool { return discoveredTrapAt(trapsCur, x, y) != nullptr; };
 
     const int dirs[8][2] = {
@@ -679,7 +694,7 @@ Vec2i Game::findNearestExploreFrontier() const {
     // Pass 1: BFS that does NOT traverse known traps (but can still return a trap tile if it's a frontier).
     {
         std::deque<Vec2i> q;
-        std::vector<uint8_t> visited(MAP_W * MAP_H, 0);
+        std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
         visited[idxOf(start.x, start.y)] = 1;
         q.push_back(start);
 
@@ -714,8 +729,8 @@ Vec2i Game::findNearestExploreFrontier() const {
     // known trap tile along the shortest path to it (so the player can deal with the blocker).
     {
         std::deque<Vec2i> q;
-        std::vector<uint8_t> visited(MAP_W * MAP_H, 0);
-        std::vector<int> firstTrapIdx(MAP_W * MAP_H, -1);
+        std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
+        std::vector<int> firstTrapIdx(static_cast<size_t>(W * H), -1);
         visited[idxOf(start.x, start.y)] = 1;
         q.push_back(start);
 
@@ -725,7 +740,7 @@ Vec2i Game::findNearestExploreFrontier() const {
 
             if (cur != start && isFrontier(cur.x, cur.y)) {
                 const int ft = firstTrapIdx[idxOf(cur.x, cur.y)];
-                if (ft != -1) return Vec2i{ft % MAP_W, ft / MAP_W};
+                if (ft != -1) return Vec2i{ft % W, ft / W};
                 return cur;
             }
 
@@ -756,8 +771,10 @@ Vec2i Game::findNearestExploreSearchSpot() const {
 
     const Vec2i start = player().pos;
     const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
+    const int W = std::max(1, dung.width);
+    const int H = std::max(1, dung.height);
 
-    auto idxOf = [](int x, int y) { return y * MAP_W + x; };
+    auto idxOf = [W](int x, int y) { return y * W + x; };
 
     auto isKnownTrap = [&](int x, int y) {
         for (const Trap& t : trapsCur) {
@@ -833,7 +850,7 @@ Vec2i Game::findNearestExploreSearchSpot() const {
         return false;
     };
 
-    std::vector<uint8_t> visited(MAP_W * MAP_H, 0);
+    std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
     std::deque<Vec2i> q;
     visited[idxOf(start.x, start.y)] = 1;
     q.push_back(start);
@@ -880,6 +897,9 @@ Vec2i Game::findNearestExploreSearchSpot() const {
 std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplored, bool allowKnownTraps) const {
     if (!dung.inBounds(start.x, start.y) || !dung.inBounds(goal.x, goal.y)) return {};
     if (start == goal) return { start };
+
+    const int W = std::max(1, dung.width);
+    const int H = std::max(1, dung.height);
 
     // Weighted pathing: doors and locks take extra turns to traverse.
     // This produces auto-travel paths that are closer to "minimum turns" rather
@@ -964,5 +984,5 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
         return diagonalPassable(dung, {fromX, fromY}, dx, dy);
     };
 
-    return dijkstraPath(MAP_W, MAP_H, start, goal, passable, stepCost, diagOk);
+    return dijkstraPath(W, H, start, goal, passable, stepCost, diagOk);
 }

@@ -1,5 +1,5 @@
 {
-  "description": "Cumulative patch through roundN_plus93: fixes MSVC shadowing warnings and exposes Game::describeAt for UI tooltips (minimap cursor info).",
+  "description": "Cumulative patch through roundN_plus112: add an optional perf overlay HUD (FPS/frame time + sprite cache stats + low-rate determinism hash), toggleable via Shift+F10/#perf/show_perf_overlay; plus all prior patch improvements.",
   "files": [
     "CHANGELOG.md",
     "CMakeLists.txt",
@@ -52,16 +52,335 @@
     "src/ui_font.hpp",
     "tests/test_main.cpp"
   ],
-  "patch_id": "roundN_plus93_patch",
-  "previous_patch": "roundN_plus92_patch",
+  "patch_id": "roundN_plus112_patch",
+  "previous_patch": "roundN_plus111_patch",
   "summary": [
-    "Fix MSVC C4456 warnings by renaming shadowing locals in save migration and isometric phantom rendering.",
-    "Expose Game::describeAt as a public UI helper so renderer can show minimap cursor tile descriptions without friending internal helpers.",
-    "Unblock MSVC build by resolving private-member access error in render minimap tooltip code."
+    "Added an optional perf overlay HUD (FPS/frame time, sprite cache usage/hits/misses/evictions, and a low-rate determinism hash) toggleable via Shift+F10 (default), `show_perf_overlay` setting, or `#perf on/off`.",
+    "Obscure debug/info commands: added extended commands #pos (#where alias), #what (#tile/#describe/#whatis aliases), and #mapstats for quick coordinate readout, tile description, and per-floor exploration stats (uses LOOK cursor when active or accepts X Y).",
+    "Procedurally generated map sizes: newly generated floors now vary in width/height by depth (with mild jitter). Special/bespoke floors keep the canonical size.",
+    "Auto-explore/pathfinding indexing and mouse->tile hit testing now use the current dungeon dimensions (no fixed MAP_W/H assumptions).",
+    "Level entry messaging now reports `LEVEL SIZE: WxH` when a floor is generated for the first time (and at game start).",
+    "Improved procedurally generated isometric visuals: themed floor tiles in isometric view are now generated directly in diamond space (no projection), keeping material patterns aligned to the 2:1 grid and reducing projection artifacts.",
+    "Improved procedurally generated isometric visuals: wall/door/doorway 2.5D block sprites now add subtle procedural brick/mortar seams on stone faces and non-animated wood grain streaks on door panels, reducing flatness and improving material readability.",
+    "Fixed isometric asset generation: repaired a loop ordering regression in isometric terrain overlay creation (edge shade + chasm gloom) that could break compilation and/or prevent overlays from generating correctly.",
+    "Improved procedurally generated isometric visuals: floor tiles adjacent to chasms now draw an additional procedural diamond 'gloom' overlay that darkens farther inward than the rim band, making pits read deeper and edges more hazardous in 2.5D view.",
+    "Improved procedurally generated isometric visuals: confusion/poison gas and fire field overlays in isometric view are now generated directly in diamond space (no projection), keeping animation aligned to the 2:1 grid; poison gas now also uses the isometric overlay textures.",
+    "Improved procedurally generated isometric visuals: themed floor decal overlays in isometric view are now generated directly in diamond space (no projection), keeping thin linework crisper and motifs better aligned to the 2.5D grid.",
+    "Improved procedurally generated isometric visuals: chasms in isometric view now use a purpose-built procedural diamond tile (stone rim + shaded inner walls + swirling void core) for stronger depth cues, replacing the projected top-down chasm tile.",
+    "Improved procedurally generated isometric block sprites: wall/door/doorway/pillar blocks now get subtle vertical-face ambient occlusion (under-cap, ridge seam, and base grounding) plus a light-facing cap rim highlight for stronger 2.5D volume and readability.",
+    "Improved procedurally generated isometric visuals: isometric diamond terrain tiles now get a subtle whole-tile directional light ramp for better 2.5D depth, and isometric cast shadows now use a two-stage penumbra + stronger inner-corner occlusion, with per-caster-type strength scaling in the renderer.",
+    "Improved procedurally generated visuals: voxel sprite renderer now uses hemisphere-based ambient occlusion sampling (reduces over-darkening on flat surfaces while deepening concave pockets) and stamps a softer multi-tap contact shadow to better ground 3D voxel sprites.",
+    "Improved procedurally generated visuals: confusion/poison gas and fire overlays now use domain-warped fBm masks for more wispy, swirling motion with less blobby silhouettes; fire adds subtle spark highlights while retaining ordered dithering for crisp pixel-art.",
+    "Improved top-down procedurally generated visuals: added subtle wall contact shadows (ambient occlusion) on floor tiles adjacent to occluders (walls/closed doors/pillars + boulders/fountains/altars), using procedural mask+variant overlays to avoid repetition.",
+    "Improved procedurally generated visuals: coherent (low-frequency) tile variant selection for floors/walls/chasms, plus more even decal/stain placement (top-down + isometric).",
+    "Monster AI pathing now avoids poison gas clouds and discovered traps when practical (hazard-aware routing).",
+    "Added Ring of Sustenance: slows hunger loss while worn (only when hunger is enabled), with enchant/bless increasing potency.",
+    "Auto-travel now prefers trap-free routes when possible, falling back to paths that may approach known traps.",
+    "Rest command now recovers mana as well as HP (it no longer refuses to rest just because HP is full).",
+    "Rest now stops early on visible danger, damage ticks (e.g., poison), or starvation to prevent accidental self-kills."
   ],
-  "timestamp": "2026-01-10T10:55:20Z",
+  "timestamp": "2026-01-11T10:22:53Z",
   "notes": [
-    "This patch is intentionally small but critical: it restores MSVC builds and enables the new minimap cursor info line to compile.",
-    "No gameplay balance changes; only UI helper exposure and warning cleanups."
-  ]
+    "RoundN+94: trap-safe auto-travel preference with fallback.",
+    "RoundN+95: safer rest loop + mana recovery.",
+    "RoundN+96: Ring of Sustenance (slow hunger) + loot table integration + sprites/ID updates.",
+    "RoundN+97: monster hazard-aware pathing (avoid poison gas + discovered traps).",
+    "RoundN+98: improved procedural visuals (coherent tile variation + jittered decals; isometric wall blocks use coherent variants).",
+    "RoundN+99: top-down wall contact shadows (procedural AO overlay) for improved depth cues.",
+    "RoundN+100: improved procedural VFX overlays (gas + fire) using domain-warped fBm masks + subtle sparks; keeps ordered dithering for crispness.",
+    "RoundN+101: improved voxel sprite shading (hemisphere AO) + softer grounding contact shadow.",
+    "RoundN+102: improved isometric ground lighting ramp + enhanced isometric cast shadows (corner occlusion + caster-type strength scaling).",
+    "RoundN+103: isometric block sprite polish (AO grounding + cap rim highlights for walls/doors/doorways/pillars).",
+    "RoundN+104: isometric chasm depth tiles (purpose-built diamond tile with rim/wall/void shading).",
+    "RoundN+105: isometric floor decals generated directly in diamond space (no projection) for crisper, iso-aligned room theming.",
+    "RoundN+106: isometric VFX overlays (gas/fire) generated directly in diamond space; poison gas now uses isometric overlay textures.",
+    "RoundN+107: isometric chasm gloom overlay (inward darkening on tiles adjacent to chasms) for stronger pit depth cues.",
+    "RoundN+108: isometric block surface texture polish (brick seams + wood grain) + fix isometric overlay generation regression.",
+    "RoundN+109: improved procedural isometric base tile generation (rock density noise, quantized heightmap, shading, per-tile sprite hashing) and cleanup.",
+    "RoundN+110: procedurally generated map sizes per floor; update auto-explore/pathing and click->tile bounds to use dungeon dimensions; report LEVEL SIZE on first generation.",
+    "RoundN+111: added #pos/#what/#mapstats info/debug extended commands (with LOOK-cursor support) and updated help text.",
+    "RoundN+112: added an optional perf overlay HUD (Shift+F10 / #perf) showing FPS, cache stats, and a low-rate determinism hash."
+  ],
+  "cumulative_patch_id": "roundN_plus112",
+  "applied_patches": [
+    {
+      "id": "roundN_plus94",
+      "timestamp": "2026-01-10T11:35:00Z",
+      "notes": [
+        "Auto-travel now prefers routes that avoid already-discovered traps when possible.",
+        "If no trap-free route exists, it falls back to a route that may approach known traps (auto-move still refuses to step onto a known trap)."
+      ],
+      "files": [
+        "src/game_automove.cpp",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus95",
+      "timestamp": "2026-01-10T12:05:00Z",
+      "notes": [
+        "Rest command now supports recovering mana (in addition to HP) and no longer refuses to rest just because HP is full.",
+        "Rest now stops early on danger/damage/starvation to prevent accidental self-kills (e.g. poison ticking while resting)."
+      ],
+      "files": [
+        "src/game_look.cpp",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus96",
+      "timestamp": "2026-01-10T12:41:33Z",
+      "notes": [
+        "Added a new identifiable ring: Ring of Sustenance. While worn (and hunger enabled), it slows hunger loss deterministically.",
+        "Ring of Sustenance appears in treasure-room loot, trapped chests, and magic shop ring rolls; sprites + discovery blurbs updated."
+      ],
+      "files": [
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json",
+        "src/game_internal.hpp",
+        "src/game_inventory.cpp",
+        "src/game_spawn.cpp",
+        "src/items.cpp",
+        "src/items.hpp",
+        "src/render.cpp",
+        "src/spritegen.cpp",
+        "src/spritegen3d.cpp"
+      ]
+    },
+    {
+      "id": "roundN_plus97",
+      "timestamp": "2026-01-10T13:05:00Z",
+      "notes": [
+        "Monster AI now treats poison gas tiles and discovered traps as higher-cost during pathfinding, routing around known hazards when possible."
+      ],
+      "files": [
+        "src/ai.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus98",
+      "timestamp": "2026-01-10T13:55:00Z",
+      "notes": [
+        "Tile variant selection for floors/walls/chasms now uses low-frequency coherent noise to form natural-looking patches.",
+        "Floor decals now use jittered-grid placement to reduce clumping; wall stains avoid adjacent clusters.",
+        "Isometric wall blocks now pick variants coherently along wall segments."
+      ],
+      "files": [
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus99",
+      "timestamp": "2026-01-10T14:35:00Z",
+      "notes": [
+        "Added a procedurally generated top-down contact shadow (ambient occlusion) overlay for floor tiles adjacent to nearby occluders (walls/closed doors/pillars + boulders/fountains/altars).",
+        "Overlay is mask-driven (4-neighbor) with a small variant set to reduce repetition; rendered subtly so it doesn't overpower decals."
+      ],
+      "files": [
+        "src/render.cpp",
+        "src/render.hpp",
+        "src/spritegen.cpp",
+        "src/spritegen.hpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus100",
+      "timestamp": "2026-01-10T19:40:17Z",
+      "notes": [
+        "Improved procedural VFX overlays: confusion/poison gas now uses domain-warped fBm for wispy swirling motion (less blob-like).",
+        "Fire overlay now uses rising turbulence + cutout gaps + subtle spark highlights for a more natural flicker while staying crisp via ordered dithering."
+      ],
+      "files": [
+        "src/spritegen.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus101",
+      "timestamp": "2026-01-10T20:42:40Z",
+      "notes": [
+        "Voxel sprite ambient occlusion is now hemisphere-sampled (normal-oriented), keeping broad exposed faces from being over-darkened while still deepening concave pockets/creases.",
+        "Voxel sprites now stamp a softer multi-tap contact shadow (short falloff chain) for better grounding and readability."
+      ],
+      "files": [
+        "src/spritegen3d.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus102",
+      "timestamp": "2026-01-10T21:11:43Z",
+      "notes": [
+        "Isometric diamond terrain tiles now apply a subtle whole-tile directional light ramp (top-left brighter / bottom-right darker) to better sell the 2.5D ground plane.",
+        "Isometric cast shadow overlay now uses a two-stage penumbra and stronger inner-corner occlusion for grounded corridors.",
+        "Renderer now scales isometric cast shadow strength by occluder type (walls/closed doors cast stronger shadows than props like altars/fountains)."
+      ],
+      "files": [
+        "src/spritegen.cpp",
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus103",
+      "timestamp": "2026-01-10T21:44:18Z",
+      "notes": [
+        "Isometric wall/door/doorway/pillar block sprites now add subtle vertical-face ambient occlusion (under-cap overhang, ridge seam, base grounding) plus a light-facing cap rim highlight, improving 2.5D volume and readability."
+      ],
+      "files": [
+        "src/spritegen.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus104",
+      "timestamp": "2026-01-10T22:42:15Z",
+      "notes": [
+        "Isometric chasm tiles now use a purpose-built procedural diamond generator (stone rim + shaded inner walls + swirling void core) to improve depth/readability in 2.5D view.",
+        "Renderer now builds chasmVarIso using generateIsometricChasmTile() rather than projecting the top-down chasm sprite."
+      ],
+      "files": [
+        "src/spritegen.hpp",
+        "src/spritegen.cpp",
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus105",
+      "timestamp": "2026-01-10T23:33:10Z",
+      "notes": [
+        "Isometric floor decals are now generated directly in diamond space (no projection), keeping thin cracks/runes/grime crisper and better aligned to the 2.5D grid."
+      ],
+      "files": [
+        "src/spritegen.hpp",
+        "src/spritegen.cpp",
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus106",
+      "timestamp": "2026-01-11T02:39:04Z",
+      "notes": [
+        "Isometric gas and fire field overlays are now generated directly in diamond space (no projection) so they align cleanly to the 2:1 isometric grid.",
+        "Poison gas rendering now uses the isometric overlay textures in ViewMode::Isometric."
+      ],
+      "files": [
+        "src/spritegen.hpp",
+        "src/spritegen.cpp",
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus107",
+      "timestamp": "2026-01-11T04:47:35Z",
+      "notes": [
+        "Isometric view: floor tiles adjacent to chasms now receive an additional inward 'gloom' darkening overlay (beyond the rim band) so pits read deeper and edges feel more dangerous."
+      ],
+      "files": [
+        "src/spritegen.hpp",
+        "src/spritegen.cpp",
+        "src/render.hpp",
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus108",
+      "timestamp": "2026-01-11T05:29:35Z",
+      "notes": [
+        "Isometric 2.5D block sprites (walls/doors/doorways) now add subtle procedural brick/mortar seams on stone faces and wood grain streaks on door panels for richer, less-flat materials.",
+        "Fixed a regression in isometric terrain overlay creation (edge shade + chasm gloom) that could break compilation and/or prevent overlays from generating correctly."
+      ],
+      "files": [
+        "src/spritegen.cpp",
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "patch_id": "roundN_plus109",
+      "timestamp": "2026-01-11T01:21:46Z",
+      "note": "Procedural isometric base tiles: add rock density noise, quantized heightmap + improved shading, per-tile sprite hashing; cleanup/refactor.",
+      "files": [
+        "src/spritegen.cpp",
+        "src/spritegen.hpp",
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "patch_id": "roundN_plus110",
+      "timestamp": "2026-01-11T09:22:21Z",
+      "note": "Procedural map sizes (variable width/height per newly generated floor) + dynamic-dimension updates for auto-explore/pathing and mouse hit-testing; report LEVEL SIZE on first generation.",
+      "files": [
+        "src/game.cpp",
+        "src/game.hpp",
+        "src/game_automove.cpp",
+        "src/game_look.cpp",
+        "src/game_targeting.cpp",
+        "src/game_loop.cpp",
+        "src/game_save.cpp",
+        "src/render.cpp",
+        "src/render.hpp",
+        "src/main.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus111",
+      "timestamp": "2026-01-11T09:54:18Z",
+      "notes": [
+        "Added new extended commands for info/debug: #pos/#where (coordinates + depth + level size), #what/#tile/#describe/#whatis (tile description), and #mapstats (per-floor quick stats). Commands use the LOOK cursor when active or accept explicit X Y."
+      ],
+      "files": [
+        "CHANGELOG.md",
+        "src/game_internal.hpp",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus112",
+      "timestamp": "2026-01-11T10:22:53Z",
+      "notes": [
+        "Added a tiny optional performance overlay HUD (FPS/frame time, sprite-cache stats, low-rate determinism hash).",
+        "Toggle via Shift+F10 (default keybind), `show_perf_overlay` in settings, or `#perf on/off`."
+      ],
+      "files": [
+        "src/game.hpp",
+        "src/game_loop.cpp",
+        "src/game_internal.hpp",
+        "src/keybinds.cpp",
+        "src/main.cpp",
+        "src/render.hpp",
+        "src/render.cpp",
+        "src/settings.hpp",
+        "src/settings.cpp",
+        "docs/SETTINGS.md",
+        "README.md",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    }
+  ],
+  "user_instruction": "Obsecure improvements"
 }

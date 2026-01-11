@@ -511,6 +511,7 @@ int main(int argc, char** argv) {
     }
     game.setPlayerClass(startClass);
     game.setShowEffectTimers(settings.showEffectTimers);
+    game.setPerfOverlayEnabled(settings.showPerfOverlay);
     game.setUITheme(settings.uiTheme);
     game.setUIPanelsTextured(settings.uiPanelsTextured);
     game.setViewMode(settings.viewMode);
@@ -1046,7 +1047,7 @@ int main(int argc, char** argv) {
                             break;
                         }
 
-                        if (!renderer.windowToMapTile(ev.motion.x, ev.motion.y, tx, ty)) break;
+                        if (!renderer.windowToMapTile(game, ev.motion.x, ev.motion.y, tx, ty)) break;
                         const Vec2i p{tx, ty};
 
                         if (game.isTargeting()) {
@@ -1097,7 +1098,7 @@ int main(int argc, char** argv) {
                             break;
 
                         int tx = 0, ty = 0;
-                        if (!renderer.windowToMapTile(ev.button.x, ev.button.y, tx, ty)) break;
+                        if (!renderer.windowToMapTile(game, ev.button.x, ev.button.y, tx, ty)) break;
                         const Vec2i p{tx, ty};
 
                         if (game.isTargeting()) {
@@ -1204,6 +1205,7 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "player_name", game.playerName());
             ok &= updateIniKey(settingsPath, "player_class", game.playerClassIdString());
             ok &= updateIniKey(settingsPath, "show_effect_timers", game.showEffectTimers() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "show_perf_overlay", game.perfOverlayEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "minimap_zoom", std::to_string(game.minimapZoom()));
 
             auto uiThemeToString = [](UITheme t) -> const char* {
@@ -1248,6 +1250,7 @@ int main(int argc, char** argv) {
             game.setBonesEnabled(newSettings.bonesEnabled);
             game.setPlayerName(newSettings.playerName);
             game.setShowEffectTimers(newSettings.showEffectTimers);
+            game.setPerfOverlayEnabled(newSettings.showPerfOverlay);
             game.setUITheme(newSettings.uiTheme);
             game.setUIPanelsTextured(newSettings.uiPanelsTextured);
             game.setViewMode(newSettings.viewMode);

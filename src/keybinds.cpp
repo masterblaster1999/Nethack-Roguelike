@@ -241,6 +241,7 @@ std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     if (name == "minimap_zoom_in" || name == "minimap_zoomin" || name == "zoom_minimap_in") return Action::MinimapZoomIn;
     if (name == "minimap_zoom_out" || name == "minimap_zoomout" || name == "zoom_minimap_out") return Action::MinimapZoomOut;
     if (name == "toggle_stats" || name == "stats") return Action::ToggleStats;
+    if (name == "toggle_perf_overlay" || name == "toggle_perf" || name == "perf" || name == "perf_overlay") return Action::TogglePerfOverlay;
     if (name == "toggle_view_mode" || name == "view_mode" || name == "toggle_iso" || name == "isometric") return Action::ToggleViewMode;
     if (name == "toggle_voxel_sprites" || name == "voxel_sprites" || name == "toggle_3d_sprites" || name == "sprites3d") return Action::ToggleVoxelSprites;
     if (name == "toggle_fullscreen" || name == "fullscreen") return Action::ToggleFullscreen;
@@ -367,6 +368,7 @@ KeyBinds KeyBinds::defaults() {
     add(Action::Codex, SDLK_F4);
     add(Action::Discoveries, SDLK_BACKSLASH);
     add(Action::ToggleStats, SDLK_TAB, KMOD_SHIFT);
+    add(Action::TogglePerfOverlay, SDLK_F10, KMOD_SHIFT);
 
     add(Action::ToggleViewMode, SDLK_F7);
     add(Action::ToggleVoxelSprites, SDLK_F8);
@@ -498,6 +500,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::MinimapZoomIn,
             Action::MinimapZoomOut,
             Action::ToggleStats,
+            Action::TogglePerfOverlay,
             Action::ToggleViewMode,
             Action::ToggleVoxelSprites,
             Action::ToggleFullscreen,
@@ -526,6 +529,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::MinimapZoomIn,
         Action::MinimapZoomOut,
         Action::ToggleStats,
+        Action::TogglePerfOverlay,
         Action::ToggleViewMode,
 
         Action::Inventory,
@@ -612,6 +616,7 @@ static const std::pair<Action, const char*> kActionNameTable[] = {
     {Action::MinimapZoomIn, "minimap_zoom_in"},
     {Action::MinimapZoomOut, "minimap_zoom_out"},
     {Action::ToggleStats, "toggle_stats"},
+    {Action::TogglePerfOverlay, "toggle_perf_overlay"},
     {Action::ToggleViewMode, "toggle_view_mode"},
     {Action::ToggleVoxelSprites, "toggle_voxel_sprites"},
     {Action::ToggleFullscreen, "fullscreen"},

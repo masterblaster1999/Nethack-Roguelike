@@ -853,6 +853,9 @@ static std::vector<std::string> extendedCommandList() {
         "uitheme",
         "uipanels",
         "seed",
+        "pos",
+        "what",
+        "mapstats",
         "version",
         "name",
         "class",
@@ -974,15 +977,18 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     std::string cmdIn = toLower(toks[0]);
 
     if (cmdIn == "?" || cmdIn == "commands") cmdIn = "help";
-// Common aliases (kept out of the completion list so it stays short/stable).
-if (cmdIn == "annotate" || cmdIn == "note") cmdIn = "mark";
-else if (cmdIn == "unannotate" || cmdIn == "clearmark") cmdIn = "unmark";
-else if (cmdIn == "notes" || cmdIn == "markers") cmdIn = "marks";
-else if (cmdIn == "msghistory" || cmdIn == "message_history" || cmdIn == "msglog") cmdIn = "messages";
-else if (cmdIn == "controls" || cmdIn == "keyset") cmdIn = "preset";
-else if (cmdIn == "hear") cmdIn = "listen";
-else if (cmdIn == "vent" || cmdIn == "ventriloquism" || cmdIn == "voice" || cmdIn == "decoy") cmdIn = "throwvoice";
-else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn == "prophecy") cmdIn = "augury";
+
+    // Common aliases (kept out of the completion list so it stays short/stable).
+    if (cmdIn == "annotate" || cmdIn == "note") cmdIn = "mark";
+    else if (cmdIn == "unannotate" || cmdIn == "clearmark") cmdIn = "unmark";
+    else if (cmdIn == "notes" || cmdIn == "markers") cmdIn = "marks";
+    else if (cmdIn == "msghistory" || cmdIn == "message_history" || cmdIn == "msglog") cmdIn = "messages";
+    else if (cmdIn == "controls" || cmdIn == "keyset") cmdIn = "preset";
+    else if (cmdIn == "hear") cmdIn = "listen";
+    else if (cmdIn == "vent" || cmdIn == "ventriloquism" || cmdIn == "voice" || cmdIn == "decoy") cmdIn = "throwvoice";
+    else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn == "prophecy") cmdIn = "augury";
+    else if (cmdIn == "where" || cmdIn == "location" || cmdIn == "loc") cmdIn = "pos";
+    else if (cmdIn == "tile" || cmdIn == "whatis" || cmdIn == "describe") cmdIn = "what";
 
     std::vector<std::string> cmds = extendedCommandList();
 
@@ -1097,6 +1103,7 @@ else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn 
         if (a == "command" || a == "extcmd") { outKey = "bind_command"; return true; }
         if (a == "toggle_minimap" || a == "minimap") { outKey = "bind_toggle_minimap"; return true; }
         if (a == "toggle_stats" || a == "stats") { outKey = "bind_toggle_stats"; return true; }
+        if (a == "toggle_perf_overlay" || a == "toggle_perf" || a == "perf" || a == "perf_overlay") { outKey = "bind_toggle_perf_overlay"; return true; }
         if (a == "fullscreen" || a == "toggle_fullscreen" || a == "togglefullscreen") { outKey = "bind_fullscreen"; return true; }
         if (a == "screenshot") { outKey = "bind_screenshot"; return true; }
         if (a == "save") { outKey = "bind_save"; return true; }
@@ -1122,6 +1129,7 @@ else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn 
         }
         if (outLine != "  ") game.pushSystemMessage(outLine);
         game.pushSystemMessage("TIP: type a prefix (e.g., 'autop') and press ENTER.");
+        game.pushSystemMessage("INFO: pos [x y] | what [x y] | mapstats (TIP: uses LOOK cursor when active)");
         game.pushSystemMessage("SLOTS: slot [name], save [slot], load [slot], loadauto [slot], saves");
         game.pushSystemMessage("EXPORT: exportlog/exportmap/export/exportall/dump");
         game.pushSystemMessage("MARKS: mark [note|danger|loot] <label> | unmark | marks | travel <index|label>");
@@ -1833,8 +1841,171 @@ else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn 
         return;
     }
 
+
+    if (cmd == "perf" || cmd == "perf_overlay" || cmd == "perfui") {
+        if (toks.size() <= 1) {
+            game.pushSystemMessage(std::string("PERF OVERLAY: ") + (game.perfOverlayEnabled() ? "ON" : "OFF"));
+            game.pushSystemMessage("USAGE: #perf on/off");
+            return;
+        }
+
+        const std::string v = toLower(toks[1]);
+        if (v == "on" || v == "true" || v == "1") {
+            game.setPerfOverlayEnabled(true);
+            game.markSettingsDirty();
+            game.pushSystemMessage("PERF OVERLAY: ON");
+            return;
+        }
+        if (v == "off" || v == "false" || v == "0") {
+            game.setPerfOverlayEnabled(false);
+            game.markSettingsDirty();
+            game.pushSystemMessage("PERF OVERLAY: OFF");
+            return;
+        }
+        if (v == "toggle" || v == "t") {
+            game.setPerfOverlayEnabled(!game.perfOverlayEnabled());
+            game.markSettingsDirty();
+            game.pushSystemMessage(std::string("PERF OVERLAY: ") + (game.perfOverlayEnabled() ? "ON" : "OFF"));
+            return;
+        }
+
+        game.pushSystemMessage("USAGE: #perf on/off");
+        return;
+    }
+
     if (cmd == "seed") {
         game.pushSystemMessage("SEED: " + std::to_string(game.seed()));
+        return;
+    }
+
+    if (cmd == "pos") {
+        // Usage:
+        //   #pos          (uses LOOK cursor when active, else player)
+        //   #pos X Y
+        Vec2i p = game.player().pos;
+        bool usedLook = false;
+
+        if (game.isLooking() && toks.size() < 3) {
+            p = game.lookCursor();
+            usedLook = true;
+        } else if (toks.size() >= 3) {
+            try {
+                const int x = std::stoi(toks[1], nullptr, 0);
+                const int y = std::stoi(toks[2], nullptr, 0);
+                p = {x, y};
+            } catch (...) {
+                game.pushSystemMessage("USAGE: pos [X Y]");
+                game.pushSystemMessage("TIP: open LOOK (:) and move the cursor, then #pos.");
+                return;
+            }
+        }
+
+        const Dungeon& d = game.dungeon();
+        const Vec2i pp = game.player().pos;
+        const int dist = std::abs(p.x - pp.x) + std::abs(p.y - pp.y);
+
+        std::ostringstream ss;
+        ss << (usedLook ? "LOOK" : "POS") << ": " << p.x << " " << p.y;
+        ss << " | DEPTH " << game.depth();
+        ss << " | LEVEL " << d.width << "x" << d.height;
+        ss << " | DIST " << dist;
+        game.pushSystemMessage(ss.str());
+        return;
+    }
+
+    if (cmd == "what") {
+        // Usage:
+        //   #what         (uses LOOK cursor when active, else player)
+        //   #what X Y
+        Vec2i p = game.player().pos;
+        bool usedLook = false;
+
+        if (game.isLooking() && toks.size() < 3) {
+            p = game.lookCursor();
+            usedLook = true;
+        } else if (toks.size() >= 3) {
+            try {
+                const int x = std::stoi(toks[1], nullptr, 0);
+                const int y = std::stoi(toks[2], nullptr, 0);
+                p = {x, y};
+            } catch (...) {
+                game.pushSystemMessage("USAGE: what [X Y]");
+                game.pushSystemMessage("TIP: open LOOK (:) and move the cursor, then #what.");
+                return;
+            }
+        }
+
+        std::ostringstream ss;
+        ss << (usedLook ? "LOOK" : "AT") << " " << p.x << " " << p.y << ": " << game.describeAt(p);
+        game.pushSystemMessage(ss.str());
+        return;
+    }
+
+    if (cmd == "mapstats") {
+        const Dungeon& d = game.dungeon();
+
+        const int total = std::max(0, d.width) * std::max(0, d.height);
+        int explored = 0;
+        int visible = 0;
+        int chasm = 0;
+        int doors = 0;
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                const Tile& t = d.at(x, y);
+                if (t.explored) ++explored;
+                if (t.visible) ++visible;
+                if (t.type == TileType::Chasm) ++chasm;
+                if (t.type == TileType::DoorClosed || t.type == TileType::DoorLocked || t.type == TileType::DoorOpen) ++doors;
+            }
+        }
+        const int pct = (total > 0) ? (explored * 100) / total : 0;
+
+        // Monsters (current level)
+        int hostiles = 0;
+        int allies = 0;
+        const int playerId = game.player().id;
+        for (const auto& e : game.entities()) {
+            if (e.id == playerId) continue;
+            if (e.friendly) ++allies;
+            else ++hostiles;
+        }
+
+        // Traps (current level)
+        int trapsTotal = 0;
+        int trapsDiscovered = 0;
+        for (const auto& tr : game.traps()) {
+            ++trapsTotal;
+            if (tr.discovered) ++trapsDiscovered;
+        }
+
+        const int rooms = static_cast<int>(d.rooms.size());
+        const int items = static_cast<int>(game.groundItems().size());
+        const int marks = static_cast<int>(game.mapMarkers().size());
+        const int engr = static_cast<int>(game.engravings().size());
+
+        {
+            std::ostringstream ss;
+            ss << "MAP " << d.width << "x" << d.height;
+            ss << " | EXPLORED " << explored << "/" << total << " (" << pct << "%)";
+            ss << " | VISIBLE " << visible;
+            game.pushSystemMessage(ss.str());
+        }
+        {
+            std::ostringstream ss;
+            ss << "ROOMS " << rooms;
+            ss << " | MONSTERS " << (hostiles + allies) << " (HOSTILE " << hostiles << ", ALLY " << allies << ")";
+            ss << " | ITEMS " << items;
+            game.pushSystemMessage(ss.str());
+        }
+        {
+            std::ostringstream ss;
+            ss << "TRAPS " << trapsDiscovered << "/" << trapsTotal;
+            ss << " | MARKS " << marks;
+            ss << " | ENGR " << engr;
+            ss << " | DOORS " << doors;
+            ss << " | CHASMS " << chasm;
+            game.pushSystemMessage(ss.str());
+        }
         return;
     }
 
@@ -2468,6 +2639,7 @@ constexpr ItemKind RING_KINDS[] = {
     ItemKind::RingFocus,
     ItemKind::RingProtection,
     ItemKind::RingSearching,
+    ItemKind::RingSustenance,
 };
 
 constexpr ItemKind WAND_KINDS[] = {

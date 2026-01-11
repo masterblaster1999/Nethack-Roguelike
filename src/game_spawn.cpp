@@ -607,7 +607,8 @@ void Game::spawnItems() {
         else if (roll < 178) dropItemAt(ItemKind::RingAgility, randomFreeTileInRoom(r), 1);
         else if (roll < 181) dropItemAt(ItemKind::RingFocus, randomFreeTileInRoom(r), 1);
         else if (roll < 184) dropItemAt(ItemKind::RingSearching, randomFreeTileInRoom(r), 1);
-        else if (roll < 190) dropItemAt(ItemKind::PotionEnergy, randomFreeTileInRoom(r), 1);
+        else if (roll < 187) dropItemAt(ItemKind::RingSustenance, randomFreeTileInRoom(r), 1);
+        else if (roll < 193) dropItemAt(ItemKind::PotionEnergy, randomFreeTileInRoom(r), 1);
         else {
             // Rare: a spellbook.
             ItemKind bk = (depth_ >= 2) ? pickSpellbookKind(rng, depth_) : ItemKind::ScrollIdentify;
@@ -790,11 +791,12 @@ void Game::spawnItems() {
                     else if (roll < 99) {
                         // A small chance of rings showing up in the magic shop.
                         const int rr = rng.range(0, 99);
-                        if (rr < 30) k = ItemKind::RingProtection;
-                        else if (rr < 55) k = ItemKind::RingMight;
-                        else if (rr < 75) k = ItemKind::RingAgility;
-                        else if (rr < 90) k = ItemKind::RingFocus;
-                        else k = ItemKind::RingSearching;
+                        if (rr < 28) k = ItemKind::RingProtection;
+                        else if (rr < 50) k = ItemKind::RingMight;
+                        else if (rr < 70) k = ItemKind::RingAgility;
+                        else if (rr < 85) k = ItemKind::RingFocus;
+                        else if (rr < 95) k = ItemKind::RingSearching;
+                        else k = ItemKind::RingSustenance;
                     } else {
                         // Rare traversal utility.
                         if (rng.chance(0.18f)) {
@@ -2076,7 +2078,36 @@ void Game::applyEndOfTurnEffects() {
     if (hungerEnabled_) {
         if (hungerMax <= 0) hungerMax = 800;
 
-        hunger = std::max(0, hunger - 1);
+        // Ring of Sustenance slows hunger loss (deterministic; uses turnCount so save/load stays consistent).
+        int sustainInterval = 1;
+        bool hasSustenance = false;
+        int bestPower = -9999;
+
+        auto consider = [&](const Item* r) {
+            if (!r) return;
+            if (r->kind != ItemKind::RingSustenance) return;
+            hasSustenance = true;
+
+            int p = r->enchant;
+            if (r->buc < 0) p -= 1;
+            else if (r->buc > 0) p += 1;
+
+            bestPower = std::max(bestPower, p);
+        };
+
+        consider(equippedRing1());
+        consider(equippedRing2());
+
+        if (hasSustenance) {
+            // Base: drain 1 hunger every 2 turns (power 0).
+            // Enchant/blessing increases the interval; curses remove the benefit.
+            sustainInterval = 2 + bestPower;
+            sustainInterval = clampi(sustainInterval, 1, 5);
+        }
+
+        if (!hasSustenance || (turnCount % static_cast<uint32_t>(sustainInterval)) == 0u) {
+            hunger = std::max(0, hunger - 1);
+        }
 
         const int st = hungerStateFor(hunger, hungerMax);
         if (st != hungerStatePrev) {

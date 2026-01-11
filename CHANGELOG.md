@@ -5,14 +5,28 @@
 
 ### Added
 - **Ring of Searching**: a new ring that grants **automatic searching** each turn, helping you uncover nearby **traps, trapped chests, and secret doors** without spending an extra action.
+- **Ring of Sustenance**: a new ring that grants **passive sustenance**, slowing **hunger loss** when the hunger system is enabled.
+  - **Enchant/bless** increases potency; **curses** remove the benefit.
 - **Shrine altars**: shrine rooms now spawn a visible **altar** tile (overlay on themed floor).
   - Press **Enter** while standing on the altar to invoke the existing **shrine prayer** interaction (including auto-identify when pious).
+- **Obscure debug/info commands**: added a few extended commands for power-users:
+  - `#pos [x y]` (`#where` alias): prints coordinates + depth + level size (uses the LOOK cursor when active).
+  - `#what [x y]` (`#tile`/`#describe`/`#whatis` aliases): prints the same rich tile description used by LOOK mode.
+  - `#mapstats`: prints quick floor stats (exploration %, rooms, monsters, items, traps, marks, engravings).
+- **Perf overlay**: added a tiny optional debug HUD that shows **FPS/frame time**, sprite-cache stats, and a low-rate **determinism hash**.
+  - Toggle via **Shift+F10** (default), `show_perf_overlay` in settings, or `#perf on/off`.
 - **Isometric depth shading**: isometric view now adds **procedurally generated diamond edge shading** (contact shadows against walls/objects + subtle chasm rim) so the 2.5D map reads with more depth.
 - **Isometric bevel lighting**: isometric diamond terrain tiles now apply a subtle **edge-only bevel ramp** (top-left highlight / bottom-right shadow) to reinforce the 2.5D ground plane.
+- **Isometric themed floor diamonds**: themed floor tiles in isometric view are now generated directly in **diamond space** (no projection), keeping seams/cracks/planks aligned to the 2:1 grid and improving crispness at larger tile sizes.
+- **Isometric chasm depth tiles**: chasms in isometric view now use a purpose-built **procedural diamond tile** (stone rim + shaded inner walls + swirling void core) so pits read with stronger depth, replacing the projected top-down chasm tile.
+- **Isometric chasm gloom shading**: floor tiles adjacent to chasms now receive a subtle inward **gloom** darkening overlay in isometric view (beyond the rim band), making pits read deeper and edges feel more dangerous.
 - **Isometric sprite grounding shadows**: entities (and hallucination phantoms) now draw a small **diamond ground shadow** under their feet in isometric view, improving depth cues and reducing the “floating sprite” effect.
 - **Isometric cast shadows**: floor tiles in isometric view now receive subtle **directional cast shadows** from nearby tall blockers (walls/closed doors/pillars/etc), improving 2.5D depth cues.
-- **Isometric floor decals**: themed floor decal overlays (cracks/runes/stains) are now projected to isometric diamonds, so special rooms retain their subtle floor detail in 2.5D view.
+- **Top-down wall contact shadows**: floor tiles now receive subtle **ambient occlusion** shading along edges adjacent to wall-mass terrain (walls/closed doors/pillars) and tall props (boulders/fountains/altars), improving depth cues and readability.
+- **Isometric floor decals**: themed floor decal overlays (cracks/runes/stains) are now generated directly in isometric diamond space, keeping thin lines crisp and patterns aligned to the 2.5D grid.
+- **Isometric environmental overlays**: gas and fire floor hazards now generate directly in isometric diamond space (instead of projecting square sprites), so animated VFX align cleanly to the 2.5D grid. Poison gas now uses the isometric diamond variants as well.
 - **Isometric door blocks**: closed and locked doors now render as **procedurally generated 2.5D door blocks** in isometric view, matching the wall block style (wood panels inset into stone faces) instead of using flat top-down overlay sprites.
+- **Isometric block surface texture**: isometric wall/door/doorway blocks now add subtle procedural **brick seams** on stone faces and **wood grain** on door panels for richer, less-flat 2.5D visuals.
 - **Isometric open door frames**: open doors now render as a **procedurally generated 2.5D doorway frame** in isometric view (a passable archway), so doorways keep their vertical depth instead of relying on a flat floor overlay.
 - **Isometric stairs depth overlays**: stairs up/down now use a purpose-built **procedural diamond overlay** (rim + interior shading + step lines) so stairwells read with more depth in 2.5D view.
 - **Isometric prop blocks**: pillars and boulders now render as **procedurally generated 2.5D blocks** in isometric view, matching the wall/door block style instead of relying on flat top-down overlay sprites.
@@ -49,6 +63,10 @@
 
 - **Room shape variety**: some **normal rooms** now get internal wall partitions (L-shaped alcoves, donut blocks, and partition walls with occasional inner doors).
   - Designed to increase tactical line-of-sight variation while keeping the global stairs path intact.
+
+- **Procedural map sizes**: newly generated floors now vary in **width/height** by depth (with mild jitter), adding navigational variety.
+  - Bespoke/puzzle floors (Sokoban/Rogue/labyrinth/sanctum) keep the canonical size.
+  - The game now prints `LEVEL SIZE: WxH` when a floor is generated for the first time.
 
 - **Merchant guild pursuit**: stealing from shops can now trigger a guard response that may follow you across floors.
   - Shop debts can be paid across depths, and clearing all debt causes guards to stand down globally.
@@ -139,6 +157,16 @@
 - **#whistle** now calls **all friendly companions** with **Follow/Fetch** orders (not just the starting dog).
 - Floor trap scatter now avoids **shops** and **shrines** (keeps safe spaces consistent; traps still appear elsewhere).
 - Darkness lighting now treats **burning creatures** and **flaming ego weapons** as small moving light sources (in addition to torches, room ambient light, and fire fields).
+- Monster pathfinding now treats **poison gas** and **discovered traps** as higher-cost tiles, so monsters (and pets) will route around known hazards when practical.
+- Procedural terrain visuals: floor/wall/chasm variant selection now uses low-frequency coherent noise (less "TV static", more natural patches).
+- Floor decals now use jittered-grid placement to reduce clumping; wall stains avoid adjacent clusters for a cleaner, more deliberate look (top-down + isometric).
+- Isometric floor decals are now generated directly in diamond space (instead of projecting top-down squares), keeping thin cracks/runes crisper and better aligned to the 2.5D grid.
+- Isometric VFX overlays: confusion/poison gas and fire field overlays now generate directly in diamond space in isometric view (no square projection), keeping the animation aligned to the 2:1 grid; poison gas now also uses the isometric textures.
+- Procedural VFX overlays: **confusion/poison gas** and **fire fields** now use **domain-warped fBm** masks for more wispy motion (less blobby), with subtle **spark** highlights in fire; still uses ordered dithering to stay crisp in pixel-art.
+- Voxel sprites: improved 3D voxel sprite shading with hemisphere-based ambient occlusion (reduces over-darkening on flat surfaces) plus a softer drop shadow for better grounding.
+- Isometric wall blocks now pick variants coherently along wall segments, improving brickwork continuity in 2.5D view.
+- Isometric ground plane lighting: isometric diamond terrain tiles now apply a subtle whole-tile directional ramp (top-left brighter / bottom-right darker) for better 2.5D depth, and cast shadows now feature stronger corner occlusion with caster-type strength scaling.
+- Isometric block sprites: wall/door/doorway/pillar block sprites now get subtle vertical-face ambient occlusion (under-cap overhang, ridge seam, and base grounding) plus a light-facing cap rim highlight, improving volume/readability in 2.5D view.
 
 ### Fixed
 - Shops now correctly spawn a **Shopkeeper** (enabling **#pay** and selling), and shop rooms no longer spawn random monsters.

@@ -564,8 +564,8 @@ bool Game::endTargeting(bool fire) {
 void Game::moveTargetCursor(int dx, int dy) {
     if (!targeting) return;
     Vec2i p = targetPos;
-    p.x = clampi(p.x + dx, 0, MAP_W - 1);
-    p.y = clampi(p.y + dy, 0, MAP_H - 1);
+    p.x = clampi(p.x + dx, 0, dung.width - 1);
+    p.y = clampi(p.y + dy, 0, dung.height - 1);
     setTargetCursor(p);
 }
 

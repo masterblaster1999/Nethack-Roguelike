@@ -570,11 +570,12 @@ bool Game::openChestAtPlayer() {
             // Rings (rare)
             int rr = rng.range(0, 99);
             ItemKind rk = ItemKind::RingProtection;
-            if (rr < 30) rk = ItemKind::RingProtection;
-            else if (rr < 55) rk = ItemKind::RingMight;
-            else if (rr < 75) rk = ItemKind::RingAgility;
-            else if (rr < 90) rk = ItemKind::RingFocus;
-            else rk = ItemKind::RingSearching;
+            if (rr < 28) rk = ItemKind::RingProtection;
+            else if (rr < 50) rk = ItemKind::RingMight;
+            else if (rr < 70) rk = ItemKind::RingAgility;
+            else if (rr < 85) rk = ItemKind::RingFocus;
+            else if (rr < 95) rk = ItemKind::RingSearching;
+            else rk = ItemKind::RingSustenance;
             int ench = (rng.chance(0.20f + 0.08f * tier)) ? rng.range(1, 1 + tier) : 0;
             addItemToChest(rk, 1, ench);
         } else if (roll < 48) {

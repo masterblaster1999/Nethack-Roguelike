@@ -38,6 +38,9 @@ struct Settings {
     // HUD status tags: show remaining turns for timed effects (POISON(6), REGEN(3), ...)
     bool showEffectTimers = true;
 
+    // Debug HUD overlay (FPS + texture cache stats). UI-only.
+    bool showPerfOverlay = false;
+
     // UI skin (purely cosmetic)
     UITheme uiTheme = UITheme::DarkStone;   // darkstone|parchment|arcane
     bool uiPanelsTextured = true;           // textured|solid

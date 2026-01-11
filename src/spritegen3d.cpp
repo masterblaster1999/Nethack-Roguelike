@@ -498,7 +498,7 @@ VoxelModel buildItemModel(ItemKind kind, uint32_t seed, int frame, const SpriteP
 
     // Rings: a flat torus-like loop.
     if (kind == ItemKind::RingMight || kind == ItemKind::RingAgility || kind == ItemKind::RingFocus ||
-        kind == ItemKind::RingProtection || kind == ItemKind::RingSearching) {
+        kind == ItemKind::RingProtection || kind == ItemKind::RingSearching || kind == ItemKind::RingSustenance) {
         m = makeModel(W,H,D);
 
         Color metal = lerp(main, {235, 210, 120, 255}, 0.40f);
@@ -1143,6 +1143,56 @@ SpritePixels renderVoxel(const VoxelModel& m, int outW, int outH, int frame, flo
         return clampf(T, 0.0f, 1.0f);
     };
 
+    // Hemisphere-based ambient occlusion sampling around the surface normal.
+    // This avoids over-darkening broad flat faces (a common issue when AO is
+    // derived from "internal" neighbors), while still deepening concave pockets.
+    struct AOSample { int dx, dy, dz; float w; };
+    static constexpr AOSample AO_SAMPLES[] = {
+        // 1-step axis
+        {  1,  0,  0, 1.00f }, { -1,  0,  0, 1.00f }, {  0,  1,  0, 1.00f }, {  0, -1,  0, 1.00f }, {  0,  0,  1, 1.00f }, {  0,  0, -1, 1.00f },
+        // 1-step edges (sqrt2)
+        {  1,  1,  0, 0.85f }, {  1, -1,  0, 0.85f }, { -1,  1,  0, 0.85f }, { -1, -1,  0, 0.85f },
+        {  1,  0,  1, 0.85f }, {  1,  0, -1, 0.85f }, { -1,  0,  1, 0.85f }, { -1,  0, -1, 0.85f },
+        {  0,  1,  1, 0.85f }, {  0,  1, -1, 0.85f }, {  0, -1,  1, 0.85f }, {  0, -1, -1, 0.85f },
+        // 1-step corners (sqrt3)
+        {  1,  1,  1, 0.70f }, {  1,  1, -1, 0.70f }, {  1, -1,  1, 0.70f }, {  1, -1, -1, 0.70f },
+        { -1,  1,  1, 0.70f }, { -1,  1, -1, 0.70f }, { -1, -1,  1, 0.70f }, { -1, -1, -1, 0.70f },
+        // 2-step axis (softens occlusion a little)
+        {  2,  0,  0, 0.55f }, { -2,  0,  0, 0.55f }, {  0,  2,  0, 0.55f }, {  0, -2,  0, 0.55f }, {  0,  0,  2, 0.55f }, {  0,  0, -2, 0.55f },
+    };
+
+    auto ambientOcclusion = [&](int vx, int vy, int vz, const Vec3f& normal) -> float {
+        const Vec3f nn = normalize(normal);
+
+        float occSum = 0.0f;
+        float wSum = 0.0f;
+
+        for (const auto& s : AO_SAMPLES) {
+            const Vec3f dir = normalize({ static_cast<float>(s.dx), static_cast<float>(s.dy), static_cast<float>(s.dz) });
+            const float dp = dot(dir, nn);
+
+            // Only sample the hemisphere in front of the surface; a small threshold
+            // avoids noisy "side" contributions on flat faces.
+            if (dp <= 0.10f) continue;
+
+            const float o = occ(vx + s.dx, vy + s.dy, vz + s.dz);
+
+            // Weight samples by both their importance and alignment with the normal.
+            const float w = s.w * (0.35f + 0.65f * dp);
+
+            occSum += o * w;
+            wSum += w;
+        }
+
+        const float occAvg = (wSum > 1e-6f) ? (occSum / wSum) : 0.0f;
+
+        // Map [0..1] occlusion to an AO multiplier.
+        float ao = 1.0f - occAvg * 0.85f;
+        ao = clampf(ao, 0.45f, 1.0f);
+        ao = std::pow(ao, 1.25f);
+        return ao;
+    };
+
     auto shadeVoxel = [&](Color c, const Vec3f& n, const Vec3f& viewDir, float shadow, int vx, int vy, int vz)->Color {
         Vec3f nn = normalize(n);
         Vec3f vv = normalize(viewDir);
@@ -1150,18 +1200,10 @@ SpritePixels renderVoxel(const VoxelModel& m, int outW, int outH, int frame, flo
         float ndl = std::max(0.0f, dot(nn, lightDir));
         float shade = ambient + diffuse * ndl * shadow;
 
-        // Tiny ambient occlusion based on filled neighbors.
-        int neighbors = 0;
-        neighbors += (occ(vx-1,vy,vz) > 0.01f) ? 1 : 0;
-        neighbors += (occ(vx+1,vy,vz) > 0.01f) ? 1 : 0;
-        neighbors += (occ(vx,vy-1,vz) > 0.01f) ? 1 : 0;
-        neighbors += (occ(vx,vy+1,vz) > 0.01f) ? 1 : 0;
-        neighbors += (occ(vx,vy,vz-1) > 0.01f) ? 1 : 0;
-        neighbors += (occ(vx,vy,vz+1) > 0.01f) ? 1 : 0;
-
-        float ao = 1.0f - 0.055f * static_cast<float>(neighbors);
-        ao = clampf(ao, 0.60f, 1.0f);
-
+        // Hemisphere-based ambient occlusion sampling (surface-facing).
+        // Keeps broad exposed faces from being over-darkened, while still
+        // deepening concave pockets and creases.
+        const float ao = ambientOcclusion(vx, vy, vz, nn);
         shade *= ao;
         shade = clampf(shade, 0.0f, 1.25f);
 
@@ -1317,25 +1359,50 @@ SpritePixels renderVoxel(const VoxelModel& m, int outW, int outH, int frame, flo
             img.px[static_cast<size_t>(py*outW + px)] = out;
         }
     }
-
-    // A tiny "contact shadow" in screen-space for extra depth.
+    // A small "contact shadow" in screen-space for extra depth.
+    // Shadow direction matches the light (down-right). We stamp a short falloff
+    // chain so sprites feel grounded without looking blurry.
     SpritePixels withShadow = img;
-    for (int y = outH - 2; y >= 0; --y) {
-        for (int x = outW - 2; x >= 0; --x) {
+
+    auto stampShadow = [&](int sx, int sy, uint8_t a) {
+        if (a == 0) return;
+        if (sx < 0 || sy < 0 || sx >= outW || sy >= outH) return;
+        if (img.at(sx, sy).a != 0) return; // never paint over the sprite itself
+
+        Color& d = withShadow.at(sx, sy);
+        if (d.a == 0) {
+            d = {0,0,0,a};
+        } else if (d.r == 0 && d.g == 0 && d.b == 0) {
+            if (a > d.a) d.a = a;
+        }
+    };
+
+    for (int y = outH - 1; y >= 0; --y) {
+        for (int x = outW - 1; x >= 0; --x) {
             const Color c = img.at(x,y);
             if (c.a == 0) continue;
-            const int sx = x + 1;
-            const int shY = y + 1;
-            if (sx < 0 || shY < 0 || sx >= outW || shY >= outH) continue;
-            Color& d = withShadow.at(sx,shY);
-            if (d.a == 0) {
-                d = {0,0,0,80};
-            }
+
+            const float oa = static_cast<float>(c.a) / 255.0f;
+
+            const uint8_t a1 = clamp8(static_cast<int>(std::round(74.0f * oa)));
+            const uint8_t a2 = clamp8(static_cast<int>(std::round(44.0f * oa)));
+            const uint8_t a3 = clamp8(static_cast<int>(std::round(26.0f * oa)));
+            const uint8_t aSide = clamp8(static_cast<int>(std::round(28.0f * oa)));
+
+            stampShadow(x + 1, y + 1, a1);
+            stampShadow(x + 2, y + 2, a2);
+            stampShadow(x + 3, y + 3, a3);
+
+            // Small lateral spread so the shadow isn't a single-pixel staircase.
+            stampShadow(x + 1, y + 2, aSide);
+            stampShadow(x + 2, y + 1, aSide);
         }
     }
 
     return withShadow;
 }
+
+
 
 
 SpritePixels downscale2x(const SpritePixels& hi) {

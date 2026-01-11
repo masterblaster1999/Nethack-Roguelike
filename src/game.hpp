@@ -291,6 +291,9 @@ enum class Action : uint8_t {
 
     // Spells (append-only)
     Spells,
+
+    // Debug (append-only)
+    TogglePerfOverlay,
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -983,6 +986,9 @@ public:
     bool showEffectTimers() const { return showEffectTimers_; }
     void setShowEffectTimers(bool enabled) { showEffectTimers_ = enabled; }
 
+    bool perfOverlayEnabled() const { return perfOverlayEnabled_; }
+    void setPerfOverlayEnabled(bool enabled) { perfOverlayEnabled_ = enabled; }
+
 // UI skin (purely cosmetic)
 UITheme uiTheme() const { return uiTheme_; }
 void setUITheme(UITheme theme) { uiTheme_ = theme; }
@@ -1223,8 +1229,8 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     bool minimapCursorActive() const { return minimapCursorActive_; }
     Vec2i minimapCursor() const { return minimapCursorPos_; }
     void setMinimapCursor(Vec2i p) {
-        p.x = std::clamp(p.x, 0, MAP_W - 1);
-        p.y = std::clamp(p.y, 0, MAP_H - 1);
+        p.x = std::clamp(p.x, 0, std::max(0, dung.width - 1));
+        p.y = std::clamp(p.y, 0, std::max(0, dung.height - 1));
         minimapCursorPos_ = p;
         minimapCursorActive_ = true;
     }
@@ -1771,6 +1777,7 @@ private:
 
     // UI preferences (persisted via settings)
     bool showEffectTimers_ = true;
+    bool perfOverlayEnabled_ = false; // UI-only: show perf HUD overlay
     UITheme uiTheme_ = UITheme::DarkStone;
     bool uiPanelsTextured_ = true;
     ViewMode viewMode_ = ViewMode::TopDown;

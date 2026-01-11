@@ -192,6 +192,9 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "show_effect_timers") {
             bool b = true;
             if (parseBool(val, b)) s.showEffectTimers = b;
+        } else if (key == "show_perf_overlay" || key == "perf_overlay" || key == "perf_ui") {
+            bool b = false;
+            if (parseBool(val, b)) s.showPerfOverlay = b;
         } else if (key == "ui_theme") {
             std::string v = toLower(val);
             if (v == "dark" || v == "darkstone" || v == "stone") s.uiTheme = UITheme::DarkStone;
@@ -325,6 +328,9 @@ player_class = adventurer
 # HUD
 # show_effect_timers: true/false (shows remaining turns on POISON/REGEN/... in the HUD)
 show_effect_timers = true
+
+# show_perf_overlay: true/false (tiny debug HUD: FPS + cache stats)
+show_perf_overlay = false
 
 # UI skin (cosmetic)
 # ui_theme: darkstone | parchment | arcane
@@ -470,6 +476,7 @@ bind_save = f5
 bind_restart = f6
 bind_load = f9
 bind_load_auto = f10
+bind_toggle_perf_overlay = shift+f10
 bind_log_up = pageup
 bind_log_down = pagedown
 )INI";

@@ -99,6 +99,79 @@ static void utf8PopBack(std::string& s) {
 
 } // namespace
 
+namespace {
+
+struct MapSizeWH {
+    int w = 0;
+    int h = 0;
+};
+
+static int lerpInt(int a, int b, int num, int den) {
+    if (den <= 0) return a;
+    return a + (b - a) * num / den;
+}
+
+// Picks a map size for a newly generated level.
+// Philosophy: early floors slightly smaller/tighter, late floors slightly larger,
+// with mild jitter and a couple of depth-based aspect biases.
+static MapSizeWH pickProceduralMapSize(RNG& rng, int depth, int maxDepth) {
+    MapSizeWH out{Dungeon::DEFAULT_W, Dungeon::DEFAULT_H};
+
+    // Keep bespoke/special layouts at the canonical size (they were authored/tuned for it).
+    if (depth <= 0) return out;
+    if (depth >= maxDepth) return out;
+    if (maxDepth >= 2 && depth == maxDepth - 1) return out; // labyrinth / pre-sanctum
+    if (depth == Dungeon::SOKOBAN_DEPTH) return out;
+    if (depth == Dungeon::ROGUE_LEVEL_DEPTH) return out;
+
+    // Depth progress 0..(maxDepth-1) (with depth 1 at 0).
+    const int den = std::max(1, maxDepth - 1);
+    const int num = std::clamp(depth - 1, 0, den);
+
+    // Base size bands.
+    // These are intentionally conservative to avoid making floors feel empty or overly sparse.
+    const int wMin = 90;
+    const int wMax = 124;
+    const int hMin = 56;
+    const int hMax = 78;
+
+    int w = lerpInt(wMin, wMax, num, den);
+    int h = lerpInt(hMin, hMax, num, den);
+
+    // Mild jitter so consecutive floors don't feel "grid-locked".
+    w += rng.range(-4, 4);
+    h += rng.range(-3, 3);
+
+    // Depth-specific aspect nudges (keeps certain themes feeling distinct).
+    if (depth == Dungeon::MINES_DEPTH || depth == Dungeon::DEEP_MINES_DEPTH) {
+        w -= 6;
+        h += 2;
+    }
+    if (depth == Dungeon::CATACOMBS_DEPTH) {
+        w += 4;
+        h += 2;
+    }
+
+    // Occasional wider-or-taller bias.
+    if (rng.chance(0.35f)) {
+        w += rng.range(-6, 6);
+    }
+
+    // Clamp to safe bounds for generators.
+    w = std::clamp(w, 80, 132);
+    h = std::clamp(h, 50, 86);
+
+    // Keep a 1-tile border and reasonable interior.
+    w = std::max(w, 32);
+    h = std::max(h, 24);
+
+    out.w = w;
+    out.h = h;
+    return out;
+}
+
+} // namespace
+
 void Game::pushMsg(const std::string& s, MessageKind kind, bool fromPlayer) {
     // Coalesce consecutive identical messages to reduce spam in combat / auto-move.
     // This preserves the original text and adds a repeat counter for the renderer.
@@ -1254,7 +1327,7 @@ void Game::newGame(uint32_t seed) {
     autoExploreSearchGoalPos = Vec2i{-1, -1};
     autoExploreSearchTurnsLeft = 0;
     autoExploreSearchAnnounced = false;
-    autoExploreSearchTriedTurns.assign(MAP_W * MAP_H, 0);
+    autoExploreSearchTriedTurns.clear();
 
     turnCount = 0;
     naturalRegenCounter = 0;
@@ -1330,12 +1403,17 @@ void Game::newGame(uint32_t seed) {
     hunger = hungerMax;
     hungerStatePrev = hungerStateFor(hunger, hungerMax);
 
+    const MapSizeWH msz = pickProceduralMapSize(rng, depth_, DUNGEON_MAX_DEPTH);
+    dung = Dungeon(msz.w, msz.h);
     dung.generate(rng, depth_, DUNGEON_MAX_DEPTH);
     // Environmental fields reset per floor (no lingering gas on a fresh level).
     confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
     poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
     fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
     scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+
+    // Auto-explore bookkeeping is transient per-floor; size it to this dungeon.
+    autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
     // Shrines get a visible altar overlay tile (placed before graffiti/spawns so it stays clear).
     spawnAltars();
@@ -1536,6 +1614,11 @@ void Game::newGame(uint32_t seed) {
 
     pushMsg("WELCOME TO PROCROGUE++.", MessageKind::System);
     pushMsg(std::string("CLASS: ") + playerClassDisplayName(), MessageKind::System);
+    {
+        std::ostringstream ms;
+        ms << "LEVEL SIZE: " << dung.width << "x" << dung.height << ".";
+        pushMsg(ms.str(), MessageKind::System);
+    }
     pushMsg("A DOG TROTS AT YOUR HEELS.", MessageKind::System);
     {
         std::ostringstream ss;
@@ -2071,7 +2154,7 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     autoExploreSearchGoalPos = Vec2i{-1, -1};
     autoExploreSearchTurnsLeft = 0;
     autoExploreSearchAnnounced = false;
-    autoExploreSearchTriedTurns.assign(MAP_W * MAP_H, 0);
+    autoExploreSearchTriedTurns.clear();
     invOpen = false;
     targeting = false;
     helpOpen = false;
@@ -2254,6 +2337,8 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         fireField_.clear();
         scentField_.clear();
 
+        const MapSizeWH msz = pickProceduralMapSize(rng, depth_, DUNGEON_MAX_DEPTH);
+        dung = Dungeon(msz.w, msz.h);
         dung.generate(rng, depth_, DUNGEON_MAX_DEPTH);
         confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
@@ -2371,6 +2456,9 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         emitNoise(p.pos, 12);
     }
 
+    // Auto-explore bookkeeping is transient per-floor; size it to the current dungeon.
+    autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+
     // Small heal on travel.
     p.hp = std::min(p.hpMax, p.hp + 2);
 
@@ -2379,6 +2467,13 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     else if (goingDown) ss << "YOU DESCEND TO DEPTH " << depth_ << ".";
     else ss << "YOU ASCEND TO DEPTH " << depth_ << ".";
     pushMsg(ss.str());
+
+    // Show the procedurally-chosen map dimensions once, when a floor is first generated.
+    if (!restored) {
+        std::ostringstream ms;
+        ms << "LEVEL SIZE: " << dung.width << "x" << dung.height << ".";
+        pushSystemMessage(ms.str());
+    }
 
     if (followedCount > 0) {
         std::ostringstream ms;

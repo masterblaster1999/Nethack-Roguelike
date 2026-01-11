@@ -2631,6 +2631,7 @@ constexpr ItemKind SCROLL_KINDS[] = {
     ItemKind::ScrollFear,
     ItemKind::ScrollEarth,
     ItemKind::ScrollTaming,
+    ItemKind::ScrollEnchantRing,
 };
 
 constexpr ItemKind RING_KINDS[] = {

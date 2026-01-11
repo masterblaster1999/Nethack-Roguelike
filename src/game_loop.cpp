@@ -203,6 +203,7 @@ void Game::handleAction(Action a) {
     auto closeOverlays = [&]() {
         invOpen = false;
         invIdentifyMode = false;
+        invEnchantRingMode = false;
         closeChestOverlay();
         targeting = false;
         targetingMode_ = TargetingMode::Ranged;
@@ -287,6 +288,7 @@ void Game::handleAction(Action a) {
             case Action::Confirm: {
                 if (inv.empty()) {
                     invIdentifyMode = false;
+                    invEnchantRingMode = false;
                     break;
                 }
                 invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
@@ -299,12 +301,91 @@ void Game::handleAction(Action a) {
 
                 (void)markIdentified(selIt.kind, false);
                 invIdentifyMode = false;
+                invEnchantRingMode = false;
                 break;
             }
             case Action::Cancel:
             case Action::Inventory:
                 // Treat cancel as "pick randomly" to preserve the old (random) behavior.
                 identifyRandom();
+                closeInventory();
+                break;
+            default:
+                // Ignore other actions while the prompt is active.
+                break;
+        }
+        return;
+    }
+
+
+    
+
+    // ------------------------------------------------------------
+    // Modal inventory prompt: selecting a ring for Scroll of Enchant Ring
+    // ------------------------------------------------------------
+    // This runs *before* global hotkeys so the prompt can't be dismissed by opening other overlays.
+    if (invOpen && invEnchantRingMode) {
+        auto candidates = [&]() {
+            std::vector<int> out;
+            out.reserve(8);
+            for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+                const Item& it = inv[static_cast<size_t>(i)];
+                if (!isRingKind(it.kind)) continue;
+                out.push_back(i);
+            }
+            return out;
+        };
+
+        auto enchantAt = [&](int idx) {
+            if (idx < 0 || idx >= static_cast<int>(inv.size())) return;
+            Item& r = inv[static_cast<size_t>(idx)];
+            if (!isRingKind(r.kind)) return;
+            r.enchant += 1;
+            pushMsg("YOUR RING GLOWS BRIEFLY.", MessageKind::Success, true);
+        };
+
+        auto enchantRandom = [&]() {
+            const std::vector<int> c = candidates();
+            if (c.empty()) {
+                pushMsg("NOTHING HAPPENS.", MessageKind::Info, true);
+                invEnchantRingMode = false;
+                return;
+            }
+            const int pick = rng.range(0, static_cast<int>(c.size()) - 1);
+            enchantAt(c[static_cast<size_t>(pick)]);
+        };
+
+        switch (a) {
+            case Action::Up:
+                moveInventorySelection(-1);
+                break;
+            case Action::Down:
+                moveInventorySelection(1);
+                break;
+            case Action::SortInventory:
+                sortInventory();
+                break;
+            case Action::Confirm: {
+                if (inv.empty()) {
+                    invEnchantRingMode = false;
+                    break;
+                }
+                invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
+                const Item& selIt = inv[static_cast<size_t>(invSel)];
+
+                if (!isRingKind(selIt.kind)) {
+                    pushMsg("THAT IS NOT A RING.", MessageKind::Info, true);
+                    break;
+                }
+
+                enchantAt(invSel);
+                invEnchantRingMode = false;
+                break;
+            }
+            case Action::Cancel:
+            case Action::Inventory:
+                // Treat cancel as "pick randomly" so the scroll isn't wasted.
+                enchantRandom();
                 closeInventory();
                 break;
             default:

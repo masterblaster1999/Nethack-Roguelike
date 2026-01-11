@@ -34,6 +34,7 @@ void Game::openInventory() {
 
     invOpen = true;
     invIdentifyMode = false;
+    invEnchantRingMode = false;
     invPrompt_ = InvPromptKind::None;
     invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 }
@@ -41,6 +42,7 @@ void Game::openInventory() {
 void Game::closeInventory() {
     invOpen = false;
     invIdentifyMode = false;
+    invEnchantRingMode = false;
     invPrompt_ = InvPromptKind::None;
 }
 
@@ -601,14 +603,16 @@ bool Game::openChestAtPlayer() {
         } else if (roll < 124) {
             const ItemKind pk = rng.chance(0.25f) ? ItemKind::PotionInvisibility : ItemKind::PotionVision;
             addItemToChest(pk, 1);
-        } else if (roll < 130) {
+        } else if (roll < 128) {
             addItemToChest(ItemKind::ScrollMapping, 1);
-        } else if (roll < 134) {
+        } else if (roll < 132) {
             addItemToChest(ItemKind::ScrollTeleport, 1);
-        } else if (roll < 136) {
+        } else if (roll < 134) {
             addItemToChest(ItemKind::ScrollEnchantWeapon, 1);
-        } else if (roll < 138) {
+        } else if (roll < 136) {
             addItemToChest(ItemKind::ScrollEnchantArmor, 1);
+        } else if (roll < 138) {
+            addItemToChest(ItemKind::ScrollEnchantRing, 1);
         } else if (roll < 142) {
             addItemToChest(ItemKind::ScrollRemoveCurse, 1);
         } else {
@@ -2112,6 +2116,52 @@ bool Game::useSelected() {
         }
         (void)markIdentified(it.kind, false);
         consumeOneStackable();
+        return true;
+    }
+
+
+    if (it.kind == ItemKind::ScrollEnchantRing) {
+        (void)markIdentified(it.kind, false);
+
+        // Gather ring candidates.
+        std::vector<int> ringIds;
+        ringIds.reserve(8);
+        for (const auto& invIt : inv) {
+            if (!isRingKind(invIt.kind)) continue;
+            ringIds.push_back(invIt.id);
+        }
+
+        if (ringIds.empty()) {
+            pushMsg("YOU FEEL A FAINT TINGLE... BUT NOTHING HAPPENS.", MessageKind::Info, true);
+            consumeOneStackable();
+            return true;
+        }
+
+        auto enchantRingById = [&](int itemId) {
+            const int idx = findItemIndexById(inv, itemId);
+            if (idx < 0) return;
+            inv[static_cast<size_t>(idx)].enchant += 1;
+            pushMsg("YOUR RING GLOWS BRIEFLY.", MessageKind::Success, true);
+        };
+
+        if (ringIds.size() == 1) {
+            enchantRingById(ringIds[0]);
+            consumeOneStackable();
+            return true;
+        }
+
+        // Multiple rings: consume the scroll now (reading takes the turn regardless).
+        consumeOneStackable();
+
+        // Enter a temporary inventory sub-mode so the player can choose.
+        invEnchantRingMode = true;
+
+        // Move selection to the first ring to reduce friction.
+        const int idx0 = findItemIndexById(inv, ringIds[0]);
+        if (idx0 >= 0) invSel = idx0;
+        else invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+
+        pushMsg("SELECT A RING TO ENCHANT (ENTER = CHOOSE, ESC = RANDOM).", MessageKind::System, true);
         return true;
     }
 

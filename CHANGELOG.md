@@ -7,6 +7,8 @@
 - **Ring of Searching**: a new ring that grants **automatic searching** each turn, helping you uncover nearby **traps, trapped chests, and secret doors** without spending an extra action.
 - **Ring of Sustenance**: a new ring that grants **passive sustenance**, slowing **hunger loss** when the hunger system is enabled.
   - **Enchant/bless** increases potency; **curses** remove the benefit.
+- **Scroll of Enchant Ring**: a new scroll that lets you enchant one of your rings (+ENCHANT).
+  - If you have multiple rings, you will be prompted to choose; cancelling picks a random ring.
 - **Shrine altars**: shrine rooms now spawn a visible **altar** tile (overlay on themed floor).
   - Press **Enter** while standing on the altar to invoke the existing **shrine prayer** interaction (including auto-identify when pious).
 - **Obscure debug/info commands**: added a few extended commands for power-users:

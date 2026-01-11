@@ -795,6 +795,7 @@ void Game::onPlayerLevelUp() {
     // Cancel other UI modes / automation so the player can make a choice.
     invOpen = false;
     invIdentifyMode = false;
+    invEnchantRingMode = false;
     invPrompt_ = InvPromptKind::None;
     closeChestOverlay();
     targeting = false;
@@ -1278,6 +1279,7 @@ void Game::newGame(uint32_t seed) {
 
     invOpen = false;
     invIdentifyMode = false;
+    invEnchantRingMode = false;
     invPrompt_ = InvPromptKind::None;
     invSel = 0;
     targeting = false;

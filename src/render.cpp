@@ -4250,6 +4250,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             case ItemKind::ScrollKnock: return "EFFECT: KNOCK";
             case ItemKind::ScrollEnchantWeapon: return "EFFECT: ENCHANT WEAPON";
             case ItemKind::ScrollEnchantArmor: return "EFFECT: ENCHANT ARMOR";
+            case ItemKind::ScrollEnchantRing: return "EFFECT: ENCHANT RING";
             case ItemKind::ScrollIdentify: return "EFFECT: IDENTIFY";
             case ItemKind::ScrollRemoveCurse: return "EFFECT: REMOVE CURSE";
             case ItemKind::ScrollConfusion: return "EFFECT: CONFUSION";
@@ -6152,6 +6153,7 @@ void Renderer::drawDiscoveriesOverlay(const Game& game) {
                 case ItemKind::ScrollMapping:       return {"REVEALS THE MAP.", "CONFUSED: CAUSES AMNESIA.", ""};
                 case ItemKind::ScrollEnchantWeapon: return {"ENCHANTS YOUR WEAPON.", "", ""};
                 case ItemKind::ScrollEnchantArmor:  return {"ENCHANTS YOUR ARMOR.", "", ""};
+                case ItemKind::ScrollEnchantRing:   return {"ENCHANTS A RING.", "PROMPTS IF MULTIPLE RINGS.", ""};
                 case ItemKind::ScrollIdentify:      return {"IDENTIFIES AN UNKNOWN ITEM.", "", ""};
                 case ItemKind::ScrollDetectTraps:   return {"DETECTS TRAPS NEARBY.", "", ""};
                 case ItemKind::ScrollDetectSecrets: return {"REVEALS SECRET DOORS.", "", ""};

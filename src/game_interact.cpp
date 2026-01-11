@@ -1861,6 +1861,7 @@ void Game::beginDig() {
     // Close other overlays/modes.
     invOpen = false;
     invIdentifyMode = false;
+    invEnchantRingMode = false;
     targeting = false;
     looking = false;
     helpOpen = false;
@@ -1887,6 +1888,7 @@ void Game::beginKick() {
     // Close other overlays/modes.
     invOpen = false;
     invIdentifyMode = false;
+    invEnchantRingMode = false;
     targeting = false;
     looking = false;
     helpOpen = false;

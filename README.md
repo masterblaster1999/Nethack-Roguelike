@@ -146,6 +146,7 @@ A tiny NetHack-inspired roguelike with:
 - **NetHack-style item identification**: potions + scrolls start unknown each run (randomized appearances). Using them identifies the item type; you can also find/read a **Scroll of Identify**. (Toggle via `identify_items` in settings.)
   - **Procedural appearance sprites**: potion/scroll/ring/wand icons now follow the randomized appearance each run (so you can't "ID by icon" and it feels more NetHack-like).
 - **New scroll**: **Scroll of Detect Traps** reveals all traps on the current floor (and identifies itself when used).
+- **New scroll**: **Scroll of Enchant Ring** enchants a ring in your inventory (**+ENCHANT**). If you have multiple rings, you'll be prompted to choose.
 - **Shrines (piety + prayer cooldown)**:
   - Use **#pray** (`pray heal|cure|identify|bless|uncurse|recharge`) to request a service.
   - Services cost **PIETY** and trigger a short **cooldown** (shown on the HUD).

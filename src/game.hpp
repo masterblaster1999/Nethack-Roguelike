@@ -1021,6 +1021,7 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     bool isInventoryOpen() const { return invOpen; }
     // True when the inventory overlay is being used for a special prompt (e.g. choosing an item for Scroll of Identify).
     bool isInventoryIdentifyMode() const { return invIdentifyMode; }
+    bool isInventoryEnchantRingMode() const { return invEnchantRingMode; }
     int inventorySelection() const { return invSel; }
     bool isEquipped(int itemId) const;
     std::string equippedTag(int itemId) const; // e.g. "M", "R", "A", "1", "2"
@@ -1522,6 +1523,7 @@ private:
     int invSel = 0;
     // Temporary inventory sub-mode (used for prompts like selecting an item to identify).
     bool invIdentifyMode = false;
+    bool invEnchantRingMode = false;
 
     // Additional modal inventory prompts (e.g., shrine services that need a target item).
     enum class InvPromptKind : uint8_t {

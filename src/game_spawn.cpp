@@ -580,11 +580,12 @@ void Game::spawnItems() {
             dropItemAt(ItemKind::PotionHallucination, randomFreeTileInRoom(r), 1);
         }
         else if (roll < 149) {
-            int pick = rng.range(0, 3);
+            int pick = rng.range(0, 4);
             ItemKind sk = (pick == 0) ? ItemKind::ScrollIdentify
                                       : (pick == 1) ? ItemKind::ScrollDetectTraps
                                       : (pick == 2) ? ItemKind::ScrollDetectSecrets
-                                                    : ItemKind::ScrollKnock;
+                                      : (pick == 3) ? ItemKind::ScrollKnock
+                                                    : ItemKind::ScrollEnchantRing;
             dropItemAt(sk, randomFreeTileInRoom(r), 1);
         }
         else if (roll < 151) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
@@ -868,6 +869,7 @@ void Game::spawnItems() {
         }
             if (rng.chance(0.18f)) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.12f)) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
+            if (rng.chance(0.10f)) dropItemAt(ItemKind::ScrollEnchantRing, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.08f)) dropItemAt(ItemKind::ScrollRemoveCurse, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.20f)) {
                 int pick = rng.range(0, 4);
@@ -951,6 +953,7 @@ void Game::spawnItems() {
                 else if (roll < 72) dropItemAt(ItemKind::ScrollDetectSecrets, randomFreeTileInRoom(r), 1);
                 else if (roll < 80) dropItemAt(ItemKind::ScrollEnchantWeapon, randomFreeTileInRoom(r), 1);
                 else if (roll < 86) dropItemAt(ItemKind::ScrollEnchantArmor, randomFreeTileInRoom(r), 1);
+                else if (roll < 88) dropItemAt(ItemKind::ScrollEnchantRing, randomFreeTileInRoom(r), 1);
                 else if (roll < 90) dropItemAt(ItemKind::ScrollRemoveCurse, randomFreeTileInRoom(r), 1);
                 else if (roll < 93) dropItemAt(ItemKind::ScrollConfusion, randomFreeTileInRoom(r), 1);
                 else if (roll < 95) dropItemAt(ItemKind::ScrollFear, randomFreeTileInRoom(r), 1);
@@ -1035,6 +1038,7 @@ void Game::spawnItems() {
                 const ItemKind pool[] = {
                     ItemKind::ScrollEnchantWeapon,
                     ItemKind::ScrollEnchantArmor,
+                    ItemKind::ScrollEnchantRing,
                     ItemKind::ScrollTeleport,
                     ItemKind::ScrollMapping,
                 };
@@ -2814,11 +2818,12 @@ void Game::cleanupDead() {
             else if (roll < 99) { gi.item.kind = ItemKind::PotionRegeneration; gi.item.count = 1; }
             else if (roll < 103) { gi.item.kind = ItemKind::ScrollTeleport; gi.item.count = 1; }
             else if (roll < 105) {
-                int pick = rng.range(0, 3);
+                int pick = rng.range(0, 4);
                 gi.item.kind = (pick == 0) ? ItemKind::ScrollIdentify
                                            : (pick == 1) ? ItemKind::ScrollDetectTraps
                                            : (pick == 2) ? ItemKind::ScrollDetectSecrets
-                                                         : ItemKind::ScrollKnock;
+                                           : (pick == 3) ? ItemKind::ScrollKnock
+                                                         : ItemKind::ScrollEnchantRing;
                 gi.item.count = 1;
             }
             else if (roll < 108) { gi.item.kind = ItemKind::ScrollEnchantWeapon; gi.item.count = 1; }

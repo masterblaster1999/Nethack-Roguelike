@@ -2469,6 +2469,7 @@ if (ver >= 33u) {
         // Close transient UI and effects.
         invOpen = false;
         invIdentifyMode = false;
+        invEnchantRingMode = false;
         invPrompt_ = InvPromptKind::None;
         chestOpen = false;
         chestOpenId = 0;

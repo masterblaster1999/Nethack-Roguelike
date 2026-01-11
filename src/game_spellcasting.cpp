@@ -15,6 +15,7 @@ void Game::openSpells() {
     // Close other modal overlays.
     invOpen = false;
     invIdentifyMode = false;
+    invEnchantRingMode = false;
     invPrompt_ = InvPromptKind::None;
     closeChestOverlay();
 

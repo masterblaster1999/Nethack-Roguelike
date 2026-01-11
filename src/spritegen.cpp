@@ -1608,6 +1608,16 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
             break;
         }
         
+        case ItemKind::ScrollEnchantRing: {
+            Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));
+            rect(s, 5, 6, 6, 5, paper);
+            // ring-ish glyph
+            outlineRect(s, 7, 7, 3, 3, {80,50,30,255});
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,120});
+            break;
+        }
+
         case ItemKind::ScrollIdentify: {
             Color paper = add({220,210,180,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
             outlineRect(s, 4, 5, 8, 7, mul(paper, 0.85f));

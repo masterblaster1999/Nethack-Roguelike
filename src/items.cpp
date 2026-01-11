@@ -165,6 +165,7 @@ const ItemDef& itemDef(ItemKind k) {
         { ItemKind::SpellbookPoisonCloud, "SPELLBOOK OF POISON CLOUD", false, true, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 4, 260 },
         { ItemKind::RingSearching, "RING OF SEARCHING", false, false, false, EquipSlot::Ring, 0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock, 0, 0, 0, 1, 200, 0, 0, 0, 0 },
         { ItemKind::RingSustenance, "RING OF SUSTENANCE", false, false, false, EquipSlot::Ring, 0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock, 0, 0, 0, 1, 190, 0, 0, 0, 0 },
+        { ItemKind::ScrollEnchantRing, "SCROLL OF ENCHANT RING", true,  true,  false, EquipSlot::None,   0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 95 },
     };
 
     static std::vector<ItemDef> defs;

@@ -1,5 +1,4 @@
 {
-  "description": "Cumulative patch through roundN_plus112: add an optional perf overlay HUD (FPS/frame time + sprite cache stats + low-rate determinism hash), toggleable via Shift+F10/#perf/show_perf_overlay; plus all prior patch improvements.",
   "files": [
     "CHANGELOG.md",
     "CMakeLists.txt",
@@ -52,8 +51,8 @@
     "src/ui_font.hpp",
     "tests/test_main.cpp"
   ],
-  "patch_id": "roundN_plus112_patch",
-  "previous_patch": "roundN_plus111_patch",
+  "patch_id": "roundN_plus113_patch",
+  "previous_patch": "roundN_plus112_patch",
   "summary": [
     "Added an optional perf overlay HUD (FPS/frame time, sprite cache usage/hits/misses/evictions, and a low-rate determinism hash) toggleable via Shift+F10 (default), `show_perf_overlay` setting, or `#perf on/off`.",
     "Obscure debug/info commands: added extended commands #pos (#where alias), #what (#tile/#describe/#whatis aliases), and #mapstats for quick coordinate readout, tile description, and per-floor exploration stats (uses LOOK cursor when active or accepts X Y).",
@@ -77,9 +76,10 @@
     "Added Ring of Sustenance: slows hunger loss while worn (only when hunger is enabled), with enchant/bless increasing potency.",
     "Auto-travel now prefers trap-free routes when possible, falling back to paths that may approach known traps.",
     "Rest command now recovers mana as well as HP (it no longer refuses to rest just because HP is full).",
-    "Rest now stops early on visible danger, damage ticks (e.g., poison), or starvation to prevent accidental self-kills."
+    "Rest now stops early on visible danger, damage ticks (e.g., poison), or starvation to prevent accidental self-kills.",
+    "Added Scroll of Enchant Ring: enchants a ring in your inventory (+ENCHANT), prompting you to choose if multiple rings are available."
   ],
-  "timestamp": "2026-01-11T10:22:53Z",
+  "timestamp": "2026-01-11T00:00:00Z",
   "notes": [
     "RoundN+94: trap-safe auto-travel preference with fallback.",
     "RoundN+95: safer rest loop + mana recovery.",
@@ -99,9 +99,10 @@
     "RoundN+109: improved procedural isometric base tile generation (rock density noise, quantized heightmap, shading, per-tile sprite hashing) and cleanup.",
     "RoundN+110: procedurally generated map sizes per floor; update auto-explore/pathing and click->tile bounds to use dungeon dimensions; report LEVEL SIZE on first generation.",
     "RoundN+111: added #pos/#what/#mapstats info/debug extended commands (with LOOK-cursor support) and updated help text.",
-    "RoundN+112: added an optional perf overlay HUD (Shift+F10 / #perf) showing FPS, cache stats, and a low-rate determinism hash."
+    "RoundN+112: added an optional perf overlay HUD (Shift+F10 / #perf) showing FPS, cache stats, and a low-rate determinism hash.",
+    "RoundN+113: added Scroll of Enchant Ring (new scroll that enchants a ring; selection prompt if multiple rings) and integrated it into loot tables + UI/sprites."
   ],
-  "cumulative_patch_id": "roundN_plus112",
+  "cumulative_patch_id": "roundN_plus113",
   "applied_patches": [
     {
       "id": "roundN_plus94",
@@ -379,6 +380,32 @@
         "README.md",
         "CHANGELOG.md",
         "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus113",
+      "timestamp": "2026-01-11T00:00:00Z",
+      "notes": [
+        "Added a new identifiable scroll: Scroll of Enchant Ring. Reading it enchants a ring in your inventory (+ENCHANT).",
+        "If multiple rings are available, the game prompts you to select one (Enter=choose, Esc=random). Spawn tables + UI + sprite updated."
+      ],
+      "files": [
+        "CHANGELOG.md",
+        "README.md",
+        "PATCH_MANIFEST.json",
+        "src/game.hpp",
+        "src/game.cpp",
+        "src/game_interact.cpp",
+        "src/game_inventory.cpp",
+        "src/game_loop.cpp",
+        "src/game_save.cpp",
+        "src/game_spellcasting.cpp",
+        "src/game_spawn.cpp",
+        "src/game_internal.hpp",
+        "src/items.hpp",
+        "src/items.cpp",
+        "src/render.cpp",
+        "src/spritegen.cpp"
       ]
     }
   ],

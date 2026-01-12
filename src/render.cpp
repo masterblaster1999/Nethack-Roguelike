@@ -1181,7 +1181,10 @@ namespace {
 }
 
 SDL_Texture* Renderer::entityTexture(const Entity& e, int frame) {
-    const int spritePx = std::clamp(tile, 16, 256);
+    // In 2D sprite mode (voxel sprites disabled), generate at 256x256 by default
+    // to maximize detail, then scale down at render-time using nearest-neighbor.
+    // In 3D (voxel) mode we stick to tile-resolution to keep VRAM + gen cost reasonable.
+    const int spritePx = voxelSpritesCached ? std::clamp(tile, 16, 256) : 256;
     const uint64_t key = makeSpriteKey(CAT_ENTITY, static_cast<uint8_t>(e.kind), e.spriteSeed);
 
     auto arr = spriteTex.get(key);
@@ -1191,9 +1194,8 @@ SDL_Texture* Renderer::entityTexture(const Entity& e, int frame) {
         for (int f = 0; f < FRAMES; ++f) {
             tex[static_cast<size_t>(f)] = textureFromSprite(generateEntitySprite(e.kind, e.spriteSeed, f, voxelSpritesCached, spritePx));
         }
-        const size_t bytes = (spriteEntryBytes != 0)
-            ? spriteEntryBytes
-            : (static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx) * sizeof(uint32_t) * static_cast<size_t>(FRAMES));
+        const size_t bytes = static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx)
+            * sizeof(uint32_t) * static_cast<size_t>(FRAMES);
 
         spriteTex.put(key, tex, bytes);
         arr = spriteTex.get(key);
@@ -1203,7 +1205,10 @@ SDL_Texture* Renderer::entityTexture(const Entity& e, int frame) {
 }
 
 SDL_Texture* Renderer::itemTexture(const Item& it, int frame) {
-    const int spritePx = std::clamp(tile, 16, 256);
+    // In 2D sprite mode (voxel sprites disabled), generate at 256x256 by default
+    // to maximize detail, then scale down at render-time using nearest-neighbor.
+    // In 3D (voxel) mode we stick to tile-resolution to keep VRAM + gen cost reasonable.
+    const int spritePx = voxelSpritesCached ? std::clamp(tile, 16, 256) : 256;
     const uint64_t key = makeSpriteKey(CAT_ITEM, static_cast<uint8_t>(it.kind), it.spriteSeed);
 
     auto arr = spriteTex.get(key);
@@ -1214,9 +1219,8 @@ SDL_Texture* Renderer::itemTexture(const Item& it, int frame) {
             tex[static_cast<size_t>(f)] = textureFromSprite(generateItemSprite(it.kind, it.spriteSeed, f, voxelSpritesCached, spritePx));
         }
 
-        const size_t bytes = (spriteEntryBytes != 0)
-            ? spriteEntryBytes
-            : (static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx) * sizeof(uint32_t) * static_cast<size_t>(FRAMES));
+        const size_t bytes = static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx)
+            * sizeof(uint32_t) * static_cast<size_t>(FRAMES);
 
         spriteTex.put(key, tex, bytes);
         arr = spriteTex.get(key);
@@ -1278,7 +1282,10 @@ void Renderer::drawItemIcon(const Game& game, const Item& it, int x, int y, int 
 }
 
 SDL_Texture* Renderer::projectileTexture(ProjectileKind k, int frame) {
-    const int spritePx = std::clamp(tile, 16, 256);
+    // In 2D sprite mode (voxel sprites disabled), generate at 256x256 by default
+    // to maximize detail, then scale down at render-time using nearest-neighbor.
+    // In 3D (voxel) mode we stick to tile-resolution to keep VRAM + gen cost reasonable.
+    const int spritePx = voxelSpritesCached ? std::clamp(tile, 16, 256) : 256;
     const uint64_t key = makeSpriteKey(CAT_PROJECTILE, static_cast<uint8_t>(k), 0u);
 
     auto arr = spriteTex.get(key);
@@ -1289,9 +1296,8 @@ SDL_Texture* Renderer::projectileTexture(ProjectileKind k, int frame) {
             tex[static_cast<size_t>(f)] = textureFromSprite(generateProjectileSprite(k, 0u, f, voxelSpritesCached, spritePx));
         }
 
-        const size_t bytes = (spriteEntryBytes != 0)
-            ? spriteEntryBytes
-            : (static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx) * sizeof(uint32_t) * static_cast<size_t>(FRAMES));
+        const size_t bytes = static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx)
+            * sizeof(uint32_t) * static_cast<size_t>(FRAMES);
 
         spriteTex.put(key, tex, bytes);
         arr = spriteTex.get(key);

@@ -105,8 +105,8 @@ void Game::monsterTurn() {
         if (!dung.inBounds(tr.pos.x, tr.pos.y)) continue;
         const size_t i = static_cast<size_t>(idx(tr.pos.x, tr.pos.y));
         if (i >= discoveredTrapPenalty.size()) continue;
-        const int p = trapPenaltyForAi(tr.kind);
-        if (p > discoveredTrapPenalty[i]) discoveredTrapPenalty[i] = p;
+        const int penalty = trapPenaltyForAi(tr.kind);
+        if (penalty > discoveredTrapPenalty[i]) discoveredTrapPenalty[i] = penalty;
     }
 
 

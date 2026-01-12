@@ -6236,6 +6236,8 @@ SpritePixels generateIsometricFloorDecalOverlay(uint32_t seed, uint8_t style, in
             drawThickLine(topX, topY, topX + w / 6, topY + h / 4, dust);
             drawThickLine(rightX, rightY, rightX - w / 5, rightY - h / 6, dust);
             drawThickLine(leftX, leftY, leftX + w / 5, leftY - h / 6, dust);
+            drawThickLine(botX, botY, botX - w / 6, botY - h / 4, dust);
+            drawThickLine(botX, botY, botX + w / 6, botY - h / 4, dust);
 
             // drifting dust mote
             if (frame % 2 == 1) {

@@ -353,7 +353,15 @@ static bool exportRunLogToFile(const Game& game, const std::filesystem::path& ou
     f << "Class: " << game.playerClassDisplayName() << " (" << game.playerClassIdString() << ")\n";
     f << "Slot: " << (game.activeSlot().empty() ? std::string("default") : game.activeSlot()) << "\n";
     f << "Seed: " << game.seed() << "\n";
-    f << "Depth: " << game.depth() << " (max " << game.maxDepthReached() << ")\n";
+
+    const char* branchName = (game.branch() == DungeonBranch::Camp) ? "Camp" : "Main";
+    f << "Branch: " << branchName << "\n";
+    if (game.branch() == DungeonBranch::Main) {
+        f << "Depth: " << game.depth() << " (max " << game.maxDepthReached() << ")\n";
+    } else {
+        // Camp is a distinct hub branch; avoid implying it's "D0".
+        f << "Depth: CAMP" << " (deepest main " << game.maxDepthReached() << ")\n";
+    }
     f << "Turns: " << game.turns() << "\n";
     f << "Kills: " << game.kills() << "\n";
     f << "Gold: " << game.goldCount() << "\n";
@@ -379,7 +387,11 @@ static bool exportRunLogToFile(const Game& game, const std::filesystem::path& ou
                       : (m.kind == MessageKind::Warning) ? "WARN"
                       : (m.kind == MessageKind::Success) ? "SUCCESS"
                                                          : "INFO";
-        f << "[" << k << "] [D" << m.depth << " T" << m.turn << "] " << m.text;
+        std::string depthTag;
+        if (m.branch == DungeonBranch::Camp) depthTag = "CAMP";
+        else depthTag = "D" + std::to_string(m.depth);
+
+        f << "[" << k << "] [" << depthTag << " T" << m.turn << "] " << m.text;
         if (m.repeat > 1) f << " (x" << m.repeat << ")";
         f << "\n";
     }
@@ -393,7 +405,11 @@ static bool exportRunMapToFile(const Game& game, const std::filesystem::path& ou
     const Dungeon& d = game.dungeon();
 
     f << PROCROGUE_APPNAME << " map export (" << PROCROGUE_VERSION << ")\n";
-    f << "Seed: " << game.seed() << "  Depth: " << game.depth() << "  Turns: " << game.turns() << "\n";
+    const char* branchName = (game.branch() == DungeonBranch::Camp) ? "Camp" : "Main";
+    f << "Seed: " << game.seed()
+      << "  Branch: " << branchName
+      << "  Depth: " << ((game.branch() == DungeonBranch::Camp) ? "CAMP" : std::to_string(game.depth()))
+      << "  Turns: " << game.turns() << "\n";
     f << "Legend: # wall, . floor, + door, / open door, * locked door, < up, > down, ~ chasm, I pillar, B boulder, ^ trap, @ you\n";
     f << "        $ gold, ! potion, ? scroll, : food, K key, l lockpick, C chest\n";
     f << "        = note mark, X danger mark, % loot mark\n";
@@ -538,7 +554,15 @@ static std::pair<bool, bool> exportRunDumpToFile(const Game& game, const std::fi
     f << "Class: " << game.playerClassDisplayName() << " (" << game.playerClassIdString() << ")\n";
     f << "Slot: " << (game.activeSlot().empty() ? std::string("default") : game.activeSlot()) << "\n";
     f << "Seed: " << game.seed() << "\n";
-    f << "Depth: " << game.depth() << " (max " << game.maxDepthReached() << ")\n";
+
+    const char* branchName = (game.branch() == DungeonBranch::Camp) ? "Camp" : "Main";
+    f << "Branch: " << branchName << "\n";
+    if (game.branch() == DungeonBranch::Main) {
+        f << "Depth: " << game.depth() << " (max " << game.maxDepthReached() << ")\n";
+    } else {
+        // Camp is a distinct hub branch; avoid implying it's "D0".
+        f << "Depth: CAMP" << " (deepest main " << game.maxDepthReached() << ")\n";
+    }
     f << "Turns: " << game.turns() << "\n";
     f << "Kills: " << game.kills() << "\n";
     f << "Gold: " << game.goldCount() << "\n";
@@ -606,7 +630,11 @@ static std::pair<bool, bool> exportRunDumpToFile(const Game& game, const std::fi
     const auto& ms = game.messages();
     const size_t start = (ms.size() > 120) ? (ms.size() - 120) : 0;
     for (size_t i = start; i < ms.size(); ++i) {
-        f << "  [D" << ms[i].depth << " T" << ms[i].turn << "] " << ms[i].text;
+        std::string depthTag;
+        if (ms[i].branch == DungeonBranch::Camp) depthTag = "CAMP";
+        else depthTag = "D" + std::to_string(ms[i].depth);
+
+        f << "  [" << depthTag << " T" << ms[i].turn << "] " << ms[i].text;
         if (ms[i].repeat > 1) f << " (x" << ms[i].repeat << ")";
         f << "\n";
     }
@@ -1809,7 +1837,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     if (cmd == "pay") {
         if (game.playerInShop()) {
             game.payAtShop();
-        } else if (game.depth() == 0) {
+        } else if (game.atCamp()) {
             game.payAtCamp();
         } else {
             game.pushSystemMessage("YOU MUST BE IN A SHOP OR AT CAMP TO PAY.");
@@ -1904,10 +1932,14 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         const Vec2i pp = game.player().pos;
         const int dist = std::abs(p.x - pp.x) + std::abs(p.y - pp.y);
 
+        std::string levelTag;
+        if (game.branch() == DungeonBranch::Camp) levelTag = "CAMP";
+        else levelTag = "D" + std::to_string(game.depth());
+
         std::ostringstream ss;
         ss << (usedLook ? "LOOK" : "POS") << ": " << p.x << " " << p.y;
-        ss << " | DEPTH " << game.depth();
-        ss << " | LEVEL " << d.width << "x" << d.height;
+        ss << " | LEVEL " << levelTag;
+        ss << " | MAP " << d.width << "x" << d.height;
         ss << " | DIST " << dist;
         game.pushSystemMessage(ss.str());
         return;
@@ -2102,8 +2134,14 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             }
             const std::string res = e.won ? std::string("WIN") : std::string("DEAD");
 
+            // Historic scoreboard entries only store a numeric depth. Since the game now
+            // starts in the Camp branch at depth 0, show "CAMP" for depth 0 for clarity.
+            const std::string depthTag = (e.branch == 0) ? std::string("CAMP")
+                : (e.branch == 1) ? ("D" + std::to_string(e.depth))
+                                : ("B" + std::to_string(static_cast<int>(e.branch)) + "D" + std::to_string(e.depth));
+
             std::string scoreLine = "#" + std::to_string(i + 1) + " " + who + " " + res + " ";
-            scoreLine += "S" + std::to_string(e.score) + " D" + std::to_string(e.depth);
+            scoreLine += "S" + std::to_string(e.score) + " " + depthTag;
             if (!e.slot.empty() && e.slot != "default") scoreLine += " [" + e.slot + "]";
             scoreLine += " T" + std::to_string(e.turns) + " K" + std::to_string(e.kills);
             scoreLine += " SEED" + std::to_string(e.seed);
@@ -2147,6 +2185,10 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         for (int i = 0; i < count; ++i) {
             const auto& e = es[idx[static_cast<size_t>(i)]];
 
+            const std::string depthTag = (e.branch == 0) ? std::string("CAMP")
+                : (e.branch == 1) ? ("D" + std::to_string(e.depth))
+                                : ("B" + std::to_string(static_cast<int>(e.branch)) + "D" + std::to_string(e.depth));
+
             std::ostringstream oss;
             oss << "#" << (i + 1) << " ";
             oss << (e.timestamp.empty() ? "(no timestamp)" : e.timestamp) << " ";
@@ -2161,7 +2203,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             }
             oss << " ";
             oss << (e.won ? "WIN" : "DEAD") << " ";
-            oss << "S" << e.score << " D" << e.depth << " T" << e.turns << " K" << e.kills;
+            oss << "S" << e.score << " " << depthTag << " T" << e.turns << " K" << e.kills;
             oss << " SEED" << e.seed;
 
             if (!e.slot.empty() && e.slot != "default") oss << " [" << e.slot << "]";
@@ -2180,8 +2222,15 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         const std::string ts = timestampForFilename();
         const std::string argName = (toks.size() > 1) ? toks[1] : std::string();
 
+        auto branchTag = [](DungeonBranch b) -> std::string {
+            if (b == DungeonBranch::Camp) return "camp";
+            if (b == DungeonBranch::Main) return "main";
+            return "b" + std::to_string(static_cast<int>(b));
+        };
+        const std::string locTag = branchTag(game.branch()) + "_d" + std::to_string(game.depth());
+
         if (cmd == "exportlog") {
-            const fs::path outPath = argName.empty() ? (baseDir / ("procrogue_log_" + ts + ".txt")) : (baseDir / fs::path(argName));
+            const fs::path outPath = argName.empty() ? (baseDir / ("procrogue_log_" + locTag + "_" + ts + ".txt")) : (baseDir / fs::path(argName));
             if (!exportRunLogToFile(game, outPath)) {
                 game.pushSystemMessage("FAILED TO EXPORT LOG.");
             } else {
@@ -2191,7 +2240,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         }
 
         if (cmd == "exportmap") {
-            const fs::path outPath = argName.empty() ? (baseDir / ("procrogue_map_" + ts + ".txt")) : (baseDir / fs::path(argName));
+            const fs::path outPath = argName.empty() ? (baseDir / ("procrogue_map_" + locTag + "_" + ts + ".txt")) : (baseDir / fs::path(argName));
             if (!exportRunMapToFile(game, outPath)) {
                 game.pushSystemMessage("FAILED TO EXPORT MAP.");
             } else {
@@ -2201,7 +2250,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         }
 
         if (cmd == "dump") {
-            const fs::path outPath = argName.empty() ? (baseDir / ("procrogue_dump_" + ts + ".txt")) : (baseDir / fs::path(argName));
+            const fs::path outPath = argName.empty() ? (baseDir / ("procrogue_dump_" + locTag + "_" + ts + ".txt")) : (baseDir / fs::path(argName));
             const auto res = exportRunDumpToFile(game, outPath);
             if (!res.first) {
                 game.pushSystemMessage("FAILED TO EXPORT DUMP.");
@@ -2215,7 +2264,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
         if (cmd == "exportall") {
             // Optional: #exportall [prefix]
-            fs::path prefix = argName.empty() ? fs::path("procrogue_" + ts) : fs::path(argName);
+            fs::path prefix = argName.empty() ? fs::path("procrogue_" + locTag + "_" + ts) : fs::path(argName);
 
             fs::path dir = baseDir;
             if (!prefix.parent_path().empty()) {
@@ -2248,8 +2297,8 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         }
 
         // export: do both
-        const fs::path logPath = baseDir / ("procrogue_log_" + ts + ".txt");
-        const fs::path mapPath = baseDir / ("procrogue_map_" + ts + ".txt");
+        const fs::path logPath = baseDir / ("procrogue_log_" + locTag + "_" + ts + ".txt");
+        const fs::path mapPath = baseDir / ("procrogue_map_" + locTag + "_" + ts + ".txt");
 
         const bool okLog = exportRunLogToFile(game, logPath);
         const bool okMap = exportRunMapToFile(game, mapPath);

@@ -39,6 +39,32 @@ struct ClipRectGuard {
     ClipRectGuard& operator=(const ClipRectGuard&) = delete;
 };
 
+inline std::string depthLabel(int depth) {
+    if (depth <= 0) return "CAMP";
+    return std::to_string(depth);
+}
+
+inline std::string depthTag(int depth) {
+    if (depth <= 0) return "CAMP";
+    return "D" + std::to_string(depth);
+}
+
+inline std::string depthLabel(DungeonBranch branch, int depth) {
+    if (branch == DungeonBranch::Camp) return "CAMP";
+    return std::to_string(depth);
+}
+
+inline std::string depthTag(DungeonBranch branch, int depth) {
+    if (branch == DungeonBranch::Camp) return "CAMP";
+    return "D" + std::to_string(depth);
+}
+
+inline DungeonBranch scoreEntryBranch(const ScoreEntry& e) {
+    // Score entries store branch as an ID to avoid depending on Game types.
+    // 0 = Camp, 1 = Main dungeon (default).
+    return (e.branch == 0) ? DungeonBranch::Camp : DungeonBranch::Main;
+}
+
 // --- Isometric helpers ---
 // mapTileDst() returns the bounding box of the diamond tile in iso mode.
 inline void isoDiamondCorners(const SDL_Rect& base, SDL_Point& top, SDL_Point& right, SDL_Point& bottom, SDL_Point& left) {
@@ -420,6 +446,7 @@ for (int k = 0; k < EFFECT_KIND_COUNT; ++k) {
 // Reset room-type cache (rebuilt lazily in render()).
 roomTypeCache.clear();
 roomCacheDungeon = nullptr;
+roomCacheBranch = DungeonBranch::Main;
 roomCacheDepth = -1;
 roomCacheW = 0;
 roomCacheH = 0;
@@ -667,6 +694,7 @@ for (auto& arr : effectIconTex) {
 
 roomTypeCache.clear();
 roomCacheDungeon = nullptr;
+roomCacheBranch = DungeonBranch::Main;
 roomCacheDepth = -1;
 roomCacheW = 0;
 roomCacheH = 0;
@@ -1843,6 +1871,13 @@ void Renderer::render(const Game& game) {
 
     const bool isoView = (viewMode_ == ViewMode::Isometric);
 
+    // Encode branch + depth into a stable per-level key for procedural terrain variation.
+    // Main branch keeps the legacy key (depth) so existing visuals don't shift.
+    const int levelKey = (game.branch() == DungeonBranch::Main)
+        ? game.depth()
+        : ((static_cast<int>(game.branch()) + 1) * 1000 + game.depth());
+    const uint32_t lvlSeed = static_cast<uint32_t>(levelKey);
+
     // Build isometric-diamond terrain textures lazily so top-down mode doesn't pay
     // the VRAM + CPU cost unless it is actually used.
     if (isoView) {
@@ -1860,6 +1895,7 @@ void Renderer::render(const Game& game) {
     // Room type cache (used for themed decals / minimap)
     auto rebuildRoomTypeCache = [&]() {
         roomCacheDungeon = &d;
+        roomCacheBranch = game.branch();
         roomCacheDepth = game.depth();
         roomCacheW = d.width;
         roomCacheH = d.height;
@@ -1876,7 +1912,7 @@ void Renderer::render(const Game& game) {
         }
     };
 
-    if (roomCacheDungeon != &d || roomCacheDepth != game.depth() ||
+    if (roomCacheDungeon != &d || roomCacheBranch != game.branch() || roomCacheDepth != game.depth() ||
         roomCacheW != d.width || roomCacheH != d.height || roomCacheRooms != d.rooms.size() ||
         roomTypeCache.size() != static_cast<size_t>(d.width * d.height)) {
         rebuildRoomTypeCache();
@@ -2141,7 +2177,7 @@ void Renderer::render(const Game& game) {
             TileType base = (t.type == TileType::Chasm) ? TileType::Chasm : TileType::Floor;
             const int style = (base == TileType::Floor) ? floorStyleAt(x, y) : 0;
 
-            SDL_Texture* btex = tileTexture(base, x, y, game.depth(), frame, style);
+            SDL_Texture* btex = tileTexture(base, x, y, levelKey, frame, style);
             const Color mod = tileColorMod(x, y, t.visible);
             const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 115 : 175);
 
@@ -2161,7 +2197,7 @@ void Renderer::render(const Game& game) {
                 const int dStyle = style;
 
                 // Jittered-grid placement gives a more even, less clumpy distribution than independent per-tile RNG.
-                const uint32_t dSeed = hashCombine(static_cast<uint32_t>(game.depth()) ^ 0xDECA151u,
+                const uint32_t dSeed = hashCombine(lvlSeed ^ 0xDECA151u,
                                                   static_cast<uint32_t>(dStyle) * 0x9E3779B9u);
                 uint32_t cellR = 0;
                 const int cell = 3;
@@ -2416,7 +2452,7 @@ void Renderer::render(const Game& game) {
 
             if (t.type == TileType::Wall || t.type == TileType::DoorSecret) {
                 if (!wallBlockVarIso.empty()) {
-                    const uint32_t seed = hashCombine(static_cast<uint32_t>(game.depth()) ^ 0x00AA110u, 0x000B10Cu);
+                    const uint32_t seed = hashCombine(lvlSeed ^ 0x00AA110u, 0x000B10Cu);
                     const size_t v = pickCoherentVariantIndex(x, y, seed, wallBlockVarIso.size());
                     SDL_Texture* wtex = wallBlockVarIso[v][static_cast<size_t>(frame % FRAMES)];
                     // Wall blocks are already outlined in their procedural art.
@@ -2424,7 +2460,7 @@ void Renderer::render(const Game& game) {
                 }
             } else if (t.type == TileType::DoorClosed) {
                 if (!doorBlockClosedVarIso.empty()) {
-                    const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                    const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xD00Du ^ 0xC105EDu;
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(doorBlockClosedVarIso.size()));
                     drawTall(doorBlockClosedVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false);
@@ -2434,7 +2470,7 @@ void Renderer::render(const Game& game) {
                 }
             } else if (t.type == TileType::DoorLocked) {
                 if (!doorBlockLockedVarIso.empty()) {
-                    const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                    const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xD00Du ^ 0x10CCEDu;
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(doorBlockLockedVarIso.size()));
                     drawTall(doorBlockLockedVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false);
@@ -2444,13 +2480,13 @@ void Renderer::render(const Game& game) {
                 }
             } else if (t.type == TileType::DoorOpen) {
                 if (!doorBlockOpenVarIso.empty()) {
-                    const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                    const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xD00Du ^ 0x0B0A1u;
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(doorBlockOpenVarIso.size()));
                     drawTall(doorBlockOpenVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false);
                 }
             } else if (t.type == TileType::Pillar) {
-                const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                static_cast<uint32_t>(y)) ^ 0x9111A0u;
                 if (!pillarBlockVarIso.empty()) {
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(pillarBlockVarIso.size()));
@@ -2461,7 +2497,7 @@ void Renderer::render(const Game& game) {
                     drawTall(pillarOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
                 }
             } else if (t.type == TileType::Boulder) {
-                const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                static_cast<uint32_t>(y)) ^ 0xB011D3u;
                 if (!boulderBlockVarIso.empty()) {
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(boulderBlockVarIso.size()));
@@ -2473,14 +2509,14 @@ void Renderer::render(const Game& game) {
                 }
             } else if (t.type == TileType::Fountain) {
                 if (!fountainOverlayVar.empty()) {
-                    const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                    const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xF017A1u;
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(fountainOverlayVar.size()));
                     drawTall(fountainOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
                 }
             } else if (t.type == TileType::Altar) {
                 if (!altarOverlayVar.empty()) {
-                    const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                    const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xA17A12u;
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(altarOverlayVar.size()));
                     drawTall(altarOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
@@ -2505,7 +2541,7 @@ void Renderer::render(const Game& game) {
 
         int floorStyle = (baseType == TileType::Floor) ? floorStyleAt(x, y) : 0;
 
-        SDL_Texture* tex = tileTexture(baseType, x, y, game.depth(), frame, floorStyle);
+        SDL_Texture* tex = tileTexture(baseType, x, y, levelKey, frame, floorStyle);
         if (!tex) return;
 
         const Color mod = tileColorMod(x, y, t.visible);
@@ -2523,7 +2559,7 @@ void Renderer::render(const Game& game) {
             const int style = floorStyle;
 
             // Jittered-grid placement gives a more even, less clumpy distribution than independent per-tile RNG.
-            const uint32_t dSeed = hashCombine(static_cast<uint32_t>(game.depth()) ^ 0xDECA151u,
+            const uint32_t dSeed = hashCombine(lvlSeed ^ 0xDECA151u,
                                               static_cast<uint32_t>(style) * 0x9E3779B9u);
             uint32_t cellR = 0;
             const int cell = 3;
@@ -2552,7 +2588,7 @@ void Renderer::render(const Game& game) {
         if (baseType == TileType::Floor) {
             const uint8_t occMask = wallOccMaskAt(x, y);
             if (occMask != 0u) {
-                const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                static_cast<uint32_t>(y)) ^ 0x5EAD0DEu ^ static_cast<uint32_t>(occMask);
                 const uint32_t r = hash32(h);
                 const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(autoVarsUsed));
@@ -2572,7 +2608,7 @@ void Renderer::render(const Game& game) {
 
         // Occasional wall stains/cracks (very low frequency; helps break large flat walls).
         if ((t.type == TileType::Wall || t.type == TileType::DoorSecret) && !wallDecalVar.empty()) {
-            const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+            const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                            static_cast<uint32_t>(y)) ^ 0xBADC0DEu;
             const uint32_t r = hash32(h);
             const uint8_t roll = static_cast<uint8_t>(r & 0xFFu);
@@ -2588,7 +2624,7 @@ void Renderer::render(const Game& game) {
                     const TileType nt = d.at(nx, ny).type;
                     if (nt != TileType::Wall && nt != TileType::DoorSecret) continue;
 
-                    const uint32_t nh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(nx)),
+                    const uint32_t nh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(nx)),
                                                     static_cast<uint32_t>(ny)) ^ 0xBADC0DEu;
                     const uint32_t nr = hash32(nh);
                     const uint8_t nroll = static_cast<uint8_t>(nr & 0xFFu);
@@ -2634,7 +2670,7 @@ void Renderer::render(const Game& game) {
         if ((t.type == TileType::Wall || t.type == TileType::DoorSecret)) {
             const uint8_t mask = wallOpenMaskAt(x, y);
             if (mask != 0u) {
-                const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                static_cast<uint32_t>(y)) ^ 0xED6E7u ^ static_cast<uint32_t>(mask);
                 const uint32_t r = hash32(h);
                 const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(autoVarsUsed));
@@ -2652,7 +2688,7 @@ void Renderer::render(const Game& game) {
         } else if (t.type == TileType::Chasm) {
             const uint8_t mask = chasmOpenMaskAt(x, y);
             if (mask != 0u) {
-                const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                static_cast<uint32_t>(y)) ^ 0xC11A5u ^ static_cast<uint32_t>(mask);
                 const uint32_t r = hash32(h);
                 const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(autoVarsUsed));
@@ -2675,7 +2711,7 @@ void Renderer::render(const Game& game) {
             switch (t.type) {
                 case TileType::Pillar: {
                     if (!pillarOverlayVar.empty()) {
-                        const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                        const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                        static_cast<uint32_t>(y)) ^ 0x9111A0u;
                         const uint32_t rr = hash32(hh);
                         const size_t idx = static_cast<size_t>(rr % static_cast<uint32_t>(pillarOverlayVar.size()));
@@ -2685,7 +2721,7 @@ void Renderer::render(const Game& game) {
                 }
                 case TileType::Boulder: {
                     if (!boulderOverlayVar.empty()) {
-                        const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                        const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                        static_cast<uint32_t>(y)) ^ 0xB011D3u;
                         const uint32_t rr = hash32(hh);
                         const size_t idx = static_cast<size_t>(rr % static_cast<uint32_t>(boulderOverlayVar.size()));
@@ -2695,7 +2731,7 @@ void Renderer::render(const Game& game) {
                 }
                 case TileType::Fountain: {
                     if (!fountainOverlayVar.empty()) {
-                        const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                        const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                        static_cast<uint32_t>(y)) ^ 0xF017A1u;
                         const uint32_t rr = hash32(hh);
                         const size_t idx = static_cast<size_t>(rr % static_cast<uint32_t>(fountainOverlayVar.size()));
@@ -2705,7 +2741,7 @@ void Renderer::render(const Game& game) {
                 }
                 case TileType::Altar: {
                     if (!altarOverlayVar.empty()) {
-                        const uint32_t hh = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                        const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                        static_cast<uint32_t>(y)) ^ 0xA17A12u;
                         const uint32_t rr = hash32(hh);
                         const size_t idx = static_cast<size_t>(rr % static_cast<uint32_t>(altarOverlayVar.size()));
@@ -3041,7 +3077,7 @@ void Renderer::render(const Game& game) {
                 SDL_Rect r = tileDst(x, y);
 
                 if (haveGasTex) {
-                    const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                    const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0x6A5u;
                     const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(GAS_VARS));
                     const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
@@ -3103,7 +3139,7 @@ void Renderer::render(const Game& game) {
                 SDL_Rect r = tileDst(x, y);
 
                 if (haveGasTex) {
-                    const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                    const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xC41u;
                     const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(GAS_VARS));
                     const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
@@ -3166,7 +3202,7 @@ void Renderer::render(const Game& game) {
                 SDL_Rect r = tileDst(x, y);
 
                 if (haveFireTex) {
-                    const uint32_t h = hashCombine(hashCombine(static_cast<uint32_t>(game.depth()), static_cast<uint32_t>(x)),
+                    const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xF17Eu;
                     const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(FIRE_VARS));
                     const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
@@ -3895,7 +3931,7 @@ void Renderer::drawHud(const Game& game) {
     const int rocks  = ammoCount(game.inventory(), AmmoKind::Rock);
     if (arrows > 0) ss << " | ARROWS: " << arrows;
     if (rocks > 0)  ss << " | ROCKS: " << rocks;
-    if (game.depth() == 0) ss << " | DEPTH: CAMP";
+    if (game.atCamp()) ss << " | DEPTH: CAMP";
     else ss << " | DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth();
     ss << " | DEEPEST: " << game.maxDepthReached();
     ss << " | TURNS: " << game.turns();
@@ -5030,11 +5066,12 @@ void Renderer::drawMinimapOverlay(const Game& game) {
     const Color white{ 240, 240, 240, 255 };
     const Dungeon& d = game.dungeon();
     // Room type cache (minimap) — rebuilt if the dungeon changed.
-    if (roomCacheDungeon != &d || roomCacheDepth != game.depth() ||
+    if (roomCacheDungeon != &d || roomCacheBranch != game.branch() || roomCacheDepth != game.depth() ||
         roomCacheW != d.width || roomCacheH != d.height || roomCacheRooms != d.rooms.size() ||
         roomTypeCache.size() != static_cast<size_t>(d.width * d.height)) {
 
         roomCacheDungeon = &d;
+        roomCacheBranch = game.branch();
         roomCacheDepth = game.depth();
         roomCacheW = d.width;
         roomCacheH = d.height;
@@ -5376,7 +5413,7 @@ void Renderer::drawStatsOverlay(const Game& game) {
     }
     {
         std::stringstream ss;
-        if (game.depth() == 0) ss << "DEPTH: CAMP  (DEEPEST: " << game.maxDepthReached() << ")";
+        if (game.atCamp()) ss << "DEPTH: CAMP  (DEEPEST: " << game.maxDepthReached() << ")";
         else ss << "DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth() << "  (DEEPEST: " << game.maxDepthReached() << ")";
         drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
         y += 18;
@@ -5477,7 +5514,7 @@ void Renderer::drawStatsOverlay(const Game& game) {
             ss << " "
                << (e.won ? "WIN " : "DEAD")
                << " " << e.score
-               << " D" << e.depth
+               << " " << depthTag(scoreEntryBranch(e), e.depth)
                << " T" << e.turns
                << " K" << e.kills
                << " S" << e.seed;
@@ -5636,7 +5673,8 @@ void Renderer::drawScoresOverlay(const Game& game) {
                 if (game.scoresView() == ScoresView::Top) {
                     ss << "#" << std::setw(3) << (viewIdx + 1) << "  ";
                     ss << "S" << std::setw(6) << e.score << "  ";
-                    ss << "D" << std::setw(2) << e.depth << "  ";
+                    if (scoreEntryBranch(e) == DungeonBranch::Camp) ss << "CAMP ";
+                    else ss << "D" << std::setw(2) << e.depth << "  ";
                     ss << (e.won ? "W " : "D ");
                     ss << e.name;
                     if (!e.playerClass.empty()) ss << " (" << e.playerClass << ")";
@@ -5644,7 +5682,7 @@ void Renderer::drawScoresOverlay(const Game& game) {
                     std::string date = e.timestamp;
                     if (date.size() >= 10) date = date.substr(0, 10);
                     ss << date << "  " << (e.won ? "W " : "D ");
-                    ss << "S" << e.score << " D" << e.depth << " ";
+                    ss << "S" << e.score << " " << depthTag(scoreEntryBranch(e), e.depth) << " ";
                     ss << e.name;
                     if (!e.playerClass.empty()) ss << " (" << e.playerClass << ")";
                 }
@@ -5717,7 +5755,7 @@ void Renderer::drawScoresOverlay(const Game& game) {
 
             {
                 std::ostringstream ss;
-                ss << "DEPTH: " << e.depth << "   TURNS: " << e.turns;
+                ss << "DEPTH: " << depthLabel(scoreEntryBranch(e), e.depth) << "   TURNS: " << e.turns;
                 drawText5x7(renderer, detailX, dy, bodyScale, white, ss.str());
                 dy += lineH;
             }
@@ -6344,7 +6382,7 @@ void Renderer::drawMessageHistoryOverlay(const Game& game) {
             const auto& m = msgs[idx[row]];
             const Color c = kindColor(m.kind);
 
-            std::string prefix = "D" + std::to_string(m.depth) + " T" + std::to_string(m.turn) + " ";
+            std::string prefix = depthTag(m.branch, m.depth) + " T" + std::to_string(m.turn) + " ";
             std::string body = m.text;
             if (m.repeat > 1) {
                 body += " (x" + std::to_string(m.repeat) + ")";

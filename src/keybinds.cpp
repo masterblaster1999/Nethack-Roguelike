@@ -515,6 +515,9 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::LogDown,
 
         Action::Help,
+        Action::MessageHistory,
+        Action::Codex,
+        Action::Discoveries,
         Action::Options,
         Action::Command,
 
@@ -531,6 +534,9 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::ToggleStats,
         Action::TogglePerfOverlay,
         Action::ToggleViewMode,
+        Action::ToggleVoxelSprites,
+        Action::ToggleFullscreen,
+        Action::Screenshot,
 
         Action::Inventory,
         Action::Spells,

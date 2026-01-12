@@ -566,7 +566,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 44u; // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
+constexpr uint32_t SAVE_VERSION = 47u; // v47: trapdoorFallers keyed by (branch,depth) // v46: Message.branch (dungeon branch for log/history) // v45: dungeon branches (LevelId) // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -1115,6 +1115,12 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     uint32_t rngState = rng.state;
     writePod(mem, rngState);
 
+    // v45+: active branch (separate from numeric depth)
+    if constexpr (SAVE_VERSION >= 45u) {
+        const uint8_t br = static_cast<uint8_t>(branch_);
+        writePod(mem, br);
+    }
+
     int32_t depth = depth_;
     writePod(mem, depth);
 
@@ -1295,12 +1301,16 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
         uint32_t rep = static_cast<uint32_t>(m.repeat);
         uint32_t turn = m.turn;
         uint32_t msgDepth = static_cast<uint32_t>(m.depth);
+        uint8_t msgBranch = static_cast<uint8_t>(m.branch);
         writePod(mem, mk);
         writePod(mem, fp);
         if constexpr (SAVE_VERSION >= 24u) {
             writePod(mem, rep);
             writePod(mem, turn);
             writePod(mem, msgDepth);
+            if constexpr (SAVE_VERSION >= 46u) {
+                writePod(mem, msgBranch);
+            }
         }
         writeString(mem, m.text);
     }
@@ -1309,10 +1319,16 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     uint32_t lvlCount = static_cast<uint32_t>(levels.size());
     writePod(mem, lvlCount);
     for (const auto& kv : levels) {
-        const int d = kv.first;
+        const LevelId id = kv.first;
         const LevelState& st = kv.second;
 
-        int32_t d32 = d;
+        // v45+: persist the branch alongside the depth.
+        if constexpr (SAVE_VERSION >= 45u) {
+            const uint8_t br = static_cast<uint8_t>(id.branch);
+            writePod(mem, br);
+        }
+
+        int32_t d32 = id.depth;
         writePod(mem, d32);
 
         // Dungeon
@@ -1491,17 +1507,23 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
 
 // v33+: creatures that fell through trap doors to deeper levels but haven't been placed yet.
 if constexpr (SAVE_VERSION >= 33u) {
-    uint32_t depthCount = 0;
-    for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
-        if (!trapdoorFallers_[static_cast<size_t>(d)].empty()) ++depthCount;
+    // v47+: key by (branch, depth) so multiple dungeon branches can safely coexist.
+    uint32_t entryCount = 0;
+    for (const auto& kv : trapdoorFallers_) {
+        if (!kv.second.empty()) ++entryCount;
     }
-    writePod(mem, depthCount);
+    writePod(mem, entryCount);
 
-    for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
-        const auto& vec = trapdoorFallers_[static_cast<size_t>(d)];
+    for (const auto& kv : trapdoorFallers_) {
+        const LevelId& id = kv.first;
+        const auto& vec = kv.second;
         if (vec.empty()) continue;
-        const int32_t d32 = d;
+
+        const uint8_t b = static_cast<uint8_t>(id.branch);
+        const int32_t d32 = static_cast<int32_t>(id.depth);
+        writePod(mem, b);
         writePod(mem, d32);
+
         uint32_t c = static_cast<uint32_t>(vec.size());
         writePod(mem, c);
         for (const auto& e : vec) {
@@ -1643,6 +1665,7 @@ bool Game::loadFromFile(const std::string& path) {
         };
 
         uint32_t rngState = 0;
+        uint8_t branchU8 = static_cast<uint8_t>(DungeonBranch::Main);
         int32_t depth = 1;
         int32_t pId = 0;
         int32_t nextE = 1;
@@ -1672,7 +1695,19 @@ bool Game::loadFromFile(const std::string& path) {
         codexKillsTmp.fill(0);
 
         if (!readPod(in, rngState)) return fail();
+        if (ver >= 45u) {
+            if (!readPod(in, branchU8)) return fail();
+            // Clamp unknown branches to Main for forward/backward compatibility.
+            if (branchU8 > static_cast<uint8_t>(DungeonBranch::Main)) {
+                branchU8 = static_cast<uint8_t>(DungeonBranch::Main);
+            }
+        }
         if (!readPod(in, depth)) return fail();
+        if (ver < 45u) {
+            branchU8 = (depth == 0) ? static_cast<uint8_t>(DungeonBranch::Camp)
+                                   : static_cast<uint8_t>(DungeonBranch::Main);
+        }
+        const DungeonBranch branchTmp = static_cast<DungeonBranch>(branchU8);
         if (!readPod(in, pId)) return fail();
         if (!readPod(in, nextE)) return fail();
         if (!readPod(in, nextI)) return fail();
@@ -1927,6 +1962,7 @@ bool Game::loadFromFile(const std::string& path) {
                 uint32_t turn = 0;
                 uint32_t msgDepth = 0;
                 std::string s;
+                uint8_t msgBranchU8 = static_cast<uint8_t>(DungeonBranch::Main);
 
                 if (!readPod(in, mk)) return fail();
                 if (!readPod(in, fp)) return fail();
@@ -1934,6 +1970,16 @@ bool Game::loadFromFile(const std::string& path) {
                     if (!readPod(in, rep)) return fail();
                     if (!readPod(in, turn)) return fail();
                     if (!readPod(in, msgDepth)) return fail();
+                    if (ver >= 46u) {
+                        if (!readPod(in, msgBranchU8)) return fail();
+                        if (msgBranchU8 > static_cast<uint8_t>(DungeonBranch::Main)) {
+                            msgBranchU8 = static_cast<uint8_t>(DungeonBranch::Main);
+                        }
+                    } else {
+                        msgBranchU8 = (msgDepth == 0u)
+                                        ? static_cast<uint8_t>(DungeonBranch::Camp)
+                                        : static_cast<uint8_t>(DungeonBranch::Main);
+                    }
                 }
                 if (!readString(in, s)) return fail();
 
@@ -1944,6 +1990,7 @@ bool Game::loadFromFile(const std::string& path) {
                 m.repeat = static_cast<int>(rep);
                 m.turn = turn;
                 m.depth = static_cast<int>(msgDepth);
+                m.branch = static_cast<DungeonBranch>(msgBranchU8);
                 msgsTmp.push_back(std::move(m));
             } else {
                 std::string s;
@@ -1958,11 +2005,26 @@ bool Game::loadFromFile(const std::string& path) {
 
         uint32_t lvlCount = 0;
         if (!readPod(in, lvlCount)) return fail();
-        std::map<int, LevelState> levelsTmp;
+        std::map<LevelId, LevelState> levelsTmp;
 
         for (uint32_t li = 0; li < lvlCount; ++li) {
+            uint8_t lvlBranchU8 = static_cast<uint8_t>(DungeonBranch::Main);
+            if (ver >= 45u) {
+                if (!readPod(in, lvlBranchU8)) return fail();
+                if (lvlBranchU8 > static_cast<uint8_t>(DungeonBranch::Main)) {
+                    lvlBranchU8 = static_cast<uint8_t>(DungeonBranch::Main);
+                }
+            }
+
             int32_t d32 = 0;
             if (!readPod(in, d32)) return fail();
+
+            if (ver < 45u) {
+                lvlBranchU8 = (d32 == 0) ? static_cast<uint8_t>(DungeonBranch::Camp)
+                                        : static_cast<uint8_t>(DungeonBranch::Main);
+            }
+            const DungeonBranch lvlBranch = static_cast<DungeonBranch>(lvlBranchU8);
+            const LevelId lvlId{lvlBranch, static_cast<int>(d32)};
 
             int32_t w = 0, h = 0;
             int32_t upx = 0, upy = 0, dnx = 0, dny = 0;
@@ -1974,6 +2036,7 @@ bool Game::loadFromFile(const std::string& path) {
             if (!readPod(in, dny)) return fail();
 
             LevelState st;
+            st.branch = lvlBranch;
             st.depth = d32;
             st.dung = Dungeon(w, h);
             st.dung.stairsUp = { upx, upy };
@@ -2274,27 +2337,45 @@ bool Game::loadFromFile(const std::string& path) {
             }
 
 
-            levelsTmp[d32] = std::move(st);
+            levelsTmp[lvlId] = std::move(st);
         }
 
 // v33+: pending trapdoor fallers (creatures that fell to deeper levels but aren't placed yet).
-std::array<std::vector<Entity>, DUNGEON_MAX_DEPTH + 1> trapdoorFallersTmp;
-for (auto& v : trapdoorFallersTmp) v.clear();
+std::map<LevelId, std::vector<Entity>> trapdoorFallersTmp;
 
 if (ver >= 33u) {
-    uint32_t depthCount = 0;
-    if (!readPod(in, depthCount)) return fail();
-    if (depthCount > 1024u) return fail();
+    uint32_t entryCount = 0;
+    if (!readPod(in, entryCount)) return fail();
+    if (entryCount > 4096u) return fail();
 
-    for (uint32_t di = 0; di < depthCount; ++di) {
+    for (uint32_t di = 0; di < entryCount; ++di) {
+        DungeonBranch fallBranch = DungeonBranch::Main;
         int32_t fallDepth = 0;
         uint32_t c = 0;
-        if (!readPod(in, fallDepth)) return fail();
-        if (!readPod(in, c)) return fail();
+
+        // v47+: key by (branch, depth). Older saves stored only depth (implicitly Main branch).
+        if (ver >= 47u) {
+            uint8_t b = static_cast<uint8_t>(DungeonBranch::Main);
+            if (!readPod(in, b)) return fail();
+            if (!readPod(in, fallDepth)) return fail();
+            if (!readPod(in, c)) return fail();
+
+            if (b > static_cast<uint8_t>(DungeonBranch::Main)) {
+                b = static_cast<uint8_t>(DungeonBranch::Main);
+            }
+            fallBranch = static_cast<DungeonBranch>(b);
+        } else {
+            if (!readPod(in, fallDepth)) return fail();
+            if (!readPod(in, c)) return fail();
+            fallBranch = DungeonBranch::Main;
+        }
+
         if (c > 8192u) return fail();
 
-        // Skip out-of-range depths for forward/backward compatibility.
-        if (fallDepth < 1 || fallDepth > DUNGEON_MAX_DEPTH) {
+        const bool depthOk = (fallDepth >= 1 && fallDepth <= DUNGEON_MAX_DEPTH)
+                          || (fallBranch == DungeonBranch::Camp && fallDepth == 0);
+        if (!depthOk) {
+            // Skip out-of-range keys for forward/backward compatibility.
             Entity skip;
             for (uint32_t i = 0; i < c; ++i) {
                 if (!readEntity(in, skip, ver)) return fail();
@@ -2302,7 +2383,8 @@ if (ver >= 33u) {
             continue;
         }
 
-        auto& vec = trapdoorFallersTmp[static_cast<size_t>(fallDepth)];
+        const LevelId id{fallBranch, static_cast<int>(fallDepth)};
+        auto& vec = trapdoorFallersTmp[id];
         vec.reserve(vec.size() + c);
         for (uint32_t i = 0; i < c; ++i) {
             Entity m;
@@ -2314,6 +2396,7 @@ if (ver >= 33u) {
 
         // If we got here, we have a fully parsed save. Commit state.
         rng = RNG(rngState);
+        branch_ = branchTmp;
         depth_ = depth;
         playerId_ = pId;
         nextEntityId = nextE;
@@ -2460,10 +2543,17 @@ if (ver >= 33u) {
         ents.clear();
         ents.push_back(p);
 
-        // Sanity: ensure we have the current depth.
-        if (levels.find(depth_) == levels.end()) {
-            // Fallback: if missing, reconstruct from what's available.
-            if (!levels.empty()) depth_ = levels.begin()->first;
+        // Sanity: ensure we have the current level.
+        {
+            const LevelId cur{branch_, depth_};
+            if (levels.find(cur) == levels.end()) {
+                // Fallback: if missing, reconstruct from what's available.
+                if (!levels.empty()) {
+                    const LevelId fb = levels.begin()->first;
+                    branch_ = fb.branch;
+                    depth_ = fb.depth;
+                }
+            }
         }
 
         // Close transient UI and effects.
@@ -2508,7 +2598,7 @@ if (ver >= 33u) {
         // v40 migration: older saves (v39 and earlier) could generate shop rooms without a shopkeeper.
         // Backfill a peaceful shopkeeper so the buy/sell/#pay loop works mid-run without forcing a new game.
         if (ver < 40u) {
-            for (auto& [d, st] : levels) {
+            for (auto& [id, st] : levels) {
                 // Find the first shop room on this depth (if any).
                 bool hasShopRoom = false;
                 Room shopRoom{};
@@ -2598,7 +2688,7 @@ if (ver >= 33u) {
                 }
 
                 // Avoid consuming RNG during load: derive a stable sprite seed instead of using rng.nextU32().
-                const uint32_t seedA = hash32(static_cast<uint32_t>(d));
+                const uint32_t seedA = hash32(static_cast<uint32_t>(id.depth) ^ (static_cast<uint32_t>(id.branch) << 24));
                 const uint32_t seedB = hash32(static_cast<uint32_t>(sp.x) ^ (static_cast<uint32_t>(sp.y) << 16));
                 const uint32_t spriteSeed = hashCombine(seedA, seedB);
 
@@ -2609,7 +2699,7 @@ if (ver >= 33u) {
             }
         }
 
-        restoreLevel(depth_);
+        restoreLevel(LevelId{branch_, depth_});
 
         // Auto-explore bookkeeping is transient per-floor; size it to this dungeon.
         autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
@@ -2656,8 +2746,13 @@ bool Game::writeBonesFile() {
     const std::filesystem::path baseDir = exportBaseDir(*this);
     if (baseDir.empty()) return false;
 
-    // One bones file per depth. New deaths overwrite old ones.
-    const std::filesystem::path path = baseDir / (std::string("procrogue_bones_d") + std::to_string(depth_) + ".dat");
+    // One bones file per (branch, depth). New deaths overwrite old ones.
+    //
+    // NOTE: Bones payload format is still keyed by numeric depth for now, but the filename
+    // includes the branch to prevent collisions once multiple dungeon branches can share
+    // the same depth numbers.
+    const char* branchTag = (branch_ == DungeonBranch::Camp) ? "camp" : "main";
+    const std::filesystem::path path = baseDir / (std::string("procrogue_bones_") + branchTag + "_d" + std::to_string(depth_) + ".dat");
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) return false;
@@ -2732,9 +2827,19 @@ bool Game::tryApplyBones() {
     const std::filesystem::path baseDir = exportBaseDir(*this);
     if (baseDir.empty()) return false;
 
-    const std::filesystem::path path = baseDir / (std::string("procrogue_bones_d") + std::to_string(depth_) + ".dat");
+    const char* branchTag = (branch_ == DungeonBranch::Camp) ? "camp" : "main";
+    std::filesystem::path path = baseDir / (std::string("procrogue_bones_") + branchTag + "_d" + std::to_string(depth_) + ".dat");
+    std::filesystem::path pathLegacy = baseDir / (std::string("procrogue_bones_d") + std::to_string(depth_) + ".dat");
+
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec) || ec) return false;
+    if (!std::filesystem::exists(path, ec) || ec) {
+        // Backwards compatibility: older builds used one bones file per depth without a branch tag.
+        // Only consider legacy bones on the main dungeon branch.
+        if (branch_ != DungeonBranch::Main) return false;
+        ec.clear();
+        if (!std::filesystem::exists(pathLegacy, ec) || ec) return false;
+        path = pathLegacy;
+    }
 
     // Chance to apply, so bones don't appear every single time.
     const int depthBonusI = std::min(10, std::max(0, depth_ - 2));

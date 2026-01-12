@@ -15,6 +15,10 @@ struct ScoreEntry {
     uint32_t score = 0;
 
     int depth = 1;
+
+    // Which dungeon branch this entry's "depth" refers to.
+    // 0 = Camp, 1 = Main dungeon, other values reserved for future branches.
+    uint8_t branch = 1;
     uint32_t turns = 0;
     uint32_t kills = 0;
     int level = 1;

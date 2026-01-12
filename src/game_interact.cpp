@@ -990,7 +990,8 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
                 if (survived) {
                     // Queue inter-level travel: the creature will appear on the level below
                     // the next time that depth is entered.
-                    trapdoorFallers_[static_cast<size_t>(dstDepth)].push_back(faller);
+                    const LevelId dst{branch_, dstDepth};
+                    trapdoorFallers_[dst].push_back(faller);
                 }
 
                 // Audible feedback: even if you can't see it, you can hear something fall.
@@ -2459,7 +2460,7 @@ bool Game::donateAtShrine(int goldAmount) {
     for (const auto& r : dung.rooms) {
         if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
     }
-    const bool atCamp = (depth_ <= 0);
+    const bool atCamp = (branch_ == DungeonBranch::Camp);
 
     if (!inShrine && !atCamp) {
         pushMsg("YOU NEED A SHRINE OR YOUR CAMP TO DONATE.", MessageKind::Info, true);
@@ -2509,7 +2510,7 @@ bool Game::sacrificeAtShrine() {
     for (const auto& r : dung.rooms) {
         if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
     }
-    const bool atCamp = (depth_ <= 0);
+    const bool atCamp = (branch_ == DungeonBranch::Camp);
 
     if (!inShrine && !atCamp) {
         pushMsg("YOU NEED A SHRINE OR YOUR CAMP TO SACRIFICE.", MessageKind::Info, true);
@@ -2597,7 +2598,7 @@ bool Game::augury() {
         if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
     }
 
-    const bool atCamp = (depth_ <= 0);
+    const bool atCamp = (branch_ == DungeonBranch::Camp);
     if (!inShrine && !atCamp) {
         pushMsg("YOU NEED A SHRINE OR YOUR CAMP TO ATTEMPT AUGURY.", MessageKind::Info, true);
         return false;
@@ -2617,10 +2618,19 @@ bool Game::augury() {
 
     // Preview the next floor using a COPY of the RNG so the vision itself doesn't perturb fate.
     // NOTE: the vision can still be "wrong" if you do other RNG-consuming actions before descending.
-    RNG previewRng = rng;
+        RNG previewRng = rng;
     Dungeon preview(dung.width, dung.height);
-    const int nextDepth = depth_ + 1;
-    preview.generate(previewRng, nextDepth, DUNGEON_MAX_DEPTH);
+
+    DungeonBranch nextBranch = branch_;
+    int nextDepth = depth_ + 1;
+
+    // From Camp, the "next floor" is the first floor of the Main dungeon.
+    if (atCamp) {
+        nextBranch = DungeonBranch::Main;
+        nextDepth = 1;
+    }
+
+    preview.generate(previewRng, nextBranch, nextDepth, DUNGEON_MAX_DEPTH);
 
     auto dirFromDelta = [&](int dx, int dy) -> std::string {
         if (dx == 0 && dy == 0) return "HERE";
@@ -2808,10 +2818,17 @@ bool Game::payAtShop() {
         }
 
         // Also cancel any queued trapdoor fallers that are guards.
-        for (auto& q : trapdoorFallers_) {
+        // Trapdoor fallers are keyed by (branch, depth), so remove guards across all entries.
+        for (auto it = trapdoorFallers_.begin(); it != trapdoorFallers_.end(); ) {
+            auto& q = it->second;
             q.erase(std::remove_if(q.begin(), q.end(), [&](const Entity& e) {
                 return e.hp > 0 && e.kind == EntityKind::Guard;
             }), q.end());
+            if (q.empty()) {
+                it = trapdoorFallers_.erase(it);
+            } else {
+                ++it;
+            }
         }
 
         merchantGuildAlerted_ = false;
@@ -2943,7 +2960,8 @@ bool Game::payAtShop() {
 bool Game::payAtCamp() {
     if (gameOver || gameWon) return false;
 
-    if (depth_ != 0) {
+    // Camp hub is a separate branch; don't rely on depth==0 to identify it.
+    if (branch_ != DungeonBranch::Camp) {
         pushMsg("YOU MUST BE AT CAMP TO SETTLE YOUR DEBTS.", MessageKind::Info, true);
         return false;
     }
@@ -2969,10 +2987,17 @@ bool Game::payAtCamp() {
             }), st.monsters.end());
         }
 
-        for (auto& q : trapdoorFallers_) {
+        // Trapdoor fallers are keyed by (branch, depth), so remove guards across all entries.
+        for (auto it = trapdoorFallers_.begin(); it != trapdoorFallers_.end(); ) {
+            auto& q = it->second;
             q.erase(std::remove_if(q.begin(), q.end(), [&](const Entity& e) {
                 return e.hp > 0 && e.kind == EntityKind::Guard;
             }), q.end());
+            if (q.empty()) {
+                it = trapdoorFallers_.erase(it);
+            } else {
+                ++it;
+            }
         }
 
         merchantGuildAlerted_ = false;

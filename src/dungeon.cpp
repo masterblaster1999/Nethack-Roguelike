@@ -1,4 +1,5 @@
 #include "dungeon.hpp"
+#include "game.hpp"
 #include "corridor_braid.hpp"
 #include "terrain_sculpt.hpp"
 #include <algorithm>
@@ -1415,6 +1416,168 @@ bool stairsConnected(const Dungeon& d) {
     const size_t ii = static_cast<size_t>(d.stairsDown.y * d.width + d.stairsDown.x);
     if (ii >= dist.size()) return false;
     return dist[ii] >= 0;
+}
+
+void ensureStairLandingPads(Dungeon& d) {
+    // A tiny fairness/robustness pass: ensure stairs aren't surrounded by
+    // impassable micro-terrain (chasm/pillars/boulders) and have at least a
+    // minimal walkable "landing".
+    auto clearAround = [&](Vec2i s) {
+        if (!d.inBounds(s.x, s.y)) return;
+
+        for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -1; ox <= 1; ++ox) {
+                const int x = s.x + ox;
+                const int y = s.y + oy;
+                if (!d.inBounds(x, y)) continue;
+
+                Tile& t = d.at(x, y);
+                if (t.type == TileType::StairsUp || t.type == TileType::StairsDown) continue;
+                if (t.type == TileType::DoorClosed || t.type == TileType::DoorOpen || t.type == TileType::DoorSecret || t.type == TileType::DoorLocked)
+                    continue;
+
+                // Clear "blocking" micro-terrain in the immediate 3x3.
+                if (t.type == TileType::Chasm || t.type == TileType::Pillar || t.type == TileType::Boulder) {
+                    t.type = TileType::Floor;
+                    continue;
+                }
+
+                // If we somehow ended up with walls directly adjacent, open a minimum landing.
+                if ((std::abs(ox) + std::abs(oy)) <= 1 && t.type == TileType::Wall) {
+                    t.type = TileType::Floor;
+                }
+            }
+        }
+    };
+
+    clearAround(d.stairsUp);
+    clearAround(d.stairsDown);
+}
+
+bool repairStairsConnectivity(Dungeon& d, RNG& rng) {
+    // A last-ditch repair pass: if a rare late procgen step disconnects stairs,
+    // carve a conservative tunnel between them.
+    //
+    // We search with a weighted Dijkstra that prefers existing corridors/floor
+    // but can "dig" through walls if needed.
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) return true;
+    if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) return true;
+    if (stairsConnected(d)) return true;
+
+    const int W = d.width;
+    const int H = d.height;
+    const int INF = 1'000'000'000;
+
+    auto idx = [&](int x, int y) { return y * W + x; };
+    auto inInner = [&](int x, int y) {
+        // Keep a 1-tile border intact; generation relies on solid borders.
+        return x >= 1 && y >= 1 && x < W - 1 && y < H - 1;
+    };
+
+    auto stepCost = [&](TileType t) {
+        switch (t) {
+            case TileType::Floor:
+            case TileType::StairsUp:
+            case TileType::StairsDown:
+            case TileType::DoorOpen:
+            case TileType::Fountain:
+            case TileType::Altar:
+                return 1;
+            case TileType::DoorClosed:
+            case TileType::DoorSecret:
+            case TileType::DoorLocked:
+                // Doors are traversable but slightly penalized.
+                return 2;
+            case TileType::Boulder:
+                // Pushable, but treat as costly; we may clear it while carving.
+                return 6;
+            case TileType::Pillar:
+                return 8;
+            case TileType::Chasm:
+                return 10;
+            case TileType::Wall:
+            default:
+                return 7;
+        }
+    };
+
+    struct QN {
+        int f;
+        int g;
+        int x;
+        int y;
+    };
+
+    auto cmp = [](const QN& a, const QN& b) {
+        if (a.f != b.f) return a.f > b.f;
+        return a.g > b.g;
+    };
+
+    std::priority_queue<QN, std::vector<QN>, decltype(cmp)> pq(cmp);
+    std::vector<int> dist(static_cast<size_t>(W * H), INF);
+    std::vector<int> parent(static_cast<size_t>(W * H), -1);
+
+    const Vec2i start = d.stairsUp;
+    const Vec2i goal = d.stairsDown;
+
+    dist[static_cast<size_t>(idx(start.x, start.y))] = 0;
+    const int h0 = std::abs(start.x - goal.x) + std::abs(start.y - goal.y);
+    pq.push({h0, 0, start.x, start.y});
+
+    const Vec2i dirs[4] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    while (!pq.empty()) {
+        const QN cur = pq.top();
+        pq.pop();
+
+        const int ci = idx(cur.x, cur.y);
+        if (cur.g != dist[static_cast<size_t>(ci)]) continue;
+        if (cur.x == goal.x && cur.y == goal.y) break;
+
+        // Small shuffle by random start index for tie-breaking variety.
+        const int startDir = rng.range(0, 3);
+        for (int di = 0; di < 4; ++di) {
+            const Vec2i dv = dirs[(startDir + di) % 4];
+            const int nx = cur.x + dv.x;
+            const int ny = cur.y + dv.y;
+            if (!inInner(nx, ny)) continue;
+
+            const int ni = idx(nx, ny);
+            const int cost = stepCost(d.at(nx, ny).type);
+            const int ng = cur.g + cost;
+            if (ng >= dist[static_cast<size_t>(ni)]) continue;
+
+            dist[static_cast<size_t>(ni)] = ng;
+            parent[static_cast<size_t>(ni)] = ci;
+
+            const int h = std::abs(nx - goal.x) + std::abs(ny - goal.y);
+            pq.push({ng + h, ng, nx, ny});
+        }
+    }
+
+    const int goalIdx = idx(goal.x, goal.y);
+    if (parent[static_cast<size_t>(goalIdx)] < 0) return false;
+
+    // Carve along the found path.
+    int walk = goalIdx;
+    while (walk != idx(start.x, start.y) && walk >= 0) {
+        const int px = walk % W;
+        const int py = walk / W;
+        Tile& t = d.at(px, py);
+
+        if (t.type == TileType::Wall || t.type == TileType::Chasm || t.type == TileType::Pillar || t.type == TileType::Boulder) {
+            t.type = TileType::Floor;
+        }
+
+        walk = parent[static_cast<size_t>(walk)];
+    }
+
+    // Reassert stairs tiles (in case any carving logic touched them).
+    if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+    if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
+
+    ensureStairLandingPads(d);
+    return stairsConnected(d);
 }
 
 
@@ -8634,6 +8797,10 @@ bool Dungeon::dig(int x, int y) {
 }
 
 void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
+    generate(rng, DungeonBranch::Main, depth, maxDepth);
+}
+
+void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth) {
     // A default-constructed Dungeon starts at 0x0. Ensure we have a valid grid
     // allocated before generation begins (especially for special layouts that return early).
     if (width <= 0 || height <= 0) {
@@ -8661,8 +8828,8 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     // Sanity clamp.
     if (maxDepth < 1) maxDepth = 1;
 
-    // Surface camp (depth 0): above-ground hub level.
-    if (depth <= 0) {
+    // Camp branch: above-ground hub level.
+    if (branch == DungeonBranch::Camp) {
         generateSurfaceCamp(*this, rng);
         ensureBorders(*this);
 
@@ -8671,6 +8838,10 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
         if (inBounds(stairsDown.x, stairsDown.y)) at(stairsDown.x, stairsDown.y).type = TileType::StairsDown;
         return;
     }
+
+    // Non-camp branches should never have depth <= 0, but clamp for safety.
+    if (depth < 1) depth = 1;
+
 
     // Final floor: a bespoke arena-like sanctum that caps the run.
     if (depth >= maxDepth) {
@@ -8832,6 +9003,13 @@ void Dungeon::generate(RNG& rng, int depth, int maxDepth) {
     // Vault prefabs: carve small handcrafted set-pieces into wall pockets off corridors.
     // These are always optional side content and never gate the critical stairs path.
     (void)maybePlaceVaultPrefabs(*this, rng, depth, g);
+
+    // Final procgen robustness: ensure stair landings remain usable and repair the
+    // rare case where late passes accidentally disconnect stairs.
+    ensureStairLandingPads(*this);
+    if (depth < maxDepth && !stairsConnected(*this)) {
+        (void)repairStairsConnectivity(*this, rng);
+    }
 
     ensureBorders(*this);
 

@@ -312,7 +312,7 @@ Entity& Game::spawnMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear)
 }
 
 void Game::spawnMonsters() {
-    if (depth_ <= 0) return;
+    if (branch_ == DungeonBranch::Camp) return;
 
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;
@@ -462,7 +462,7 @@ void Game::spawnMonsters() {
 }
 
 void Game::spawnItems() {
-    if (depth_ <= 0) return;
+    if (branch_ == DungeonBranch::Camp) return;
 
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;
@@ -1259,7 +1259,7 @@ void Game::spawnItems() {
 }
 
 void Game::spawnTraps() {
-    if (depth_ <= 0) return;
+    if (branch_ == DungeonBranch::Camp) return;
 
     trapsCur.clear();
 
@@ -2883,7 +2883,7 @@ void Game::cleanupDead() {
 }
 
 void Game::spawnAltars() {
-    if (depth_ <= 0) return;
+    if (branch_ == DungeonBranch::Camp) return;
 
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;
@@ -2937,7 +2937,7 @@ void Game::spawnAltars() {
 
 
 void Game::spawnFountains() {
-    if (depth_ <= 0) return;
+    if (branch_ == DungeonBranch::Camp) return;
 
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;

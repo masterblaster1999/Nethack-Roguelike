@@ -177,12 +177,13 @@ void Game::pushMsg(const std::string& s, MessageKind kind, bool fromPlayer) {
     // This preserves the original text and adds a repeat counter for the renderer.
     if (!msgs.empty()) {
         Message& last = msgs.back();
-        if (last.text == s && last.kind == kind && last.fromPlayer == fromPlayer) {
+        if (last.text == s && last.kind == kind && last.fromPlayer == fromPlayer && last.branch == branch_ && last.depth == depth_) {
             if (last.repeat < 9999) {
                 ++last.repeat;
             }
             // Treat the compacted line as "latest occurrence".
             last.turn = turnCount;
+            last.branch = branch_;
             last.depth = depth_;
             return;
         }
@@ -216,6 +217,7 @@ void Game::pushMsg(const std::string& s, MessageKind kind, bool fromPlayer) {
     m.kind = kind;
     m.fromPlayer = fromPlayer;
     m.turn = turnCount;
+    m.branch = branch_;
     m.depth = depth_;
     msgs.push_back(m);
 
@@ -1235,9 +1237,11 @@ void Game::newGame(uint32_t seed) {
 
     rng = RNG(seed);
     seed_ = seed;
-    depth_ = 1;
+    // Start the run at the surface camp hub.
+    branch_ = DungeonBranch::Camp;
+    depth_ = 0;
     levels.clear();
-    for (auto& v : trapdoorFallers_) v.clear();
+    trapdoorFallers_.clear();
 
     ents.clear();
     ground.clear();
@@ -1336,7 +1340,7 @@ void Game::newGame(uint32_t seed) {
     lastAutosaveTurn = 0;
 
     killCount = 0;
-    maxDepth = 1;
+    maxDepth = 0;
     codexSeen_.fill(0);
     codexKills_.fill(0);
     runRecorded = false;
@@ -1407,7 +1411,7 @@ void Game::newGame(uint32_t seed) {
 
     const MapSizeWH msz = pickProceduralMapSize(rng, depth_, DUNGEON_MAX_DEPTH);
     dung = Dungeon(msz.w, msz.h);
-    dung.generate(rng, depth_, DUNGEON_MAX_DEPTH);
+    dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH);
     // Environmental fields reset per floor (no lingering gas on a fresh level).
     confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
     poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
@@ -1427,7 +1431,18 @@ void Game::newGame(uint32_t seed) {
     Entity p;
     p.id = nextEntityId++;
     p.kind = EntityKind::Player;
-    p.pos = dung.stairsUp;
+    // Spawn in the surface camp hub (near the stash), otherwise default to the upstairs.
+    Vec2i startPos = dung.stairsUp;
+    if (atCamp()) {
+        startPos = dung.campStashSpot;
+        if (!dung.inBounds(startPos.x, startPos.y) || !dung.isWalkable(startPos.x, startPos.y)) {
+            startPos = dung.stairsDown;
+        }
+        if (!dung.inBounds(startPos.x, startPos.y) || !dung.isWalkable(startPos.x, startPos.y)) {
+            startPos = dung.stairsUp;
+        }
+    }
+    p.pos = startPos;
 
     // Class baseline stats.
     // These are intentionally modest; items and talents still matter a lot.
@@ -1602,6 +1617,10 @@ void Game::newGame(uint32_t seed) {
     spawnItems();
     spawnTraps();
 
+    if (atCamp()) {
+        setupSurfaceCampInstallations();
+    }
+
     tryApplyBones();
 
     spawnFountains();
@@ -1639,6 +1658,7 @@ void Game::newGame(uint32_t seed) {
 
 void Game::storeCurrentLevel() {
     LevelState st;
+    st.branch = branch_;
     st.depth = depth_;
     st.dung = dung;
     st.ground = ground;
@@ -1655,11 +1675,11 @@ void Game::storeCurrentLevel() {
         if (e.id == playerId_) continue;
         st.monsters.push_back(e);
     }
-    levels[depth_] = std::move(st);
+    levels[{branch_, depth_}] = std::move(st);
 }
 
-bool Game::restoreLevel(int depth) {
-    auto it = levels.find(depth);
+bool Game::restoreLevel(LevelId id) {
+    auto it = levels.find(id);
     if (it == levels.end()) return false;
 
     dung = it->second.dung;
@@ -1876,7 +1896,7 @@ void Game::spawnGraffiti() {
     };
 
     // Camp-specific: the surface is calmer, so the scribbles are more practical.
-    if (depth_ == 0) {
+    if (atCamp()) {
         if (dung.inBounds(dung.campStashSpot.x, dung.campStashSpot.y)) {
             addGraffiti(dung.campStashSpot, "STASH");
         }
@@ -1961,7 +1981,9 @@ void Game::spawnGraffiti() {
 }
 
 void Game::setupSurfaceCampInstallations() {
-    if (depth_ != 0) return;
+    // Surface camp installations are only valid in the Camp hub (depth 0).
+    // Keep this branch-aware so future branches can safely use depth 0.
+    if (!atCamp()) return;
 
     // Stash anchor comes from dungeon generation; fall back to the downstairs if needed.
     Vec2i stash = dung.campStashSpot;
@@ -2043,6 +2065,15 @@ void Game::setupSurfaceCampInstallations() {
 
 
 void Game::changeLevel(int newDepth, bool goingDown) {
+    // Convenience overload: change depth *within the current branch*.
+    //
+    // Branch transitions (Camp <-> Main, etc.) should use the LevelId overload so
+    // each branch can have its own independent depth numbering in the future.
+    changeLevel(LevelId{branch_, newDepth}, goingDown);
+}
+
+void Game::changeLevel(LevelId newLevel, bool goingDown) {
+    const int newDepth = newLevel.depth;
     if (newDepth < 0) return;
     if (newDepth > DUNGEON_MAX_DEPTH) {
         pushMsg("THE STAIRS END HERE. YOU SENSE YOU ARE AT THE BOTTOM.", MessageKind::System, true);
@@ -2112,8 +2143,8 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         if (!canMonsterUseStairs(m)) continue;
         if (chebyshev(m.pos, leavePos) > 1) continue;
         if (!m.alerted) continue;
-        // Keep the surface camp (depth 0) as a safe-ish hub: hostile monsters don't follow you up.
-        if (newDepth == 0 && !m.friendly) continue;
+        // Keep the surface camp as a safe-ish hub: hostile monsters don't follow you up.
+        if (newLevel.branch == DungeonBranch::Camp && !m.friendly) continue;
         followerIdx.push_back(i);
     }
 
@@ -2164,10 +2195,11 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     statsOpen = false;
     msgScroll = 0;
 
+    branch_ = newLevel.branch;
     depth_ = newDepth;
     maxDepth = std::max(maxDepth, depth_);
 
-    bool restored = restoreLevel(depth_);
+    bool restored = restoreLevel(newLevel);
 
     Entity& p = playerMut();
 
@@ -2257,11 +2289,11 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     };
 
     auto placeTrapdoorFallersHere = [&]() -> size_t {
-        // Spawn any monsters/companions that previously fell through trap doors into this depth.
-        const int d = depth_;
-        if (d < 1 || d > DUNGEON_MAX_DEPTH) return 0;
-
-        auto& pending = trapdoorFallers_[static_cast<size_t>(d)];
+        // Spawn any monsters/companions that previously fell through trap doors into this level.
+        const LevelId here{branch_, depth_};
+        auto it = trapdoorFallers_.find(here);
+        if (it == trapdoorFallers_.end()) return 0;
+        auto& pending = it->second;
         if (pending.empty()) return 0;
 
         auto isSafeLanding = [&](Vec2i v) -> bool {
@@ -2319,6 +2351,9 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         }
 
         pending = std::move(stillPending);
+        if (pending.empty()) {
+            trapdoorFallers_.erase(it);
+        }
         return placed;
     };
 
@@ -2341,7 +2376,7 @@ void Game::changeLevel(int newDepth, bool goingDown) {
 
         const MapSizeWH msz = pickProceduralMapSize(rng, depth_, DUNGEON_MAX_DEPTH);
         dung = Dungeon(msz.w, msz.h);
-        dung.generate(rng, depth_, DUNGEON_MAX_DEPTH);
+        dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH);
         confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
@@ -2395,7 +2430,7 @@ void Game::changeLevel(int newDepth, bool goingDown) {
         spawnItems();
         spawnTraps();
 
-        if (depth_ == 0) {
+        if (branch_ == DungeonBranch::Camp) {
             setupSurfaceCampInstallations();
         }
 
@@ -2465,9 +2500,15 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     p.hp = std::min(p.hpMax, p.hp + 2);
 
     std::ostringstream ss;
-    if (!goingDown && depth_ == 0) ss << "YOU RETURN TO YOUR CAMP.";
-    else if (goingDown) ss << "YOU DESCEND TO DEPTH " << depth_ << ".";
-    else ss << "YOU ASCEND TO DEPTH " << depth_ << ".";
+    if (!goingDown && atCamp()) {
+        ss << "YOU RETURN TO YOUR CAMP.";
+    } else if (goingDown && branch_ == DungeonBranch::Main && depth_ == 1) {
+        ss << "YOU DESCEND INTO THE DUNGEON (DEPTH 1).";
+    } else if (goingDown) {
+        ss << "YOU DESCEND TO DEPTH " << depth_ << ".";
+    } else {
+        ss << "YOU ASCEND TO DEPTH " << depth_ << ".";
+    }
     pushMsg(ss.str());
 
     // Show the procedurally-chosen map dimensions once, when a floor is first generated.
@@ -2490,7 +2531,7 @@ void Game::changeLevel(int newDepth, bool goingDown) {
     }
 
     // MERCHANT GUILD PURSUIT: if you fled a shop with unpaid goods, guards may pursue across floors.
-    if (merchantGuildAlerted_ && shopDebtTotal() > 0 && depth_ > 0) {
+    if (merchantGuildAlerted_ && shopDebtTotal() > 0 && !atCamp()) {
         if (rng.chance(0.65f)) {
             Vec2i gpos = findNearbyFreeTile(p.pos, 6, true, true);
             if (dung.inBounds(gpos.x, gpos.y) && dung.isWalkable(gpos.x, gpos.y) && !entityAt(gpos.x, gpos.y)) {
@@ -2506,77 +2547,81 @@ void Game::changeLevel(int newDepth, bool goingDown) {
 
     recomputeFov();
 
-    if (goingDown && depth_ == MIDPOINT_DEPTH) {
-        pushMsg("YOU HAVE REACHED THE MIDPOINT OF THE DUNGEON.", MessageKind::System, true);
-    }
+    if (branch_ == DungeonBranch::Main) {
+
+        if (goingDown && depth_ == MIDPOINT_DEPTH) {
+            pushMsg("YOU HAVE REACHED THE MIDPOINT OF THE DUNGEON.", MessageKind::System, true);
+        }
 
     
-    // Grotto callout: the cavern-like floor features a subterranean lake carved out of chasms.
-    if (goingDown && depth_ == Dungeon::GROTTO_DEPTH) {
-        pushMsg("A DAMP CHILL RISES FROM BELOW...", MessageKind::System, true);
-        if (dung.hasCavernLake) {
-            pushMsg("THE GROTTO OPENS INTO A SUBTERRANEAN LAKE.", MessageKind::System, true);
-        } else {
-            pushMsg("THE ROCK GIVES WAY TO A NATURAL CAVERN.", MessageKind::System, true);
+        // Grotto callout: the cavern-like floor features a subterranean lake carved out of chasms.
+        if (goingDown && depth_ == Dungeon::GROTTO_DEPTH) {
+            pushMsg("A DAMP CHILL RISES FROM BELOW...", MessageKind::System, true);
+            if (dung.hasCavernLake) {
+                pushMsg("THE GROTTO OPENS INTO A SUBTERRANEAN LAKE.", MessageKind::System, true);
+            } else {
+                pushMsg("THE ROCK GIVES WAY TO A NATURAL CAVERN.", MessageKind::System, true);
+            }
         }
-    }
 
-    // Special floor callout: the procedural mines floors are about winding tunnels,
-    // loops, and small chambers (less "architected" than BSP rooms).
-    if (goingDown && (depth_ == Dungeon::MINES_DEPTH || depth_ == Dungeon::DEEP_MINES_DEPTH)) {
-        if (depth_ == Dungeon::MINES_DEPTH) {
-            pushMsg("THE STONE GIVES WAY TO ROUGH-HEWN TUNNELS...", MessageKind::System, true);
-            pushMsg("YOU HAVE ENTERED THE MINES.", MessageKind::System, true);
-        } else {
-            pushMsg("THE AIR GROWS THICK WITH DUST AND ECHOES...", MessageKind::System, true);
-            pushMsg("DEEP MINES: FISSURES CRACK THE EARTH BETWEEN WANDERING TUNNELS.", MessageKind::System, true);
+        // Special floor callout: the procedural mines floors are about winding tunnels,
+        // loops, and small chambers (less "architected" than BSP rooms).
+        if (goingDown && (depth_ == Dungeon::MINES_DEPTH || depth_ == Dungeon::DEEP_MINES_DEPTH)) {
+            if (depth_ == Dungeon::MINES_DEPTH) {
+                pushMsg("THE STONE GIVES WAY TO ROUGH-HEWN TUNNELS...", MessageKind::System, true);
+                pushMsg("YOU HAVE ENTERED THE MINES.", MessageKind::System, true);
+            } else {
+                pushMsg("THE AIR GROWS THICK WITH DUST AND ECHOES...", MessageKind::System, true);
+                pushMsg("DEEP MINES: FISSURES CRACK THE EARTH BETWEEN WANDERING TUNNELS.", MessageKind::System, true);
+            }
         }
-    }
 
-    // Special floor callout: the organic Warrens layout is a network of dug-out burrows,
-    // with chambers as landmarks and lots of dead ends (great for secrets/closets).
-    if (goingDown && dung.hasWarrens) {
-        pushMsg("THE PASSAGES NARROW INTO DAMP BURROWS...", MessageKind::System, true);
-        pushMsg("YOU HAVE ENTERED THE WARRENS.", MessageKind::System, true);
-    }
+        // Special floor callout: the organic Warrens layout is a network of dug-out burrows,
+        // with chambers as landmarks and lots of dead ends (great for secrets/closets).
+        if (goingDown && dung.hasWarrens) {
+            pushMsg("THE PASSAGES NARROW INTO DAMP BURROWS...", MessageKind::System, true);
+            pushMsg("YOU HAVE ENTERED THE WARRENS.", MessageKind::System, true);
+        }
 
-    // Fixed-depth generator callout: the Catacombs floor is a dense maze of small tomb rooms.
-    if (goingDown && depth_ == Dungeon::CATACOMBS_DEPTH) {
-        pushMsg("YOU ENTER A MAZE OF NARROW VAULTS AND CRUMBLING TOMBS.", MessageKind::System, true);
-        pushMsg("THE CATACOMBS STRETCH OUT IN EVERY DIRECTION.", MessageKind::System, true);
-    }
-
+        // Fixed-depth generator callout: the Catacombs floor is a dense maze of small tomb rooms.
+        if (goingDown && depth_ == Dungeon::CATACOMBS_DEPTH) {
+            pushMsg("YOU ENTER A MAZE OF NARROW VAULTS AND CRUMBLING TOMBS.", MessageKind::System, true);
+            pushMsg("THE CATACOMBS STRETCH OUT IN EVERY DIRECTION.", MessageKind::System, true);
+        }
 
 
-    // Subtle hint: some floors hide secret shortcut doors between adjacent passages.
-    if (goingDown && dung.secretShortcutCount > 0) {
-        pushMsg("YOU FEEL A FAINT DRAFT IN THE WALLS.", MessageKind::System, true);
-    }
 
-    // Hint: some floors also contain visible locked shortcut gates (key/lockpick shortcuts).
-    if (goingDown && dung.lockedShortcutCount > 0) {
-        pushMsg("YOU HEAR THE RATTLE OF CHAINS IN THE DARK.", MessageKind::System, true);
-    }
+        // Subtle hint: some floors hide secret shortcut doors between adjacent passages.
+        if (goingDown && dung.secretShortcutCount > 0) {
+            pushMsg("YOU FEEL A FAINT DRAFT IN THE WALLS.", MessageKind::System, true);
+        }
 
-    // Special floor callout: the Sokoban puzzle floor teaches/spotlights the
-    // boulder-into-chasm bridging mechanic.
-    if (goingDown && depth_ == Dungeon::SOKOBAN_DEPTH) {
-        pushMsg("THE AIR VIBRATES WITH A LOW RUMBLE...", MessageKind::System, true);
-        pushMsg("BOULDERS AND CHASMS AHEAD. BRIDGE THE GAPS BY PUSHING BOULDERS INTO THEM.", MessageKind::System, true);
-    }
+        // Hint: some floors also contain visible locked shortcut gates (key/lockpick shortcuts).
+        if (goingDown && dung.lockedShortcutCount > 0) {
+            pushMsg("YOU HEAR THE RATTLE OF CHAINS IN THE DARK.", MessageKind::System, true);
+        }
 
-    // Special floor callout: the Rogue homage floor is deliberately doorless and grid-based,
-    // echoing classic Rogue/NetHack pacing.
-    if (goingDown && depth_ == Dungeon::ROGUE_LEVEL_DEPTH) {
-        pushMsg("YOU ENTER WHAT SEEMS TO BE AN OLDER, MORE PRIMITIVE WORLD.", MessageKind::System, true);
-    }
+        // Special floor callout: the Sokoban puzzle floor teaches/spotlights the
+        // boulder-into-chasm bridging mechanic.
+        if (goingDown && depth_ == Dungeon::SOKOBAN_DEPTH) {
+            pushMsg("THE AIR VIBRATES WITH A LOW RUMBLE...", MessageKind::System, true);
+            pushMsg("BOULDERS AND CHASMS AHEAD. BRIDGE THE GAPS BY PUSHING BOULDERS INTO THEM.", MessageKind::System, true);
+        }
 
-    if (goingDown && depth_ == QUEST_DEPTH - 1) {
-        pushMsg("THE PASSAGES TWIST AND TURN... YOU ENTER A LABYRINTH.", MessageKind::System, true);
-        pushMsg("IN THE DISTANCE, YOU HEAR THE DRUMMING OF HEAVY HOOVES...", MessageKind::Warning, true);
-    }
-    if (goingDown && depth_ == QUEST_DEPTH && !playerHasAmulet()) {
-        pushMsg("A SINISTER PRESENCE LURKS AHEAD. THE AMULET MUST BE NEAR...", MessageKind::System, true);
+        // Special floor callout: the Rogue homage floor is deliberately doorless and grid-based,
+        // echoing classic Rogue/NetHack pacing.
+        if (goingDown && depth_ == Dungeon::ROGUE_LEVEL_DEPTH) {
+            pushMsg("YOU ENTER WHAT SEEMS TO BE AN OLDER, MORE PRIMITIVE WORLD.", MessageKind::System, true);
+        }
+
+        if (goingDown && depth_ == QUEST_DEPTH - 1) {
+            pushMsg("THE PASSAGES TWIST AND TURN... YOU ENTER A LABYRINTH.", MessageKind::System, true);
+            pushMsg("IN THE DISTANCE, YOU HEAR THE DRUMMING OF HEAVY HOOVES...", MessageKind::Warning, true);
+        }
+        if (goingDown && depth_ == QUEST_DEPTH && !playerHasAmulet()) {
+            pushMsg("A SINISTER PRESENCE LURKS AHEAD. THE AMULET MUST BE NEAR...", MessageKind::System, true);
+        }
+
     }
 
     // Safety: when autosave is enabled, also autosave on floor transitions.
@@ -2866,6 +2911,7 @@ static void hashChestContainer(Hash64& hh, const ChestContainer& c) {
 }
 
 static void hashLevelState(Hash64& hh, const LevelState& ls) {
+    hh.addEnum(ls.branch);
     hh.addI32(ls.depth);
     hashDungeon(hh, ls.dung);
 
@@ -2907,6 +2953,7 @@ uint64_t Game::determinismHash() const {
     // Core run identity.
     hh.addU32(seed_);
     hh.addU32(rng.state);
+    hh.addEnum(branch_);
     hh.addI32(depth_);
     hh.addI32(maxDepth);
     hh.addU32(turnCount);
@@ -3028,20 +3075,33 @@ uint64_t Game::determinismHash() const {
     // level (it may be stale until storeCurrentLevel() runs), so exclude it
     // from the determinism hash to make the hash stable across save/load
     // round-trips.
+    const LevelId curId{branch_, depth_};
+
     uint32_t levelCount = static_cast<uint32_t>(levels.size());
-    if (levels.find(depth_) != levels.end()) {
+    if (levels.find(curId) != levels.end()) {
         levelCount -= 1u;
     }
     hh.addU32(levelCount);
     for (const auto& kv : levels) {
-        if (kv.first == depth_) continue;
-        hh.addI32(kv.first);
+        if (kv.first == curId) continue;
+        hh.addEnum(kv.first.branch);
+        hh.addI32(kv.first.depth);
         hashLevelState(hh, kv.second);
     }
 
     // Pending trapdoor fallers (creatures that fell to deeper levels but aren't placed yet).
-    for (int d = 1; d <= DUNGEON_MAX_DEPTH; ++d) {
-        const auto& vec = trapdoorFallers_[static_cast<size_t>(d)];
+    // Keyed by (branch, depth) so multiple branches can safely coexist.
+    uint32_t fallEntryCount = 0;
+    for (const auto& kv : trapdoorFallers_) {
+        if (!kv.second.empty()) ++fallEntryCount;
+    }
+    hh.addU32(fallEntryCount);
+    for (const auto& kv : trapdoorFallers_) {
+        const auto& id = kv.first;
+        const auto& vec = kv.second;
+        if (vec.empty()) continue;
+        hh.addEnum(id.branch);
+        hh.addI32(id.depth);
         hh.addU32(static_cast<uint32_t>(vec.size()));
         for (const auto& e : vec) hashEntity(hh, e);
     }

@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <vector>
 
+enum class DungeonBranch : uint8_t;
+
 enum class TileType : uint8_t {
     Wall = 0,
     Floor,
@@ -163,8 +165,11 @@ public:
 
     // Procedural generation.
     //
-    // `depth` is used to vary generation style (rooms vs caverns vs mazes)
-    // and difficulty pacing.
+    // `branch` selects the dungeon branch's layout rules (e.g. Camp hub vs Main dungeon).
+    // `depth` is a branch-local depth used for pacing and special floors.
+    void generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth);
+
+    // Convenience overload (legacy): generates using the Main branch rules.
     void generate(RNG& rng, int depth, int maxDepth);
 
     void computeFov(int px, int py, int radius, bool markExplored = true);

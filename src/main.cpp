@@ -1309,7 +1309,14 @@ int main(int argc, char** argv) {
         renderer.render(game);
 
         if (wantScreenshot) {
-            std::string outPath = renderer.saveScreenshotBMP(screenshotDir);
+            const auto branchTag = [](DungeonBranch b) -> std::string {
+                if (b == DungeonBranch::Camp) return "camp";
+                if (b == DungeonBranch::Main) return "main";
+                return "b" + std::to_string(static_cast<int>(b));
+            };
+
+            const std::string prefix = "procrogue_shot_" + branchTag(game.branch()) + "_d" + std::to_string(game.depth());
+            std::string outPath = renderer.saveScreenshotBMP(screenshotDir, prefix);
             if (!outPath.empty()) {
                 game.pushSystemMessage("SCREENSHOT SAVED: " + outPath);
             } else {

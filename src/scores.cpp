@@ -189,6 +189,32 @@ bool parseBool(const std::string& s, bool& out) {
     return false;
 }
 
+
+bool parseBranchToken(const std::string& s, uint8_t& out) {
+    std::string v = toLower(trimStr(s));
+    if (v.empty()) return false;
+
+    if (v == "camp" || v == "surface" || v == "hub") { out = 0; return true; }
+    if (v == "main" || v == "dungeon" || v == "d") { out = 1; return true; }
+
+    uint32_t u = 0;
+    if (parseU32(v, u)) {
+        out = static_cast<uint8_t>(std::min<uint32_t>(u, 255u));
+        return true;
+    }
+
+    return false;
+}
+
+const char* branchToken(uint8_t b) {
+    switch (b) {
+        case 0: return "camp";
+        case 1: return "main";
+        default: return "unknown";
+    }
+}
+
+
 bool atomicWriteTextFile(const std::string& path, const std::string& contents) {
 #if __has_include(<filesystem>)
     std::error_code ec;
@@ -450,6 +476,10 @@ bool ScoreBoard::load(const std::string& path) {
         int i32 = 1;
         if (parseI32(getCol(cols, "depth"), i32)) e.depth = i32;
 
+        uint8_t br = 1;
+        if (parseBranchToken(getCol(cols, "branch"), br)) e.branch = br;
+        else e.branch = (e.depth <= 0) ? 0 : 1;
+
         if (parseU32(getCol(cols, "turns"), u)) e.turns = u;
         if (parseU32(getCol(cols, "kills"), u)) e.kills = u;
 
@@ -489,7 +519,7 @@ bool ScoreBoard::append(const std::string& path, const ScoreEntry& eIn) {
     std::ostringstream out;
 
     // Newer, richer schema. Older files are still readable via header mapping.
-    out << "timestamp,name,class,slot,won,score,depth,turns,kills,level,gold,seed,cause,game_version\n";
+    out << "timestamp,name,class,slot,won,score,branch,depth,turns,kills,level,gold,seed,cause,game_version\n";
     for (const auto& s : entries_) {
         out << csvEscape(s.timestamp) << ','
             << csvEscape(s.name) << ','
@@ -497,6 +527,7 @@ bool ScoreBoard::append(const std::string& path, const ScoreEntry& eIn) {
             << csvEscape(s.slot) << ','
             << (s.won ? 1 : 0) << ','
             << s.score << ','
+            << csvEscape(branchToken(s.branch)) << ','
             << s.depth << ','
             << s.turns << ','
             << s.kills << ','

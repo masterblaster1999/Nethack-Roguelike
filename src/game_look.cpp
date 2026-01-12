@@ -79,6 +79,28 @@ std::string Game::describeAt(Vec2i p) const {
         default: ss << "TILE"; break;
     }
 
+    // Branch-aware stair destination hints.
+    // This keeps look/inspect readable now that multiple branches can share the same numeric depth.
+    if (t.type == TileType::StairsUp) {
+        if (atCamp()) {
+            ss << " | EXIT";
+        } else {
+            // First-pass branching: stairs up from depth 1 returns to camp.
+            if (depth_ <= 1) ss << " | TO CAMP";
+            else ss << " | TO DEPTH " << (depth_ - 1);
+        }
+    } else if (t.type == TileType::StairsDown) {
+        if (atCamp()) {
+            ss << " | TO DUNGEON (DEPTH 1)";
+        } else {
+            if (depth_ >= DUNGEON_MAX_DEPTH) {
+                ss << " | BOTTOM";
+            } else {
+                ss << " | TO DEPTH " << (depth_ + 1);
+            }
+        }
+    }
+
     // Trap (can be remembered once discovered)
     for (const auto& tr : trapsCur) {
         if (!tr.discovered) continue;

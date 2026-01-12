@@ -16,6 +16,34 @@
 #include <utility>
 #include <vector>
 
+// Dungeon topology: a run can span multiple branches (e.g., Main dungeon, Camp hub).
+//
+// First pass: we only expose Camp vs Main, but this is intentionally modeled as a
+// real branch dimension so future side-dungeons can slot in without overloading
+// the meaning of numeric depth.
+enum class DungeonBranch : uint8_t {
+    Camp = 0,
+    Main = 1,
+};
+
+// A unique identifier for a level within the run.
+//
+// NOTE: We keep this comparable so it can be used as a std::map key.
+struct LevelId {
+    DungeonBranch branch = DungeonBranch::Main;
+    int depth = 1;
+
+    bool operator<(const LevelId& o) const {
+        const uint8_t a = static_cast<uint8_t>(branch);
+        const uint8_t b = static_cast<uint8_t>(o.branch);
+        if (a != b) return a < b;
+        return depth < o.depth;
+    }
+    bool operator==(const LevelId& o) const {
+        return branch == o.branch && depth == o.depth;
+    }
+};
+
 enum class EntityKind : uint8_t {
     Player = 0,
     Goblin,
@@ -617,8 +645,9 @@ struct Message {
     bool fromPlayer = true;
 
     // Metadata for log/history tools.
-    uint32_t turn = 0; // game turn when the message was generated
-    int depth = 0;     // dungeon depth when generated
+    uint32_t turn = 0;        // game turn when the message was generated
+    DungeonBranch branch = DungeonBranch::Main; // dungeon branch when generated
+    int depth = 0;            // dungeon depth when generated
 
     // Consecutive duplicate messages are compacted by incrementing this counter.
     // Example: "YOU HIT THE ORC." repeated 3 times becomes one log line with repeat=3.
@@ -788,6 +817,7 @@ struct ChestContainer {
 };
 
 struct LevelState {
+    DungeonBranch branch = DungeonBranch::Main;
     int depth = 1;
     Dungeon dung;
     std::vector<Entity> monsters;
@@ -954,6 +984,10 @@ public:
     int playerId() const { return playerId_; }
 
     int depth() const { return depth_; }
+
+    DungeonBranch branch() const { return branch_; }
+
+    bool atCamp() const { return branch_ == DungeonBranch::Camp && depth_ == 0; }
 
     int dungeonMaxDepth() const { return DUNGEON_MAX_DEPTH; }
     int questDepth() const { return QUEST_DEPTH; }
@@ -1457,15 +1491,18 @@ private:
     Dungeon dung;
     RNG rng;
 
+    DungeonBranch branch_ = DungeonBranch::Main;
     int depth_ = 1;
 
     // Persistent visited levels (monsters + items + explored tiles)
-    std::map<int, LevelState> levels;
+    std::map<LevelId, LevelState> levels;
 
     // Monsters/companions that fell through trap doors into a deeper level.
     // These are queued by destination depth and spawned when that level is entered.
     // Index 0 is unused.
-    std::array<std::vector<Entity>, DUNGEON_MAX_DEPTH + 1> trapdoorFallers_{};
+    // v33+: creatures that fell through trap doors to deeper levels but haven't been placed yet.
+    // Keyed by (branch, depth) so multiple branches can safely coexist.
+    std::map<LevelId, std::vector<Entity>> trapdoorFallers_{};
 
     std::vector<Entity> ents;
     int nextEntityId = 1;
@@ -1849,8 +1886,9 @@ private:
 
     // Level transitions
     void storeCurrentLevel();
-    bool restoreLevel(int depth);
+    bool restoreLevel(LevelId id);
     void changeLevel(int newDepth, bool goingDown);
+    void changeLevel(LevelId newLevel, bool goingDown);
 
     // Shops / economy
     // Triggered when the player escapes a shop with unpaid goods or attacks the shopkeeper.

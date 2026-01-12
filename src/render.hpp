@@ -345,6 +345,7 @@ private:
 
     // Cached room type per tile (for themed decals / minimap)
     const Dungeon* roomCacheDungeon = nullptr;
+    DungeonBranch roomCacheBranch = DungeonBranch::Main;
     int roomCacheDepth = -1;
     int roomCacheW = 0;
     int roomCacheH = 0;

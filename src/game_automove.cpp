@@ -142,9 +142,29 @@ bool Game::requestAutoTravel(Vec2i goal) {
         return false;
     }
 
-    if (!dung.isPassable(goal.x, goal.y)) {
-        pushMsg("NO PATH (BLOCKED).", MessageKind::Warning);
-        return false;
+    // Destination validation: most of the time we require a passable tile.
+    // However, for convenience we allow auto-travel to certain interactable blockers
+    // that the player can resolve while walking (e.g. a locked door you can unlock).
+    {
+        const TileType tt = dung.at(goal.x, goal.y).type;
+
+        bool okGoal = dung.isPassable(goal.x, goal.y);
+        if (!okGoal) {
+            const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
+            const bool levitating = (player().effects.levitationTurns > 0);
+
+            if (tt == TileType::DoorLocked && canUnlockDoors) {
+                okGoal = true;
+            } else if (tt == TileType::Chasm && levitating) {
+                // Rare case: allow targeting a chasm tile directly while levitating.
+                okGoal = true;
+            }
+        }
+
+        if (!okGoal) {
+            pushMsg("NO PATH (BLOCKED).", MessageKind::Warning);
+            return false;
+        }
     }
 
     if (goal == player().pos) {
@@ -705,12 +725,16 @@ Vec2i Game::findNearestExploreFrontier() const {
             if (cur != start && isFrontier(cur.x, cur.y)) return cur;
 
             for (int dir = 0; dir < 8; ++dir) {
-                const int nx = cur.x + dirs[dir][0];
-                const int ny = cur.y + dirs[dir][1];
+                const int dx = dirs[dir][0];
+                const int dy = dirs[dir][1];
+                const int nx = cur.x + dx;
+                const int ny = cur.y + dy;
                 if (!dung.inBounds(nx, ny)) continue;
                 const int nIdx = idxOf(nx, ny);
                 if (visited[nIdx]) continue;
                 if (!passableForSearch(nx, ny)) continue;
+
+                if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
 
                 // We don't traverse known traps in pass 1, but if a known trap tile is itself a frontier,
                 // we return it as the goal (auto-explore will stop before stepping onto it).
@@ -745,12 +769,16 @@ Vec2i Game::findNearestExploreFrontier() const {
             }
 
             for (int dir = 0; dir < 8; ++dir) {
-                const int nx = cur.x + dirs[dir][0];
-                const int ny = cur.y + dirs[dir][1];
+                const int dx = dirs[dir][0];
+                const int dy = dirs[dir][1];
+                const int nx = cur.x + dx;
+                const int ny = cur.y + dy;
                 if (!dung.inBounds(nx, ny)) continue;
                 const int nIdx = idxOf(nx, ny);
                 if (visited[nIdx]) continue;
                 if (!passableForSearch(nx, ny)) continue;
+
+                if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
 
                 const int curIdx = idxOf(cur.x, cur.y);
                 int ft = firstTrapIdx[curIdx];
@@ -759,6 +787,104 @@ Vec2i Game::findNearestExploreFrontier() const {
 
                 visited[nIdx] = 1;
                 q.push_back(Vec2i{nx, ny});
+            }
+        }
+    }
+
+    // Pass 3: if the floor appears "fully explored" but the last unexplored pocket is
+    // behind a visible locked door, allow auto-explore to walk to that door and unlock it.
+    //
+    // We only do this AFTER exhausting normal frontiers so auto-explore doesn't burn keys
+    // while there is still plenty of open terrain to reveal.
+    if (canUnlockDoors) {
+        auto isLockedDoorFrontier = [&](int x, int y) -> bool {
+            if (!dung.inBounds(x, y)) return false;
+            const Tile& t = dung.at(x, y);
+            if (!t.explored) return false;
+            if (t.type != TileType::DoorLocked) return false;
+            if (fireAt(x, y) > 0u) return false;
+
+            for (int dir = 0; dir < 8; ++dir) {
+                const int nx = x + dirs[dir][0];
+                const int ny = y + dirs[dir][1];
+                if (!dung.inBounds(nx, ny)) continue;
+                if (!dung.at(nx, ny).explored) return true;
+            }
+            return false;
+        };
+
+        // Pass 3a: BFS that does NOT traverse known traps.
+        {
+            std::deque<Vec2i> q;
+            std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
+            visited[idxOf(start.x, start.y)] = 1;
+            q.push_back(start);
+
+            while (!q.empty()) {
+                const Vec2i cur = q.front();
+                q.pop_front();
+
+                if (cur != start && isLockedDoorFrontier(cur.x, cur.y)) return cur;
+
+                for (int dir = 0; dir < 8; ++dir) {
+                    const int dx = dirs[dir][0];
+                    const int dy = dirs[dir][1];
+                    const int nx = cur.x + dx;
+                    const int ny = cur.y + dy;
+                    if (!dung.inBounds(nx, ny)) continue;
+                    const int nIdx = idxOf(nx, ny);
+                    if (visited[nIdx]) continue;
+                    if (!passableForSearch(nx, ny)) continue;
+
+                    if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
+
+                    if (isKnownTrap(nx, ny)) continue;
+
+                    visited[nIdx] = 1;
+                    q.push_back(Vec2i{nx, ny});
+                }
+            }
+        }
+
+        // Pass 3b: BFS that allows traversing known traps. If we find a locked-door frontier,
+        // return the FIRST known trap tile along the shortest path to it.
+        {
+            std::deque<Vec2i> q;
+            std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
+            std::vector<int> firstTrapIdx(static_cast<size_t>(W * H), -1);
+            visited[idxOf(start.x, start.y)] = 1;
+            q.push_back(start);
+
+            while (!q.empty()) {
+                const Vec2i cur = q.front();
+                q.pop_front();
+
+                if (cur != start && isLockedDoorFrontier(cur.x, cur.y)) {
+                    const int ft = firstTrapIdx[idxOf(cur.x, cur.y)];
+                    if (ft != -1) return Vec2i{ft % W, ft / W};
+                    return cur;
+                }
+
+                for (int dir = 0; dir < 8; ++dir) {
+                    const int dx = dirs[dir][0];
+                    const int dy = dirs[dir][1];
+                    const int nx = cur.x + dx;
+                    const int ny = cur.y + dy;
+                    if (!dung.inBounds(nx, ny)) continue;
+                    const int nIdx = idxOf(nx, ny);
+                    if (visited[nIdx]) continue;
+                    if (!passableForSearch(nx, ny)) continue;
+
+                    if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
+
+                    const int curIdx = idxOf(cur.x, cur.y);
+                    int ft = firstTrapIdx[curIdx];
+                    if (ft == -1 && isKnownTrap(nx, ny)) ft = nIdx;
+                    firstTrapIdx[nIdx] = ft;
+
+                    visited[nIdx] = 1;
+                    q.push_back(Vec2i{nx, ny});
+                }
             }
         }
     }

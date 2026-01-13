@@ -2046,8 +2046,9 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
 
 }
 
+
 void Renderer::updateProceduralAnimations(const Game& game, float frameDt, uint32_t ticks) {
-    // Reset between runs/floors so animation state doesn't "leak" across levels.
+    // Clear between runs/floors so we don't tween across unrelated levels.
     const uint32_t runSeed = static_cast<uint32_t>(game.seed());
     if (prevAnimSeed_ != runSeed || prevAnimBranch_ != game.branch() || prevAnimDepth_ != game.depth()) {
         procAnimById_.clear();
@@ -2058,8 +2059,8 @@ void Renderer::updateProceduralAnimations(const Game& game, float frameDt, uint3
 
     const float dt = std::clamp(frameDt, 0.0f, 0.05f);
 
-    const int playerId = game.playerId();
     const Vec2i playerPos = game.player().pos;
+    const int playerId = game.playerId();
 
     auto signi = [](int v) -> int { return (v > 0) - (v < 0); };
 
@@ -2068,25 +2069,23 @@ void Renderer::updateProceduralAnimations(const Game& game, float frameDt, uint3
 
     for (const Entity& e : game.entities()) {
         alive.insert(e.id);
-
         ProcAnimState& st = procAnimById_[e.id];
+
         if (!st.initialized) {
             st.initialized = true;
             st.lastPos = e.pos;
             st.lastHp = e.hp;
 
-            st.moveFrom = e.pos;
-            st.moveTo = e.pos;
             st.moveDuration = 0.08f;
             st.moveTime = st.moveDuration;
 
-            st.hurtDir = {0, 0};
             st.hurtDuration = 0.18f;
             st.hurtTime = st.hurtDuration;
+            st.hurtDir = Vec2i{0, 0};
             continue;
         }
 
-        // Movement tween.
+        // Start a move tween if the entity stepped to a new tile.
         if (e.pos.x != st.lastPos.x || e.pos.y != st.lastPos.y) {
             const int dx = e.pos.x - st.lastPos.x;
             const int dy = e.pos.y - st.lastPos.y;
@@ -2110,7 +2109,7 @@ void Renderer::updateProceduralAnimations(const Game& game, float frameDt, uint3
             st.lastPos = e.pos;
         }
 
-        // Hurt recoil.
+        // Start a recoil if HP decreased.
         if (e.hp < st.lastHp) {
             st.hurtDuration = 0.18f;
             st.hurtTime = 0.0f;
@@ -2120,12 +2119,11 @@ void Renderer::updateProceduralAnimations(const Game& game, float frameDt, uint3
                 dir.x = signi(e.pos.x - playerPos.x);
                 dir.y = signi(e.pos.y - playerPos.y);
             } else {
-                // Player recoil: bias opposite the last movement direction if we have it.
+                // Player: bias opposite the last movement direction.
                 dir.x = -signi(st.moveTo.x - st.moveFrom.x);
                 dir.y = -signi(st.moveTo.y - st.moveFrom.y);
             }
 
-            // Fallback: stable pseudo-random direction.
             if (dir.x == 0 && dir.y == 0) {
                 const uint32_t h = hash32(hashCombine(runSeed, hashCombine(static_cast<uint32_t>(e.id), ticks)));
                 const int r = static_cast<int>(h & 3u);
@@ -2134,7 +2132,6 @@ void Renderer::updateProceduralAnimations(const Game& game, float frameDt, uint3
                 else if (r == 2) dir.y = 1;
                 else dir.y = -1;
             }
-
             st.hurtDir = dir;
         }
 
@@ -2144,21 +2141,20 @@ void Renderer::updateProceduralAnimations(const Game& game, float frameDt, uint3
     // Advance timers.
     for (auto& kv : procAnimById_) {
         ProcAnimState& st = kv.second;
-        if (st.moveDuration > 0.0f && st.moveTime < st.moveDuration) {
+        if (st.moveTime < st.moveDuration) {
             st.moveTime = std::min(st.moveDuration, st.moveTime + dt);
         }
-        if (st.hurtDuration > 0.0f && st.hurtTime < st.hurtDuration) {
+        if (st.hurtTime < st.hurtDuration) {
             st.hurtTime = std::min(st.hurtDuration, st.hurtTime + dt);
         }
     }
 
-    // Cleanup states for entities that no longer exist.
+    // Remove stale entries.
     for (auto it = procAnimById_.begin(); it != procAnimById_.end(); ) {
         if (alive.find(it->first) == alive.end()) it = procAnimById_.erase(it);
         else ++it;
     }
 }
-
 
 SDL_Texture* Renderer::textureFromSprite(const SpritePixels& s) {
     if (!renderer || !pixfmt) return nullptr;
@@ -3018,7 +3014,6 @@ void Renderer::render(const Game& game) {
         updateParticlesFromGame(game, static_cast<float>(frameDt), ticks);
     }
 
-    // Visual-only procedural animation state (smooth movement / bobbing / recoil).
     updateProceduralAnimations(game, static_cast<float>(frameDt), ticks);
 
     ParticleView particleView;
@@ -3043,6 +3038,7 @@ void Renderer::render(const Game& game) {
     auto spriteDst = [&](int x, int y) -> SDL_Rect {
         return mapSpriteDst(x, y);
     };
+
 
     // ---------------------------------------------------------------------
     // Procedural sprite animation helpers (visual-only).
@@ -4305,7 +4301,6 @@ void Renderer::render(const Game& game) {
                     sd.w = (tileBase.w * 2) / 3;
                     sd.h = (tileBase.h * 2) / 3;
 
-                    // Shrink a little as the item rises.
                     const float amp = std::clamp(static_cast<float>(tile) * 0.035f, 0.0f, 3.0f);
                     const float lift01 = (amp > 0.0f && bob > 0.0f) ? std::clamp(bob / amp, 0.0f, 1.0f) : 0.0f;
                     const float sc = 1.0f - 0.10f * lift01;
@@ -4349,6 +4344,7 @@ void Renderer::render(const Game& game) {
             SDL_Rect dst = spriteDst(gi.pos.x, gi.pos.y);
             const float bob = itemBob(gi);
             dst.y -= static_cast<int>(std::lround(bob));
+
             const Color mod = tileColorMod(gi.pos.x, gi.pos.y, /*visible*/true);
             drawSpriteWithShadowOutline(renderer, tex, dst, mod, 255, /*shadow*/false, /*outline*/true);
         }
@@ -4920,6 +4916,7 @@ void Renderer::render(const Game& game) {
     if (particles_) {
         particles_->render(renderer, particleView, ParticleEngine::LAYER_BEHIND);
     }
+
 
     // FX projectiles
     for (const auto& fx : game.fxProjectiles()) {
@@ -8027,7 +8024,7 @@ void Renderer::drawMessageHistoryOverlay(const Game& game) {
         y += 20;
     }
 
-    drawText5x7(renderer, x0 + pad, y, 1, gray, "UP/DOWN scroll  LEFT/RIGHT filter  PGUP/PGDN scroll  / search  CTRL+L clear  CTRL+C copy  ESC close");
+    drawText5x7(renderer, x0 + pad, y, 1, gray, "UP/DOWN scroll  LEFT/RIGHT filter  PGUP/PGDN scroll  / search  CTRL+L clear  ESC close");
     y += 18;
 
     // Build filtered view.
@@ -8087,6 +8084,9 @@ void Renderer::drawMessageHistoryOverlay(const Game& game) {
     const int availH = std::max(0, textBottom - textTop);
     const int maxLines = std::max(1, availH / lineH);
 
+    const int start = std::max(0, static_cast<int>(idx.size()) - maxLines - scroll);
+    const int end = std::min(static_cast<int>(idx.size()), start + maxLines);
+
     auto kindColor = [&](MessageKind k) -> Color {
         switch (k) {
             case MessageKind::Combat:       return Color{255,230,120,255};
@@ -8107,125 +8107,28 @@ void Renderer::drawMessageHistoryOverlay(const Game& game) {
         return s.substr(0, static_cast<size_t>(maxChars - 3)) + "...";
     };
 
-    const int maxChars = std::max(1, (panelW - 2 * pad) / std::max(1, charW));
+    const int maxChars = (panelW - 2 * pad) / charW;
 
-    // Compute a consistent prefix field width so wrapped lines align.
-    int prefixW = 0;
-    for (int mi : idx) {
-        const auto& m = msgs[static_cast<size_t>(mi)];
-        const std::string prefix = depthTag(m.branch, m.depth) + " T" + std::to_string(m.turn) + " ";
-        prefixW = std::max(prefixW, static_cast<int>(prefix.size()));
-    }
-    prefixW = std::min(prefixW, maxChars);
+    if (idx.empty()) {
+        drawText5x7(renderer, x0 + pad, y + 10, 2, gray, "NO MESSAGES MATCH.");
+    } else {
+        int yy = y;
+        for (int row = start; row < end; ++row) {
+            const auto& m = msgs[idx[row]];
+            const Color c = kindColor(m.kind);
 
-    const int bodyMaxChars = std::max(0, maxChars - prefixW);
-
-    // Simple word wrap (ASCII-ish) with hard breaks for long tokens.
-    auto wrap = [&](const std::string& s, int maxCharsLocal) -> std::vector<std::string> {
-        std::vector<std::string> out;
-        if (maxCharsLocal <= 0) {
-            out.push_back("");
-            return out;
-        }
-
-        size_t pos = 0;
-        while (pos < s.size()) {
-            // Skip leading spaces for the next line.
-            while (pos < s.size() && s[pos] == ' ') ++pos;
-            if (pos >= s.size()) break;
-
-            size_t end = std::min(s.size(), pos + static_cast<size_t>(maxCharsLocal));
-            if (end >= s.size()) {
-                out.push_back(s.substr(pos));
-                break;
-            }
-
-            // Prefer breaking on the last space inside the window.
-            size_t space = s.rfind(' ', end);
-            if (space != std::string::npos && space > pos) {
-                end = space;
-            }
-
-            std::string line = s.substr(pos, end - pos);
-            while (!line.empty() && line.back() == ' ') line.pop_back();
-            out.push_back(line);
-
-            pos = end;
-        }
-
-        if (out.empty()) out.push_back("");
-        return out;
-    };
-
-    struct LineEntry {
-        int msgIdx = 0;     // index into msgs
-        int lineIdx = 0;    // 0 = first wrapped line for this message
-        std::string text;   // wrapped body line
-    };
-
-    // Build a set of wrapped lines that fills the viewport bottom-up, keeping
-    // the newest (respecting scroll) pinned to the bottom.
-    std::vector<LineEntry> linesRev;
-
-    if (!idx.empty()) {
-        linesRev.reserve(static_cast<size_t>(maxLines));
-
-        int bottomMsg = static_cast<int>(idx.size()) - 1 - scroll;
-        bottomMsg = std::max(0, std::min(bottomMsg, static_cast<int>(idx.size()) - 1));
-
-        for (int ii = bottomMsg; ii >= 0; --ii) {
-            const int mi = idx[static_cast<size_t>(ii)];
-            const auto& m = msgs[static_cast<size_t>(mi)];
-
+            std::string prefix = depthTag(m.branch, m.depth) + " T" + std::to_string(m.turn) + " ";
             std::string body = m.text;
             if (m.repeat > 1) {
                 body += " (x" + std::to_string(m.repeat) + ")";
             }
 
-            std::vector<std::string> bodyLines = wrap(body, bodyMaxChars);
-            const int need = std::max(1, static_cast<int>(bodyLines.size()));
+            const int prefixChars = static_cast<int>(prefix.size());
+            const int bodyChars = std::max(0, maxChars - prefixChars);
 
-            if (static_cast<int>(linesRev.size()) + need > maxLines) {
-                // If the very first message is too tall, show as many lines from
-                // the beginning as we can (at least the prefix line).
-                if (linesRev.empty()) {
-                    const int take = std::min(need, maxLines);
-                    for (int li = take - 1; li >= 0; --li) {
-                        linesRev.push_back(LineEntry{mi, li, bodyLines[static_cast<size_t>(li)]});
-                    }
-                }
-                break;
-            }
-
-            for (int li = need - 1; li >= 0; --li) {
-                linesRev.push_back(LineEntry{mi, li, bodyLines[static_cast<size_t>(li)]});
-            }
-
-            if (static_cast<int>(linesRev.size()) >= maxLines) break;
-        }
-    }
-
-    std::reverse(linesRev.begin(), linesRev.end());
-
-    const int bx = x0 + pad + prefixW * charW;
-
-    if (idx.empty()) {
-        drawText5x7(renderer, x0 + pad, y + 10, 2, gray, "NO MESSAGES MATCH.");
-    } else if (linesRev.empty()) {
-        drawText5x7(renderer, x0 + pad, y + 10, 2, gray, "NO MESSAGES TO SHOW.");
-    } else {
-        int yy = y;
-
-        for (const auto& e : linesRev) {
-            const auto& m = msgs[static_cast<size_t>(e.msgIdx)];
-            const Color c = kindColor(m.kind);
-
-            if (e.lineIdx == 0) {
-                const std::string prefix = depthTag(m.branch, m.depth) + " T" + std::to_string(m.turn) + " ";
-                drawText5x7(renderer, x0 + pad, yy, scale, gray, fitToChars(prefix, prefixW));
-            }
-
-            const std::string disp = fitToChars(e.text, bodyMaxChars);
+            drawText5x7(renderer, x0 + pad, yy, scale, gray, fitToChars(prefix, prefixChars));
+            const int bx = x0 + pad + prefixChars * charW;
+            const std::string disp = fitToChars(body, bodyChars);
 
             if (!needle.empty()) {
                 const size_t pos = ifindAscii(disp, needle);

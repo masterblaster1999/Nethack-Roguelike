@@ -799,7 +799,7 @@ Color baseColorFor(EntityKind k, RNG& rng) {
 } // namespace
 
 
-SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, bool use3d, int pxSize) {
+SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, bool use3d, int pxSize, bool isometric, bool isoRaytrace) {
     pxSize = clampSpriteSize(pxSize);
     // Base shape from seed (stable), subtle variation from frame.
     RNG rngBase(hash32(seed));
@@ -1292,15 +1292,23 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, boo
     } else {
         finalizeSprite(s, seed, frame, /*outlineAlpha=*/255, /*shadowAlpha=*/90);
     }
-    return use3d ? renderSprite3DEntity(kind, s, seed, frame, pxSize)
-                 : resampleSpriteToSize(s, pxSize);
+    if (use3d) {
+        return isometric ? renderSprite3DEntityIso(kind, s, seed, frame, pxSize, isoRaytrace)
+                         : renderSprite3DEntity(kind, s, seed, frame, pxSize);
+    }
+    return resampleSpriteToSize(s, pxSize);
 }
 
 
-SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool use3d, int pxSize) {
+SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool use3d, int pxSize, bool isometric, bool isoRaytrace) {
     pxSize = clampSpriteSize(pxSize);
     RNG rng(hash32(seed));
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+
+    auto render3d = [&](const SpritePixels& base) -> SpritePixels {
+        return isometric ? renderSprite3DItemIso(kind, base, seed, frame, pxSize, isoRaytrace)
+                         : renderSprite3DItem(kind, base, seed, frame, pxSize);
+    };
 
     // NetHack-style identification visuals:
     // if the renderer sets SPRITE_SEED_IDENT_APPEARANCE_FLAG, we generate
@@ -1311,26 +1319,26 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
         if (isPotionKind(kind)) {
             drawPotionAppearance(s, seed, rng, app, frame);
             finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
-            return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
+            return use3d ? render3d(s)
                          : resampleSpriteToSize(s, pxSize);
         }
         if (isScrollKind(kind)) {
             drawScrollAppearance(s, seed, rng, app, frame);
             finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
-            return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
+            return use3d ? render3d(s)
                          : resampleSpriteToSize(s, pxSize);
         }
         if (kind == ItemKind::RingMight || kind == ItemKind::RingAgility || kind == ItemKind::RingFocus ||
             kind == ItemKind::RingProtection || kind == ItemKind::RingSearching || kind == ItemKind::RingSustenance) {
             drawRingAppearance(s, seed, rng, app, frame);
             finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
-            return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
+            return use3d ? render3d(s)
                          : resampleSpriteToSize(s, pxSize);
         }
         if (kind == ItemKind::WandSparks || kind == ItemKind::WandDigging || kind == ItemKind::WandFireball) {
             drawWandAppearance(s, seed, rng, app, frame);
             finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
-            return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
+            return use3d ? render3d(s)
                          : resampleSpriteToSize(s, pxSize);
         }
     }
@@ -2268,11 +2276,11 @@ case ItemKind::Arrow: {
     // Post-process: subtle outline + shadow for readability on noisy floors.
     finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
 
-    return use3d ? renderSprite3DItem(kind, s, seed, frame, pxSize)
-                 : resampleSpriteToSize(s, pxSize);
+    return use3d ? render3d(s)
+                         : resampleSpriteToSize(s, pxSize);
 }
 
-SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int frame, bool use3d, int pxSize) {
+SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int frame, bool use3d, int pxSize, bool isometric, bool isoRaytrace) {
     pxSize = clampSpriteSize(pxSize);
     (void)seed;
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
@@ -2350,8 +2358,11 @@ SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int fr
     // Post-process: a crisp outline keeps fast projectiles readable.
     finalizeSprite(s, seed, frame, /*outlineAlpha=*/200, /*shadowAlpha=*/55);
 
-    return use3d ? renderSprite3DProjectile(kind, s, seed, frame, pxSize)
-                 : resampleSpriteToSize(s, pxSize);
+    if (use3d) {
+        return isometric ? renderSprite3DProjectileIso(kind, s, seed, frame, pxSize, isoRaytrace)
+                         : renderSprite3DProjectile(kind, s, seed, frame, pxSize);
+    }
+    return resampleSpriteToSize(s, pxSize);
 }
 
 

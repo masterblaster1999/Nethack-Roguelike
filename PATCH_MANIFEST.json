@@ -4,6 +4,13 @@
     "CMakeLists.txt",
     "PATCH_MANIFEST.json",
     "README.md",
+    "SETTINGS.md",
+    "game.hpp",
+    "game_loop.cpp",
+    "main.cpp",
+    "render.cpp",
+    "docs/PARTICLES.md",
+    "docs/ANIMATION.md",
     "docs/SETTINGS.md",
     "src/ai.cpp",
     "src/combat.cpp",
@@ -34,6 +41,8 @@
     "src/items.hpp",
     "src/keybinds.cpp",
     "src/main.cpp",
+    "src/mesh2d.cpp",
+    "src/mesh2d.hpp",
     "src/render.cpp",
     "src/render.hpp",
     "src/replay_runner.cpp",
@@ -46,14 +55,17 @@
     "src/spritegen.cpp",
     "src/spritegen.hpp",
     "src/spritegen3d.cpp",
+    "src/spritegen3d.hpp",
     "src/terrain_sculpt.cpp",
     "src/terrain_sculpt.hpp",
     "src/ui_font.hpp",
     "tests/test_main.cpp"
   ],
-  "patch_id": "roundN_plus113_patch",
-  "previous_patch": "roundN_plus112_patch",
+  "patch_id": "roundN_plus131_patch",
+  "previous_patch": "roundN_plus130_patch",
   "summary": [
+    "Added mesh-based isometric voxel sprite rendering: in isometric view mode, voxel_sprites now project visible voxel faces into a 2D triangle mesh and rasterize to a sprite for better alignment with the 2.5D terrain.",
+    "Added a reusable procedural 2D mesh rasterizer (Mesh2D) with an opaque z-buffer pass plus depth-sorted translucent blending; isometric voxel sprites now greedy-merge uniform visible faces for fewer triangles and more robust glass/liquid ordering.",
     "Added an optional perf overlay HUD (FPS/frame time, sprite cache usage/hits/misses/evictions, and a low-rate determinism hash) toggleable via Shift+F10 (default), `show_perf_overlay` setting, or `#perf on/off`.",
     "Obscure debug/info commands: added extended commands #pos (#where alias), #what (#tile/#describe/#whatis aliases), and #mapstats for quick coordinate readout, tile description, and per-floor exploration stats (uses LOOK cursor when active or accepts X Y).",
     "Procedurally generated map sizes: newly generated floors now vary in width/height by depth (with mild jitter). Special/bespoke floors keep the canonical size.",
@@ -77,32 +89,30 @@
     "Auto-travel now prefers trap-free routes when possible, falling back to paths that may approach known traps.",
     "Rest command now recovers mana as well as HP (it no longer refuses to rest just because HP is full).",
     "Rest now stops early on visible danger, damage ticks (e.g., poison), or starvation to prevent accidental self-kills.",
-    "Added Scroll of Enchant Ring: enchants a ring in your inventory (+ENCHANT), prompting you to choose if multiple rings are available."
+    "Added Scroll of Enchant Ring: enchants a ring in your inventory (+ENCHANT), prompting you to choose if multiple rings are available.",
+    "Keybind parsing now deduplicates equivalent chords (e.g. `?` vs `shift+slash`) so bindings don't show duplicates / \u201cdouble up\u201d.",
+    "Keybinds editor overlay: added / filter search with a safer typing mode (Enter/Esc exits), DEL unbind (writes `none`), and highlighted conflicts when the same chord is bound to multiple actions.",
+    "HUD text now wraps (stats, message log, and bottom hint lines) instead of clipping off the right edge on narrow windows.",
+    "Extended command prompt: TAB completion now expands to the longest common prefix and lets you cycle through multiple matches by pressing TAB repeatedly.",
+    "Extended command prompt: autocomplete also works for pasted NetHack-style inputs like `#quit`.",
+    "Message history overlay: PageUp/PageDown now pages through results (10 lines) and search matches are highlighted.",
+    "Mouse wheel scrolling is now context-sensitive in UI overlays: it scrolls selection in list menus (inventory/chests/spells/options/codex/discoveries/scores) and allows the minimap\u2019s intended quick-scroll (LOG UP/DOWN) to move the cursor by 10 tiles instead of scrolling the message log.",
+    "Auto-travel now allows targeting locked doors directly when you have keys/lockpicks (useful for walking to vault doors intentionally).",
+    "Auto-explore frontier selection now respects diagonal corner-cutting rules, avoiding unreachable diagonal targets that could prematurely end exploration.",
+    "Procedural particle VFX engine: renderer-owned, procedurally generated spark/smoke/ember textures with lightweight simulation; integrated for hits, explosions, fire-field embers, and projectile trails.",
+    "Game-driven procedural particle FX events for spells + digging via new FXParticleEvent queue; renderer consumes events into the particle engine.",
+    "Documented particle/VFX pipeline in docs/PARTICLES.md.",
+    "Isometric voxel sprites: upgraded mesh-projected voxel face shading to use a consistent directional light (ambient + diffuse) plus cheap AO and a subtle spec/rim boost; shading multipliers are quantized so greedy face merges remain stable and clean.",
+    "Added optional isometric voxel sprite raytracing: new `iso_voxel_raytrace` setting (and `#isoraytrace` toggle) switches isometric voxel sprites from the mesh rasterizer to a custom orthographic DDA voxel raytracer with soft self-shadowing + AO.",
+    "Save/load recovery: loading a save/autosave now automatically falls back to rotated backup files (.bak1..bak10) when the primary file is corrupt/truncated/CRC mismatched, improving crash resilience.",
+    "Input handling: SDL key repeat is now honored for movement and menu navigation (hold keys to repeat); repeats are suppressed for ESC/confirm/toggle actions to avoid accidental spam.",
+    "Auto-explore: when no normal frontiers remain, it will now walk to reachable locked doors that border unexplored tiles (if you have keys/lockpicks) so it doesn't incorrectly report the floor as fully explored.",
+    "Help overlay now wraps long lines and supports scrolling (Up/Down, PageUp/PageDown, mouse wheel) so content never clips off-screen; message history wheel now scrolls via Up/Down so PageUp/PageDown can page 10 lines.",
+    "Procedural sprite animation: renderer-side smooth move tween (with hop/squash), idle bob, recoil on damage, floating item bob + iso shadow, and projectile lerp + arc."
   ],
-  "timestamp": "2026-01-11T00:00:00Z",
-  "notes": [
-    "RoundN+94: trap-safe auto-travel preference with fallback.",
-    "RoundN+95: safer rest loop + mana recovery.",
-    "RoundN+96: Ring of Sustenance (slow hunger) + loot table integration + sprites/ID updates.",
-    "RoundN+97: monster hazard-aware pathing (avoid poison gas + discovered traps).",
-    "RoundN+98: improved procedural visuals (coherent tile variation + jittered decals; isometric wall blocks use coherent variants).",
-    "RoundN+99: top-down wall contact shadows (procedural AO overlay) for improved depth cues.",
-    "RoundN+100: improved procedural VFX overlays (gas + fire) using domain-warped fBm masks + subtle sparks; keeps ordered dithering for crispness.",
-    "RoundN+101: improved voxel sprite shading (hemisphere AO) + softer grounding contact shadow.",
-    "RoundN+102: improved isometric ground lighting ramp + enhanced isometric cast shadows (corner occlusion + caster-type strength scaling).",
-    "RoundN+103: isometric block sprite polish (AO grounding + cap rim highlights for walls/doors/doorways/pillars).",
-    "RoundN+104: isometric chasm depth tiles (purpose-built diamond tile with rim/wall/void shading).",
-    "RoundN+105: isometric floor decals generated directly in diamond space (no projection) for crisper, iso-aligned room theming.",
-    "RoundN+106: isometric VFX overlays (gas/fire) generated directly in diamond space; poison gas now uses isometric overlay textures.",
-    "RoundN+107: isometric chasm gloom overlay (inward darkening on tiles adjacent to chasms) for stronger pit depth cues.",
-    "RoundN+108: isometric block surface texture polish (brick seams + wood grain) + fix isometric overlay generation regression.",
-    "RoundN+109: improved procedural isometric base tile generation (rock density noise, quantized heightmap, shading, per-tile sprite hashing) and cleanup.",
-    "RoundN+110: procedurally generated map sizes per floor; update auto-explore/pathing and click->tile bounds to use dungeon dimensions; report LEVEL SIZE on first generation.",
-    "RoundN+111: added #pos/#what/#mapstats info/debug extended commands (with LOOK-cursor support) and updated help text.",
-    "RoundN+112: added an optional perf overlay HUD (Shift+F10 / #perf) showing FPS, cache stats, and a low-rate determinism hash.",
-    "RoundN+113: added Scroll of Enchant Ring (new scroll that enchants a ring; selection prompt if multiple rings) and integrated it into loot tables + UI/sprites."
-  ],
-  "cumulative_patch_id": "roundN_plus113",
+  "timestamp": "2026-01-13T00:00:00Z",
+  "notes": "RoundN+129: Help overlay now wraps and is scrollable (Up/Down, PageUp/PageDown, mouse wheel) so it doesn't clip on small windows; message history wheel uses Up/Down so PageUp/PageDown can page 10 lines as documented.",
+  "cumulative_patch_id": "roundN_plus123_patch",
   "applied_patches": [
     {
       "id": "roundN_plus94",
@@ -407,7 +417,251 @@
         "src/render.cpp",
         "src/spritegen.cpp"
       ]
+    },
+    {
+      "id": "roundN_plus114",
+      "timestamp": "2026-01-12T00:00:00Z",
+      "notes": [
+        "Deduped equivalent keybind chords when parsing bind_* lists (e.g., `?` and `shift+slash`) so the UI/`#binds` output doesn't show duplicates.",
+        "HUD text now word-wraps (stats line, message log, and bottom control hints) to prevent clipping off the right edge on narrow windows."
+      ],
+      "files": [
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json",
+        "src/keybinds.cpp",
+        "src/render.cpp"
+      ]
+    },
+    {
+      "id": "roundN_plus115",
+      "timestamp": "2026-01-12T00:00:00Z",
+      "notes": [
+        "Extended command prompt TAB completion now expands to the longest common prefix and supports cycling through multiple matches via repeated TAB presses.",
+        "Autocomplete now also works for pasted NetHack-style inputs like `#quit`."
+      ],
+      "files": [
+        "src/game.hpp",
+        "src/game_save.cpp",
+        "src/game_loop.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus116",
+      "timestamp": "2026-01-12T00:00:00Z",
+      "notes": [
+        "Message history overlay now supports PageUp/PageDown paging (10 lines) and highlights search matches."
+      ],
+      "files": [
+        "src/game_loop.cpp",
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus120",
+      "timestamp": "2026-01-12T00:00:00Z",
+      "notes": [
+        "Added Game-side FXParticleEvent queue and hooked up spells/digging to emit procedural particles (heal/buff/invisibility/blink/poison/dig/detect).",
+        "Renderer now consumes fxParticles() events to spawn matching particle bursts over the event lifetime.",
+        "Documented the particle/VFX pipeline and FXParticleEvent presets."
+      ],
+      "files": [
+        "src/game.hpp",
+        "src/game.cpp",
+        "src/game_loop.cpp",
+        "src/game_spellcasting.cpp",
+        "src/game_targeting.cpp",
+        "src/game_interact.cpp",
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json",
+        "docs/PARTICLES.md"
+      ]
+    },
+    {
+      "id": "roundN_plus121",
+      "timestamp": "2026-01-12T00:00:00Z",
+      "notes": [
+        "Implemented an isometric voxel sprite renderer (visible-face meshing -> 2D triangles -> rasterization) and wired it into the voxel_sprites pipeline when ViewMode::Isometric is active.",
+        "Updated sprite cache keys so isometric voxel sprites can coexist with top-down voxel sprites without requiring cache flushes."
+      ],
+      "files": [
+        "src/spritegen3d.hpp",
+        "src/spritegen3d.cpp",
+        "src/spritegen.hpp",
+        "src/spritegen.cpp",
+        "src/render.cpp",
+        "docs/SETTINGS.md",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus122",
+      "timestamp": "2026-01-12T00:00:00Z",
+      "notes": [
+        "Added a tiny reusable procedural 2D mesh module (Mesh2D): triangle list + z-buffered rasterizer with a split opaque/translucent pipeline.",
+        "Isometric voxel sprites now greedy-merge uniform visible faces and render via Mesh2D for fewer triangles and more robust translucent voxel ordering (e.g., glass/liquid)."
+      ],
+      "files": [
+        "src/mesh2d.hpp",
+        "src/mesh2d.cpp",
+        "src/spritegen3d.cpp",
+        "CMakeLists.txt",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus123",
+      "timestamp": "2026-01-12T00:00:00Z",
+      "notes": [
+        "Keybinds editor overlay now supports / filter/search with a text-input mode (Enter/Esc exits typing).",
+        "DEL unbinds/disables the selected action (writes `bind_<action> = none`).",
+        "Conflicting bindings (duplicate chords bound to multiple actions) are highlighted in the list."
+      ],
+      "files": [
+        "src/game.hpp",
+        "src/game_loop.cpp",
+        "src/main.cpp",
+        "src/render.cpp",
+        "docs/SETTINGS.md",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus124",
+      "timestamp": "2026-01-12T00:00:00Z",
+      "notes": [
+        "Message history overlay now wraps long messages into multiple lines instead of truncating them at the right edge.",
+        "Added CTRL+C in the message history overlay to copy the currently filtered history (respects filter/search) to the system clipboard."
+      ],
+      "files": [
+        "src/game.hpp",
+        "src/game.cpp",
+        "src/main.cpp",
+        "src/render.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus125",
+      "timestamp": "2026-01-13T00:00:00Z",
+      "notes": [
+        "Improved isometric voxel sprite lighting/shading (per-face directional diffuse + cheap AO + subtle spec/rim) so voxel_sprites read with more depth/volume in 2.5D view; shading remains quantized to keep greedy face merges stable.",
+        "Updated cumulative patch manifest/changelog."
+      ],
+      "files": [
+        "src/spritegen3d.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus126",
+      "timestamp": "2026-01-13T00:00:00Z",
+      "notes": [
+        "Save loading now automatically attempts rotated backups (.bak1..bak10) when the primary save/autosave is missing/corrupt/truncated/CRC mismatched.",
+        "In-game load actions and extended #load/#loadauto now use the same backup recovery path.",
+        "Documented the behavior in SETTINGS.md."
+      ],
+      "files": [
+        "src/game.hpp",
+        "src/game_save.cpp",
+        "src/game_loop.cpp",
+        "src/game_internal.hpp",
+        "src/main.cpp",
+        "game.hpp",
+        "game_loop.cpp",
+        "main.cpp",
+        "SETTINGS.md",
+        "docs/SETTINGS.md",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
     }
   ],
-  "user_instruction": "Obsecure improvements"
+  "user_instruction": "Procedurally generated custom animation",
+  "patch_history": [
+    {
+      "id": "roundN_plus127",
+      "timestamp": "2026-01-13T00:00:00Z",
+      "notes": [
+        "Keyboard input now honors SDL key repeat for movement and menu navigation (hold directions/arrows/PageUp/PageDown).",
+        "Repeat events are still ignored for ESC/Enter/toggle-style actions to prevent accidental spam (and preserve double-ESC quit semantics)."
+      ],
+      "files": [
+        "src/main.cpp",
+        "main.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus128",
+      "timestamp": "2026-01-13T00:00:00Z",
+      "notes": [
+        "Auto-explore: when no normal frontiers remain, it will now walk to reachable locked doors that border unexplored tiles (if you have keys/lockpicks) so it doesn't incorrectly report the floor as fully explored."
+      ],
+      "files": [
+        "src/game_automove.cpp",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    },
+    {
+      "id": "roundN_plus130",
+      "timestamp": "2026-01-13T00:00:00Z",
+      "notes": [
+        "Added an optional orthographic isometric voxel raytracer (DDA traversal) for voxel_sprites in isometric view.",
+        "New setting: `iso_voxel_raytrace` (default false).",
+        "New extended command: `#isoraytrace on/off/toggle` (clears sprite cache so textures regenerate).",
+        "Sprite cache keys now include a raytrace bit so mesh vs raytraced isometric sprites never collide."
+      ],
+      "files": [
+        "src/spritegen3d.cpp",
+        "src/spritegen3d.hpp",
+        "src/spritegen.cpp",
+        "src/spritegen.hpp",
+        "src/render.cpp",
+        "src/render.hpp",
+        "src/settings.cpp",
+        "src/settings.hpp",
+        "src/game.hpp",
+        "src/game_internal.hpp",
+        "src/main.cpp",
+        "CHANGELOG.md",
+        "SETTINGS.md",
+        "docs/SETTINGS.md",
+        "PATCH_MANIFEST.json",
+        "game.hpp",
+        "main.cpp",
+        "render.cpp"
+      ]
+    },
+    {
+      "id": "roundN_plus131",
+      "timestamp": "2026-01-13T05:58:53Z",
+      "notes": [
+        "Added renderer-side procedural sprite animation: smooth movement tween with hop + squash/stretch, plus idle bob for living entities.",
+        "Added quick recoil animation when an entity takes damage (HP decreases).",
+        "Items now gently bob; isometric view also draws a small grounding shadow that shrinks/fades as the item rises.",
+        "Projectiles now smoothly interpolate between path tiles using stepTimer/stepTime, with a slight arc lift."
+      ],
+      "files": [
+        "src/render.hpp",
+        "src/render.cpp",
+        "render.cpp",
+        "docs/ANIMATION.md",
+        "CHANGELOG.md",
+        "PATCH_MANIFEST.json"
+      ]
+    }
+  ],
+  "generated_at": "2026-01-13T05:58:53Z"
 }

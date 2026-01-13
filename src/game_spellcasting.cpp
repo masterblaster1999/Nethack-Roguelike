@@ -106,6 +106,8 @@ bool Game::castSpell(SpellKind k) {
                 std::ostringstream ss;
                 ss << "YOU FEEL BETTER (" << gained << ").";
                 pushMsg(ss.str(), MessageKind::Success, true);
+                const int intensity = clampi(14 + gained * 4 + focus * 2, 14, 90);
+                pushFxParticle(FXParticlePreset::Heal, p.pos, intensity, 0.22f);
             } else {
                 pushMsg("YOU FEEL NO DIFFERENT.", MessageKind::System, true);
             }
@@ -132,6 +134,8 @@ bool Game::castSpell(SpellKind k) {
             } else {
                 pushMsg("YOU SENSE NO TRAPS.", MessageKind::System, true);
             }
+            const int intensity = clampi(18 + found * 6 + focus * 2, 18, 120);
+            pushFxParticle(FXParticlePreset::Detect, p.pos, intensity, 0.30f);
             return true;
         }
 
@@ -139,6 +143,8 @@ bool Game::castSpell(SpellKind k) {
             const int dur = clampi(12 + focus * 2, 12, 42);
             p.effects.shieldTurns = std::max(p.effects.shieldTurns, dur);
             pushMsg("YOUR SKIN HARDENS LIKE STONE.", MessageKind::Success, true);
+            const int intensity = clampi(18 + focus * 3, 18, 120);
+            pushFxParticle(FXParticlePreset::Buff, p.pos, intensity, 0.35f);
             return true;
         }
 
@@ -147,6 +153,8 @@ bool Game::castSpell(SpellKind k) {
             p.effects.hasteTurns = std::min(40, p.effects.hasteTurns + add);
             hastePhase = false; // ensure the next action is the "free" haste action
             pushMsg("YOU FEEL QUICK!", MessageKind::Success, true);
+            const int intensity = clampi(16 + focus * 2, 16, 90);
+            pushFxParticle(FXParticlePreset::Buff, p.pos, intensity, 0.25f);
             return true;
         }
 
@@ -154,6 +162,8 @@ bool Game::castSpell(SpellKind k) {
             const int add = clampi(14 + focus / 2, 14, 30);
             p.effects.invisTurns = std::min(60, p.effects.invisTurns + add);
             pushMsg("YOU FADE FROM SIGHT!", MessageKind::Success, true);
+            const int intensity = clampi(20 + focus * 3, 20, 140);
+            pushFxParticle(FXParticlePreset::Invisibility, p.pos, intensity, 0.40f);
             return true;
         }
 
@@ -221,7 +231,12 @@ bool Game::castSpellAt(SpellKind k, Vec2i target) {
             }
 
             mana_ = std::max(0, mana_ - sd.manaCost);
+            const int focus = std::max(0, playerFocus());
+            const int intensity = clampi(30 + focus * 2, 30, 90);
+            const Vec2i src = p.pos;
+            pushFxParticle(FXParticlePreset::Blink, src, intensity, 0.18f);
             p.pos = target;
+            pushFxParticle(FXParticlePreset::Blink, target, intensity, 0.18f, 0.03f);
             pushMsg("YOU BLINK.", MessageKind::System, true);
             emitNoise(p.pos, 10);
             return true;
@@ -281,6 +296,8 @@ bool Game::castSpellAt(SpellKind k, Vec2i target) {
 
             pushMsg("A CLOUD OF TOXIC VAPOR BLOOMS.", MessageKind::Warning, true);
             emitNoise(target, 8);
+            const int intensity = clampi(static_cast<int>(baseStrength) * 6, 24, 140);
+            pushFxParticle(FXParticlePreset::Poison, target, intensity, 0.50f);
             return true;
         }
 

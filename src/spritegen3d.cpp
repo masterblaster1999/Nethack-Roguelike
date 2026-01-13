@@ -1,5 +1,7 @@
 #include "spritegen3d.hpp"
 
+#include "mesh2d.hpp"
+
 #include "game.hpp"   // EntityKind
 #include "items.hpp"  // ItemKind, ProjectileKind helpers
 
@@ -1481,6 +1483,843 @@ SpritePixels renderModelToSprite(const VoxelModel& model, int frame, float yawSc
     return out;
 }
 
+
+// --- Isometric voxel renderer -------------------------------------------------
+//
+// Converts a voxel volume into a small, projected 2D mesh (quads/triangles) using
+// a 2:1 dimetric/isometric projection, then rasterizes it back into a SpritePixels.
+//
+// This renderer is used for isometric view mode so 3D voxel sprites align with the
+// isometric terrain projection.
+
+enum class IsoFaceType : uint8_t { Left = 0, Right = 1, Top = 2 };
+
+struct IsoQuad {
+    std::array<Vec2f, 4> v;    // projected (unscaled) quad vertices
+    std::array<float, 4> z{};  // depth at each vertex (larger = closer)
+    Color c{0,0,0,0};
+};
+
+inline Vec2f isoProject(float x, float y, float z) {
+    // 2:1 dimetric projection:
+    //   +X goes down-right, +Z goes down-left, +Y goes up.
+    // Units are voxel units; we scale/translate to output pixels later.
+    return { (x - z), (x + z) * 0.5f - y };
+}
+
+Color shadeIsoFace(Color base, IsoFaceType t, const VoxelModel& m, int x, int y, int z) {
+    // Stylized isometric lighting.
+    //
+    // The isometric camera in ProcRogue shows the Top (+Y), Right (+X) and Left (+Z) faces.
+    // We keep shading "pixel-art friendly" (mostly flat per face), but add:
+    //   - A consistent directional light (Lambertian diffuse + ambient)
+    //   - A small, cheap ambient-occlusion term so concavities read deeper
+    //   - A tiny specular + rim boost to help silhouettes pop in the 2.5D view
+    //
+    // IMPORTANT: We quantize the final multiplier so greedy face merging can still
+    // collapse large uniform surfaces into big quads (performance + cleaner edges).
+
+    const Vec3f lightDir = normalize({0.58f, 0.80f, 0.28f}); // above + slightly from the "front/right"
+    const Vec3f viewDir  = normalize({0.62f, 0.78f, 0.62f}); // toward the isometric camera
+
+    constexpr float ambient   = 0.40f;
+    constexpr float diffuse   = 0.72f;
+    constexpr float specular  = 0.22f;
+    constexpr float shininess = 22.0f;
+    constexpr float rimStrength = 0.10f;
+
+    Vec3f n{0.0f, 1.0f, 0.0f};
+    switch (t) {
+        case IsoFaceType::Top:   n = {0.0f, 1.0f, 0.0f}; break;
+        case IsoFaceType::Right: n = {1.0f, 0.0f, 0.0f}; break;
+        case IsoFaceType::Left:  n = {0.0f, 0.0f, 1.0f}; break;
+        default: break;
+    }
+
+    const float ndl = std::max(0.0f, dot(n, lightDir));
+    float shade = ambient + diffuse * ndl;
+
+    // Occupancy as "density" (alpha) so translucent voxels occlude less.
+    auto occ = [&](int dx, int dy, int dz) -> float {
+        return static_cast<float>(m.at(x + dx, y + dy, z + dz).a) / 255.0f;
+    };
+
+    float occSum = 0.0f;
+    float wSum = 0.0f;
+    auto sample = [&](int dx, int dy, int dz, float w) {
+        occSum += occ(dx, dy, dz) * w;
+        wSum += w;
+    };
+
+    // Cheap AO sampling tuned per face.
+    // Side faces care a lot about "overhang" voxels above them.
+    if (t == IsoFaceType::Top) {
+        // Nearby voxels just above the top face plane.
+        sample(-1, 1,  0, 1.00f);
+        sample( 1, 1,  0, 1.00f);
+        sample( 0, 1, -1, 1.00f);
+        sample( 0, 1,  1, 1.00f);
+
+        sample(-1, 1, -1, 0.70f);
+        sample(-1, 1,  1, 0.70f);
+        sample( 1, 1, -1, 0.70f);
+        sample( 1, 1,  1, 0.70f);
+
+        // A little from "two above" to deepen tall stacks.
+        sample(0, 2, 0, 0.55f);
+    } else if (t == IsoFaceType::Right) {
+        // Direct overhang above the face is the most important.
+        sample(0, 1, 0, 1.25f);
+        sample(0, 2, 0, 0.45f);
+
+        // Overhangs on the top edge and corners.
+        sample(0, 1, -1, 0.75f);
+        sample(0, 1,  1, 0.75f);
+        sample(1, 1,  0, 0.85f);
+        sample(1, 1, -1, 0.50f);
+        sample(1, 1,  1, 0.50f);
+    } else { // IsoFaceType::Left
+        sample(0, 1, 0, 1.25f);
+        sample(0, 2, 0, 0.45f);
+
+        sample(-1, 1, 0, 0.55f);
+        sample( 1, 1, 0, 0.55f);
+        sample(0, 1, 1, 0.90f);
+        sample(-1, 1, 1, 0.55f);
+        sample( 1, 1, 1, 0.55f);
+    }
+
+    const float occAvg = (wSum > 1e-6f) ? (occSum / wSum) : 0.0f;
+    const float aoStrength = (t == IsoFaceType::Top) ? 0.45f : 0.62f;
+
+    float ao = 1.0f - occAvg * aoStrength;
+    ao = clampf(ao, 0.55f, 1.0f);
+
+    // Quantize to keep merges stable and reduce tiny-sprite shimmer.
+    ao = std::round(ao * 16.0f) / 16.0f;
+
+    shade *= ao;
+    shade = clampf(shade, 0.35f, 1.25f);
+    shade = std::round(shade * 32.0f) / 32.0f;
+
+    Color out = mul(base, shade);
+
+    // Tiny spec + rim to help 3D readability.
+    const Vec3f h = normalize(lightDir + viewDir);
+    float spec = std::pow(std::max(0.0f, dot(n, h)), shininess) * specular;
+
+    const float vdn = clampf(dot(n, viewDir), 0.0f, 1.0f);
+    float rim = std::pow(1.0f - vdn, 2.2f) * rimStrength;
+
+    float boost = clampf(spec + rim, 0.0f, 0.65f);
+
+    // Don't over-boost very translucent materials (ghost/slime/etc.).
+    const float aF = static_cast<float>(base.a) / 255.0f;
+    boost *= (0.35f + 0.65f * aF);
+
+    if (boost > 0.0f) {
+        const int addv = static_cast<int>(std::round(255.0f * boost));
+        out.r = clamp8(static_cast<int>(out.r) + addv);
+        out.g = clamp8(static_cast<int>(out.g) + addv);
+        out.b = clamp8(static_cast<int>(out.b) + addv);
+    }
+
+    return out;
+}
+
+inline void blendOver(Color& dst, const Color& src) {
+    const int sa = static_cast<int>(src.a);
+    if (sa <= 0) return;
+    if (sa >= 255) {
+        dst = src;
+        return;
+    }
+
+    const int da = static_cast<int>(dst.a);
+    const int inv = 255 - sa;
+
+    // Straight-alpha blend, computed via premultiplied intermediates.
+    const int outA = sa + (da * inv + 127) / 255;
+
+    const int srcRp = static_cast<int>(src.r) * sa;
+    const int srcGp = static_cast<int>(src.g) * sa;
+    const int srcBp = static_cast<int>(src.b) * sa;
+
+    const int dstRp = static_cast<int>(dst.r) * da;
+    const int dstGp = static_cast<int>(dst.g) * da;
+    const int dstBp = static_cast<int>(dst.b) * da;
+
+    const int outRp = srcRp + (dstRp * inv + 127) / 255;
+    const int outGp = srcGp + (dstGp * inv + 127) / 255;
+    const int outBp = srcBp + (dstBp * inv + 127) / 255;
+
+    Color out{0, 0, 0, 0};
+    out.a = clamp8(outA);
+    if (outA > 0) {
+        out.r = clamp8((outRp + outA / 2) / outA);
+        out.g = clamp8((outGp + outA / 2) / outA);
+        out.b = clamp8((outBp + outA / 2) / outA);
+    }
+    dst = out;
+}
+
+inline bool sameColor(const Color& a, const Color& b) {
+    return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+}
+
+// Greedy rectangle merge on a 2D face mask.
+//
+// The grid is indexed row-major as (v * dimU + u).
+// Cells with alpha==0 are treated as empty.
+template <typename EmitFn>
+void greedyMerge2D(int dimU, int dimV, const std::vector<Color>& cells, EmitFn emit) {
+    if (dimU <= 0 || dimV <= 0) return;
+    if (static_cast<int>(cells.size()) != dimU * dimV) return;
+
+    std::vector<uint8_t> used(static_cast<size_t>(dimU * dimV), 0);
+
+    auto idx = [&](int u, int v) -> size_t {
+        return static_cast<size_t>(v * dimU + u);
+    };
+
+    for (int v = 0; v < dimV; ++v) {
+        for (int u = 0; u < dimU; ++u) {
+            const size_t i = idx(u, v);
+            if (used[i]) continue;
+            const Color c = cells[i];
+            if (c.a == 0) continue;
+
+            // Expand width (u).
+            int w = 1;
+            while (u + w < dimU) {
+                const size_t j = idx(u + w, v);
+                if (used[j]) break;
+                if (!sameColor(cells[j], c)) break;
+                ++w;
+            }
+
+            // Expand height (v).
+            int h = 1;
+            bool stop = false;
+            while (!stop && v + h < dimV) {
+                for (int du = 0; du < w; ++du) {
+                    const size_t j = idx(u + du, v + h);
+                    if (used[j] || !sameColor(cells[j], c)) {
+                        stop = true;
+                        break;
+                    }
+                }
+                if (!stop) ++h;
+            }
+
+            for (int dv = 0; dv < h; ++dv) {
+                for (int du = 0; du < w; ++du) {
+                    used[idx(u + du, v + dv)] = 1;
+                }
+            }
+
+            emit(u, v, w, h, c);
+        }
+    }
+}
+
+SpritePixels renderVoxelIsometric(const VoxelModel& m, int outW, int outH, int frame) {
+    (void)frame;
+
+    std::vector<IsoQuad> quads;
+    quads.reserve(static_cast<size_t>(m.w * m.h * m.d));
+
+    float minX = 1e9f, minY = 1e9f;
+    float maxX = -1e9f, maxY = -1e9f;
+
+    auto consider = [&](const Vec2f& p) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+    };
+
+    auto pushQuad = [&](const std::array<Vec3f, 4>& p3, Color c) {
+        IsoQuad q;
+        q.c = c;
+        for (int i = 0; i < 4; ++i) {
+            q.v[i] = isoProject(p3[i].x, p3[i].y, p3[i].z);
+            q.z[i] = p3[i].x + p3[i].y + p3[i].z;
+            consider(q.v[i]);
+        }
+        quads.push_back(q);
+    };
+
+    // Build merged surface quads per face orientation.
+    // We only generate the 3 faces visible in the game's isometric view: Top (+Y), Right (+X), Left (+Z).
+    //
+    // NOTE: Merge key is the *final shaded* face color so we don't merge across AO/shading boundaries.
+    //       This keeps the look consistent while still reducing micro-face spam on uniform surfaces
+    //       (e.g., potion glass, smooth slimes, etc.).
+    //
+    // Top faces: per y-slice, merge in (x,z).
+    for (int y = 0; y < m.h; ++y) {
+        std::vector<Color> cells(static_cast<size_t>(m.w * m.d), {0,0,0,0});
+        for (int z = 0; z < m.d; ++z) {
+            for (int x = 0; x < m.w; ++x) {
+                const Color vox = m.at(x, y, z);
+                if (vox.a == 0) continue;
+                if (isFilled(m, x, y + 1, z)) continue;
+                cells[static_cast<size_t>(z * m.w + x)] = shadeIsoFace(vox, IsoFaceType::Top, m, x, y, z);
+            }
+        }
+
+        greedyMerge2D(m.w, m.d, cells, [&](int x0, int z0, int w, int h, const Color& c) {
+            const float fx0 = static_cast<float>(x0);
+            const float fz0 = static_cast<float>(z0);
+            const float fx1 = static_cast<float>(x0 + w);
+            const float fz1 = static_cast<float>(z0 + h);
+            const float fy = static_cast<float>(y + 1);
+
+            std::array<Vec3f, 4> p3{
+                Vec3f{fx0, fy, fz0},
+                Vec3f{fx1, fy, fz0},
+                Vec3f{fx1, fy, fz1},
+                Vec3f{fx0, fy, fz1},
+            };
+            pushQuad(p3, c);
+        });
+    }
+
+    // Right faces: per x-slice, merge in (z,y).
+    for (int x = 0; x < m.w; ++x) {
+        const int dimU = m.d; // z
+        const int dimV = m.h; // y
+        std::vector<Color> cells(static_cast<size_t>(dimU * dimV), {0,0,0,0});
+        for (int y = 0; y < m.h; ++y) {
+            for (int z = 0; z < m.d; ++z) {
+                const Color vox = m.at(x, y, z);
+                if (vox.a == 0) continue;
+                if (isFilled(m, x + 1, y, z)) continue;
+                cells[static_cast<size_t>(y * dimU + z)] = shadeIsoFace(vox, IsoFaceType::Right, m, x, y, z);
+            }
+        }
+
+        greedyMerge2D(dimU, dimV, cells, [&](int z0, int y0, int w, int h, const Color& c) {
+            const float fx = static_cast<float>(x + 1);
+            const float fz0 = static_cast<float>(z0);
+            const float fy0 = static_cast<float>(y0);
+            const float fz1 = static_cast<float>(z0 + w);
+            const float fy1 = static_cast<float>(y0 + h);
+
+            std::array<Vec3f, 4> p3{
+                Vec3f{fx, fy0, fz0},
+                Vec3f{fx, fy1, fz0},
+                Vec3f{fx, fy1, fz1},
+                Vec3f{fx, fy0, fz1},
+            };
+            pushQuad(p3, c);
+        });
+    }
+
+    // Left faces: per z-slice, merge in (x,y).
+    for (int z = 0; z < m.d; ++z) {
+        const int dimU = m.w; // x
+        const int dimV = m.h; // y
+        std::vector<Color> cells(static_cast<size_t>(dimU * dimV), {0,0,0,0});
+        for (int y = 0; y < m.h; ++y) {
+            for (int x = 0; x < m.w; ++x) {
+                const Color vox = m.at(x, y, z);
+                if (vox.a == 0) continue;
+                if (isFilled(m, x, y, z + 1)) continue;
+                cells[static_cast<size_t>(y * dimU + x)] = shadeIsoFace(vox, IsoFaceType::Left, m, x, y, z);
+            }
+        }
+
+        greedyMerge2D(dimU, dimV, cells, [&](int x0, int y0, int w, int h, const Color& c) {
+            const float fz = static_cast<float>(z + 1);
+            const float fx0 = static_cast<float>(x0);
+            const float fy0 = static_cast<float>(y0);
+            const float fx1 = static_cast<float>(x0 + w);
+            const float fy1 = static_cast<float>(y0 + h);
+
+            std::array<Vec3f, 4> p3{
+                Vec3f{fx0, fy0, fz},
+                Vec3f{fx0, fy1, fz},
+                Vec3f{fx1, fy1, fz},
+                Vec3f{fx1, fy0, fz},
+            };
+            pushQuad(p3, c);
+        });
+    }
+
+    SpritePixels img;
+    img.w = std::max(1, outW);
+    img.h = std::max(1, outH);
+    img.px.assign(static_cast<size_t>(img.w * img.h), {0, 0, 0, 0});
+
+    if (quads.empty()) return img;
+
+    const int margin = std::clamp(outW / 16, 1, 6);
+    const float bbW = std::max(1e-3f, maxX - minX);
+    const float bbH = std::max(1e-3f, maxY - minY);
+
+    const float availW = static_cast<float>(outW - margin * 2);
+    const float availH = static_cast<float>(outH - margin * 2);
+    const float scale = std::max(1e-3f, std::min(availW / bbW, availH / bbH));
+
+    // Center horizontally; align bottom to the sprite bottom margin.
+    const float offX = static_cast<float>(margin) - minX * scale + (availW - bbW * scale) * 0.5f;
+    const float offY = static_cast<float>(outH - margin) - maxY * scale;
+
+    auto xf = [&](Vec2f p) -> Vec2f { return { p.x * scale + offX, p.y * scale + offY }; };
+
+    // Convert quads to a 2D triangle mesh and rasterize.
+    Mesh2D mesh;
+    mesh.tris.reserve(quads.size() * 2);
+
+    for (const IsoQuad& q : quads) {
+        const Vec2f p0 = xf(q.v[0]);
+        const Vec2f p1 = xf(q.v[1]);
+        const Vec2f p2 = xf(q.v[2]);
+        const Vec2f p3 = xf(q.v[3]);
+
+        Mesh2DTriangle t0;
+        t0.p0 = p0; t0.p1 = p1; t0.p2 = p2;
+        t0.z0 = q.z[0]; t0.z1 = q.z[1]; t0.z2 = q.z[2];
+        t0.c = q.c;
+        mesh.tris.push_back(t0);
+
+        Mesh2DTriangle t1;
+        t1.p0 = p0; t1.p1 = p2; t1.p2 = p3;
+        t1.z0 = q.z[0]; t1.z1 = q.z[2]; t1.z2 = q.z[3];
+        t1.c = q.c;
+        mesh.tris.push_back(t1);
+    }
+
+    img = rasterizeMesh2D(mesh, img.w, img.h);
+
+    // Soft contact shadow: stamp onto transparent pixels below/around the sprite mass.
+    SpritePixels withShadow = img;
+    auto isSolid = [&](int x, int y) -> bool {
+        if (x < 0 || y < 0 || x >= img.w || y >= img.h) return false;
+        return img.at(x, y).a > 0;
+    };
+
+    for (int y = 0; y < img.h; ++y) {
+        for (int x = 0; x < img.w; ++x) {
+            if (img.at(x, y).a > 0) continue;
+
+            // Look for nearby solid pixels above/left (light from top-left).
+            bool near = false;
+            for (int dy = -2; dy <= 0 && !near; ++dy) {
+                for (int dx = -2; dx <= 0 && !near; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
+                    if (isSolid(x + dx, y + dy)) near = true;
+                }
+            }
+
+            if (near) {
+                // Slightly stronger at the very bottom of the sprite.
+                const float t = static_cast<float>(y) / std::max(1, img.h - 1);
+                const int a = static_cast<int>(60 + 80 * t);
+                blendOver(withShadow.at(x, y), {0, 0, 0, clamp8(a)});
+            }
+        }
+    }
+
+    return withShadow;
+}
+
+
+SpritePixels renderVoxelIsometricRaytrace(const VoxelModel& m, int outW, int outH, int frame) {
+    (void)frame;
+
+    SpritePixels img;
+    img.w = std::max(1, outW);
+    img.h = std::max(1, outH);
+    img.px.assign(static_cast<size_t>(img.w * img.h), {0, 0, 0, 0});
+
+    if (m.w <= 0 || m.h <= 0 || m.d <= 0) return img;
+
+    // Compute tight bounds of filled voxels.
+    int minX = m.w, minY = m.h, minZ = m.d;
+    int maxX = -1, maxY = -1, maxZ = -1;
+    for (int y = 0; y < m.h; ++y) {
+        for (int z = 0; z < m.d; ++z) {
+            for (int x = 0; x < m.w; ++x) {
+                if (m.at(x, y, z).a == 0) continue;
+                minX = std::min(minX, x);
+                minY = std::min(minY, y);
+                minZ = std::min(minZ, z);
+                maxX = std::max(maxX, x);
+                maxY = std::max(maxY, y);
+                maxZ = std::max(maxZ, z);
+            }
+        }
+    }
+    if (maxX < minX || maxY < minY || maxZ < minZ) return img;
+
+    // Expand bounds slightly so silhouettes don't get clipped.
+    constexpr int pad = 2;
+    const Vec3f boundMin{
+        static_cast<float>(minX - pad),
+        static_cast<float>(minY - pad),
+        static_cast<float>(minZ - pad),
+    };
+    const Vec3f boundMax{
+        static_cast<float>(maxX + 1 + pad),
+        static_cast<float>(maxY + 1 + pad),
+        static_cast<float>(maxZ + 1 + pad),
+    };
+
+    // Project the 8 AABB corners into iso space to compute a 2D fit transform.
+    float minIsoX = 1e9f, maxIsoX = -1e9f;
+    float minIsoY = 1e9f, maxIsoY = -1e9f;
+    auto addCorner = [&](float x, float y, float z) {
+        const Vec2f p = isoProject({x, y, z});
+        minIsoX = std::min(minIsoX, p.x);
+        maxIsoX = std::max(maxIsoX, p.x);
+        minIsoY = std::min(minIsoY, p.y);
+        maxIsoY = std::max(maxIsoY, p.y);
+    };
+
+    const float xs[2] = {boundMin.x, boundMax.x};
+    const float ys[2] = {boundMin.y, boundMax.y};
+    const float zs[2] = {boundMin.z, boundMax.z};
+    for (float x : xs) for (float y : ys) for (float z : zs) addCorner(x, y, z);
+
+    const int margin = std::clamp(outW / 16, 1, 6);
+    const float bbW = std::max(1e-3f, maxIsoX - minIsoX);
+    const float bbH = std::max(1e-3f, maxIsoY - minIsoY);
+
+    const float availW = static_cast<float>(outW - margin * 2);
+    const float availH = static_cast<float>(outH - margin * 2);
+    const float scale = std::max(1e-3f, std::min(availW / bbW, availH / bbH));
+
+    // Center horizontally; align the bottom-most projected point to the sprite bottom margin.
+    const float offX = static_cast<float>(margin) - minIsoX * scale + (availW - bbW * scale) * 0.5f;
+    const float offY = static_cast<float>(outH - margin) - maxIsoY * scale;
+
+    // --- Custom orthographic isometric voxel raytracer ---
+    // We shoot a constant-direction ray (toward -1,-1,-1) for each pixel.
+    //
+    // Our isometric projection is:
+    //   isoX = x - z
+    //   isoY = 0.5(x+z) - y
+    //
+    // A convenient inverse (up to the view direction) is:
+    //   p = isoX*(0.5,0,-0.5) + isoY*(0,-1,0) + t*(1,1,1)
+    //
+    // where t moves along the view direction and does not change the projected iso coords.
+    const Vec3f isoXVec{0.5f, 0.0f, -0.5f};
+    const Vec3f isoYVec{0.0f, -1.0f, 0.0f};
+    const Vec3f viewVec{1.0f, 1.0f, 1.0f};
+    const Vec3f rayDir = normalize(Vec3f{-1.0f, -1.0f, -1.0f});
+    const Vec3f viewDir = normalize(viewVec);
+
+    // Lighting constants chosen to match shadeIsoFace().
+    const Vec3f lightDir = normalize(Vec3f{0.58f, 0.80f, 0.28f});
+    constexpr float ambient = 0.40f;
+    constexpr float diffuse = 0.72f;
+    constexpr float specular = 0.22f;
+    constexpr float shininess = 22.0f;
+    constexpr float rimStrength = 0.10f;
+
+    // Distance along +viewVec used to place the orthographic camera plane "in front"
+    // of the voxel bounds for *all* rays.
+    float dist = 0.0f;
+    auto consider = [&](float isoX, float isoY) {
+        const Vec3f p = isoXVec * isoX + isoYVec * isoY;
+        dist = std::max(dist, (boundMax.x + 1.0f) - p.x);
+        dist = std::max(dist, (boundMax.y + 1.0f) - p.y);
+        dist = std::max(dist, (boundMax.z + 1.0f) - p.z);
+    };
+    consider(minIsoX, minIsoY);
+    consider(minIsoX, maxIsoY);
+    consider(maxIsoX, minIsoY);
+    consider(maxIsoX, maxIsoY);
+    dist += 2.0f;
+
+    auto occ = [&](int x, int y, int z) -> float {
+        return static_cast<float>(m.at(x, y, z).a) / 255.0f;
+    };
+
+    auto smoothNormal = [&](int x, int y, int z, Vec3f fallback) -> Vec3f {
+        const float dx = occ(x - 1, y, z) - occ(x + 1, y, z);
+        const float dy = occ(x, y - 1, z) - occ(x, y + 1, z);
+        const float dz = occ(x, y, z - 1) - occ(x, y, z + 1);
+        Vec3f n{dx, dy, dz};
+        if (dot(n, n) < 1e-6f) return normalize(fallback);
+        return normalize(n);
+    };
+
+    auto aabbHit = [&](const Vec3f& ro, const Vec3f& rd, float& t0, float& t1, Vec3f& hitN) -> bool {
+        float tmin = -1e9f;
+        float tmax =  1e9f;
+        Vec3f n{0, 0, 0};
+
+        auto axis = [&](float roC, float rdC, float mnC, float mxC, int axisIdx) -> bool {
+            if (std::abs(rdC) < 1e-6f) {
+                if (roC < mnC || roC > mxC) return false;
+                return true;
+            }
+            const float inv = 1.0f / rdC;
+            float tA = (mnC - roC) * inv;
+            float tB = (mxC - roC) * inv;
+            float sign = -1.0f;
+            if (tA > tB) { std::swap(tA, tB); sign = 1.0f; }
+
+            if (tA > tmin) {
+                tmin = tA;
+                n = {0, 0, 0};
+                if (axisIdx == 0) n.x = sign;
+                else if (axisIdx == 1) n.y = sign;
+                else n.z = sign;
+            }
+
+            tmax = std::min(tmax, tB);
+            if (tmin > tmax) return false;
+            return true;
+        };
+
+        if (!axis(ro.x, rd.x, boundMin.x, boundMax.x, 0)) return false;
+        if (!axis(ro.y, rd.y, boundMin.y, boundMax.y, 1)) return false;
+        if (!axis(ro.z, rd.z, boundMin.z, boundMax.z, 2)) return false;
+
+        t0 = tmin;
+        t1 = tmax;
+        hitN = n;
+        return t1 >= 0.0f;
+    };
+
+    auto traceShadow = [&](Vec3f ro, Vec3f n) -> float {
+        // Offset to avoid self-shadow on the originating voxel face.
+        ro = ro + n * 0.04f;
+
+        float t0 = 0.0f, t1 = 0.0f;
+        Vec3f hitN{0, 0, 0};
+        if (!aabbHit(ro, lightDir, t0, t1, hitN)) return 1.0f;
+
+        float t = std::max(0.0f, t0) + 1e-4f;
+        Vec3f p = ro + lightDir * t;
+
+        int x = static_cast<int>(std::floor(p.x));
+        int y = static_cast<int>(std::floor(p.y));
+        int z = static_cast<int>(std::floor(p.z));
+
+        const int stepX = (lightDir.x > 0.0f) ? 1 : -1;
+        const int stepY = (lightDir.y > 0.0f) ? 1 : -1;
+        const int stepZ = (lightDir.z > 0.0f) ? 1 : -1;
+
+        const float invDx = 1.0f / std::max(1e-6f, std::abs(lightDir.x));
+        const float invDy = 1.0f / std::max(1e-6f, std::abs(lightDir.y));
+        const float invDz = 1.0f / std::max(1e-6f, std::abs(lightDir.z));
+
+        const float nextX = (stepX > 0) ? static_cast<float>(x + 1) : static_cast<float>(x);
+        const float nextY = (stepY > 0) ? static_cast<float>(y + 1) : static_cast<float>(y);
+        const float nextZ = (stepZ > 0) ? static_cast<float>(z + 1) : static_cast<float>(z);
+
+        float tMaxX = t + (nextX - p.x) / lightDir.x;
+        float tMaxY = t + (nextY - p.y) / lightDir.y;
+        float tMaxZ = t + (nextZ - p.z) / lightDir.z;
+
+        const float tDeltaX = invDx;
+        const float tDeltaY = invDy;
+        const float tDeltaZ = invDz;
+
+        float trans = 1.0f;
+        int steps = 0;
+        const int maxSteps = (m.w + m.h + m.d + pad * 3) * 4;
+
+        while (t < t1 && trans > 0.05f && steps++ < maxSteps) {
+            const float a = occ(x, y, z);
+            if (a > 0.0f) {
+                // Translucent voxels absorb less light (nice for glass/potions).
+                const float absorb = 0.80f + 0.20f * (1.0f - a);
+                trans *= absorb;
+            }
+
+            if (tMaxX < tMaxY) {
+                if (tMaxX < tMaxZ) {
+                    x += stepX;
+                    t = tMaxX;
+                    tMaxX += tDeltaX;
+                } else {
+                    z += stepZ;
+                    t = tMaxZ;
+                    tMaxZ += tDeltaZ;
+                }
+            } else {
+                if (tMaxY < tMaxZ) {
+                    y += stepY;
+                    t = tMaxY;
+                    tMaxY += tDeltaY;
+                } else {
+                    z += stepZ;
+                    t = tMaxZ;
+                    tMaxZ += tDeltaZ;
+                }
+            }
+        }
+
+        return std::clamp(trans, 0.0f, 1.0f);
+    };
+
+    for (int py = 0; py < img.h; ++py) {
+        for (int px = 0; px < img.w; ++px) {
+            // Inverse transform to iso-space coordinates.
+            const float isoX = (static_cast<float>(px) + 0.5f - offX) / scale;
+            const float isoY = (static_cast<float>(py) + 0.5f - offY) / scale;
+
+            // Build a per-pixel orthographic ray origin on the camera plane.
+            const Vec3f camPos = isoXVec * isoX + isoYVec * isoY + viewVec * dist;
+
+            float tEnter = 0.0f, tExit = 0.0f;
+            Vec3f enterN{0, 0, 0};
+            if (!aabbHit(camPos, rayDir, tEnter, tExit, enterN)) continue;
+
+            float t = std::max(0.0f, tEnter) + 1e-4f;
+            Vec3f p = camPos + rayDir * t;
+
+            int x = static_cast<int>(std::floor(p.x));
+            int y = static_cast<int>(std::floor(p.y));
+            int z = static_cast<int>(std::floor(p.z));
+
+            const int stepX = (rayDir.x > 0.0f) ? 1 : -1;
+            const int stepY = (rayDir.y > 0.0f) ? 1 : -1;
+            const int stepZ = (rayDir.z > 0.0f) ? 1 : -1;
+
+            const float invDx = 1.0f / std::max(1e-6f, std::abs(rayDir.x));
+            const float invDy = 1.0f / std::max(1e-6f, std::abs(rayDir.y));
+            const float invDz = 1.0f / std::max(1e-6f, std::abs(rayDir.z));
+
+            const float nextX = (stepX > 0) ? static_cast<float>(x + 1) : static_cast<float>(x);
+            const float nextY = (stepY > 0) ? static_cast<float>(y + 1) : static_cast<float>(y);
+            const float nextZ = (stepZ > 0) ? static_cast<float>(z + 1) : static_cast<float>(z);
+
+            float tMaxX = t + (nextX - p.x) / rayDir.x;
+            float tMaxY = t + (nextY - p.y) / rayDir.y;
+            float tMaxZ = t + (nextZ - p.z) / rayDir.z;
+
+            const float tDeltaX = invDx;
+            const float tDeltaY = invDy;
+            const float tDeltaZ = invDz;
+
+            float accumA = 0.0f;
+            Vec3f accumRGB{0.0f, 0.0f, 0.0f};
+
+            Vec3f lastN = enterN;
+            int steps = 0;
+            const int maxSteps = (m.w + m.h + m.d + pad * 3) * 6;
+
+            while (t < tExit && accumA < 0.995f && steps++ < maxSteps) {
+                const Color vox = m.at(x, y, z);
+                if (vox.a > 0) {
+                    const float a = static_cast<float>(vox.a) / 255.0f;
+                    Vec3f n = smoothNormal(x, y, z, lastN);
+
+                    // Cheap AO: local occupancy around the voxel.
+                    float occSum = 0.0f;
+                    float wSum = 0.0f;
+                    auto sample = [&](int dx, int dy, int dz, float w) {
+                        occSum += occ(x + dx, y + dy, z + dz) * w;
+                        wSum += w;
+                    };
+
+                    sample(-1, 0, 0, 1.0f);
+                    sample( 1, 0, 0, 1.0f);
+                    sample( 0,-1, 0, 1.0f);
+                    sample( 0, 1, 0, 1.0f);
+                    sample( 0, 0,-1, 1.0f);
+                    sample( 0, 0, 1, 1.0f);
+
+                    // Extra weight from "above" so overhangs read.
+                    sample(0, 1, 0, 1.25f);
+                    sample(0, 2, 0, 0.45f);
+
+                    const float occl = (wSum > 0.0f) ? (occSum / wSum) : 0.0f;
+                    const float ao = std::clamp(1.0f - occl * 0.55f, 0.45f, 1.0f);
+
+                    const float ndl = std::max(0.0f, dot(n, lightDir));
+                    const Vec3f h = normalize(lightDir + viewDir);
+                    const float ndh = std::max(0.0f, dot(n, h));
+                    const float spec = std::pow(ndh, shininess);
+                    const float rim = std::pow(1.0f - std::max(0.0f, dot(n, viewDir)), 2.0f);
+
+                    // Approximate hit position at the entry boundary for this cell.
+                    const Vec3f hitPos = camPos + rayDir * (t - 1e-4f);
+                    const float shadow = traceShadow(hitPos, n);
+
+                    float shade = (ambient + diffuse * ndl * shadow) * ao;
+                    shade += specular * spec * shadow;
+                    shade += rimStrength * rim;
+                    shade = std::clamp(shade, 0.0f, 1.35f);
+
+                    Vec3f baseC{vox.r / 255.0f, vox.g / 255.0f, vox.b / 255.0f};
+                    Vec3f lit = baseC * shade;
+
+                    // Subtle gel lift for translucent voxels.
+                    if (a < 0.98f) {
+                        lit = lit * (0.92f + 0.20f * (1.0f - a)) + Vec3f{0.02f, 0.03f, 0.04f} * (1.0f - a);
+                    }
+
+                    const float oneMinusA = 1.0f - accumA;
+                    accumRGB = accumRGB + lit * (a * oneMinusA);
+                    accumA = accumA + a * oneMinusA;
+                }
+
+                // DDA step
+                if (tMaxX < tMaxY) {
+                    if (tMaxX < tMaxZ) {
+                        x += stepX;
+                        lastN = Vec3f{-static_cast<float>(stepX), 0.0f, 0.0f};
+                        t = tMaxX;
+                        tMaxX += tDeltaX;
+                    } else {
+                        z += stepZ;
+                        lastN = Vec3f{0.0f, 0.0f, -static_cast<float>(stepZ)};
+                        t = tMaxZ;
+                        tMaxZ += tDeltaZ;
+                    }
+                } else {
+                    if (tMaxY < tMaxZ) {
+                        y += stepY;
+                        lastN = Vec3f{0.0f, -static_cast<float>(stepY), 0.0f};
+                        t = tMaxY;
+                        tMaxY += tDeltaY;
+                    } else {
+                        z += stepZ;
+                        lastN = Vec3f{0.0f, 0.0f, -static_cast<float>(stepZ)};
+                        t = tMaxZ;
+                        tMaxZ += tDeltaZ;
+                    }
+                }
+            }
+
+            Color out{0, 0, 0, 0};
+            out.a = clamp8(static_cast<int>(std::round(accumA * 255.0f)));
+            out.r = clamp8(static_cast<int>(std::round(accumRGB.x * 255.0f)));
+            out.g = clamp8(static_cast<int>(std::round(accumRGB.y * 255.0f)));
+            out.b = clamp8(static_cast<int>(std::round(accumRGB.z * 255.0f)));
+            img.at(px, py) = out;
+        }
+    }
+
+    return img;
+}
+
+SpritePixels renderModelToSpriteIsometric(const VoxelModel& model, int frame, int outPx, bool isoRaytrace) {
+    outPx = clampOutPx(outPx);
+
+    // Small sprites benefit a lot from 2x supersampling + downscale.
+    const int hiW = (outPx <= 32) ? outPx * 2 : outPx;
+    const int hiH = hiW;
+
+    SpritePixels hi = isoRaytrace
+        ? renderVoxelIsometricRaytrace(model, /*outW=*/hiW, /*outH=*/hiH, frame)
+        : renderVoxelIsometric(model, /*outW=*/hiW, /*outH=*/hiH, frame);
+    SpritePixels out = (hiW == outPx) ? hi : downscale2x(hi);
+
+    if (outPx <= 32) addOutline(out);
+    return out;
+}
+
 } // namespace
 
 SpritePixels renderSprite3DExtruded(const SpritePixels& base2d, uint32_t seed, int frame, int outPx) {
@@ -1524,4 +2363,39 @@ SpritePixels renderSprite3DProjectile(ProjectileKind kind, const SpritePixels& b
         return renderModelToSprite(m, frame, /*yawScale=*/1.35f, outPx);
     }
     return renderSprite3DExtruded(base2d, seed, frame, outPx);
+}
+
+SpritePixels renderSprite3DExtrudedIso(const SpritePixels& base2d, uint32_t seed, int frame, int outPx, bool isoRaytrace) {
+    outPx = clampOutPx(outPx);
+    if (base2d.w <= 0 || base2d.h <= 0) return base2d;
+
+    constexpr int maxDepth = 6;
+    const VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
+
+    return renderModelToSpriteIsometric(vox, frame, outPx, isoRaytrace);
+}
+
+SpritePixels renderSprite3DEntityIso(EntityKind kind, const SpritePixels& base2d, uint32_t seed, int frame, int outPx, bool isoRaytrace) {
+    const VoxelModel m = buildEntityModel(kind, seed, frame, base2d);
+    if (m.w > 0 && m.h > 0 && m.d > 0) {
+        return renderModelToSpriteIsometric(m, frame, outPx, isoRaytrace);
+    }
+    return renderSprite3DExtrudedIso(base2d, seed, frame, outPx);
+}
+
+SpritePixels renderSprite3DItemIso(ItemKind kind, const SpritePixels& base2d, uint32_t seed, int frame, int outPx, bool isoRaytrace) {
+    const VoxelModel m = buildItemModel(kind, seed, frame, base2d);
+    if (m.w > 0 && m.h > 0 && m.d > 0) {
+        return renderModelToSpriteIsometric(m, frame, outPx, isoRaytrace);
+    }
+    return renderSprite3DExtrudedIso(base2d, seed, frame, outPx);
+}
+
+SpritePixels renderSprite3DProjectileIso(ProjectileKind kind, const SpritePixels& base2d, uint32_t seed, int frame, int outPx, bool isoRaytrace) {
+    (void)seed;
+    const VoxelModel m = buildProjectileModel(kind, frame, base2d);
+    if (m.w > 0 && m.h > 0 && m.d > 0) {
+        return renderModelToSpriteIsometric(m, frame, outPx, isoRaytrace);
+    }
+    return renderSprite3DExtrudedIso(base2d, seed, frame, outPx);
 }

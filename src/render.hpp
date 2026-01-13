@@ -10,9 +10,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <list>
+#include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+// Forward declare renderer-owned particle system (defined in render.cpp)
+struct ParticleEngine;
 
 // A tiny, self-contained LRU texture cache.
 //
@@ -238,6 +243,40 @@ private:
     int mapOffX = 0;
     int mapOffY = 0;
 
+    // Renderer-owned particle system (procedural VFX). Visual-only.
+    std::unique_ptr<ParticleEngine> particles_;
+    // Previous-frame entity HP cache for hit/death particle bursts.
+    std::unordered_map<int, int> prevHpById_;
+    std::unordered_map<int, Vec2i> prevPosById_;
+    // Procedural sprite animation state (renderer-only; visual).
+    struct ProcAnimState {
+        Vec2i lastPos{0, 0};
+        int lastHp = 0;
+        bool initialized = false;
+
+        // Smooth move tween between discrete tile positions.
+        Vec2i moveFrom{0, 0};
+        Vec2i moveTo{0, 0};
+        float moveTime = 0.0f;
+        float moveDuration = 0.0f;
+
+        // Hurt recoil / kickback.
+        Vec2i hurtDir{0, 0};
+        float hurtTime = 0.0f;
+        float hurtDuration = 0.0f;
+    };
+
+    std::unordered_map<int, ProcAnimState> procAnimById_;
+    // Track level/run transitions so we can clear procedural animation between floors.
+    uint32_t prevAnimSeed_ = 0;
+    DungeonBranch prevAnimBranch_ = DungeonBranch::Main;
+    int prevAnimDepth_ = -1;
+
+    // Track level/run transitions so we can clear particles between floors.
+    uint32_t prevParticleSeed_ = 0;
+    DungeonBranch prevParticleBranch_ = DungeonBranch::Main;
+    int prevParticleDepth_ = -1;
+
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_PixelFormat* pixfmt = nullptr;
@@ -364,6 +403,8 @@ private:
     UITheme uiThemeCached = UITheme::DarkStone;
     // Cached sprite mode (2D vs 3D voxel-extruded) so we can invalidate caches on change.
     bool voxelSpritesCached = true;
+    // Cached isometric voxel sprite renderer mode (mesh vs raytrace) so we can invalidate caches on change.
+    bool isoVoxelRaytraceCached = false;
     std::array<SDL_Texture*, FRAMES> uiPanelTileTex{};
     std::array<SDL_Texture*, FRAMES> uiOrnamentTex{};
 
@@ -380,6 +421,11 @@ private:
 
     // Updates camera position based on player/cursor and current viewport size.
     void updateCamera(const Game& game);
+    // Particle VFX hooks.
+    void updateParticlesFromGame(const Game& game, float frameDt, uint32_t ticks);
+
+    // Procedural animation hooks (visual-only).
+    void updateProceduralAnimations(const Game& game, float frameDt, uint32_t ticks);
 
     SDL_Texture* textureFromSprite(const SpritePixels& s);
 

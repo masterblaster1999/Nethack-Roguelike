@@ -84,6 +84,11 @@ void Game::commandTextInput(const char* utf8) {
     // Basic length cap so the overlay stays sane.
     if (commandBuf.size() > 120) return;
     commandBuf += utf8;
+
+    // Any manual edits cancel tab-completion cycling state.
+    commandAutoBase.clear();
+    commandAutoMatches.clear();
+    commandAutoIndex = -1;
 }
 
 static void utf8PopBack(std::string& s) {
@@ -96,40 +101,153 @@ static void utf8PopBack(std::string& s) {
     s.erase(i);
 }
 
+static bool vecContains(const std::vector<std::string>& v, const std::string& s) {
+    return std::find(v.begin(), v.end(), s) != v.end();
+}
+
+static std::string longestCommonPrefix(const std::vector<std::string>& v) {
+    if (v.empty()) return std::string();
+    std::string pref = v[0];
+    for (size_t i = 1; i < v.size(); ++i) {
+        const std::string& s = v[i];
+        size_t n = 0;
+        const size_t maxn = std::min(pref.size(), s.size());
+        while (n < maxn && pref[n] == s[n]) {
+            ++n;
+        }
+        pref.resize(n);
+        if (pref.empty()) break;
+    }
+    return pref;
+}
+
+static std::string formatMatchesMessage(const std::vector<std::string>& matches) {
+    // Keep this short; the HUD will wrap if needed, but we want to avoid giant spam lines.
+    constexpr size_t kMaxShow = 10;
+
+    std::ostringstream ss;
+    ss << "MATCHES (" << matches.size() << "):";
+
+    const size_t show = std::min(matches.size(), kMaxShow);
+    for (size_t i = 0; i < show; ++i) {
+        ss << " " << matches[i];
+    }
+    if (matches.size() > kMaxShow) {
+        ss << " ... (+" << (matches.size() - kMaxShow) << ")";
+    }
+
+    ss << "  [TAB cycles]";
+    return ss.str();
+}
+
 void Game::commandBackspace() {
     if (!commandOpen) return;
     utf8PopBack(commandBuf);
+
+    // Any manual edits cancel tab-completion cycling state.
+    commandAutoBase.clear();
+    commandAutoMatches.clear();
+    commandAutoIndex = -1;
 }
 
 void Game::commandAutocomplete() {
     if (!commandOpen) return;
 
-    std::string s = trim(commandBuf);
-    if (s.empty()) return;
+    std::string raw = trim(commandBuf);
+    if (raw.empty()) return;
 
     // Only complete the first token; once you add arguments we assume you know what you're doing.
-    if (s.find_first_of(" 	") != std::string::npos) return;
+    if (raw.find_first_of(" 	") != std::string::npos) return;
 
-    std::string prefix = toLower(s);
-    std::vector<std::string> cmds = extendedCommandList();
+    // Support pasted NetHack-style inputs like "#quit" even though we open the prompt separately.
+    bool hadHash = false;
+    if (!raw.empty() && raw[0] == '#') {
+        hadHash = true;
+        raw = trim(raw.substr(1));
+        if (raw.empty()) return;
+        if (raw.find_first_of(" 	") != std::string::npos) return;
+    }
+
+    const std::string cur = toLower(raw);
+
+    // If we're already cycling completions (from a previous TAB), advance to the next match.
+    if (commandAutoIndex >= 0 && !commandAutoMatches.empty() && !commandAutoBase.empty()) {
+        if (vecContains(commandAutoMatches, cur) && cur.rfind(commandAutoBase, 0) == 0) {
+            commandAutoIndex = (commandAutoIndex + 1) % static_cast<int>(commandAutoMatches.size());
+            const std::string& out = commandAutoMatches[static_cast<size_t>(commandAutoIndex)];
+            commandBuf = hadHash ? ("#" + out) : out;
+            return;
+        }
+
+        // Buffer changed (history/edit), so drop cycle state.
+        commandAutoBase.clear();
+        commandAutoMatches.clear();
+        commandAutoIndex = -1;
+    }
+
+    const std::vector<std::string> cmds = extendedCommandList();
 
     std::vector<std::string> matches;
     for (const auto& c : cmds) {
-        if (c.rfind(prefix, 0) == 0) matches.push_back(c);
+        if (c.rfind(cur, 0) == 0) matches.push_back(c);
+    }
+
+    if (matches.empty()) {
+        commandAutoBase.clear();
+        commandAutoMatches.clear();
+        commandAutoIndex = -1;
+        return;
     }
 
     if (matches.size() == 1) {
-        commandBuf = matches[0] + " ";
+        const std::string out = matches[0] + " ";
+        commandBuf = hadHash ? ("#" + out) : out;
+        commandAutoBase.clear();
+        commandAutoMatches.clear();
+        commandAutoIndex = -1;
         return;
     }
 
-    if (matches.size() > 1) {
-        std::string line = "MATCHES:";
-        for (const auto& m : matches) line += " " + m;
-        pushSystemMessage(line);
+
+    // If all matches share a longer common prefix, extend to that.
+    const std::string lcp = longestCommonPrefix(matches);
+    if (!lcp.empty() && lcp.size() > cur.size()) {
+        commandBuf = hadHash ? ("#" + lcp) : lcp;
+
+        // Keep the match set around so a subsequent TAB can begin cycling from this new prefix.
+        commandAutoBase = lcp;
+        commandAutoMatches = matches;
+        commandAutoIndex = -1;
         return;
     }
+
+    // Otherwise, start cycling through the available matches.
+    commandAutoBase = cur;
+    commandAutoMatches = matches;
+
+    // If the current buffer already exactly matches one of the candidates, keep it and
+    // cycle *from there* (so the next TAB advances to the next option instead of snapping
+    // to the first match).
+    int startIdx = -1;
+    for (size_t i = 0; i < matches.size(); ++i) {
+        if (matches[i] == cur) {
+            startIdx = static_cast<int>(i);
+            break;
+        }
+    }
+
+    if (startIdx >= 0) {
+        commandAutoIndex = startIdx;
+        commandBuf = hadHash ? ("#" + cur) : cur;
+    } else {
+        commandAutoIndex = 0;
+        commandBuf = hadHash ? ("#" + matches[0]) : matches[0];
+    }
+
+    // Print the match list once when we begin cycling.
+    pushSystemMessage(formatMatchesMessage(matches));
 }
+
 
 void Game::setAutoPickupMode(AutoPickupMode m) {
     autoPickup = m;
@@ -1587,31 +1705,31 @@ if constexpr (SAVE_VERSION >= 33u) {
     return true;
 }
 
-bool Game::loadFromFile(const std::string& path) {
+bool Game::loadFromFile(const std::string& path, bool reportErrors) {
     // Read whole file so we can verify integrity (v13+) and also attempt
     // to recover from a historical v9-v12 layout bug (missing lighting byte).
     std::ifstream f(path, std::ios::binary);
     if (!f) {
-        pushMsg("NO SAVE FILE FOUND.");
+        if (reportErrors) pushMsg("NO SAVE FILE FOUND.");
         return false;
     }
 
     f.seekg(0, std::ios::end);
     const std::streamsize sz = f.tellg();
     if (sz <= 0) {
-        pushMsg("SAVE FILE IS CORRUPTED OR TRUNCATED.");
+        if (reportErrors) pushMsg("SAVE FILE IS CORRUPTED OR TRUNCATED.");
         return false;
     }
     f.seekg(0, std::ios::beg);
 
     std::vector<uint8_t> bytes(static_cast<size_t>(sz));
     if (!f.read(reinterpret_cast<char*>(bytes.data()), sz)) {
-        pushMsg("SAVE FILE IS CORRUPTED OR TRUNCATED.");
+        if (reportErrors) pushMsg("SAVE FILE IS CORRUPTED OR TRUNCATED.");
         return false;
     }
 
     if (bytes.size() < 8u) {
-        pushMsg("SAVE FILE IS CORRUPTED OR TRUNCATED.");
+        if (reportErrors) pushMsg("SAVE FILE IS CORRUPTED OR TRUNCATED.");
         return false;
     }
 
@@ -1619,7 +1737,7 @@ bool Game::loadFromFile(const std::string& path) {
     const uint32_t version = readU32LE(bytes.data() + 4);
 
     if (magic != SAVE_MAGIC || version == 0u || version > SAVE_VERSION) {
-        pushMsg("SAVE FILE IS INVALID OR FROM ANOTHER VERSION.");
+        if (reportErrors) pushMsg("SAVE FILE IS INVALID OR FROM ANOTHER VERSION.");
         return false;
     }
 
@@ -1630,7 +1748,7 @@ bool Game::loadFromFile(const std::string& path) {
 
     if (version >= 13u) {
         if (bytes.size() < 12u) {
-            pushMsg("SAVE FILE IS CORRUPTED OR TRUNCATED.");
+            if (reportErrors) pushMsg("SAVE FILE IS CORRUPTED OR TRUNCATED.");
             return false;
         }
 
@@ -1638,7 +1756,7 @@ bool Game::loadFromFile(const std::string& path) {
         const uint32_t computedCrc = crc32(bytes.data(), bytes.size() - 4u);
 
         if (storedCrc != computedCrc) {
-            pushMsg("SAVE FILE FAILED INTEGRITY CHECK (CRC MISMATCH).");
+            if (reportErrors) pushMsg("SAVE FILE FAILED INTEGRITY CHECK (CRC MISMATCH).");
             return false;
         }
 
@@ -2718,17 +2836,48 @@ if (ver >= 33u) {
     const bool canFallback = (version >= 9u && version < 13u);
     if (canFallback) {
         if (tryParse(true, false)) {
-            pushMsg("GAME LOADED.");
+            if (reportErrors) pushMsg("GAME LOADED.");
             return true;
         }
-        if (tryParse(false, true)) {
-            pushMsg("LOADED LEGACY SAVE (FIXED LIGHTING STATE FORMAT).", MessageKind::System);
+        if (tryParse(false, reportErrors)) {
+            if (reportErrors) pushMsg("LOADED LEGACY SAVE (FIXED LIGHTING STATE FORMAT).", MessageKind::System);
             return true;
         }
         return false;
     }
 
-    return tryParse(true, true);
+    return tryParse(true, reportErrors);
+}
+
+
+bool Game::loadFromFileWithBackups(const std::string& path) {
+    namespace fs = std::filesystem;
+
+    // First try the primary file silently, so we can fall back to rotated backups
+    // without spamming error messages.
+    if (loadFromFile(path, false)) {
+        pushMsg("GAME LOADED.", MessageKind::Success, false);
+        return true;
+    }
+
+    // If it fails, try rotated backups (<file>.bak1..bak10), most-recent first.
+    for (int i = 1; i <= 10; ++i) {
+        const fs::path bak = fs::path(path).string() + ".bak" + std::to_string(i);
+        std::error_code ec;
+        if (!fs::exists(bak, ec) || ec) continue;
+
+        if (loadFromFile(bak.string(), false)) {
+            std::ostringstream ss;
+            ss << "SAVE RECOVERED FROM BACKUP (BAK" << i << ").";
+            pushMsg(ss.str(), MessageKind::Warning, false);
+            pushMsg("TIP: SAVE NOW TO REWRITE THE PRIMARY FILE.", MessageKind::System, false);
+            return true;
+        }
+    }
+
+    // Nothing worked; re-run the primary load with errors enabled so the player
+    // sees a helpful failure reason.
+    return loadFromFile(path, true);
 }
 
 

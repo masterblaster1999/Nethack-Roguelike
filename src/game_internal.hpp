@@ -859,6 +859,7 @@ static std::vector<std::string> extendedCommandList() {
         "options",
         "preset",
         "sprites3d",
+        "isoraytrace",
         "binds",
         "bind",
         "unbind",
@@ -1291,7 +1292,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         const std::string path = slot.empty()
             ? game.defaultSavePath()
             : makeSlotPath(baseSavePathForSlots(game).string(), slot).string();
-        (void)game.loadFromFile(path);
+        (void)game.loadFromFileWithBackups(path);
         return;
     }
     if (cmd == "loadauto") {
@@ -1300,7 +1301,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         const std::string path = slot.empty()
             ? game.defaultAutosavePath()
             : makeSlotPath(baseAutosavePathForSlots(game).string(), slot).string();
-        (void)game.loadFromFile(path);
+        (void)game.loadFromFileWithBackups(path);
         return;
     }
 
@@ -2329,6 +2330,37 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             }
         }
         game.pushSystemMessage(std::string("3D SPRITES: ") + (game.voxelSpritesEnabled() ? "ON" : "OFF"));
+        return;
+    }
+
+    if (cmd == "isoraytrace" || cmd == "iso_raytrace" || cmd == "iso_ray" || cmd == "isovoxelray") {
+        if (toks.size() <= 1) {
+            game.pushSystemMessage(std::string("ISO VOXEL RAYTRACE: ") + (game.isoVoxelRaytraceEnabled() ? "ON" : "OFF"));
+            game.pushSystemMessage("USAGE: #isoraytrace on/off/toggle");
+            return;
+        }
+
+        const std::string v = toLower(toks[1]);
+        if (v == "on" || v == "true" || v == "1") {
+            game.setIsoVoxelRaytraceEnabled(true);
+            game.markSettingsDirty();
+            game.pushSystemMessage("ISO VOXEL RAYTRACE: ON");
+            return;
+        }
+        if (v == "off" || v == "false" || v == "0") {
+            game.setIsoVoxelRaytraceEnabled(false);
+            game.markSettingsDirty();
+            game.pushSystemMessage("ISO VOXEL RAYTRACE: OFF");
+            return;
+        }
+        if (v == "toggle" || v == "t") {
+            game.setIsoVoxelRaytraceEnabled(!game.isoVoxelRaytraceEnabled());
+            game.markSettingsDirty();
+            game.pushSystemMessage(std::string("ISO VOXEL RAYTRACE: ") + (game.isoVoxelRaytraceEnabled() ? "ON" : "OFF"));
+            return;
+        }
+
+        game.pushSystemMessage("USAGE: #isoraytrace on/off/toggle");
         return;
     }
 

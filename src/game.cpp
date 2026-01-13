@@ -281,6 +281,51 @@ void Game::messageHistoryCycleFilter(int dir) {
     msgHistoryScroll = 0;
 }
 
+
+std::string Game::messageHistoryClipboardText() const {
+    std::ostringstream f;
+    f << PROCROGUE_APPNAME << " message history\n";
+    f << "Filter: " << messageFilterDisplayName(msgHistoryFilter);
+    if (!msgHistorySearch.empty()) {
+        f << "  Search: \"" << msgHistorySearch << "\"";
+    }
+    f << "\n\n";
+
+    int shown = 0;
+
+    for (const auto& m : msgs) {
+        if (!messageFilterMatches(msgHistoryFilter, m.kind)) continue;
+        if (!msgHistorySearch.empty() && !icontainsAscii(m.text, msgHistorySearch)) continue;
+
+        ++shown;
+
+        const char* k = (m.kind == MessageKind::Info)         ? "INFO"
+                      : (m.kind == MessageKind::Combat)       ? "COMBAT"
+                      : (m.kind == MessageKind::Loot)         ? "LOOT"
+                      : (m.kind == MessageKind::System)       ? "SYSTEM"
+                      : (m.kind == MessageKind::ImportantMsg) ? "IMPORTANT"
+                      : (m.kind == MessageKind::Warning)      ? "WARNING"
+                      : (m.kind == MessageKind::Success)      ? "SUCCESS"
+                                                             : "INFO";
+
+        const std::string depthTag = (m.branch == DungeonBranch::Camp)
+            ? std::string("CAMP")
+            : std::string("D") + std::to_string(m.depth);
+
+        f << "[" << k << "] [" << depthTag << " T" << m.turn << "] " << m.text;
+        if (m.repeat > 1) f << " (x" << m.repeat << ")";
+        f << "\n";
+    }
+
+    if (shown == 0) {
+        f << "(no messages matched)\n";
+    } else {
+        f << "\n" << shown << "/" << msgs.size() << " messages shown\n";
+    }
+
+    return f.str();
+}
+
 void Game::buildCodexList(std::vector<EntityKind>& out) const {
     out.clear();
     out.reserve(ENTITY_KIND_COUNT);
@@ -1264,6 +1309,7 @@ void Game::newGame(uint32_t seed) {
     knownSpellsMask_ = 0u;
     fx.clear();
     fxExpl.clear();
+    fxParticles_.clear();
 
     // Reset endgame escalation state.
     yendorDoomActive_ = false;
@@ -2175,6 +2221,7 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
     // Clear transient states.
     fx.clear();
     fxExpl.clear();
+    fxParticles_.clear();
     inputLock = false;
 
     autoMode = AutoMoveMode::None;
@@ -3107,4 +3154,31 @@ uint64_t Game::determinismHash() const {
     }
 
     return hh.h;
+}
+
+
+void Game::pushFxParticle(FXParticlePreset preset, Vec2i pos, int intensity, float duration, float delay, uint32_t seed) {
+    // Visual-only helper; safe to ignore out-of-bounds events.
+    if (!dung.inBounds(pos.x, pos.y)) return;
+
+    FXParticleEvent ev;
+    ev.preset = preset;
+    ev.pos = pos;
+    ev.intensity = clampi(intensity, 1, 200);
+    ev.delay = std::max(0.0f, delay);
+    ev.timer = 0.0f;
+    ev.duration = std::max(0.02f, duration);
+
+    if (seed == 0u) {
+        const uint32_t p = (static_cast<uint32_t>(pos.x) & 0xFFFFu) | ((static_cast<uint32_t>(pos.y) & 0xFFFFu) << 16u);
+        seed = hashCombine(seed_, hashCombine(turnCount, hashCombine(p, static_cast<uint32_t>(preset))));
+    }
+    ev.seed = seed;
+
+    constexpr size_t kMaxFxParticles = 256;
+    if (fxParticles_.size() >= kMaxFxParticles) {
+        // Drop oldest (avoid unbounded growth in pathological cases).
+        fxParticles_.erase(fxParticles_.begin());
+    }
+    fxParticles_.push_back(ev);
 }

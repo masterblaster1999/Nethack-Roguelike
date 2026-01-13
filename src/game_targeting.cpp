@@ -703,6 +703,7 @@ void Game::zapDiggingWand(int range) {
 
         if (dung.dig(p.x, p.y)) {
             dug += 1;
+            pushFxParticle(FXParticlePreset::Dig, p, 26, 0.12f);
         }
     }
 

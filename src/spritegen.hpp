@@ -38,9 +38,9 @@ inline constexpr uint32_t SPRITE_SEED_IDENT_APPEARANCE_FLAG = 0x80000000u;
 // then upscales to the requested pixel size.
 //
 // Supported range: 16..256 (values outside are clamped).
-SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, bool use3d, int pxSize = 16);
-SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool use3d, int pxSize = 16);
-SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int frame, bool use3d, int pxSize = 16);
+SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, bool use3d, int pxSize = 16, bool isometric = false, bool isoRaytrace = false);
+SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool use3d, int pxSize = 16, bool isometric = false, bool isoRaytrace = false);
+SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int frame, bool use3d, int pxSize = 16, bool isometric = false, bool isoRaytrace = false);
 
 // Procedural terrain tiles (same size range as sprites).
 SpritePixels generateFloorTile(uint32_t seed, int frame, int pxSize = 16);

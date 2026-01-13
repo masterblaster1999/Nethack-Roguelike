@@ -209,6 +209,9 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "voxel_sprites") {
             bool b = true;
             if (parseBool(val, b)) s.voxelSprites = b;
+        } else if (key == "iso_voxel_raytrace" || key == "voxel_iso_raytrace" || key == "isometric_voxel_raytrace") {
+            bool b = false;
+            if (parseBool(val, b)) s.isoVoxelRaytrace = b;
         } else if (key == "texture_cache_mb") {
             int v = 0;
             if (parseInt(val, v)) {
@@ -340,6 +343,11 @@ ui_panels = textured
 
 # voxel_sprites: true/false (true = render entities/items/projectiles as tiny 3D voxel sprites)
 voxel_sprites = true
+
+# iso_voxel_raytrace: true/false
+# Isometric view only. When true, isometric voxel sprites are rendered using the
+# custom voxel raytracer (orthographic DDA) instead of the face-meshed isometric rasterizer.
+iso_voxel_raytrace = false
 
 # texture_cache_mb: 0 or 16..2048
 # Approximate VRAM budget for cached entity/item/projectile textures.

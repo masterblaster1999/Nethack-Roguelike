@@ -139,6 +139,7 @@ add_executable(${PROCROGUE_TARGET}
     src/main.cpp
     src/keybinds.cpp
     src/render.cpp
+    src/mesh2d.cpp
     src/spritegen.cpp
     src/spritegen3d.cpp
 )

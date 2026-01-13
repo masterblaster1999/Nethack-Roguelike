@@ -213,6 +213,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
                     const TileType before = dung.at(nx, ny).type;
                     if (dung.dig(nx, ny)) {
                         emitNoise(e.pos, 14);
+                        pushFxParticle(FXParticlePreset::Dig, Vec2i{nx, ny}, 24, 0.14f);
 
                         switch (before) {
                             case TileType::Wall:       pushMsg("YOU CHIP THROUGH THE WALL.", MessageKind::Info, true); break;

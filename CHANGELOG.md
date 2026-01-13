@@ -4,6 +4,8 @@
 ## [0.22.0] - Unreleased
 
 ### Added
+- Game-driven procedural particle FX events (spells + digging) via `FXParticleEvent` queue.
+- **Procedural sprite animation**: entities, items, and projectiles now use smooth, renderer-side procedural motion (move tween + hop/squash, idle bob, and hit recoil) to reduce "teleporty" feel in both top-down and isometric views.
 - **Ring of Searching**: a new ring that grants **automatic searching** each turn, helping you uncover nearby **traps, trapped chests, and secret doors** without spending an extra action.
 - **Ring of Sustenance**: a new ring that grants **passive sustenance**, slowing **hunger loss** when the hunger system is enabled.
   - **Enchant/bless** increases potency; **curses** remove the benefit.
@@ -23,6 +25,9 @@
 - **Isometric chasm depth tiles**: chasms in isometric view now use a purpose-built **procedural diamond tile** (stone rim + shaded inner walls + swirling void core) so pits read with stronger depth, replacing the projected top-down chasm tile.
 - **Isometric chasm gloom shading**: floor tiles adjacent to chasms now receive a subtle inward **gloom** darkening overlay in isometric view (beyond the rim band), making pits read deeper and edges feel more dangerous.
 - **Isometric sprite grounding shadows**: entities (and hallucination phantoms) now draw a small **diamond ground shadow** under their feet in isometric view, improving depth cues and reducing the “floating sprite” effect.
+- **Isometric voxel sprites**: when `voxel_sprites` is enabled in isometric view, entities/items/projectiles now render via a **mesh-based isometric voxel rasterizer** backed by a tiny **procedural 2D mesh** engine (merged visible faces -> 2D triangles -> z-buffered sprite), so they visually align with the 2.5D terrain and translucent voxels (glass/liquid) sort more robustly.
+- **Isometric voxel raytracer (optional)**: add `iso_voxel_raytrace` to render isometric voxel sprites using a custom **orthographic DDA raytracer** (instead of the face-mesh rasterizer).
+  - Toggle at runtime via `#isoraytrace on/off/toggle`.
 - **Isometric cast shadows**: floor tiles in isometric view now receive subtle **directional cast shadows** from nearby tall blockers (walls/closed doors/pillars/etc), improving 2.5D depth cues.
 - **Top-down wall contact shadows**: floor tiles now receive subtle **ambient occlusion** shading along edges adjacent to wall-mass terrain (walls/closed doors/pillars) and tall props (boulders/fountains/altars), improving depth cues and readability.
 - **Isometric floor decals**: themed floor decal overlays (cracks/runes/stains) are now generated directly in isometric diamond space, keeping thin lines crisp and patterns aligned to the 2.5D grid.
@@ -152,11 +157,17 @@
   - Earn PIETY by donating gold (**#donate**) or offering corpses (**#sacrifice**) at a shrine (or at the surface camp).
   - The HUD now shows your current PIETY and remaining prayer cooldown.
 
+- **Procedural particle VFX engine**: renderer-owned, procedurally generated spark/smoke/ember textures with lightweight simulation; used for hits, explosions, fire-field embers, and projectile trails.
 ### Save compatibility
 - Save version bumped to **v43** (v41 adds `Item.flags`; v42 adds merchant guild pursuit; v43 adds shrine piety + prayer cooldown).
 
 ### Changed
+- Extended command prompt: **TAB completion** now extends to the **longest common prefix** and lets you **cycle** through ambiguous matches by pressing **TAB** repeatedly (also works for pasted NetHack-style `#cmd` inputs).
+- Keybinds editor overlay: added an in-overlay **filter/search** (press `/`), **DEL** to unbind (writes `none`), and highlighted **conflicting** duplicate chords.
+- Keyboard input: SDL key repeat is now honored for movement and menu navigation (hold a direction to keep moving; repeats are still suppressed for toggles/confirm/ESC to avoid accidental spam).
 - **#whistle** now calls **all friendly companions** with **Follow/Fetch** orders (not just the starting dog).
+- Auto-travel: you can now **target locked doors** directly (when you have keys/lockpicks), making it easier to walk to vault doors intentionally.
+- Auto-explore: when no normal frontiers remain, it will now **walk to reachable locked doors** that border unexplored tiles (if you have keys/lockpicks) so it doesn't incorrectly report the floor as fully explored.
 - Floor trap scatter now avoids **shops** and **shrines** (keeps safe spaces consistent; traps still appear elsewhere).
 - Darkness lighting now treats **burning creatures** and **flaming ego weapons** as small moving light sources (in addition to torches, room ambient light, and fire fields).
 - Monster pathfinding now treats **poison gas** and **discovered traps** as higher-cost tiles, so monsters (and pets) will route around known hazards when practical.
@@ -166,6 +177,7 @@
 - Isometric VFX overlays: confusion/poison gas and fire field overlays now generate directly in diamond space in isometric view (no square projection), keeping the animation aligned to the 2:1 grid; poison gas now also uses the isometric textures.
 - Procedural VFX overlays: **confusion/poison gas** and **fire fields** now use **domain-warped fBm** masks for more wispy motion (less blobby), with subtle **spark** highlights in fire; still uses ordered dithering to stay crisp in pixel-art.
 - Voxel sprites: improved 3D voxel sprite shading with hemisphere-based ambient occlusion (reduces over-darkening on flat surfaces) plus a softer drop shadow for better grounding.
+- Isometric voxel sprites: improved per-face lighting (directional diffuse + cheap AO + subtle spec/rim) so voxel_sprites read with more depth/volume in 2.5D view; shading is quantized to keep greedy face merges stable.
 - Isometric wall blocks now pick variants coherently along wall segments, improving brickwork continuity in 2.5D view.
 - Isometric ground plane lighting: isometric diamond terrain tiles now apply a subtle whole-tile directional ramp (top-left brighter / bottom-right darker) for better 2.5D depth, and cast shadows now feature stronger corner occlusion with caster-type strength scaling.
 - Isometric block sprites: wall/door/doorway/pillar block sprites now get subtle vertical-face ambient occlusion (under-cap overhang, ridge seam, and base grounding) plus a light-facing cap rim highlight, improving volume/readability in 2.5D view.
@@ -178,6 +190,15 @@
 - Fixed build-breaking pointer dereferences in **Disarm Trap** and **Shrine prayer** interactions.
 - Fixed MSVC build breaks/warnings: implemented missing chest overlay item icon helper, corrected keybind chord formatting, and centralized SDL includes to avoid SDL_MAIN_HANDLED macro redefinitions.
 - Fixed MSVC build break in minimap cursor tooltip: expose Game::describeAt and remove shadowing warnings in save migration + isometric phantom rendering.
+- Keybind parsing now **deduplicates equivalent chords** (e.g. `?` and `shift+slash`) so bindings don't “double up” in the UI.
+- HUD text now **wraps** (stats, message log, and bottom hint lines) instead of clipping off the right edge on narrow windows.
+- Help overlay now **wraps** long lines and supports **scrolling** (Up/Down, PageUp/PageDown, mouse wheel) so content never clips off-screen.
+- Message history overlay now supports **PageUp/PageDown paging** (10 lines) and highlights **search matches**.
+- Message history overlay now **wraps** long messages (no more right-edge truncation) and supports **CTRL+C** to copy the filtered history to the clipboard.
+- Mouse wheel scrolling is now **context-sensitive**: it scrolls selection in list-based overlays (inventory/chests/spells/options/codex/discoveries/scores) and enables the minimap’s intended **quick-scroll** behavior (LOG UP/DOWN moves the cursor by 10 tiles instead of scrolling the message log).
+- Auto-explore: frontier selection now respects diagonal "corner-cut" movement rules, avoiding unreachable diagonal targets that could prematurely end exploration.
+- Save loading now automatically attempts rotated backups (`.bak1..bakN`) when a primary save/autosave is corrupt (truncated/CRC mismatch), improving recovery after crashes.
+
 
 
 

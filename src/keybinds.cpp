@@ -188,12 +188,21 @@ std::vector<KeyChord> KeyBinds::parseChordList(const std::string& valueIn) {
     if (vLow == "none" || vLow == "unbound" || vLow == "disabled") return {};
 
     std::vector<KeyChord> out;
+
+    auto already = [&](const KeyChord& c) -> bool {
+        for (const auto& ex : out) {
+            if (ex.key == c.key && ex.mods == c.mods) return true;
+        }
+        return false;
+    };
+
     for (const auto& part : split(value, ',')) {
         auto chord = parseChord(part);
-        if (chord.has_value()) out.push_back(*chord);
+        if (chord.has_value() && !already(*chord)) out.push_back(*chord);
     }
     return out;
 }
+
 
 std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
     std::string key = trim(toLower(bindKeyIn));

@@ -45,6 +45,7 @@ struct Settings {
     UITheme uiTheme = UITheme::DarkStone;   // darkstone|parchment|arcane
     bool uiPanelsTextured = true;           // textured|solid
     bool voxelSprites = true;               // true = 3D voxel-extruded sprites (entities/items/projectiles)
+    bool isoVoxelRaytrace = false;        // isometric-only: raytraced voxel sprites instead of mesh rasterization
 
     // Rendering / performance
     // - vsync: enables SDL_Renderer vsync (lower CPU usage, smoother rendering).

@@ -1687,10 +1687,10 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
             center.y /= static_cast<float>(ex.tiles.size());
 
             for (int i = 0; i < sparks; ++i) {
-                const Vec2i tile = ex.tiles[static_cast<size_t>(randRange(s, 0.0f, static_cast<float>(ex.tiles.size()))) % ex.tiles.size()];
+                const Vec2i spawnTile = ex.tiles[static_cast<size_t>(randRange(s, 0.0f, static_cast<float>(ex.tiles.size()))) % ex.tiles.size()];
 
-                const float tx = static_cast<float>(tile.x) + 0.5f;
-                const float ty = static_cast<float>(tile.y) + 0.5f;
+                const float tx = static_cast<float>(spawnTile.x) + 0.5f;
+                const float ty = static_cast<float>(spawnTile.y) + 0.5f;
 
                 float dx = tx - center.x;
                 float dy = ty - center.y;
@@ -1727,9 +1727,9 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
             }
 
             for (int i = 0; i < smokes; ++i) {
-                const Vec2i tile = ex.tiles[static_cast<size_t>(randRange(s, 0.0f, static_cast<float>(ex.tiles.size()))) % ex.tiles.size()];
-                const float tx = static_cast<float>(tile.x) + 0.5f;
-                const float ty = static_cast<float>(tile.y) + 0.5f;
+                const Vec2i spawnTile = ex.tiles[static_cast<size_t>(randRange(s, 0.0f, static_cast<float>(ex.tiles.size()))) % ex.tiles.size()];
+                const float tx = static_cast<float>(spawnTile.x) + 0.5f;
+                const float ty = static_cast<float>(spawnTile.y) + 0.5f;
 
                 ParticleEngine::Particle p;
                 p.x = tx + randRange(s, -0.45f, 0.45f);

@@ -268,6 +268,19 @@ bool Game::stepAutoMove() {
         return false;
     }
 
+    // Movement blockers: auto-move would just burn turns (and potentially make noise).
+    // Stop immediately so the player can choose a deliberate action.
+    if (player().effects.webTurns > 0) {
+        pushMsg("AUTO-MOVE STOPPED (YOU ARE WEBBED).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+    if (encumbranceEnabled_ && burdenState() == BurdenState::Overloaded) {
+        pushMsg("AUTO-MOVE STOPPED (YOU ARE OVERLOADED).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
     // Auto-explore: optional secret-hunting pass. If we're at a chosen search spot, spend turns searching
     // before declaring the floor fully explored.
     if (autoMode == AutoMoveMode::Explore && autoExploreGoalIsSearch && player().pos == autoExploreSearchGoalPos) {
@@ -511,6 +524,12 @@ bool Game::stepAutoMove() {
     const int dx = next.x - p.pos.x;
     const int dy = next.y - p.pos.y;
 
+    // Special-case: if we're about to interact with a locked door, track state so we can
+    // abort auto-move after a failed lockpick attempt (avoids noisy repeated attempts).
+    const bool lockedDoorBefore = dung.isDoorLocked(next.x, next.y);
+    const int keysBefore = keyCount();
+    const int lockpicksBefore = lockpickCount();
+
     const int hpBefore = p.hp;
     const int poisonBefore = p.effects.poisonTurns;
     const int webBefore = p.effects.webTurns;
@@ -521,6 +540,14 @@ bool Game::stepAutoMove() {
     const bool acted = tryMove(p, dx, dy);
     if (!acted) {
         pushMsg("AUTO-MOVE STOPPED (BLOCKED).", MessageKind::System);
+        stopAutoMove(true);
+        return false;
+    }
+
+    // If we attempted to pick a lock and failed, stop immediately so the player can decide
+    // whether to try again, use a key, or take another route.
+    if (lockedDoorBefore && keysBefore == 0 && lockpicksBefore > 0 && p.pos == posBefore && dung.isDoorLocked(next.x, next.y)) {
+        pushMsg("AUTO-MOVE STOPPED (FAILED TO PICK LOCK).", MessageKind::Warning);
         stopAutoMove(true);
         return false;
     }

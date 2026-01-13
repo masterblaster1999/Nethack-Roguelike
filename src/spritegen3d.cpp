@@ -1972,7 +1972,7 @@ SpritePixels renderVoxelIsometricRaytrace(const VoxelModel& m, int outW, int out
     float minIsoX = 1e9f, maxIsoX = -1e9f;
     float minIsoY = 1e9f, maxIsoY = -1e9f;
     auto addCorner = [&](float x, float y, float z) {
-        const Vec2f p = isoProject({x, y, z});
+        const Vec2f p = isoProject(x, y, z);
         minIsoX = std::min(minIsoX, p.x);
         maxIsoX = std::max(maxIsoX, p.x);
         minIsoY = std::min(minIsoY, p.y);

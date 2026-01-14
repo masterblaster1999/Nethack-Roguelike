@@ -684,7 +684,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 49u; // v49: procedural monster variants (rank + affix mask) // v48: item call labels (NetHack-style) // v47: trapdoorFallers keyed by (branch,depth) // v46: Message.branch (dungeon branch for log/history) // v45: dungeon branches (LevelId) // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
+constexpr uint32_t SAVE_VERSION = 50u; // v50: procedural monster abilities (active kit + cooldowns) // v49: procedural monster variants (rank + affix mask) // v48: item call labels (NetHack-style) // v47: trapdoorFallers keyed by (branch,depth) // v46: Message.branch (dungeon branch for log/history) // v45: dungeon branches (LevelId) // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -967,6 +967,18 @@ void writeEntity(std::ostream& out, const Entity& e) {
         writePod(out, procRank);
         writePod(out, procMask);
     }
+
+    // v50+: procedural monster abilities (two-slot kit + cooldowns)
+    if constexpr (SAVE_VERSION >= 50u) {
+        uint8_t a1 = static_cast<uint8_t>(e.procAbility1);
+        uint8_t a2 = static_cast<uint8_t>(e.procAbility2);
+        int32_t cd1 = e.procAbility1Cd;
+        int32_t cd2 = e.procAbility2Cd;
+        writePod(out, a1);
+        writePod(out, a2);
+        writePod(out, cd1);
+        writePod(out, cd2);
+    }
 }
 
 bool readEntity(std::istream& in, Entity& e, uint32_t version) {
@@ -1021,6 +1033,12 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     // v49+: procedural monster variants.
     uint8_t procRank = 0;
     uint32_t procMask = 0u;
+
+    // v50+: procedural monster abilities
+    uint8_t procAbility1 = 0;
+    uint8_t procAbility2 = 0;
+    int32_t procAbility1Cd = 0;
+    int32_t procAbility2Cd = 0;
 
     Item gearMelee;
     Item gearArmor;
@@ -1128,6 +1146,14 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         if (!readPod(in, procMask)) return false;
     }
 
+    // v50+: procedural monster abilities (two-slot kit + cooldowns)
+    if (version >= 50u) {
+        if (!readPod(in, procAbility1)) return false;
+        if (!readPod(in, procAbility2)) return false;
+        if (!readPod(in, procAbility1Cd)) return false;
+        if (!readPod(in, procAbility2Cd)) return false;
+    }
+
     e.id = id;
     e.kind = static_cast<EntityKind>(kind);
     e.pos = { x, y };
@@ -1145,6 +1171,20 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         e.procRank = ProcMonsterRank::Normal;
         e.procAffixMask = 0u;
     }
+
+    // v50+: procedural monster abilities
+    if (version >= 50u) {
+        e.procAbility1 = static_cast<ProcMonsterAbility>(procAbility1);
+        e.procAbility2 = static_cast<ProcMonsterAbility>(procAbility2);
+        e.procAbility1Cd = procAbility1Cd;
+        e.procAbility2Cd = procAbility2Cd;
+    } else {
+        e.procAbility1 = ProcMonsterAbility::None;
+        e.procAbility2 = ProcMonsterAbility::None;
+        e.procAbility1Cd = 0;
+        e.procAbility2Cd = 0;
+    }
+
 
     e.groupId = groupId;
     e.alerted = alerted != 0;

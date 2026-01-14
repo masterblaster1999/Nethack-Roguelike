@@ -792,6 +792,7 @@ int Game::xpFor(const Entity& e) const {
     if (base <= 0) return base;
 
     const int affCount = procMonsterAffixCount(e.procAffixMask);
+    const int abilCount = procMonsterAbilityCount(e.procAbility1, e.procAbility2);
 
     int tierBonusPct = 0;
     switch (e.procRank) {
@@ -801,8 +802,9 @@ int Game::xpFor(const Entity& e) const {
         default:                        tierBonusPct = 0; break;
     }
 
-    const int affBonusPct = affCount * 25; // +25% per affix
-    const int pct = 100 + tierBonusPct + affBonusPct;
+    const int affBonusPct = affCount * 25;  // +25% per affix
+    const int abilBonusPct = abilCount * 20; // +20% per proc ability
+    const int pct = 100 + tierBonusPct + affBonusPct + abilBonusPct;
 
     if (pct == 100) return base;
 

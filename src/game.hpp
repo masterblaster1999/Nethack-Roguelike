@@ -220,6 +220,81 @@ inline constexpr int procRankTier(ProcMonsterRank r) {
     return static_cast<int>(r);
 }
 
+
+// -----------------------------------------------------------------------------
+// Procedural monster abilities (active kits)
+//
+// These are *active* behaviors that can be rolled onto procedural variants
+// (ranked monsters). Unlike affixes, abilities usually involve a cooldown and
+// a tactical decision (area denial, reposition, summoning).
+//
+// Save format notes:
+// - Append-only. Old saves may not have these fields; they default to None.
+// -----------------------------------------------------------------------------
+
+enum class ProcMonsterAbility : uint8_t {
+    None = 0,
+
+    // Mobility / pressure
+    Pounce = 1,        // leap adjacent to the target and strike
+
+    // Environment control
+    ToxicMiasma = 2,   // seed a lingering poison gas field
+    CinderNova = 3,    // seed a short-lived fire field burst
+
+    // Defense
+    ArcaneWard = 4,    // temporary shielding (damage reduction)
+
+    // Reinforcements
+    SummonMinions = 5, // call weak allies nearby
+
+    // Debuff
+    Screech = 6,       // sonic burst that confuses the player
+};
+
+inline const char* procMonsterAbilityName(ProcMonsterAbility a) {
+    switch (a) {
+        case ProcMonsterAbility::Pounce:        return "POUNCE";
+        case ProcMonsterAbility::ToxicMiasma:   return "TOXIC MIASMA";
+        case ProcMonsterAbility::CinderNova:    return "CINDER NOVA";
+        case ProcMonsterAbility::ArcaneWard:    return "ARCANE WARD";
+        case ProcMonsterAbility::SummonMinions: return "SUMMON";
+        case ProcMonsterAbility::Screech:       return "SCREECH";
+        case ProcMonsterAbility::None:
+        default:                                return "NONE";
+    }
+}
+
+inline constexpr ProcMonsterAbility PROC_MONSTER_ABILITY_ALL[] = {
+    ProcMonsterAbility::Pounce,
+    ProcMonsterAbility::ToxicMiasma,
+    ProcMonsterAbility::CinderNova,
+    ProcMonsterAbility::ArcaneWard,
+    ProcMonsterAbility::SummonMinions,
+    ProcMonsterAbility::Screech,
+};
+
+inline int procMonsterAbilityCount(ProcMonsterAbility a, ProcMonsterAbility b) {
+    int n = 0;
+    if (a != ProcMonsterAbility::None) ++n;
+    if (b != ProcMonsterAbility::None && b != a) ++n;
+    return n;
+}
+
+inline std::string procMonsterAbilityList(ProcMonsterAbility a, ProcMonsterAbility b, const char* sep = ", ") {
+    std::string out;
+    bool first = true;
+    auto add = [&](ProcMonsterAbility x) {
+        if (x == ProcMonsterAbility::None) return;
+        if (!first) out += sep;
+        first = false;
+        out += procMonsterAbilityName(x);
+    };
+    add(a);
+    if (b != a) add(b);
+    return out;
+}
+
 // Baseline movement speed for monsters (used by the energy-based turn scheduler).
 // 100 = normal speed (roughly 1 action per player turn).
 // Values above 100 act more often; values below 100 act less often.
@@ -833,6 +908,15 @@ struct Entity {
     // Procedural monster variants (rank + affixes).
     ProcMonsterRank procRank = ProcMonsterRank::Normal;
     uint32_t procAffixMask = 0u;
+
+    // Procedural monster abilities (active kit).
+    // Stored as two slots for compactness and straightforward UI display.
+    ProcMonsterAbility procAbility1 = ProcMonsterAbility::None;
+    ProcMonsterAbility procAbility2 = ProcMonsterAbility::None;
+
+    // Cooldowns are in monster actions (each time the monster spends 100 energy).
+    int procAbility1Cd = 0;
+    int procAbility2Cd = 0;
 
     // Turn scheduling (energy-based).
     // Each full player turn, monsters gain `speed` energy and can act once per 100 energy.
@@ -2282,7 +2366,7 @@ private:
 
     // Monster factory (shared by level generation + dynamic spawns).
     // Returns a fully-initialized Entity (id, stats, speed, ammo, gear, ...).
-    Entity makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, uint32_t forcedSpriteSeed = 0);
+    Entity makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, uint32_t forcedSpriteSeed = 0, bool allowProcVariant = true);
     // Convenience wrapper that appends the monster to the entity list and returns a reference.
     Entity& spawnMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear = true);
 

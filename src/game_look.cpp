@@ -428,6 +428,13 @@ std::string Game::describeAt(Vec2i p) const {
                 }
                 ss << " | XP: " << (hallu ? xpFor(showKind) : xpFor(*e));
 
+                if (!hallu) {
+                    const std::string abil = procMonsterAbilityList(e->procAbility1, e->procAbility2);
+                    if (!abil.empty()) {
+                        ss << " | ABIL: " << abil;
+                    }
+                }
+
                 if (showKind == EntityKind::Ghost) {
                     ss << " | ETHEREAL";
                 }

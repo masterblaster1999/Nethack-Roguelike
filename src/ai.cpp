@@ -60,6 +60,17 @@ int smellFor(EntityKind k) {
 void Game::monsterTurn() {
     if (isFinished()) return;
 
+    // Some procedural monster abilities can spawn new monsters during a turn. We reserve generous
+    // headroom to avoid std::vector reallocation, which would invalidate references/iterators
+    // while we iterate through `ents`. (Newly spawned monsters will *not* act this turn because
+    // range-based loops snapshot the end iterator.)
+    const size_t wantCap = ents.size() * 4 + 16;
+    if (ents.capacity() < wantCap) {
+        ents.reserve(wantCap);
+    }
+
+    Dungeon& dung = dung_;
+
     const Entity& p = player();
 
     // Friendly companions (dog, tamed beasts, etc.)
@@ -70,6 +81,8 @@ void Game::monsterTurn() {
         if (e.hp <= 0) continue;
         if (e.friendly) allies.push_back(&e);
     }
+
+
     const int W = dung.width;
     const int H = dung.height;
 
@@ -573,6 +586,10 @@ void Game::monsterTurn() {
 
         refreshPackAnchor();
 
+        // Proc ability cooldowns tick once per monster action.
+        if (m.procAbility1Cd > 0) --m.procAbility1Cd;
+        if (m.procAbility2Cd > 0) --m.procAbility2Cd;
+
         // Ally AI: friendly companions (dog, tamed beasts, etc.).
         if (m.friendly) {
             // Lazily initialize / clear home anchors based on current order.
@@ -1065,6 +1082,331 @@ void Game::monsterTurn() {
                 if (dLev >= 0) {
                     drinkPocketPotion(pk);
                     return;
+                }
+            }
+        }
+
+
+        // Procedural monster abilities: elite+ monsters can roll a small kit of
+        // active abilities (cooldowns, AoE, summons...) in addition to affixes.
+        // These are intentionally *rare-ish* and situational so most turns remain
+        // traditional roguelike movement/attacks.
+        if (!m.friendly) {
+            const ProcMonsterAbility aSlots[2] = {m.procAbility1, m.procAbility2};
+            int* cdSlots[2] = {&m.procAbility1Cd, &m.procAbility2Cd};
+            const int tier = procRankTier(m.procRank);
+
+            const bool anyAbil = (aSlots[0] != ProcMonsterAbility::None) || (aSlots[1] != ProcMonsterAbility::None);
+            if (tier > 0 && anyAbil) {
+                auto ensureField = [&](std::vector<uint8_t>& f) {
+                    const size_t n = static_cast<size_t>(w * h);
+                    if (n == 0) return;
+                    if (f.size() != n) f.assign(n, 0u);
+                };
+
+                auto seedPoisonGas = [&](Vec2i c, int radius, uint8_t baseStrength) {
+                    ensureField(poisonGas_);
+                    if (poisonGas_.empty()) return;
+
+                    std::vector<int> fovMask(static_cast<size_t>(w * h), 0);
+                    dung.computeFovMask(c.x, c.y, radius, fovMask);
+
+                    for (int dy = -radius; dy <= radius; ++dy) {
+                        for (int dx = -radius; dx <= radius; ++dx) {
+                            const int man = std::abs(dx) + std::abs(dy);
+                            if (man > radius) continue;
+                            const int nx = c.x + dx;
+                            const int ny = c.y + dy;
+                            if (!dung.inBounds(nx, ny)) continue;
+                            if (!dung.isWalkable(nx, ny)) continue;
+
+                            const size_t i = static_cast<size_t>(idx(nx, ny));
+                            if (i >= fovMask.size()) continue;
+                            if (fovMask[i] == 0) continue;
+
+                            int s = static_cast<int>(baseStrength) - man * 6;
+                            if (s <= 0) continue;
+                            s = std::clamp(s, 1, 255);
+                            const uint8_t su = static_cast<uint8_t>(s);
+                            poisonGas_[i] = std::max(poisonGas_[i], su);
+                        }
+                    }
+                };
+
+                auto seedFireField = [&](Vec2i c, int radius, uint8_t baseStrength) {
+                    ensureField(fireField_);
+                    if (fireField_.empty()) return;
+
+                    std::vector<int> fovMask(static_cast<size_t>(w * h), 0);
+                    dung.computeFovMask(c.x, c.y, radius, fovMask);
+
+                    for (int dy = -radius; dy <= radius; ++dy) {
+                        for (int dx = -radius; dx <= radius; ++dx) {
+                            const int man = std::abs(dx) + std::abs(dy);
+                            if (man > radius) continue;
+                            const int nx = c.x + dx;
+                            const int ny = c.y + dy;
+                            if (!dung.inBounds(nx, ny)) continue;
+                            if (!dung.isWalkable(nx, ny)) continue;
+
+                            const size_t i = static_cast<size_t>(idx(nx, ny));
+                            if (i >= fovMask.size()) continue;
+                            if (fovMask[i] == 0) continue;
+
+                            int s = static_cast<int>(baseStrength) - man * 7;
+                            if (s <= 0) continue;
+                            s = std::clamp(s, 1, 255);
+                            const uint8_t su = static_cast<uint8_t>(s);
+                            fireField_[i] = std::max(fireField_[i], su);
+                        }
+                    }
+                };
+
+                auto pickMinionKind = [&](EntityKind caster) -> EntityKind {
+                    if (caster == EntityKind::Slime) return EntityKind::Slime;
+                    if (entityIsUndead(caster)) {
+                        return rng.chance(0.25f) ? EntityKind::SkeletonArcher : EntityKind::Zombie;
+                    }
+                    if (caster == EntityKind::Wizard) {
+                        const int r = rng.range(0, 2);
+                        return (r == 0) ? EntityKind::Bat : (r == 1 ? EntityKind::Goblin : EntityKind::Snake);
+                    }
+                    if (caster == EntityKind::Spider) {
+                        return rng.chance(0.5f) ? EntityKind::Snake : EntityKind::Bat;
+                    }
+                    if (caster == EntityKind::Wolf || caster == EntityKind::Bat) {
+                        return caster;
+                    }
+                    if (caster == EntityKind::Snake) {
+                        return rng.chance(0.7f) ? EntityKind::Snake : EntityKind::Bat;
+                    }
+
+                    return EntityKind::Goblin;
+                };
+
+                auto tryUseProcAbility = [&](ProcMonsterAbility ab, int slot) -> bool {
+                    if (ab == ProcMonsterAbility::None) return false;
+                    int& cd = *cdSlots[slot];
+                    if (cd > 0) return false;
+
+                    const bool visSelf = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+                    const bool visPlayer = dung.inBounds(p.pos.x, p.pos.y) && dung.at(p.pos.x, p.pos.y).visible;
+                    const int manToPlayer = manhattan(m.pos, p.pos);
+
+                    switch (ab) {
+                        case ProcMonsterAbility::Pounce: {
+                            if (!seesPlayer) return false;
+                            if (manToPlayer <= 1 || manToPlayer > 6) return false;
+                            if (!rng.chance(0.22f + 0.03f * tier)) return false;
+
+                            Vec2i best = {-1, -1};
+                            int bestD = 9999;
+                            for (int dy = -1; dy <= 1; ++dy) {
+                                for (int dx = -1; dx <= 1; ++dx) {
+                                    if (dx == 0 && dy == 0) continue;
+                                    const int nx = p.pos.x + dx;
+                                    const int ny = p.pos.y + dy;
+                                    if (!dung.inBounds(nx, ny)) continue;
+                                    if (!dung.isWalkable(nx, ny)) continue;
+                                    if (entityAt(nx, ny) != nullptr) continue;
+
+                                    const int d = manhattan(m.pos, {nx, ny});
+                                    if (d < bestD) {
+                                        bestD = d;
+                                        best = {nx, ny};
+                                    } else if (d == bestD && rng.chance(0.5f)) {
+                                        best = {nx, ny};
+                                    }
+                                }
+                            }
+                            if (best.x < 0) return false;
+
+                            if (visSelf) {
+                                std::ostringstream ss;
+                                ss << "THE " << kindName(m.kind) << " POUNCES!";
+                                pushMsg(ss.str(), MessageKind::Warning, false);
+                            }
+
+                            pushFxParticle(FXParticlePreset::Blink, m.pos, 1.0f, 16, 1.0f);
+                            pushFxParticle(FXParticlePreset::Blink, best, 1.0f, 16, 1.0f);
+
+                            m.pos = best;
+                            emitNoise(m.pos, 10);
+
+                            if (isAdjacent8(m.pos, p.pos)) {
+                                attackMelee(m, playerMut());
+                            }
+
+                            cd = 9 + rng.range(0, 4);
+                            return true;
+                        }
+
+                        case ProcMonsterAbility::ToxicMiasma: {
+                            if (!seesPlayer) return false;
+                            if (manToPlayer > 7) return false;
+                            if (!rng.chance(0.18f + 0.03f * tier)) return false;
+
+                            const int radius = 2;
+                            int baseI = std::clamp(12 + depth_ / 3 + tier * 2 + rng.range(0, 4), 8, 48);
+                            seedPoisonGas(p.pos, radius, static_cast<uint8_t>(baseI));
+
+                            if (visSelf || visPlayer) {
+                                std::ostringstream ss;
+                                ss << "THE " << kindName(m.kind) << " EXHALES TOXIC VAPOR!";
+                                pushMsg(ss.str(), MessageKind::Warning, false);
+                            }
+                            pushFxParticle(FXParticlePreset::Poison, p.pos, 1.0f, 18, 1.0f);
+                            emitNoise(m.pos, 8);
+
+                            cd = 12 + rng.range(0, 5);
+                            return true;
+                        }
+
+                        case ProcMonsterAbility::CinderNova: {
+                            if (!seesPlayer) return false;
+                            if (manToPlayer > 6) return false;
+                            if (!rng.chance(0.16f + 0.03f * tier)) return false;
+
+                            const int radius = (tier >= 3) ? 2 : 1;
+                            int baseI = std::clamp(10 + depth_ / 4 + tier * 2 + rng.range(0, 3), 6, 46);
+                            seedFireField(p.pos, radius, static_cast<uint8_t>(baseI));
+
+                            if (visSelf || visPlayer) {
+                                std::ostringstream ss;
+                                ss << "THE " << kindName(m.kind) << " UNLEASHES A CINDER NOVA!";
+                                pushMsg(ss.str(), MessageKind::Warning, false);
+                            }
+                            emitNoise(m.pos, 10);
+
+                            cd = 14 + rng.range(0, 6);
+                            return true;
+                        }
+
+                        case ProcMonsterAbility::ArcaneWard: {
+                            if (!(seesPlayer || m.alerted)) return false;
+                            if (m.effects.shieldTurns > 0) return false;
+
+                            const float hpFrac = (m.hpMax > 0) ? (static_cast<float>(m.hp) / static_cast<float>(m.hpMax)) : 1.0f;
+                            if (hpFrac > 0.85f && !rng.chance(0.35f)) return false;
+
+                            const int dur = 10 + tier * 6 + rng.range(0, 4);
+                            m.effects.shieldTurns = std::max(m.effects.shieldTurns, dur);
+
+                            if (visSelf) {
+                                std::ostringstream ss;
+                                ss << "THE " << kindName(m.kind) << " RAISES A WARD!";
+                                pushMsg(ss.str(), MessageKind::Warning, false);
+                            }
+                            pushFxParticle(FXParticlePreset::Buff, m.pos, 1.0f, 14, 1.0f);
+                            emitNoise(m.pos, 6);
+
+                            cd = 18 + rng.range(0, 6);
+                            return true;
+                        }
+
+                        case ProcMonsterAbility::SummonMinions: {
+                            if (!seesPlayer) return false;
+                            if (manToPlayer > 9) return false;
+                            if (!rng.chance(0.15f + 0.03f * tier)) return false;
+                            if (ents.size() > 180) return false;
+
+                            int nearbyAllies = 0;
+                            for (const auto& e : ents) {
+                                if (e.id == playerId_) continue;
+                                if (e.hp <= 0) continue;
+                                if (e.friendly) continue;
+                                if (e.kind == EntityKind::Shopkeeper && !e.alerted) continue;
+                                if (chebyshev(e.pos, m.pos) > 6) continue;
+                                nearbyAllies += 1;
+                            }
+                            if (nearbyAllies >= 7 + tier) return false;
+
+                            Vec2i candidates[64];
+                            int candN = 0;
+                            const int sr = 2;
+                            for (int dy = -sr; dy <= sr; ++dy) {
+                                for (int dx = -sr; dx <= sr; ++dx) {
+                                    if (dx == 0 && dy == 0) continue;
+                                    const int nx = m.pos.x + dx;
+                                    const int ny = m.pos.y + dy;
+                                    if (!dung.inBounds(nx, ny)) continue;
+                                    if (!dung.isWalkable(nx, ny)) continue;
+                                    if (entityAt(nx, ny) != nullptr) continue;
+                                    if (candN < 64) candidates[candN++] = {nx, ny};
+                                }
+                            }
+                            if (candN <= 0) return false;
+
+                            for (int i = 0; i < candN; ++i) {
+                                const int j = rng.range(i, candN - 1);
+                                std::swap(candidates[i], candidates[j]);
+                            }
+
+                            const int count = std::min(candN, 1 + (tier >= 2 ? 1 : 0) + (tier >= 3 && rng.chance(0.35f) ? 1 : 0));
+                            const int gid = (m.groupId != 0) ? m.groupId : m.id;
+
+                            for (int i = 0; i < count; ++i) {
+                                const EntityKind mk = pickMinionKind(m.kind);
+                                Entity nm = makeMonster(mk, candidates[i], gid, false, rng.nextU32(), false /*allowProcVariant*/);
+                                nm.alerted = true;
+                                nm.lastKnownPlayerPos = p.pos;
+                                nm.lastKnownPlayerAge = 0;
+                                ents.push_back(nm);
+                            }
+
+                            if (visSelf) {
+                                std::ostringstream ss;
+                                ss << "THE " << kindName(m.kind) << " SUMMONS REINFORCEMENTS!";
+                                pushMsg(ss.str(), MessageKind::Warning, false);
+                            }
+                            emitNoise(m.pos, 14);
+
+                            cd = 22 + rng.range(0, 8);
+                            return true;
+                        }
+
+                        case ProcMonsterAbility::Screech: {
+                            if (!seesPlayer) return false;
+                            if (manToPlayer > 8) return false;
+                            if (player().effects.confusionTurns > 0) return false;
+                            if (!rng.chance(0.16f + 0.03f * tier)) return false;
+
+                            const int dur = 4 + tier * 2 + rng.range(0, 3);
+                            playerMut().effects.confusionTurns = std::max(player().effects.confusionTurns, dur);
+
+                            if (visSelf || visPlayer) {
+                                std::ostringstream ss;
+                                ss << "THE " << kindName(m.kind) << " SCREECHES!";
+                                pushMsg(ss.str(), MessageKind::Warning, false);
+                            }
+                            emitNoise(m.pos, 16);
+
+                            cd = 16 + rng.range(0, 7);
+                            return true;
+                        }
+
+                        default:
+                            break;
+                    }
+
+                    return false;
+                };
+
+                // Build candidate list of ready ability slots.
+                int slots[2] = {-1, -1};
+                int nSlots = 0;
+                if (aSlots[0] != ProcMonsterAbility::None && *cdSlots[0] <= 0) slots[nSlots++] = 0;
+                if (aSlots[1] != ProcMonsterAbility::None && *cdSlots[1] <= 0) slots[nSlots++] = 1;
+
+                if (nSlots > 0) {
+                    if (nSlots == 2 && rng.chance(0.5f)) std::swap(slots[0], slots[1]);
+
+                    for (int ii = 0; ii < nSlots; ++ii) {
+                        const int s = slots[ii];
+                        if (tryUseProcAbility(aSlots[s], s)) {
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -1881,8 +2223,10 @@ void Game::monsterTurn() {
         }
     };
 
-    for (auto& m : ents) {
+    const size_t n0 = ents.size();
+    for (size_t mi = 0; mi < n0; ++mi) {
         if (isFinished()) return;
+        Entity& m = ents[mi];
         if (m.id == playerId_) continue;
         if (m.hp <= 0) continue;
 

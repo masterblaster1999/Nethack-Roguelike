@@ -5,6 +5,7 @@
 
 ### Added
 - **Procedural monster variants**: rare monsters now roll a persistent **rank** (Elite/Champion/Mythic) plus 1-3 **affixes** at spawn.
+- **Procedural monster abilities**: Elite+ monsters can roll 1–2 active abilities (pounce, toxic miasma, cinder nova, arcane ward, summoning, screech) with cooldowns, saved/loaded per-entity.
   - Affixes implemented this round: **Swift**, **Stonehide**, **Savage**, **Blinking** (panic blink reposition), and **Gilded** (bonus gold + higher key/drop odds).
   - New combat-proc affixes: **Venomous** (poison), **Flaming** (burn), **Vampiric** (life drain), and **Webbing** (ensnare).
   - LOOK/targeting now surfaces rank + affixes, and XP rewards scale with procedural rank/affixes.
@@ -228,6 +229,8 @@
 - Isometric block sprites: wall/door/doorway/pillar block sprites now get subtle vertical-face ambient occlusion (under-cap overhang, ridge seam, and base grounding) plus a light-facing cap rim highlight, improving volume/readability in 2.5D view.
 
 ### Fixed
+- Monster timed-effect timers now tick correctly for enemies as well (regen/shield/invisibility no longer last forever if a monster uses a potion or ability).
+- Shielding now contributes to **monster damage reduction**, making shield potions and Arcane Ward meaningful.
 - Fixed MSVC build break: LOOK/targeting HUD no longer references an out-of-scope `fitToChars` lambda (shared helper lives in render.cpp).
 - Targeting + LOOK bottom hint text now uses a compact **two-line** layout and a middle-ellipsis fitter, keeping both context and keybind hints readable on narrow windows.
 - Removed MSVC C4244 warnings by passing properly typed `Uint8` color channels to `SDL_SetRenderDrawColor` and by using `uint8_t{0}` for byte-grid fills/initialization.

@@ -104,6 +104,13 @@ int damageReduction(const Game& game, const Entity& e) {
             dr += itemDef(a.kind).defense + a.enchant + b;
         }
 
+        // Temporary shielding (from potions or procedural abilities) adds flat damage
+        // reduction for monsters. This keeps the effect meaningful even though
+        // monsters don't use the player's evasion/armor split.
+        if (e.effects.shieldTurns > 0) {
+            dr += 2;
+        }
+
         return std::max(0, dr);
     }
 

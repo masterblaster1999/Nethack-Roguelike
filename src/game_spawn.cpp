@@ -242,6 +242,134 @@ static uint32_t rollProcAffixes(RNG& rr, EntityKind k, ProcMonsterRank rank, Roo
     return mask;
 }
 
+// -----------------------------------------------------------------------------
+// Procedural monster abilities (active kits)
+// -----------------------------------------------------------------------------
+
+struct ProcAbilityWeight {
+    ProcMonsterAbility ability = ProcMonsterAbility::None;
+    int weight = 0;
+};
+
+static void buildProcAbilityPool(std::vector<ProcAbilityWeight>& out,
+                                 EntityKind k, RoomType rt, int depth, uint32_t affixMask) {
+    out.clear();
+
+    auto add = [&](ProcMonsterAbility a, int w) {
+        if (a == ProcMonsterAbility::None) return;
+        if (w <= 0) return;
+        out.push_back({a, w});
+    };
+
+    const bool undead = entityIsUndead(k);
+    const bool humanoid = (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k));
+
+    const bool beast = (k == EntityKind::Wolf || k == EntityKind::Bat || k == EntityKind::Snake || k == EntityKind::Spider);
+    const bool brute = (k == EntityKind::Ogre || k == EntityKind::Troll || k == EntityKind::Orc);
+    const bool trickster = (k == EntityKind::Leprechaun || k == EntityKind::Nymph);
+    const bool caster = (k == EntityKind::Wizard || rt == RoomType::Library || rt == RoomType::Laboratory || rt == RoomType::Shrine);
+
+    // Mobility pressure: pounce is common on beasts and fast tricksters.
+    int wPounce = 0;
+    if (beast) wPounce += 10;
+    if (trickster) wPounce += 8;
+    if (k == EntityKind::Wolf) wPounce += 4;
+    if (k == EntityKind::Bat) wPounce += 3;
+    if (procHasAffix(affixMask, ProcMonsterAffix::Swift)) wPounce += 3;
+    if (undead) wPounce = std::max(0, wPounce - 4);
+
+    // Poison control: slimes / snakes / lairs / labs.
+    int wToxic = 0;
+    if (k == EntityKind::Slime) wToxic += 16;
+    if (k == EntityKind::Snake || k == EntityKind::Spider) wToxic += 10;
+    if (rt == RoomType::Lair) wToxic += 8;
+    if (rt == RoomType::Laboratory) wToxic += 6;
+    if (procHasAffix(affixMask, ProcMonsterAffix::Venomous)) wToxic += 4;
+    if (undead) wToxic = std::max(0, wToxic - 3);
+
+    // Fire control: wizards / shrines / labs; ramps slowly with depth.
+    int wCinder = 1 + depth / 4;
+    if (caster) wCinder += 8;
+    if (k == EntityKind::Wizard) wCinder += 8;
+    if (rt == RoomType::Shrine) wCinder += 4;
+    if (procHasAffix(affixMask, ProcMonsterAffix::Flaming)) wCinder += 4;
+    if (k == EntityKind::Slime) wCinder = std::max(0, wCinder - 2);
+
+    // Defensive ward: brutes and humanoids like it.
+    int wWard = 0;
+    if (humanoid) wWard += 7;
+    if (brute) wWard += 9;
+    if (caster) wWard += 4;
+    if (procHasAffix(affixMask, ProcMonsterAffix::Stonehide)) wWard += 3;
+    if (undead) wWard = std::max(0, wWard - 1);
+
+    // Summoning: necromancy / swarm rooms / deep dungeon.
+    int wSummon = 0;
+    if (caster) wSummon += 6;
+    if (undead) wSummon += 10;
+    if (rt == RoomType::Lair) wSummon += 7;
+    if (k == EntityKind::Slime) wSummon += 6;
+    if (depth >= 6) wSummon += 2;
+
+    // Screech: confusion pressure (bats, tricksters, spiders).
+    int wScreech = 0;
+    if (k == EntityKind::Bat) wScreech += 14;
+    if (trickster) wScreech += 10;
+    if (k == EntityKind::Spider) wScreech += 6;
+    if (rt == RoomType::Lair) wScreech += 3;
+    if (undead) wScreech = std::max(0, wScreech - 2);
+
+    add(ProcMonsterAbility::Pounce, wPounce);
+    add(ProcMonsterAbility::ToxicMiasma, wToxic);
+    add(ProcMonsterAbility::CinderNova, wCinder);
+    add(ProcMonsterAbility::ArcaneWard, wWard);
+    add(ProcMonsterAbility::SummonMinions, wSummon);
+    add(ProcMonsterAbility::Screech, wScreech);
+}
+
+static void rollProcAbilities(RNG& rr, EntityKind k, ProcMonsterRank rank, RoomType rt, int depth, uint32_t affixMask,
+                              ProcMonsterAbility& a1, ProcMonsterAbility& a2) {
+    a1 = ProcMonsterAbility::None;
+    a2 = ProcMonsterAbility::None;
+
+    const int tier = procRankTier(rank);
+    if (tier <= 0) return;
+
+    int want = 1;
+    if (tier >= 3) want = 2;
+    else if (tier == 2 && rr.chance(0.35f)) want = 2;
+
+    std::vector<ProcAbilityWeight> pool;
+    buildProcAbilityPool(pool, k, rt, depth, affixMask);
+    if (pool.empty()) return;
+
+    auto pickOne = [&](ProcMonsterAbility avoid) -> ProcMonsterAbility {
+        int total = 0;
+        for (const auto& e : pool) {
+            if (e.ability == avoid) continue;
+            total += std::max(0, e.weight);
+        }
+        if (total <= 0) return ProcMonsterAbility::None;
+        int roll = rr.range(1, total);
+        for (const auto& e : pool) {
+            if (e.ability == avoid) continue;
+            roll -= std::max(0, e.weight);
+            if (roll <= 0) return e.ability;
+        }
+        return ProcMonsterAbility::None;
+    };
+
+    a1 = pickOne(ProcMonsterAbility::None);
+    if (want >= 2) {
+        a2 = pickOne(a1);
+        if (a2 == ProcMonsterAbility::None) {
+            // If we couldn't pick a distinct second ability, fall back to a single-slot kit.
+            a2 = ProcMonsterAbility::None;
+        }
+    }
+}
+
+
 static int scaledInt(int v, float mult) {
     const float f = static_cast<float>(v) * mult;
     return std::max(1, static_cast<int>(f + 0.5f));
@@ -350,7 +478,7 @@ Vec2i Game::randomFreeTileInRoom(const Room& r, int tries) {
     return c;
 }
 
-Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, uint32_t forcedSpriteSeed) {
+Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, uint32_t forcedSpriteSeed, bool allowProcVariant) {
     Entity e;
     e.id = nextEntityId++;
     e.kind = k;
@@ -534,10 +662,9 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
         }
     }
 
-
-    // Procedural monster variants (rank + affixes).
+    // Procedural monster variants (rank + affixes + abilities).
     // Applied after baseline stats/gear so modifiers scale the final creature.
-    if (branch_ == DungeonBranch::Main && procVariantEligible(k, rtHere, depth_)) {
+    if (allowProcVariant && branch_ == DungeonBranch::Main && procVariantEligible(k, rtHere, depth_)) {
         const uint32_t seed = hashCombine(e.spriteSeed ^ 0xC0FFEEu,
                                           hashCombine(static_cast<uint32_t>(k),
                                                       hashCombine(static_cast<uint32_t>(depth_), static_cast<uint32_t>(rtHere))));
@@ -545,6 +672,11 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
         const ProcMonsterRank pr = rollProcRank(prng, k, depth_, rtHere);
         const uint32_t pm = rollProcAffixes(prng, k, pr, rtHere, depth_);
         applyProcVariant(e, pr, pm);
+
+        // Roll a small active-ability kit for ranked monsters.
+        rollProcAbilities(prng, k, pr, rtHere, depth_, pm, e.procAbility1, e.procAbility2);
+        e.procAbility1Cd = 0;
+        e.procAbility2Cd = 0;
     }
 
     return e;
@@ -2635,6 +2767,40 @@ void Game::applyEndOfTurnEffects() {
                     pushMsg(ss.str(), MessageKind::System, false);
                 }
             }
+        }
+
+        // Regeneration potion (or similar): heals 1 HP per turn while active.
+        if (m.effects.regenTurns > 0) {
+            m.effects.regenTurns = std::max(0, m.effects.regenTurns - 1);
+            if (m.hp > 0 && m.hp < m.hpMax) {
+                m.hp = std::min(m.hpMax, m.hp + 1);
+            }
+
+            if (m.effects.regenTurns == 0) {
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(m.kind) << " STOPS REGENERATING.";
+                    pushMsg(ss.str(), MessageKind::System, false);
+                }
+            }
+        }
+
+        // Temporary shielding: just ticks down (damage reduction is applied in combat.cpp).
+        if (m.effects.shieldTurns > 0) {
+            m.effects.shieldTurns = std::max(0, m.effects.shieldTurns - 1);
+            if (m.effects.shieldTurns == 0) {
+                if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(m.kind) << " LOOKS LESS PROTECTED.";
+                    pushMsg(ss.str(), MessageKind::System, false);
+                }
+            }
+        }
+
+        // Invisibility: keep monster timers sane even though rendering/AI treats invis mostly as
+        // a player-stealth mechanic for now.
+        if (m.effects.invisTurns > 0) {
+            m.effects.invisTurns = std::max(0, m.effects.invisTurns - 1);
         }
 
         // Timed webbing: prevents movement while >0, then wears off.

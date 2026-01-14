@@ -1,14 +1,15 @@
 {
-  "patch_id": "round22_patch",
-  "previous_patch_id": "round21_patch",
-  "round": 22,
+  "patch_id": "round23_patch",
+  "previous_patch_id": "round22_patch",
+  "round": 23,
   "date": "2026-01-14",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Annex micro-dungeons gain a third generator style: MiniRuins (packed rooms + corridors via an MST + extra loops) for classic mini-complex side areas.",
-    "MiniRuins stamps internal door markers into real DoorClosed/DoorOpen tiles (with some broken-open variety) while keeping the annex pocket border solid.",
-    "Annex loot placement avoids selecting internal-door tiles as the farthest-cache anchor, so chests don't spawn on door tiles.",
-    "Build fixes: spawnItems no longer references an out-of-scope room type variable; Blink affix FX now uses tile visibility directly (fixes non-MSVC builds)."
+    "Added procedural monster abilities (active kits) rolled at spawn for Elite/Champion/Mythic monsters, saved/loaded persistently.",
+    "Implemented AI usage for abilities with cooldowns: Pounce, Toxic Miasma, Cinder Nova, Arcane Ward (shielding), Summon Minions, and Screech (confusion).",
+    "Made monster timed effects tick correctly for regen/shield/invis and made shielding provide monster damage reduction.",
+    "LOOK mode now surfaces proc abilities, and XP scaling accounts for ability count.",
+    "Save version bumped to v50 to persist procedural abilities + cooldowns."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",

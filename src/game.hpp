@@ -115,6 +115,111 @@ inline const char* entityKindName(EntityKind k) {
 }
 
 
+// -----------------------------------------------------------------------------
+// Procedural monster variants (rank + affixes)
+//
+// These are lightweight "roguelike affixes" applied at spawn time to create
+// rare standout monsters without introducing new EntityKind ids.
+// Persisted in saves so a monster keeps its rolled variant across load.
+// -----------------------------------------------------------------------------
+
+enum class ProcMonsterRank : uint8_t {
+    Normal = 0,
+    Elite = 1,
+    Champion = 2,
+    Mythic = 3,
+};
+
+inline const char* procMonsterRankName(ProcMonsterRank r) {
+    switch (r) {
+        case ProcMonsterRank::Normal:   return "NORMAL";
+        case ProcMonsterRank::Elite:    return "ELITE";
+        case ProcMonsterRank::Champion: return "CHAMPION";
+        case ProcMonsterRank::Mythic:   return "MYTHIC";
+        default:                        return "NORMAL";
+    }
+}
+
+// Bitmask affixes for procedural monsters. Keep these sparse and append-only
+// so the save format remains forward-compatible.
+enum class ProcMonsterAffix : uint32_t {
+    None      = 0u,
+    Swift     = 1u << 0, // faster energy gain
+    Stonehide = 1u << 1, // more defense + a bit more HP
+    Savage    = 1u << 2, // more attack (melee and ranged)
+    Blinking  = 1u << 3, // AI: panic-blink reposition when wounded
+    Gilded    = 1u << 4, // loot: bonus gold / key chance
+
+    // On-hit procedural affixes (combat procs).
+    // These are intentionally lightweight "status hooks" rather than brand-new mechanics.
+    // Append-only: do not reuse bits (save format stores the raw mask).
+    Venomous  = 1u << 5, // attacks can poison
+    Flaming   = 1u << 6, // attacks can ignite (burn)
+    Vampiric  = 1u << 7, // attacks can drain life (heal attacker)
+    Webbing   = 1u << 8, // attacks can ensnare (web)
+};
+
+inline constexpr uint32_t procAffixBit(ProcMonsterAffix a) {
+    return static_cast<uint32_t>(a);
+}
+
+inline constexpr bool procHasAffix(uint32_t mask, ProcMonsterAffix a) {
+    return (mask & procAffixBit(a)) != 0u;
+}
+
+// Canonical ordered list of all procedural monster affix bits.
+// Useful for UI (listing) and deterministic iteration (save-forward compatible).
+inline constexpr ProcMonsterAffix PROC_MONSTER_AFFIX_ALL[] = {
+    ProcMonsterAffix::Swift,
+    ProcMonsterAffix::Stonehide,
+    ProcMonsterAffix::Savage,
+    ProcMonsterAffix::Blinking,
+    ProcMonsterAffix::Gilded,
+    ProcMonsterAffix::Venomous,
+    ProcMonsterAffix::Flaming,
+    ProcMonsterAffix::Vampiric,
+    ProcMonsterAffix::Webbing,
+};
+
+inline const char* procMonsterAffixName(ProcMonsterAffix a) {
+    switch (a) {
+        case ProcMonsterAffix::Swift:     return "SWIFT";
+        case ProcMonsterAffix::Stonehide: return "STONEHIDE";
+        case ProcMonsterAffix::Savage:    return "SAVAGE";
+        case ProcMonsterAffix::Blinking:  return "BLINKING";
+        case ProcMonsterAffix::Gilded:    return "GILDED";
+        case ProcMonsterAffix::Venomous:  return "VENOMOUS";
+        case ProcMonsterAffix::Flaming:   return "FLAMING";
+        case ProcMonsterAffix::Vampiric:  return "VAMPIRIC";
+        case ProcMonsterAffix::Webbing:   return "WEBBING";
+        default:                          return "UNKNOWN";
+    }
+}
+
+inline int procMonsterAffixCount(uint32_t mask) {
+    int n = 0;
+    for (ProcMonsterAffix a : PROC_MONSTER_AFFIX_ALL) {
+        if (procHasAffix(mask, a)) ++n;
+    }
+    return n;
+}
+
+inline std::string procMonsterAffixList(uint32_t mask, const char* sep = ", ") {
+    std::string out;
+    bool first = true;
+    for (ProcMonsterAffix a : PROC_MONSTER_AFFIX_ALL) {
+        if (!procHasAffix(mask, a)) continue;
+        if (!first) out += sep;
+        first = false;
+        out += procMonsterAffixName(a);
+    }
+    return out;
+}
+
+inline constexpr int procRankTier(ProcMonsterRank r) {
+    return static_cast<int>(r);
+}
+
 // Baseline movement speed for monsters (used by the energy-based turn scheduler).
 // 100 = normal speed (roughly 1 action per player turn).
 // Values above 100 act more often; values below 100 act less often.
@@ -725,6 +830,10 @@ struct Entity {
 
     uint32_t spriteSeed = 0;
 
+    // Procedural monster variants (rank + affixes).
+    ProcMonsterRank procRank = ProcMonsterRank::Normal;
+    uint32_t procAffixMask = 0u;
+
     // Turn scheduling (energy-based).
     // Each full player turn, monsters gain `speed` energy and can act once per 100 energy.
     // Example: speed=150 -> ~1.5 actions/turn (sometimes 2).
@@ -1217,6 +1326,9 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
 
     // XP reward for killing a given monster kind (used by UI such as the Codex).
     int xpFor(EntityKind k) const;
+
+    // XP reward for killing a specific entity instance (procedural variants scale this up).
+    int xpFor(const Entity& e) const;
     AutoPickupMode autoPickupMode() const { return autoPickup; }
     bool autoPickupEnabled() const { return autoPickup != AutoPickupMode::Off; }
     void setAutoPickupMode(AutoPickupMode m);

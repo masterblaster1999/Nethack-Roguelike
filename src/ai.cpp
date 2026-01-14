@@ -865,6 +865,41 @@ void Game::monsterTurn() {
             agedThisTurn = true;
         }
 
+        // Procedural affix: Blinking (panic blink away when wounded).
+        if (procHasAffix(m.procAffixMask, ProcMonsterAffix::Blinking) && seesPlayer && m.effects.webTurns <= 0) {
+            const bool lowHp = (m.hp <= std::max(1, m.hpMax / 3));
+            if (lowHp) {
+                const int tier = std::min(3, procRankTier(m.procRank));
+                const float chance = (tier >= 3) ? 0.22f : (tier == 2) ? 0.18f : 0.14f;
+                if (rng.chance(chance)) {
+                    const bool wasVisible = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+                    for (int tries = 0; tries < 120; ++tries) {
+                        const Vec2i cand = dung.randomFloor(rng, true);
+                        if (cand == dung.stairsDown || cand == dung.stairsUp) continue;
+                        if (entityAt(cand.x, cand.y)) continue;
+
+                        const int dist = chebyshev(cand, p.pos);
+                        if (dist < 6) continue;
+                        if (dist > 18) continue; // keep it a *blink*, not a full teleport
+
+                        if (wasVisible) {
+                            pushFxParticle(FXParticlePreset::Blink, m.pos, 10, 0.18f);
+                            pushMsg(std::string("THE ") + kindName(m.kind) + " BLINKS!", MessageKind::Info, false);
+                        }
+
+                        m.pos = cand;
+
+                        if (wasVisible) {
+                            pushFxParticle(FXParticlePreset::Blink, m.pos, 10, 0.18f, 0.03f);
+                        }
+
+                        emitNoise(m.pos, 10);
+                        return;
+                    }
+                }
+            }
+        }
+
         // Determine hunt target.
         Vec2i target{-1, -1};
         bool hunting = false;

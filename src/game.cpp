@@ -786,6 +786,36 @@ int Game::xpFor(EntityKind k) const {
     }
 }
 
+
+int Game::xpFor(const Entity& e) const {
+    const int base = xpFor(e.kind);
+    if (base <= 0) return base;
+
+    const int affCount = procMonsterAffixCount(e.procAffixMask);
+
+    int tierBonusPct = 0;
+    switch (e.procRank) {
+        case ProcMonsterRank::Elite:    tierBonusPct = 40; break;
+        case ProcMonsterRank::Champion: tierBonusPct = 120; break;
+        case ProcMonsterRank::Mythic:   tierBonusPct = 220; break;
+        default:                        tierBonusPct = 0; break;
+    }
+
+    const int affBonusPct = affCount * 25; // +25% per affix
+    const int pct = 100 + tierBonusPct + affBonusPct;
+
+    if (pct == 100) return base;
+
+    const int64_t scaled = static_cast<int64_t>(base) * static_cast<int64_t>(pct);
+    int xpVal = static_cast<int>((scaled + 50) / 100); // rounded
+    xpVal = std::max(base, xpVal);
+
+    // Hard cap against extreme future combinations.
+    xpVal = std::min(xpVal, base * 10);
+
+    return xpVal;
+}
+
 void Game::grantXp(int amount) {
     if (amount <= 0) return;
     xp += amount;

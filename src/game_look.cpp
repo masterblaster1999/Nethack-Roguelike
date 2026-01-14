@@ -393,6 +393,21 @@ std::string Game::describeAt(Vec2i p) const {
             } else {
                 const EntityKind showKind = hallucinatedEntityKind(*this, *e);
                 std::string label = kindName(showKind);
+
+    // Procedural monster variants: surface rank + affixes (unless hallucinating).
+    if (!hallu && e && e->id != player().id) {
+        if (e->procRank != ProcMonsterRank::Normal || e->procAffixMask != 0u) {
+            label = kindName(e->kind);
+            const int tier = procRankTier(e->procRank);
+            if (tier > 0) {
+                label = std::string(procMonsterRankName(e->procRank)) + " " + label;
+            }
+            const std::string aff = procMonsterAffixList(e->procAffixMask);
+            if (!aff.empty()) {
+                label += " (" + aff + ")";
+            }
+        }
+    }
                 if (e->friendly) {
                     label += " (ALLY";
                     switch (e->allyOrder) {
@@ -411,7 +426,7 @@ std::string Game::describeAt(Vec2i p) const {
                 if (kindKills > 0) {
                     ss << " | KILLS: " << kindKills;
                 }
-                ss << " | XP: " << xpFor(showKind);
+                ss << " | XP: " << (hallu ? xpFor(showKind) : xpFor(*e));
 
                 if (showKind == EntityKind::Ghost) {
                     ss << " | ETHEREAL";

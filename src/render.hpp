@@ -195,7 +195,8 @@ public:
     std::string saveScreenshotBMP(const std::string& directory, const std::string& prefix = "procrogue_shot") const;
 
 private:
-    static constexpr int FRAMES = 2;
+    // Number of cached animation frames for procedurally-generated textures (gas/fire/etc.).
+    static constexpr int FRAMES = 4;
 
     // Room-style / decal style count.
     // style mapping (matches renderer helpers + spritegen themed floors):

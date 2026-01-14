@@ -358,6 +358,102 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
         }
     }
 
+    // Procedural monster affix on-hit procs.
+    // These give procedural variants "signature" combat identity without creating new monster kinds.
+    if (attacker.kind != EntityKind::Player && defender.hp > 0 && attacker.procAffixMask != 0u) {
+        const int tier = procRankTier(attacker.procRank);
+
+        auto canSeeProc = [&]() -> bool {
+            if (defender.kind == EntityKind::Player) return true;
+            if (!dung.inBounds(defender.pos.x, defender.pos.y)) return false;
+            return dung.at(defender.pos.x, defender.pos.y).visible;
+        };
+
+        // Venomous: poison on hit.
+        if (procHasAffix(attacker.procAffixMask, ProcMonsterAffix::Venomous) && defender.hp > 0) {
+            float chance = 0.22f + 0.06f * static_cast<float>(tier);
+            chance = std::clamp(chance, 0.0f, 0.65f);
+            if (rng.chance(chance)) {
+                const int before = defender.effects.poisonTurns;
+                const int turns = clampi(4 + tier * 2 + rng.range(0, 3), 3, 16);
+                defender.effects.poisonTurns = std::max(defender.effects.poisonTurns, turns);
+                if (before == 0 && defender.effects.poisonTurns > 0) {
+                    if (defender.kind == EntityKind::Player) {
+                        pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
+                    } else if (defender.friendly && canSeeProc()) {
+                        std::ostringstream ps;
+                        ps << "YOUR " << kindName(defender.kind) << " IS POISONED!";
+                        pushMsg(ps.str(), MessageKind::Info, true);
+                    }
+                    if (canSeeProc()) pushFxParticle(FXParticlePreset::Poison, defender.pos, 18, 0.35f);
+                }
+            }
+        }
+
+        // Flaming: burn on hit.
+        if (procHasAffix(attacker.procAffixMask, ProcMonsterAffix::Flaming) && defender.hp > 0) {
+            float chance = 0.18f + 0.05f * static_cast<float>(tier);
+            chance = std::clamp(chance, 0.0f, 0.60f);
+            if (rng.chance(chance)) {
+                const int before = defender.effects.burnTurns;
+                const int turns = clampi(3 + tier + rng.range(0, 2), 2, 12);
+                defender.effects.burnTurns = std::max(defender.effects.burnTurns, turns);
+                if (before == 0 && defender.effects.burnTurns > 0) {
+                    if (defender.kind == EntityKind::Player) {
+                        pushMsg("YOU CATCH FIRE!", MessageKind::Warning, false);
+                    } else if (defender.friendly && canSeeProc()) {
+                        std::ostringstream bs;
+                        bs << "YOUR " << kindName(defender.kind) << " CATCHES FIRE!";
+                        pushMsg(bs.str(), MessageKind::Info, true);
+                    }
+                }
+            }
+        }
+
+        // Webbing: ensnare on hit.
+        if (procHasAffix(attacker.procAffixMask, ProcMonsterAffix::Webbing) && defender.hp > 0) {
+            float chance = 0.16f + 0.04f * static_cast<float>(tier);
+            chance = std::clamp(chance, 0.0f, 0.55f);
+            if (rng.chance(chance)) {
+                const int before = defender.effects.webTurns;
+                const int turns = clampi(2 + tier + rng.range(0, 2), 2, 10);
+                defender.effects.webTurns = std::max(defender.effects.webTurns, turns);
+                if (before == 0 && defender.effects.webTurns > 0) {
+                    if (defender.kind == EntityKind::Player) {
+                        pushMsg("YOU ARE ENSNARED!", MessageKind::Warning, false);
+                    } else if (defender.friendly && canSeeProc()) {
+                        std::ostringstream ws;
+                        ws << "YOUR " << kindName(defender.kind) << " IS ENSNARED!";
+                        pushMsg(ws.str(), MessageKind::Info, true);
+                    }
+                }
+            }
+        }
+
+        // Vampiric: heal attacker from damage dealt.
+        if (procHasAffix(attacker.procAffixMask, ProcMonsterAffix::Vampiric) && dmg > 0 && attacker.hp > 0) {
+            float chance = 0.35f + 0.05f * static_cast<float>(tier);
+            chance = std::clamp(chance, 0.0f, 0.75f);
+            if (rng.chance(chance)) {
+                const int beforeHp = attacker.hp;
+                const int heal = clampi(1 + dmg / 5 + tier, 1, 10);
+                attacker.hp = std::min(attacker.hpMax, attacker.hp + heal);
+                if (attacker.hp > beforeHp) {
+                    if (defender.kind == EntityKind::Player) {
+                        pushMsg("YOUR LIFE IS DRAINED!", MessageKind::Warning, false);
+                    } else if (defender.friendly && canSeeProc()) {
+                        std::ostringstream vs;
+                        vs << "YOUR " << kindName(defender.kind) << " IS DRAINED!";
+                        pushMsg(vs.str(), MessageKind::Info, true);
+                    }
+                    if (dung.inBounds(attacker.pos.x, attacker.pos.y) && dung.at(attacker.pos.x, attacker.pos.y).visible) {
+                        pushFxParticle(FXParticlePreset::Heal, attacker.pos, 12, 0.30f);
+                    }
+                }
+            }
+        }
+    }
+
     // Knockback / forced movement.
     // Adds tactical positioning and makes chasms/pillars matter more.
     bool skipDeathMsg = false;
@@ -565,7 +661,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                     if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
                 }
 
-                grantXp(xpFor(defender.kind));
+                grantXp(xpFor(defender));
             }
         }
     }
@@ -745,6 +841,101 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
             }
         }
 
+        // Procedural monster affix on-hit procs (ranged).
+        if (attacker.kind != EntityKind::Player && hit->hp > 0 && attacker.procAffixMask != 0u) {
+            const int tier = procRankTier(attacker.procRank);
+
+            auto canSeeProc = [&]() -> bool {
+                if (hit->kind == EntityKind::Player) return true;
+                if (!dung.inBounds(hit->pos.x, hit->pos.y)) return false;
+                return dung.at(hit->pos.x, hit->pos.y).visible;
+            };
+
+            // Venomous: poison on hit (reduced vs melee).
+            if (procHasAffix(attacker.procAffixMask, ProcMonsterAffix::Venomous) && hit->hp > 0) {
+                float chance = (0.20f + 0.05f * static_cast<float>(tier)) * 0.75f;
+                chance = std::clamp(chance, 0.0f, 0.50f);
+                if (rng.chance(chance)) {
+                    const int before = hit->effects.poisonTurns;
+                    const int turns = clampi(3 + tier * 2 + rng.range(0, 3), 3, 14);
+                    hit->effects.poisonTurns = std::max(hit->effects.poisonTurns, turns);
+                    if (before == 0 && hit->effects.poisonTurns > 0) {
+                        if (hit->kind == EntityKind::Player) {
+                            pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
+                        } else if (hit->friendly && canSeeProc()) {
+                            std::ostringstream ps;
+                            ps << "YOUR " << kindName(hit->kind) << " IS POISONED!";
+                            pushMsg(ps.str(), MessageKind::Info, true);
+                        }
+                        if (canSeeProc()) pushFxParticle(FXParticlePreset::Poison, hit->pos, 16, 0.35f);
+                    }
+                }
+            }
+
+            // Flaming: burn on hit.
+            if (procHasAffix(attacker.procAffixMask, ProcMonsterAffix::Flaming) && hit->hp > 0) {
+                float chance = (0.16f + 0.05f * static_cast<float>(tier)) * 0.85f;
+                chance = std::clamp(chance, 0.0f, 0.55f);
+                if (rng.chance(chance)) {
+                    const int before = hit->effects.burnTurns;
+                    const int turns = clampi(2 + tier + rng.range(0, 2), 2, 10);
+                    hit->effects.burnTurns = std::max(hit->effects.burnTurns, turns);
+                    if (before == 0 && hit->effects.burnTurns > 0) {
+                        if (hit->kind == EntityKind::Player) {
+                            pushMsg("YOU CATCH FIRE!", MessageKind::Warning, false);
+                        } else if (hit->friendly && canSeeProc()) {
+                            std::ostringstream bs;
+                            bs << "YOUR " << kindName(hit->kind) << " CATCHES FIRE!";
+                            pushMsg(bs.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+            }
+
+            // Webbing: ensnare on hit (rare for ranged).
+            if (procHasAffix(attacker.procAffixMask, ProcMonsterAffix::Webbing) && hit->hp > 0) {
+                float chance = (0.10f + 0.03f * static_cast<float>(tier)) * 0.55f;
+                chance = std::clamp(chance, 0.0f, 0.35f);
+                if (rng.chance(chance)) {
+                    const int before = hit->effects.webTurns;
+                    const int turns = clampi(2 + tier + rng.range(0, 2), 2, 8);
+                    hit->effects.webTurns = std::max(hit->effects.webTurns, turns);
+                    if (before == 0 && hit->effects.webTurns > 0) {
+                        if (hit->kind == EntityKind::Player) {
+                            pushMsg("YOU ARE ENSNARED!", MessageKind::Warning, false);
+                        } else if (hit->friendly && canSeeProc()) {
+                            std::ostringstream ws;
+                            ws << "YOUR " << kindName(hit->kind) << " IS ENSNARED!";
+                            pushMsg(ws.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+            }
+
+            // Vampiric: life drain (reduced vs melee).
+            if (procHasAffix(attacker.procAffixMask, ProcMonsterAffix::Vampiric) && dmg > 0 && attacker.hp > 0) {
+                float chance = (0.30f + 0.05f * static_cast<float>(tier)) * 0.60f;
+                chance = std::clamp(chance, 0.0f, 0.55f);
+                if (rng.chance(chance)) {
+                    const int beforeHp = attacker.hp;
+                    const int heal = clampi(1 + dmg / 6 + tier, 1, 8);
+                    attacker.hp = std::min(attacker.hpMax, attacker.hp + heal);
+                    if (attacker.hp > beforeHp) {
+                        if (hit->kind == EntityKind::Player) {
+                            pushMsg("YOUR LIFE IS DRAINED!", MessageKind::Warning, false);
+                        } else if (hit->friendly && canSeeProc()) {
+                            std::ostringstream vs;
+                            vs << "YOUR " << kindName(hit->kind) << " IS DRAINED!";
+                            pushMsg(vs.str(), MessageKind::Info, true);
+                        }
+                        if (dung.inBounds(attacker.pos.x, attacker.pos.y) && dung.at(attacker.pos.x, attacker.pos.y).visible) {
+                            pushFxParticle(FXParticlePreset::Heal, attacker.pos, 10, 0.30f);
+                        }
+                    }
+                }
+            }
+        }
+
         if (hit->hp <= 0) {
             if (hit->kind == EntityKind::Player) {
                 pushMsg("YOU DIE.", MessageKind::Combat, false);
@@ -764,7 +955,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                         if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
                     }
 
-                    grantXp(xpFor(hit->kind));
+                    grantXp(xpFor(*hit));
                 }
             }
         }
@@ -992,7 +1183,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                             if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
                         }
 
-                        grantXp(xpFor(e->kind));
+                        grantXp(xpFor(*e));
                     }
                 }
             }

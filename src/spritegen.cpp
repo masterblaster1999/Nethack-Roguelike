@@ -5407,7 +5407,8 @@ SpritePixels generateFountainTile(uint32_t seed, int frame, int pxSize) {
                 float n = rand01(hv);
 
                 // Simple ripple bands that shift each frame.
-                const float band = std::sin((static_cast<float>(x + y) * 0.8f) + (frame ? 1.4f : 0.0f));
+                const float phase = static_cast<float>(frame) * 0.90f;
+                const float band = std::sin((static_cast<float>(x + y) * 0.8f) + phase);
                 float ripple = (band * 0.5f + 0.5f) * 0.35f; // 0..~0.35
                 ripple += (n - 0.5f) * 0.12f; // subtle noise
 
@@ -5423,12 +5424,24 @@ SpritePixels generateFountainTile(uint32_t seed, int frame, int pxSize) {
         }
     }
 
-    // Small central spout / sparkle.
-    if (frame % 2 == 1) {
-        setPx(s, 8, 6, add(s.at(8, 6), 18, 22, 26));
-        setPx(s, 7, 7, add(s.at(7, 7), 10, 12, 14));
-    } else {
-        setPx(s, 8, 6, add(s.at(8, 6), 10, 12, 14));
+    // Small central spout / sparkle (4-frame pulse).
+    {
+        const int ph = (frame & 3);
+        int addR = 10, addG = 12, addB = 14;
+        int addR2 = 0, addG2 = 0, addB2 = 0;
+
+        switch (ph) {
+            default:
+            case 0: addR = 10; addG = 12; addB = 14; addR2 = 0;  addG2 = 0;  addB2 = 0;  break; // idle
+            case 1: addR = 18; addG = 22; addB = 26; addR2 = 10; addG2 = 12; addB2 = 14; break; // bright
+            case 2: addR = 14; addG = 18; addB = 22; addR2 = 6;  addG2 = 8;  addB2 = 10; break; // mid
+            case 3: addR = 8;  addG = 10; addB = 12; addR2 = 0;  addG2 = 0;  addB2 = 0;  break; // dim
+        }
+
+        setPx(s, 8, 6, add(s.at(8, 6), addR, addG, addB));
+        if (addR2 > 0 || addG2 > 0 || addB2 > 0) {
+            setPx(s, 7, 7, add(s.at(7, 7), addR2, addG2, addB2));
+        }
     }
 
     // Crisp outline on the basin rim.
@@ -5918,19 +5931,30 @@ SpritePixels generateFloorDecalTile(uint32_t seed, uint8_t style, int frame, int
             break;
         }
 
-        case 2: { // Lair: grime + claw marks
+        case 2: { // Lair: animated biofilm shimmer + claw marks
+            // This decal is intentionally *animated* across all 4 frames.
+            // Rather than a binary on/off shimmer, we use a small looping drift field
+            // so lair floors feel alive (spores/biofilm) without adding new tile types.
+
             Color moss{ 70, 140, 70, 120 };
             Color grime{ 30, 35, 28, 120 };
 
-            // moss clumps around edges
-            for (int i = 0; i < 22; ++i) {
+            // Moss clumps around edges (static per-seed so the room layout stays consistent).
+            for (int i = 0; i < 26; ++i) {
                 int x = (rng.chance(0.5f) ? rng.range(0, 5) : rng.range(10, 15));
                 int y = rng.range(0, 15);
                 if (rng.chance(0.5f)) std::swap(x, y);
-                setPx(s, x, y, rng.chance(0.6f) ? moss : grime);
+                setPx(s, x, y, rng.chance(0.62f) ? moss : grime);
             }
 
-            // claw marks
+            // A few interior specks (keeps larger tiles from looking too edge-heavy).
+            for (int i = 0; i < 7; ++i) {
+                int x = rng.range(2, 13);
+                int y = rng.range(2, 13);
+                if (rng.chance(0.55f)) setPx(s, x, y, mul(moss, 0.90f));
+            }
+
+            // Claw marks (static, but read well when highlighted by the biofilm shimmer).
             Color claw{ 20, 15, 15, 150 };
             int x0 = rng.range(2, 6);
             int y0 = rng.range(9, 13);
@@ -5939,38 +5963,97 @@ SpritePixels generateFloorDecalTile(uint32_t seed, uint8_t style, int frame, int
                 line(s, x0 + dx, y0 - i, x0 + dx + 4, y0 - i - 5, claw);
             }
 
-            // faint slime shimmer
-            if (frame % 2 == 1 && rng.chance(0.55f)) {
-                int cx = rng.range(2, 13);
-                int cy = rng.range(2, 13);
-                setPx(s, cx, cy, Color{120, 220, 160, 70});
+            // 4-frame looping drift offsets (0, +, 0, -). This guarantees a clean loop
+            // while still creating motion.
+            const int ph = (frame & 3);
+            int ox = 0, oy = 0;
+            if (ph == 1) { ox = 3; oy = 1; }
+            else if (ph == 3) { ox = -3; oy = -1; }
+
+            // Animated shimmer mask: only affects pixels already painted by this decal,
+            // so it reads as wet/slimy sheen rather than random green noise.
+            const uint32_t baseH = hash32(seed ^ 0xB10F11Au);
+            for (int y = 0; y < 16; ++y) {
+                for (int x = 0; x < 16; ++x) {
+                    Color c = s.at(x, y);
+                    if (c.a == 0) continue;
+
+                    const int sx = (x + ox) & 15;
+                    const int sy = (y + oy) & 15;
+                    const uint32_t hv = hash32(baseH ^ static_cast<uint32_t>(sx * 73856093) ^ static_cast<uint32_t>(sy * 19349663));
+                    const uint8_t r = static_cast<uint8_t>(hv & 0xFFu);
+
+                    // Rare bright glints + more common soft sheen.
+                    if (r > 246u) {
+                        setPx(s, x, y, add(c, 10, 34, 16));
+                    } else if (r > 232u && ((x + y + ph) & 1) == 0) {
+                        setPx(s, x, y, add(c, 5, 18, 9));
+                    }
+                }
             }
             break;
         }
 
-        case 3: { // Shrine: runes (cool glow)
+        case 3: { // Shrine: rotating runes (cool glow)
             Color rune{ 160, 210, 255, 150 };
             Color rune2{ 120, 170, 255, 120 };
-            if (frame % 2 == 1) {
-                rune = add(rune, 25, 25, 25);
-                rune.a = 180;
-            }
 
-            // central sigil
+            // 4-frame pulse (brighter at frame 1, dimmer at frame 3).
+            const int ph = (frame & 3);
+            float pulse = 1.0f;
+            if (ph == 1) pulse = 1.18f;
+            else if (ph == 3) pulse = 0.92f;
+            rune = mul(rune, pulse);
+            rune2 = mul(rune2, pulse);
+            rune.a = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(rune.a) + ((ph == 1) ? 35 : (ph == 3 ? -18 : 0)), 90, 220));
+            rune2.a = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(rune2.a) + ((ph == 1) ? 25 : (ph == 3 ? -12 : 0)), 70, 200));
+
+            // Central sigil.
             int cx = 8 + rng.range(-1, 1);
             int cy = 8 + rng.range(-1, 1);
-            circle(s, cx, cy, 3, rune2);
-            circle(s, cx, cy, 2, rune);
+            circle(s, cx, cy, 4, rune2);
+            circle(s, cx, cy, 3, rune);
 
-            // spokes
-            line(s, cx, cy - 4, cx, cy + 4, rune);
-            line(s, cx - 4, cy, cx + 4, cy, rune);
+            // Rotating rune marks: pick base indices deterministically, then rotate by a
+            // quarter-turn each frame (12 points, shift by 3 => full loop in 4 frames).
+            static constexpr int RING_N = 12;
+            static const Vec2i ring[RING_N] = {
+                { 0, -5 }, { 3, -4 }, { 5, -2 }, { 5,  0 }, { 5,  2 }, { 3,  4 },
+                { 0,  5 }, { -3, 4 }, { -5, 2 }, { -5, 0 }, { -5,-2 }, { -3,-4 }
+            };
 
-            // dots
-            for (int i = 0; i < 4; ++i) {
-                int x = cx + (i < 2 ? -5 : 5);
-                int y = cy + (i % 2 ? -5 : 5);
-                setPx(s, std::clamp(x, 0, 15), std::clamp(y, 0, 15), rune2);
+            bool used[RING_N]{};
+            const int shift = (ph * 3) % RING_N;
+
+            for (int i = 0; i < 6; ++i) {
+                int baseIdx = rng.range(0, RING_N - 1);
+                for (int tries = 0; tries < 16 && used[baseIdx]; ++tries) baseIdx = rng.range(0, RING_N - 1);
+                used[baseIdx] = true;
+
+                const int idx = (baseIdx + shift) % RING_N;
+                const int x = cx + ring[idx].x;
+                const int y = cy + ring[idx].y;
+
+                const uint32_t g = hash32(seed ^ static_cast<uint32_t>(baseIdx * 1337) ^ 0x51A11u);
+                const int kind = static_cast<int>(g & 3u);
+
+                // Small glyph strokes.
+                switch (kind) {
+                    default:
+                    case 0: line(s, x, y - 1, x, y + 1, rune); break;
+                    case 1: line(s, x - 1, y, x + 1, y, rune); break;
+                    case 2: line(s, x - 1, y - 1, x + 1, y + 1, rune); break;
+                    case 3: line(s, x - 1, y + 1, x + 1, y - 1, rune); break;
+                }
+                setPx(s, x, y, rune);
+                if (rng.chance(0.35f)) setPx(s, x + (ring[idx].x > 0 ? 1 : -1), y, rune2);
+            }
+
+            // Center sparkle pulse (ties the animation together).
+            if (ph == 1) {
+                sparkle(cx, cy, Color{255, 250, 235, 185});
+            } else if (ph == 2) {
+                sparkle(cx, cy, Color{210, 235, 255, 150});
             }
             break;
         }
@@ -6199,7 +6282,7 @@ SpritePixels generateIsometricFloorDecalOverlay(uint32_t seed, uint8_t style, in
             break;
         }
 
-        case 2: { // Lair: grime + claw marks
+        case 2: { // Lair: animated biofilm shimmer + claw marks
             Color moss{ 70, 140, 70, 120 };
             Color grime{ 30, 35, 28, 120 };
 
@@ -6221,23 +6304,45 @@ SpritePixels generateIsometricFloorDecalOverlay(uint32_t seed, uint8_t style, in
                 drawThickLine(p0.x + ox, p0.y - oy, p0.x + ox + std::max(6, w / 6), p0.y - oy - std::max(3, h / 4), claw);
             }
 
-            // faint slime shimmer
-            if (frame % 2 == 1 && rng.chance(0.55f)) {
-                Vec2i p = pickInside(0.22f);
-                setPx(s, p.x, p.y, Color{120, 220, 160, 70});
+            // Animated shimmer: 4-frame looping drift offsets (0, +, 0, -).
+            const int ph = (frame & 3);
+            const int scX = std::max(1, w / 16);
+            const int scY = std::max(1, h / 16);
+            int ox = 0, oy = 0;
+            if (ph == 1) { ox = 3 * scX; oy = 2 * scY; }
+            else if (ph == 3) { ox = -3 * scX; oy = -2 * scY; }
+
+            const uint32_t baseH = hash32(seed ^ 0xB10F11Au ^ 0x150DEu);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    Color c = s.at(x, y);
+                    if (c.a == 0) continue;
+                    const uint32_t hv = hash32(baseH ^ static_cast<uint32_t>((x + ox) * 73856093) ^ static_cast<uint32_t>((y + oy) * 19349663));
+                    const uint8_t r = static_cast<uint8_t>(hv & 0xFFu);
+                    if (r > 248u) {
+                        setPx(s, x, y, add(c, 10, 34, 16));
+                    } else if (r > 236u && ((x + y + ph) & 1) == 0) {
+                        setPx(s, x, y, add(c, 5, 18, 9));
+                    }
+                }
             }
             break;
         }
 
-        case 3: { // Shrine: runes (cool glow)
+        case 3: { // Shrine: rotating runes (cool glow)
             Color rune{ 160, 210, 255, 150 };
             Color rune2{ 120, 170, 255, 120 };
-            if (frame % 2 == 1) {
-                rune = add(rune, 25, 25, 25);
-                rune.a = 180;
-            }
 
-            // central sigil ring (slightly elliptical in tile pixel aspect)
+            const int ph = (frame & 3);
+            float pulse = 1.0f;
+            if (ph == 1) pulse = 1.18f;
+            else if (ph == 3) pulse = 0.92f;
+            rune = mul(rune, pulse);
+            rune2 = mul(rune2, pulse);
+            rune.a = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(rune.a) + ((ph == 1) ? 35 : (ph == 3 ? -18 : 0)), 90, 220));
+            rune2.a = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(rune2.a) + ((ph == 1) ? 25 : (ph == 3 ? -12 : 0)), 70, 200));
+
+            // Central sigil ring (slightly elliptical in tile pixel aspect).
             const float r0 = 0.18f;
             const float r1 = 0.27f;
             const float r2 = 0.14f;
@@ -6257,15 +6362,45 @@ SpritePixels generateIsometricFloorDecalOverlay(uint32_t seed, uint8_t style, in
                 }
             }
 
-            // spokes / cross
-            drawThickLine(static_cast<int>(cx), 0, static_cast<int>(cx), h - 1, rune);
-            drawThickLine(0, static_cast<int>(cy), w - 1, static_cast<int>(cy), rune);
+            // Rotating rune marks: choose a few glyph anchors on an ellipse and rotate them.
+            static constexpr int K = 12;
+            const int shift = (ph * 3) % K;
+            bool used[K]{};
 
-            // four dots
-            setPx(s, static_cast<int>(cx) - (w / 6), static_cast<int>(cy), rune2);
-            setPx(s, static_cast<int>(cx) + (w / 6), static_cast<int>(cy), rune2);
-            setPx(s, static_cast<int>(cx), static_cast<int>(cy) - (h / 6), rune2);
-            setPx(s, static_cast<int>(cx), static_cast<int>(cy) + (h / 6), rune2);
+            const float ringR = 0.45f;
+            const int gsz = std::max(1, w / 64);
+
+            for (int i = 0; i < 6; ++i) {
+                int baseIdx = rng.range(0, K - 1);
+                for (int tries = 0; tries < 16 && used[baseIdx]; ++tries) baseIdx = rng.range(0, K - 1);
+                used[baseIdx] = true;
+
+                const int idx = (baseIdx + shift) % K;
+                const float ang = (static_cast<float>(idx) * 6.2831853f) / static_cast<float>(K);
+
+                const int x = static_cast<int>(std::lround(cx + std::cos(ang) * hw * ringR));
+                const int y = static_cast<int>(std::lround(cy + std::sin(ang) * hh * ringR));
+                if (!inside(x, y, 0.12f)) continue;
+
+                const uint32_t g = hash32(seed ^ static_cast<uint32_t>(baseIdx * 1337) ^ 0x51A11u);
+                const int kind = static_cast<int>(g & 3u);
+
+                // Small glyph strokes (scaled by gsz so larger tiles don't look too sparse).
+                switch (kind) {
+                    default:
+                    case 0: line(s, x, y - gsz, x, y + gsz, rune); break;
+                    case 1: line(s, x - gsz, y, x + gsz, y, rune); break;
+                    case 2: line(s, x - gsz, y - gsz, x + gsz, y + gsz, rune); break;
+                    case 3: line(s, x - gsz, y + gsz, x + gsz, y - gsz, rune); break;
+                }
+                setPx(s, x, y, rune);
+                if (rng.chance(0.30f)) setPx(s, x + (gsz + 1), y, rune2);
+            }
+
+            if (ph == 1) {
+                Vec2i sp = pickInside(0.22f);
+                sparkle(sp.x, sp.y, Color{255, 250, 235, 185});
+            }
             break;
         }
 

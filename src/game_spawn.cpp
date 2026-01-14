@@ -70,6 +70,235 @@ ItemKind pickSpellbookKind(RNG& rng, int depth) {
     return table[0].kind;
 }
 
+
+// -----------------------------------------------------------------------------
+// Procedural monster variants (rank + affixes)
+// -----------------------------------------------------------------------------
+
+struct ProcAffixWeight {
+    ProcMonsterAffix affix;
+    int weight;
+};
+
+static bool procVariantEligible(EntityKind k, RoomType rt, int depth) {
+    if (depth < 3) return false;
+    if (rt == RoomType::Shop) return false;
+
+    switch (k) {
+        case EntityKind::Player:
+        case EntityKind::Shopkeeper:
+        case EntityKind::Dog:
+        case EntityKind::Guard:
+        case EntityKind::Minotaur:
+            return false;
+        default:
+            return true;
+    }
+}
+
+static ProcMonsterRank rollProcRank(RNG& rr, EntityKind k, int depth, RoomType rt) {
+    const float t = std::clamp((depth - 1) / float(Game::DUNGEON_MAX_DEPTH - 1), 0.0f, 1.0f);
+
+    // Base chances ramp with depth.
+    float elite = 0.03f + 0.10f * t; // 3% -> 13%
+    float champ = (t < 0.20f) ? 0.0f : (0.01f + 0.05f * (t - 0.20f) / 0.80f); // ~0% -> 6%
+    float myth  = (t < 0.55f) ? 0.0f : (0.004f + 0.016f * (t - 0.55f) / 0.45f); // ~0% -> 2%
+
+    // Room spice: treasure areas are a bit nastier.
+    if (rt == RoomType::Vault || rt == RoomType::Treasure || rt == RoomType::Secret) {
+        elite += 0.04f;
+        champ += 0.02f;
+        myth  += 0.01f;
+    } else if (rt == RoomType::Lair) {
+        elite += 0.02f;
+    } else if (rt == RoomType::Laboratory) {
+        champ += 0.01f;
+    }
+
+    // Kind bias: frail critters are less likely to show up as mythic.
+    if (k == EntityKind::Bat || k == EntityKind::Slime) {
+        myth *= 0.40f;
+        champ *= 0.70f;
+    }
+
+    elite = std::clamp(elite, 0.0f, 0.30f);
+    champ = std::clamp(champ, 0.0f, 0.18f);
+    myth  = std::clamp(myth,  0.0f, 0.06f);
+
+    float x = rr.next01();
+    if (x < myth) return ProcMonsterRank::Mythic;
+    x -= myth;
+    if (x < champ) return ProcMonsterRank::Champion;
+    x -= champ;
+    if (x < elite) return ProcMonsterRank::Elite;
+    return ProcMonsterRank::Normal;
+}
+
+static void buildProcAffixPool(std::vector<ProcAffixWeight>& out, EntityKind k, RoomType rt, int depth) {
+    out.clear();
+    out.reserve(12);
+
+    auto add = [&](ProcMonsterAffix a, int w) {
+        if (w <= 0) return;
+        out.push_back({a, w});
+    };
+
+    const bool fast = (k == EntityKind::Bat || k == EntityKind::Wolf || k == EntityKind::Snake ||
+                       k == EntityKind::Nymph || k == EntityKind::Leprechaun);
+    const bool tough = (k == EntityKind::Ogre || k == EntityKind::Troll || k == EntityKind::Zombie || k == EntityKind::Wizard);
+    const bool cunning = (k == EntityKind::Wizard || k == EntityKind::Nymph || k == EntityKind::Leprechaun || k == EntityKind::Mimic);
+
+    int wSwift = fast ? 9 : 3;
+    int wStone = tough ? 8 : 3;
+    int wSavage = tough ? 6 : 4;
+    int wBlink = (depth >= 4 && cunning) ? 7 : (depth >= 6 ? 2 : 0);
+    int wGold = 2;
+
+    // Combat-proc affixes.
+    const bool undead = entityIsUndead(k);
+    const bool beast = (k == EntityKind::Bat || k == EntityKind::Wolf || k == EntityKind::Snake || k == EntityKind::Spider || k == EntityKind::Dog);
+    const bool humanoid = (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k));
+
+    int wVenom = 0;
+    if (beast || cunning) wVenom = 4;
+    if (k == EntityKind::Snake || k == EntityKind::Spider) wVenom += 12;
+    if (rt == RoomType::Lair) wVenom += 7;
+    if (undead) wVenom = std::max(0, wVenom - 3);
+
+    int wWeb = 0;
+    if (k == EntityKind::Spider || k == EntityKind::Mimic) wWeb = 10;
+    else if (rt == RoomType::Lair) wWeb = 5;
+    if (cunning) wWeb += 2;
+    if (undead) wWeb = std::max(0, wWeb - 2);
+
+    int wFlame = 1 + depth / 5;
+    if (rt == RoomType::Laboratory) wFlame += 9;
+    if (rt == RoomType::Shrine) wFlame += 6;
+    if (k == EntityKind::Wizard) wFlame += 6;
+    if (k == EntityKind::Slime) wFlame = std::max(0, wFlame - 2);
+
+    int wVamp = 0;
+    if (depth >= 5) {
+        wVamp = undead ? (8 + depth / 4) : 2;
+        if (k == EntityKind::Ghost) wVamp += 6;
+        if (rt == RoomType::Shrine) wVamp += 4;
+        if (humanoid && depth >= 9) wVamp += 2;
+    }
+
+    // Humanoid-ish enemies are more likely to be gilded.
+    if (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k)) wGold += 3;
+
+    if (rt == RoomType::Vault || rt == RoomType::Treasure) wGold += 4;
+    if (rt == RoomType::Lair) wSavage += 2;
+
+    add(ProcMonsterAffix::Swift, wSwift);
+    add(ProcMonsterAffix::Stonehide, wStone);
+    add(ProcMonsterAffix::Savage, wSavage);
+    add(ProcMonsterAffix::Blinking, wBlink);
+    add(ProcMonsterAffix::Gilded, wGold);
+
+    // Proc affixes that add on-hit status effects / sustain.
+    add(ProcMonsterAffix::Venomous, wVenom);
+    add(ProcMonsterAffix::Flaming, wFlame);
+    add(ProcMonsterAffix::Vampiric, wVamp);
+    add(ProcMonsterAffix::Webbing, wWeb);
+}
+
+static uint32_t rollProcAffixes(RNG& rr, EntityKind k, ProcMonsterRank rank, RoomType rt, int depth) {
+    const int tier = procRankTier(rank);
+    if (tier <= 0) return 0u;
+
+    int want = (tier == 1) ? 1 : (tier == 2) ? 2 : 3;
+
+    // Some early mythics roll only 2 affixes to keep spikes sane.
+    if (rank == ProcMonsterRank::Mythic && depth < 12 && rr.chance(0.35f)) want = 2;
+
+    std::vector<ProcAffixWeight> pool;
+    buildProcAffixPool(pool, k, rt, depth);
+
+    uint32_t mask = 0u;
+    for (int n = 0; n < want; ++n) {
+        int total = 0;
+        for (const auto& e : pool) {
+            if ((mask & procAffixBit(e.affix)) != 0u) continue;
+            total += std::max(0, e.weight);
+        }
+        if (total <= 0) break;
+
+        int roll = rr.range(1, total);
+        ProcMonsterAffix picked = ProcMonsterAffix::None;
+        for (const auto& e : pool) {
+            if ((mask & procAffixBit(e.affix)) != 0u) continue;
+            roll -= std::max(0, e.weight);
+            if (roll <= 0) {
+                picked = e.affix;
+                break;
+            }
+        }
+        if (picked == ProcMonsterAffix::None) break;
+        mask |= procAffixBit(picked);
+    }
+
+    return mask;
+}
+
+static int scaledInt(int v, float mult) {
+    const float f = static_cast<float>(v) * mult;
+    return std::max(1, static_cast<int>(f + 0.5f));
+}
+
+static void applyProcVariant(Entity& e, ProcMonsterRank rank, uint32_t affixMask) {
+    e.procRank = rank;
+    e.procAffixMask = affixMask;
+
+    const int tier = procRankTier(rank);
+    if (tier <= 0 && affixMask == 0u) return;
+
+    // Rank-based scaling.
+    if (tier == 1) {
+        e.hpMax = scaledInt(e.hpMax, 1.35f);
+        e.baseAtk += 1;
+        e.baseDef += 1;
+        if (e.canRanged) e.rangedAtk += 1;
+        e.speed = clampi(scaledInt(e.speed, 1.05f) + 4, 10, 230);
+    } else if (tier == 2) {
+        e.hpMax = scaledInt(e.hpMax, 1.60f);
+        e.baseAtk += 2;
+        e.baseDef += 2;
+        if (e.canRanged) e.rangedAtk += 2;
+        e.speed = clampi(scaledInt(e.speed, 1.08f) + 7, 10, 235);
+        e.willFlee = false;
+    } else if (tier >= 3) {
+        e.hpMax = scaledInt(e.hpMax, 1.90f);
+        e.baseAtk += 3;
+        e.baseDef += 3;
+        if (e.canRanged) e.rangedAtk += 3;
+        e.speed = clampi(scaledInt(e.speed, 1.10f) + 10, 10, 240);
+        e.willFlee = false;
+    }
+
+    // Affix-based scaling.
+    if (procHasAffix(affixMask, ProcMonsterAffix::Swift)) {
+        e.speed = clampi(scaledInt(e.speed, 1.25f), 10, 250);
+    }
+    if (procHasAffix(affixMask, ProcMonsterAffix::Stonehide)) {
+        e.baseDef += 2;
+        e.hpMax = scaledInt(e.hpMax, 1.15f);
+    }
+    if (procHasAffix(affixMask, ProcMonsterAffix::Savage)) {
+        e.baseAtk += 2;
+        if (e.canRanged) e.rangedAtk += 1;
+    }
+
+    // Keep numbers sane.
+    e.baseAtk = std::max(0, e.baseAtk);
+    e.baseDef = std::max(0, e.baseDef);
+    if (e.canRanged) e.rangedAtk = std::max(0, e.rangedAtk);
+
+    // After scaling: reset current HP.
+    e.hp = e.hpMax;
+}
+
 } // namespace
 
 Vec2i Game::randomFreeTileInRoom(const Room& r, int tries) {
@@ -129,6 +358,8 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
     e.groupId = groupId;
     e.spriteSeed = (forcedSpriteSeed != 0u) ? forcedSpriteSeed : rng.nextU32();
 
+    const RoomType rtHere = roomTypeAt(dung, pos);
+
     // Monster turn scheduling (fix: ensure spawned monsters use their intended speed).
     e.speed = baseSpeedFor(k);
 
@@ -173,7 +404,7 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
     // This makes loot feel more "earned" (you can take what they were using),
     // and creates emergent difficulty when monsters pick up better weapons/armor.
     if (allowGear && (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k))) {
-        const RoomType rt = roomTypeAt(dung, pos);
+        const RoomType rt = rtHere;
 
         auto makeGear = [&](ItemKind kind) -> Item {
             Item it;
@@ -301,6 +532,19 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
                 e.pocketConsumable = makePocket(picked, count);
             }
         }
+    }
+
+
+    // Procedural monster variants (rank + affixes).
+    // Applied after baseline stats/gear so modifiers scale the final creature.
+    if (branch_ == DungeonBranch::Main && procVariantEligible(k, rtHere, depth_)) {
+        const uint32_t seed = hashCombine(e.spriteSeed ^ 0xC0FFEEu,
+                                          hashCombine(static_cast<uint32_t>(k),
+                                                      hashCombine(static_cast<uint32_t>(depth_), static_cast<uint32_t>(rtHere))));
+        RNG prng(seed);
+        const ProcMonsterRank pr = rollProcRank(prng, k, depth_, rtHere);
+        const uint32_t pm = rollProcAffixes(prng, k, pr, rtHere, depth_);
+        applyProcVariant(e, pr, pm);
     }
 
     return e;
@@ -2763,6 +3007,9 @@ void Game::cleanupDead() {
         // If an entity died off-map (e.g. fell through a trap door), don't drop loot/corpses here.
         if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
 
+        const int tier = procRankTier(e.procRank);
+        const bool gilded = procHasAffix(e.procAffixMask, ProcMonsterAffix::Gilded);
+
         // Corpse drops (organic remains).
         // These are heavy, rot away over time, and can be eaten.
         {
@@ -2844,6 +3091,14 @@ void Game::cleanupDead() {
             dropGroundItem(e.pos, ItemKind::Gold, e.stolenGold);
         }
 
+        // Gilded affix: bonus gold drop (in addition to any stolen gold).
+        if (gilded) {
+            const int depthBonus = std::max(0, depth_ - 1);
+            int bonus = rng.range(4, 10) + depthBonus * 2 + std::min(3, tier) * 4;
+            bonus = std::max(1, bonus);
+            dropGroundItem(e.pos, ItemKind::Gold, bonus);
+        }
+
         // Pocket consumable: drop any remaining carried consumable so the player
         // can recover it.
         if (e.pocketConsumable.id != 0 && e.pocketConsumable.count > 0) {
@@ -2855,7 +3110,12 @@ void Game::cleanupDead() {
 
 
         // Simple drops
-        if (rng.chance(0.55f)) {
+        float dropChance = 0.55f;
+        if (tier > 0) dropChance += 0.10f * static_cast<float>(std::min(3, tier));
+        if (gilded) dropChance += 0.05f;
+        dropChance = std::min(dropChance, 0.90f);
+
+        if (rng.chance(dropChance)) {
             GroundItem gi;
             gi.pos = e.pos;
             gi.item.id = nextItemId++;
@@ -2916,7 +3176,11 @@ void Game::cleanupDead() {
             const bool keyCarrier = (e.kind == EntityKind::Goblin || e.kind == EntityKind::Orc || e.kind == EntityKind::KoboldSlinger ||
                                      e.kind == EntityKind::SkeletonArcher || e.kind == EntityKind::Wizard || e.kind == EntityKind::Ogre ||
                                      e.kind == EntityKind::Troll);
-            if (keyCarrier && rng.chance(0.07f)) {
+            float keyChance = 0.07f + 0.03f * static_cast<float>(std::min(3, tier));
+            if (gilded) keyChance += 0.03f;
+            if (depth_ >= 10) keyChance += 0.02f;
+            keyChance = std::min(keyChance, 0.25f);
+            if (keyCarrier && rng.chance(keyChance)) {
                 GroundItem kg;
                 kg.pos = e.pos;
                 kg.item.id = nextItemId++;

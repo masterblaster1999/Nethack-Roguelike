@@ -1,13 +1,14 @@
 {
-  "patch_id": "round16_patch",
-  "previous_patch_id": "round15_patch",
-  "round": 16,
+  "patch_id": "round22_patch",
+  "previous_patch_id": "round21_patch",
+  "round": 22,
   "date": "2026-01-14",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Fixed MSVC build break in render.cpp: centralized fitToChars helpers so LOOK/targeting HUD text no longer references an out-of-scope lambda.",
-    "Targeting and LOOK bottom HUD labels now use a compact two-line hint bar plus a middle-ellipsis fitter, keeping both context and control hints visible on narrow windows.",
-    "Removed MSVC C4244 warnings by type-correcting SDL_SetRenderDrawColor arguments (Uint8) and by using uint8_t{0} for byte-grid fills/initialization in dungeon/spawn generation."
+    "Annex micro-dungeons gain a third generator style: MiniRuins (packed rooms + corridors via an MST + extra loops) for classic mini-complex side areas.",
+    "MiniRuins stamps internal door markers into real DoorClosed/DoorOpen tiles (with some broken-open variety) while keeping the annex pocket border solid.",
+    "Annex loot placement avoids selecting internal-door tiles as the farthest-cache anchor, so chests don't spawn on door tiles.",
+    "Build fixes: spawnItems no longer references an out-of-scope room type variable; Blink affix FX now uses tile visibility directly (fixes non-MSVC builds)."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -16,6 +17,7 @@
     "src/dungeon.cpp",
     "src/dungeon.hpp",
     "src/game.cpp",
+    "src/combat.cpp",
     "src/game.hpp",
     "src/game_automove.cpp",
     "src/game_internal.hpp",

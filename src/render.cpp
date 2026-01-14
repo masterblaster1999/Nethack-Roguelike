@@ -357,7 +357,7 @@ struct ParticleView {
 };
 
 struct ParticleEngine {
-    enum class Kind : uint8_t { Spark = 0, Smoke, Ember };
+    enum class Kind : uint8_t { Spark = 0, Smoke, Ember, Mote };
 
     // Render ordering: some particles (trails) should appear behind projectile sprites,
     // while others (hits/explosions/fire) should sit on top.
@@ -401,10 +401,12 @@ struct ParticleEngine {
     static constexpr int SPARK_VARS = 6;
     static constexpr int SMOKE_VARS = 6;
     static constexpr int EMBER_VARS = 4;
+    static constexpr int MOTE_VARS = 6;
 
     SDL_Texture* sparkTex[SPARK_VARS]{};
     SDL_Texture* smokeTex[SMOKE_VARS]{};
     SDL_Texture* emberTex[EMBER_VARS]{};
+    SDL_Texture* moteTex[MOTE_VARS]{};
 
     std::vector<Particle> particles;
     float time = 0.0f;
@@ -439,6 +441,13 @@ struct ParticleEngine {
             SDL_SetTextureBlendMode(emberTex[i], SDL_BLENDMODE_ADD);
         }
 
+        // Mote: soft diamond dust (additive).
+        for (int i = 0; i < MOTE_VARS; ++i) {
+            moteTex[i] = createTex(r, 16, 16, hashCombine(0x4D4F5445u, static_cast<uint32_t>(i)), Kind::Mote);
+            if (!moteTex[i]) return false;
+            SDL_SetTextureBlendMode(moteTex[i], SDL_BLENDMODE_ADD);
+        }
+
         return true;
     }
 
@@ -446,6 +455,7 @@ struct ParticleEngine {
         for (auto*& t : sparkTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
         for (auto*& t : smokeTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
         for (auto*& t : emberTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+        for (auto*& t : moteTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
         particles.clear();
     }
 
@@ -479,13 +489,14 @@ struct ParticleEngine {
                     continue;
                 }
 
-                // Procedural drift for smoke.
-                if (p.kind == Kind::Smoke) {
+                // Procedural drift for smoke + motes.
+                if (p.kind == Kind::Smoke || p.kind == Kind::Mote) {
                     const float s0 = static_cast<float>((p.seed & 0xFFu)) * (1.0f / 255.0f);
                     const float w = std::sin((p.x * 2.1f + p.y * 1.7f) + time * 1.2f + s0 * 6.28318f);
                     const float v = std::cos((p.y * 2.0f - p.x * 1.4f) + time * 1.0f + s0 * 6.28318f);
-                    p.vx += w * 0.25f * h;
-                    p.vy += v * 0.25f * h;
+                    const float amp = (p.kind == Kind::Smoke) ? 0.25f : 0.10f;
+                    p.vx += w * amp * h;
+                    p.vy += v * amp * h;
                 }
 
                 // Integrate.
@@ -604,6 +615,8 @@ private:
             return sparkTex[static_cast<int>(p.var) % SPARK_VARS];
         } else if (p.kind == Kind::Smoke) {
             return smokeTex[static_cast<int>(p.var) % SMOKE_VARS];
+        } else if (p.kind == Kind::Mote) {
+            return moteTex[static_cast<int>(p.var) % MOTE_VARS];
         }
         return emberTex[static_cast<int>(p.var) % EMBER_VARS];
     }
@@ -656,6 +669,21 @@ private:
 
                     a = edge * (0.35f + n * 0.85f);
                     a = std::clamp(a, 0.0f, 1.0f);
+                } else if (kind == Kind::Mote) {
+                    // Soft diamond "mote": a tiny magical dust speck with a faint ring and a noisy twinkle.
+                    const float d = std::abs(nx) + std::abs(ny); // diamond distance
+                    float core = std::max(0.0f, 1.0f - d * 1.35f);
+                    core = core * core * core;
+
+                    float ring = std::max(0.0f, 1.0f - std::abs(d - 0.55f) * 4.2f);
+                    ring = ring * ring;
+
+                    const float crossX = std::max(0.0f, 1.0f - std::abs(nx) * 6.0f);
+                    const float crossY = std::max(0.0f, 1.0f - std::abs(ny) * 6.0f);
+
+                    const float n = (rand01(hashCombine(seed ^ 0x51A11u, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y)))) - 0.5f) * 0.22f;
+
+                    a = std::clamp(core + ring * 0.28f + (crossX + crossY) * 0.06f + n, 0.0f, 1.0f);
                 } else { // Ember
                     float core = std::max(0.0f, 1.0f - r0 * 1.85f);
                     core = core * core;
@@ -2144,6 +2172,186 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
         }
     }
 
+
+    // ---------------------------------------------------------------------
+    // 6) Ambient environmental emitters (visual-only, procedural)
+    // ---------------------------------------------------------------------
+    // We use a phase-crossing test so emission is stable across frame rates:
+    // each tile gets a deterministic phase in [0, stepMs), and we only emit when
+    // that phase wraps within this frame's delta window.
+    const uint32_t dtMsRaw = static_cast<uint32_t>(std::clamp(frameDt, 0.0f, 0.25f) * 1000.0f + 0.5f);
+    const uint32_t dtMs = std::max<uint32_t>(1u, std::min<uint32_t>(dtMsRaw, 200u));
+
+    const bool dark = game.darknessActive();
+
+    // Deterministic per-level salt (visual-only).
+    const uint32_t lvlSalt = hashCombine(hashCombine(runSeed ^ 0xA11CE5u, static_cast<uint32_t>(game.branch())),
+                                         static_cast<uint32_t>(game.depth()));
+
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const Tile& t = d.at(x, y);
+            if (!t.visible) continue;
+
+            const TileType tt = t.type;
+            if (tt != TileType::Fountain && tt != TileType::Altar) continue;
+
+            const uint8_t L = dark ? game.tileLightLevel(x, y) : 255u;
+            if (dark && L == 0u) continue;
+
+            const float lum = static_cast<float>(L) * (1.0f / 255.0f);
+
+            // Unique seed per tile (stable across the floor).
+            const uint32_t tileSeed = hashCombine(lvlSalt, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y)));
+
+            if (tt == TileType::Fountain) {
+                // Cool mist puffs (subtle).
+                const uint32_t stepMs = 240u;
+                const uint32_t dtClamped = std::min<uint32_t>(dtMs, stepMs - 1u);
+
+                const uint32_t phase = hash32(tileSeed ^ 0xF00D1234u) % stepMs;
+                const uint32_t now = (ticks + phase) % stepMs;
+                const uint32_t prev = (((ticks > dtClamped) ? (ticks - dtClamped) : 0u) + phase) % stepMs;
+
+                if (now < prev) { // phase wrapped this frame
+                    const uint32_t cycle = (ticks + phase) / stepMs;
+                    uint32_t s = hash32(tileSeed ^ 0xF00D1234u ^ (cycle * 0x9E3779B9u));
+
+                    // Chance per cycle (roughly ~0.5 spawns/sec per visible fountain).
+                    if ((s & 0xFFu) < 34u) {
+                        ParticleEngine::Particle p{};
+                        p.layer = ParticleEngine::LAYER_BEHIND;
+                        p.kind = ParticleEngine::Kind::Smoke;
+                        p.var = static_cast<uint8_t>(static_cast<int>(
+                            randRange(s, 0.0f, static_cast<float>(ParticleEngine::SMOKE_VARS))));
+                        p.seed = s;
+
+                        p.x = static_cast<float>(x) + 0.50f + randRange(s, -0.18f, 0.18f);
+                        p.y = static_cast<float>(y) + 0.50f + randRange(s, -0.18f, 0.18f);
+                        p.z = randRange(s, 0.03f, 0.12f);
+
+                        p.vx = randRange(s, -0.08f, 0.08f);
+                        p.vy = randRange(s, -0.08f, 0.08f);
+                        p.vz = randRange(s, 0.18f, 0.55f);
+                        p.drag = 0.70f;
+
+                        const int a0 = std::clamp(static_cast<int>(std::round(120.0f * lum)), 22, 140);
+                        p.c0 = Color{ 140, 205, 255, static_cast<uint8_t>(a0) };
+                        p.c1 = Color{ 45, 70, 100, 0 };
+
+                        p.life = randRange(s, 0.90f, 1.55f);
+                        p.size0 = randRange(s, 0.14f, 0.26f);
+                        p.size1 = p.size0 * randRange(s, 1.35f, 1.85f);
+
+                        particles_->add(p);
+
+                        // Occasional sparkle on the water surface.
+                        if ((s & 0x7Fu) == 0u) {
+                            ParticleEngine::Particle sp{};
+                            sp.layer = ParticleEngine::LAYER_BEHIND;
+                            sp.kind = ParticleEngine::Kind::Mote;
+                            sp.var = static_cast<uint8_t>(static_cast<int>(
+                                randRange(s, 0.0f, static_cast<float>(ParticleEngine::MOTE_VARS))));
+                            sp.seed = s ^ 0xA5A5A5A5u;
+
+                            sp.x = static_cast<float>(x) + 0.50f + randRange(s, -0.14f, 0.14f);
+                            sp.y = static_cast<float>(y) + 0.50f + randRange(s, -0.14f, 0.14f);
+                            sp.z = randRange(s, 0.05f, 0.14f);
+
+                            sp.vx = randRange(s, -0.04f, 0.04f);
+                            sp.vy = randRange(s, -0.04f, 0.04f);
+                            sp.vz = randRange(s, 0.08f, 0.22f);
+                            sp.drag = 1.25f;
+
+                            const int aS = std::clamp(static_cast<int>(std::round(150.0f * lum)), 30, 190);
+                            sp.c0 = Color{ 200, 235, 255, static_cast<uint8_t>(aS) };
+                            sp.c1 = Color{ 70, 110, 160, 0 };
+
+                            sp.life = randRange(s, 0.35f, 0.70f);
+                            sp.size0 = randRange(s, 0.05f, 0.10f);
+                            sp.size1 = sp.size0 * 0.55f;
+
+                            particles_->add(sp);
+                        }
+                    }
+                }
+            } else if (tt == TileType::Altar) {
+                // Arcane motes: slow drift + twinkle.
+                const uint32_t stepMs = 280u;
+                const uint32_t dtClamped = std::min<uint32_t>(dtMs, stepMs - 1u);
+
+                const uint32_t phase = hash32(tileSeed ^ 0xA17A1234u) % stepMs;
+                const uint32_t now = (ticks + phase) % stepMs;
+                const uint32_t prev = (((ticks > dtClamped) ? (ticks - dtClamped) : 0u) + phase) % stepMs;
+
+                if (now < prev) {
+                    const uint32_t cycle = (ticks + phase) / stepMs;
+                    uint32_t s = hash32(tileSeed ^ 0xA17A1234u ^ (cycle * 0x85EBCA6Bu));
+
+                    // Chance per cycle (~0.35-0.4 spawns/sec per visible altar).
+                    if ((s & 0xFFu) < 26u) {
+                        ParticleEngine::Particle p{};
+                        p.layer = ParticleEngine::LAYER_BEHIND;
+                        p.kind = ParticleEngine::Kind::Mote;
+                        p.var = static_cast<uint8_t>(static_cast<int>(
+                            randRange(s, 0.0f, static_cast<float>(ParticleEngine::MOTE_VARS))));
+                        p.seed = s;
+
+                        p.x = static_cast<float>(x) + 0.50f + randRange(s, -0.14f, 0.14f);
+                        p.y = static_cast<float>(y) + 0.50f + randRange(s, -0.14f, 0.14f);
+                        p.z = randRange(s, 0.06f, 0.26f);
+
+                        p.vx = randRange(s, -0.05f, 0.05f);
+                        p.vy = randRange(s, -0.05f, 0.05f);
+                        p.vz = randRange(s, 0.10f, 0.42f);
+                        p.drag = 1.05f;
+
+                        // Theme-tinted altar glow to match the HUD tone a bit.
+                        Color c0{ 220, 170, 255, 180 };
+                        Color c1{ 80,  40, 120, 0 };
+                        switch (game.uiTheme()) {
+                            case UITheme::Parchment:
+                                c0 = Color{ 255, 230, 170, 180 };
+                                c1 = Color{ 120,  80,  40, 0 };
+                                break;
+                            case UITheme::Arcane:
+                                c0 = Color{ 170, 225, 255, 180 };
+                                c1 = Color{  40,  90, 140, 0 };
+                                break;
+                            case UITheme::DarkStone:
+                            default:
+                                break;
+                        }
+
+                        const int a0 = std::clamp(static_cast<int>(std::round(static_cast<float>(c0.a) * lum)), 26, 210);
+                        c0.a = static_cast<uint8_t>(a0);
+                        p.c0 = c0;
+                        p.c1 = c1;
+
+                        p.life = randRange(s, 0.55f, 1.10f);
+                        p.size0 = randRange(s, 0.05f, 0.12f);
+                        p.size1 = p.size0 * randRange(s, 0.35f, 0.65f);
+
+                        particles_->add(p);
+
+                        // Rare "spark" burst: one extra mote with a quicker life.
+                        if ((s & 0x1FFu) == 0u) {
+                            ParticleEngine::Particle p2 = p;
+                            p2.seed ^= 0x3C3C3C3Cu;
+                            p2.z += randRange(s, 0.03f, 0.10f);
+                            p2.vz += randRange(s, 0.12f, 0.26f);
+                            p2.life = randRange(s, 0.22f, 0.45f);
+                            p2.size0 *= 0.80f;
+                            p2.size1 *= 0.70f;
+                            p2.c0.a = static_cast<uint8_t>(std::min<int>(255, static_cast<int>(p2.c0.a) + 35));
+                            particles_->add(p2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }
 
 void Renderer::updateProceduralAnimations(const Game& game, float frameDt, uint32_t ticks) {
@@ -2461,7 +2669,7 @@ void Renderer::drawItemIcon(const Game& game, const Item& it, int x, int y, int 
 
     applyIdentificationVisuals(game, visIt);
 
-    SDL_Texture* tex = itemTexture(visIt, lastFrame);
+    SDL_Texture* tex = itemTexture(visIt, lastFrame + visIt.id);
     if (tex) {
         SDL_RenderCopy(renderer, tex, nullptr, &dst);
     }
@@ -3046,6 +3254,41 @@ void Renderer::render(const Game& game) {
     const uint32_t ticks = SDL_GetTicks();
     const int frame = static_cast<int>((ticks / 220u) % FRAMES);
     lastFrame = frame;
+
+    // ---------------------------------------------------------------------
+    // Procedural animation sampling
+    //
+    // The sprite generator (spritegen) produces discrete animation frames for
+    // many tiles/VFX. Here we sample those frames with per-instance phase
+    // offsets so the whole world doesn't blink in lockstep, and we expose a
+    // sub-frame blend factor for smoother "custom" animations (used for gas/fire).
+    // ---------------------------------------------------------------------
+    struct FrameBlend {
+        int f0 = 0;
+        int f1 = 0;
+        uint8_t w1 = 0; // 0..255 weight toward f1 (w0 = 255 - w1)
+    };
+
+    auto sampleFrameBlend = [&](uint32_t stepMs, uint32_t phaseSeed) -> FrameBlend {
+        if (stepMs == 0u) stepMs = 1u;
+        const uint32_t cycleMs = stepMs * static_cast<uint32_t>(FRAMES);
+        const uint32_t phase = (cycleMs > 0u) ? (hash32(phaseSeed) % cycleMs) : 0u;
+        const uint32_t t = ticks + phase;
+
+        const uint32_t idx = t / stepMs;
+        const uint32_t rem = t - idx * stepMs;
+
+        FrameBlend fb;
+        fb.f0 = static_cast<int>(idx % static_cast<uint32_t>(FRAMES));
+        fb.f1 = (fb.f0 + 1) % FRAMES;
+
+        const float frac = static_cast<float>(rem) / static_cast<float>(stepMs);
+        int w = static_cast<int>(std::lround(frac * 255.0f));
+        w = std::clamp(w, 0, 255);
+        fb.w1 = static_cast<uint8_t>(w);
+        return fb;
+    };
+
 
     // If the user toggled 3D voxel sprites, invalidate cached textures so they regenerate.
     const bool wantVoxelSprites = game.voxelSpritesEnabled();
@@ -3668,7 +3911,16 @@ void Renderer::render(const Game& game) {
                     const size_t di = static_cast<size_t>(dStyle * decalsPerStyleUsed + var);
 
                     if (di < floorDecalVarIso.size()) {
-                        SDL_Texture* dtex = floorDecalVarIso[di][static_cast<size_t>(frame % FRAMES)];
+                        // Custom animation: de-sync some animated decal styles so special rooms
+                        // don't all pulse in perfect unison.
+                        int dFrame = frame % FRAMES;
+                        if (dStyle == 2 || dStyle == 3) {
+                            const uint32_t ph = hash32(hashCombine(hashCombine(lvlSeed ^ 0xD3CA1u, static_cast<uint32_t>(dStyle)),
+                                                                   hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y))));
+                            dFrame = (dFrame + static_cast<int>(ph & static_cast<uint32_t>(FRAMES - 1))) % FRAMES;
+                        }
+
+                        SDL_Texture* dtex = floorDecalVarIso[di][static_cast<size_t>(dFrame)];
                         if (dtex) {
                             SDL_SetTextureColorMod(dtex, mod.r, mod.g, mod.b);
                             SDL_SetTextureAlphaMod(dtex, a);
@@ -4115,7 +4367,16 @@ void Renderer::render(const Game& game) {
                 const size_t di = static_cast<size_t>(style * decalsPerStyleUsed + var);
 
                 if (di < floorDecalVar.size()) {
-                    SDL_Texture* dtex = floorDecalVar[di][static_cast<size_t>(frame % FRAMES)];
+                    // Custom animation: de-sync some animated decal styles so special rooms
+                    // (lairs/shrines) don't all pulse in perfect unison.
+                    int dFrame = frame % FRAMES;
+                    if (style == 2 || style == 3) {
+                        const uint32_t ph = hash32(hashCombine(hashCombine(lvlSeed ^ 0xD3CA1u, static_cast<uint32_t>(style)),
+                                                               hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y))));
+                        dFrame = (dFrame + static_cast<int>(ph & static_cast<uint32_t>(FRAMES - 1))) % FRAMES;
+                    }
+
+                    SDL_Texture* dtex = floorDecalVar[di][static_cast<size_t>(dFrame)];
                     if (dtex) {
                         const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 120 : 160);
                         SDL_SetTextureColorMod(dtex, mod.r, mod.g, mod.b);
@@ -4562,7 +4823,7 @@ void Renderer::render(const Game& game) {
 
             applyIdentificationVisuals(game, visIt);
 
-            SDL_Texture* tex = itemTexture(visIt, frame);
+            SDL_Texture* tex = itemTexture(visIt, frame + gi.item.id);
             if (!tex) continue;
 
             SDL_Rect base = spriteDst(gi.pos.x, gi.pos.y);
@@ -4622,7 +4883,7 @@ void Renderer::render(const Game& game) {
 
             applyIdentificationVisuals(game, visIt);
 
-            SDL_Texture* tex = itemTexture(visIt, frame);
+            SDL_Texture* tex = itemTexture(visIt, frame + gi.item.id);
             if (!tex) continue;
 
             SDL_Rect dst = spriteDst(gi.pos.x, gi.pos.y);
@@ -4667,10 +4928,19 @@ void Renderer::render(const Game& game) {
                     const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0x6A5u;
                     const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(GAS_VARS));
-                    const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
 
-                    SDL_Texture* gtex = (isoView && gasVarIso[0][0] != nullptr) ? gasVarIso[vi][fi] : gasVar[vi][fi];
-                    if (gtex) {
+                    // Smooth, desynced per-tile sampling so large gas fields don't "blink" in lockstep.
+                    const FrameBlend fb = sampleFrameBlend(180u, h ^ 0x51A11u);
+                    const uint8_t w1 = fb.w1;
+                    const uint8_t w0 = static_cast<uint8_t>(255u - w1);
+
+                    const bool useIso = isoView && (gasVarIso[0][0] != nullptr);
+                    const auto* gset = useIso ? &gasVarIso : &gasVar;
+
+                    SDL_Texture* g0 = (*gset)[vi][static_cast<size_t>(fb.f0)];
+                    SDL_Texture* g1 = (*gset)[vi][static_cast<size_t>(fb.f1)];
+
+                    if (g0 || g1) {
                         // Multiply a "signature" purple by the tile lighting/tint so it feels embedded in the world.
                         const Color lmod = tileColorMod(x, y, /*visible=*/true);
                         const Color base{200, 120, 255, 255};
@@ -4679,11 +4949,22 @@ void Renderer::render(const Game& game) {
                         const uint8_t mg = static_cast<uint8_t>((static_cast<int>(base.g) * lmod.g) / 255);
                         const uint8_t mb = static_cast<uint8_t>((static_cast<int>(base.b) * lmod.b) / 255);
 
-                        SDL_SetTextureColorMod(gtex, mr, mg, mb);
-                        SDL_SetTextureAlphaMod(gtex, static_cast<uint8_t>(a));
-                        SDL_RenderCopy(renderer, gtex, nullptr, &r);
-                        SDL_SetTextureColorMod(gtex, 255, 255, 255);
-                        SDL_SetTextureAlphaMod(gtex, 255);
+                        auto drawOne = [&](SDL_Texture* tex, uint8_t alpha) {
+                            if (!tex || alpha == 0u) return;
+                            SDL_SetTextureColorMod(tex, mr, mg, mb);
+                            SDL_SetTextureAlphaMod(tex, alpha);
+                            SDL_RenderCopy(renderer, tex, nullptr, &r);
+                            SDL_SetTextureColorMod(tex, 255, 255, 255);
+                            SDL_SetTextureAlphaMod(tex, 255);
+                        };
+
+                        const int a0i = (a * static_cast<int>(w0)) / 255;
+                        const int a1i = (a * static_cast<int>(w1)) / 255;
+                        const uint8_t a0 = static_cast<uint8_t>(std::clamp(a0i, 0, 255));
+                        const uint8_t a1 = static_cast<uint8_t>(std::clamp(a1i, 0, 255));
+
+                        drawOne(g0, a0);
+                        drawOne(g1, a1);
                         continue;
                     }
                 }
@@ -4729,10 +5010,19 @@ void Renderer::render(const Game& game) {
                     const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xC41u;
                     const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(GAS_VARS));
-                    const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
 
-                    SDL_Texture* gtex = (isoView && gasVarIso[0][0] != nullptr) ? gasVarIso[vi][fi] : gasVar[vi][fi];
-                    if (gtex) {
+                    // Smooth, desynced per-tile sampling so large gas fields don't "blink" in lockstep.
+                    const FrameBlend fb = sampleFrameBlend(200u, h ^ 0xBADC0DEu);
+                    const uint8_t w1 = fb.w1;
+                    const uint8_t w0 = static_cast<uint8_t>(255u - w1);
+
+                    const bool useIso = isoView && (gasVarIso[0][0] != nullptr);
+                    const auto* gset = useIso ? &gasVarIso : &gasVar;
+
+                    SDL_Texture* g0 = (*gset)[vi][static_cast<size_t>(fb.f0)];
+                    SDL_Texture* g1 = (*gset)[vi][static_cast<size_t>(fb.f1)];
+
+                    if (g0 || g1) {
                         // Multiply a "signature" green by the tile lighting/tint so it feels embedded in the world.
                         const Color lmod = tileColorMod(x, y, /*visible=*/true);
                         const Color base{120, 255, 120, 255};
@@ -4741,11 +5031,22 @@ void Renderer::render(const Game& game) {
                         const uint8_t mg = static_cast<uint8_t>((static_cast<int>(base.g) * lmod.g) / 255);
                         const uint8_t mb = static_cast<uint8_t>((static_cast<int>(base.b) * lmod.b) / 255);
 
-                        SDL_SetTextureColorMod(gtex, mr, mg, mb);
-                        SDL_SetTextureAlphaMod(gtex, static_cast<uint8_t>(a));
-                        SDL_RenderCopy(renderer, gtex, nullptr, &r);
-                        SDL_SetTextureColorMod(gtex, 255, 255, 255);
-                        SDL_SetTextureAlphaMod(gtex, 255);
+                        auto drawOne = [&](SDL_Texture* tex, uint8_t alpha) {
+                            if (!tex || alpha == 0u) return;
+                            SDL_SetTextureColorMod(tex, mr, mg, mb);
+                            SDL_SetTextureAlphaMod(tex, alpha);
+                            SDL_RenderCopy(renderer, tex, nullptr, &r);
+                            SDL_SetTextureColorMod(tex, 255, 255, 255);
+                            SDL_SetTextureAlphaMod(tex, 255);
+                        };
+
+                        const int a0i = (a * static_cast<int>(w0)) / 255;
+                        const int a1i = (a * static_cast<int>(w1)) / 255;
+                        const uint8_t a0 = static_cast<uint8_t>(std::clamp(a0i, 0, 255));
+                        const uint8_t a1 = static_cast<uint8_t>(std::clamp(a1i, 0, 255));
+
+                        drawOne(g0, a0);
+                        drawOne(g1, a1);
                         continue;
                     }
                 }
@@ -4792,10 +5093,19 @@ void Renderer::render(const Game& game) {
                     const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xF17Eu;
                     const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(FIRE_VARS));
-                    const size_t fi = static_cast<size_t>((frame + ((x + y) & 1)) % FRAMES);
 
-                    SDL_Texture* ftex = (isoView && fireVarIso[0][0] != nullptr) ? fireVarIso[vi][fi] : fireVar[vi][fi];
-                    if (ftex) {
+                    // Fire wants to feel "alive": faster sampling + per-tile phase offset.
+                    const FrameBlend fb = sampleFrameBlend(130u, h ^ 0xF17ECAFEu);
+                    const uint8_t w1 = fb.w1;
+                    const uint8_t w0 = static_cast<uint8_t>(255u - w1);
+
+                    const bool useIso = isoView && (fireVarIso[0][0] != nullptr);
+                    const auto* fset = useIso ? &fireVarIso : &fireVar;
+
+                    SDL_Texture* f0 = (*fset)[vi][static_cast<size_t>(fb.f0)];
+                    SDL_Texture* f1 = (*fset)[vi][static_cast<size_t>(fb.f1)];
+
+                    if (f0 || f1) {
                         // Warm fire tint, modulated by world lighting.
                         const Color lmod = tileColorMod(x, y, /*visible=*/true);
                         const Color base{255, 160, 80, 255};
@@ -4804,11 +5114,22 @@ void Renderer::render(const Game& game) {
                         const uint8_t mg = static_cast<uint8_t>((static_cast<int>(base.g) * lmod.g) / 255);
                         const uint8_t mb = static_cast<uint8_t>((static_cast<int>(base.b) * lmod.b) / 255);
 
-                        SDL_SetTextureColorMod(ftex, mr, mg, mb);
-                        SDL_SetTextureAlphaMod(ftex, static_cast<uint8_t>(a));
-                        SDL_RenderCopy(renderer, ftex, nullptr, &r);
-                        SDL_SetTextureColorMod(ftex, 255, 255, 255);
-                        SDL_SetTextureAlphaMod(ftex, 255);
+                        auto drawOne = [&](SDL_Texture* tex, uint8_t alpha) {
+                            if (!tex || alpha == 0u) return;
+                            SDL_SetTextureColorMod(tex, mr, mg, mb);
+                            SDL_SetTextureAlphaMod(tex, alpha);
+                            SDL_RenderCopy(renderer, tex, nullptr, &r);
+                            SDL_SetTextureColorMod(tex, 255, 255, 255);
+                            SDL_SetTextureAlphaMod(tex, 255);
+                        };
+
+                        const int a0i = (a * static_cast<int>(w0)) / 255;
+                        const int a1i = (a * static_cast<int>(w1)) / 255;
+                        const uint8_t a0 = static_cast<uint8_t>(std::clamp(a0i, 0, 255));
+                        const uint8_t a1 = static_cast<uint8_t>(std::clamp(a1i, 0, 255));
+
+                        drawOne(f0, a0);
+                        drawOne(f1, a1);
                         continue;
                     }
                 }
@@ -4970,7 +5291,18 @@ void Renderer::render(const Game& game) {
             if (!isPlayer && e.hp > 0) {
                 SDL_Rect bar{ dst.x + 2, dst.y + 2, std::max(1, (tile - 4) * e.hp / std::max(1, e.hpMax)), 4 };
                 SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-                SDL_SetRenderDrawColor(renderer, 200, 40, 40, 160);
+
+                Uint8 br = 200, bg = 40, bb = 40, ba = 160;
+                if (!isHallucinating(game) && e.procRank != ProcMonsterRank::Normal) {
+                    switch (e.procRank) {
+                        case ProcMonsterRank::Elite:    br = 210; bg = 170; bb = 70; ba = 200; break;
+                        case ProcMonsterRank::Champion: br = 90;  bg = 160; bb = 230; ba = 200; break;
+                        case ProcMonsterRank::Mythic:   br = 200; bg = 90;  bb = 230; ba = 210; break;
+                        default: break;
+                    }
+                }
+
+                SDL_SetRenderDrawColor(renderer, br, bg, bb, ba);
                 SDL_RenderFillRect(renderer, &bar);
             }
         }
@@ -4999,7 +5331,18 @@ void Renderer::render(const Game& game) {
             if (e.id != game.playerId() && e.hp > 0) {
                 SDL_Rect bar{ dst.x + 2, dst.y + 2, std::max(1, (tile - 4) * e.hp / std::max(1, e.hpMax)), 4 };
                 SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-                SDL_SetRenderDrawColor(renderer, 200, 40, 40, 160);
+
+                Uint8 br = 200, bg = 40, bb = 40, ba = 160;
+                if (!isHallucinating(game) && e.procRank != ProcMonsterRank::Normal) {
+                    switch (e.procRank) {
+                        case ProcMonsterRank::Elite:    br = 210; bg = 170; bb = 70; ba = 200; break;
+                        case ProcMonsterRank::Champion: br = 90;  bg = 160; bb = 230; ba = 200; break;
+                        case ProcMonsterRank::Mythic:   br = 200; bg = 90;  bb = 230; ba = 210; break;
+                        default: break;
+                    }
+                }
+
+                SDL_SetRenderDrawColor(renderer, br, bg, bb, ba);
                 SDL_RenderFillRect(renderer, &bar);
             }
         }
@@ -6258,7 +6601,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 
         applyIdentificationVisuals(game, visIt);
 
-        SDL_Texture* itex = itemTexture(visIt, lastFrame);
+        SDL_Texture* itex = itemTexture(visIt, lastFrame + visIt.id);
         if (itex) {
             SDL_RenderCopy(renderer, itex, nullptr, &iconDst);
         }
@@ -6326,7 +6669,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 
         applyIdentificationVisuals(game, visIt);
 
-        SDL_Texture* tex = itemTexture(visIt, lastFrame);
+        SDL_Texture* tex = itemTexture(visIt, lastFrame + visIt.id);
         if (tex) {
             SDL_RenderCopy(renderer, tex, nullptr, &sprDst);
         }

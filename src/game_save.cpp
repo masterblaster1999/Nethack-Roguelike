@@ -684,7 +684,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 48u; // v48: item call labels (NetHack-style) // v47: trapdoorFallers keyed by (branch,depth) // v46: Message.branch (dungeon branch for log/history) // v45: dungeon branches (LevelId) // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
+constexpr uint32_t SAVE_VERSION = 49u; // v49: procedural monster variants (rank + affix mask) // v48: item call labels (NetHack-style) // v47: trapdoorFallers keyed by (branch,depth) // v46: Message.branch (dungeon branch for log/history) // v45: dungeon branches (LevelId) // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -959,6 +959,14 @@ void writeEntity(std::ostream& out, const Entity& e) {
         writePod(out, speed);
         writePod(out, energy);
     }
+
+    // v49+: procedural monster variants (rank + affix mask)
+    if constexpr (SAVE_VERSION >= 49u) {
+        uint8_t procRank = static_cast<uint8_t>(e.procRank);
+        uint32_t procMask = e.procAffixMask;
+        writePod(out, procRank);
+        writePod(out, procMask);
+    }
 }
 
 bool readEntity(std::istream& in, Entity& e, uint32_t version) {
@@ -1009,6 +1017,10 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     int32_t lkAge = 9999;
     int32_t speed = 0;
     int32_t energy = 0;
+
+    // v49+: procedural monster variants.
+    uint8_t procRank = 0;
+    uint32_t procMask = 0u;
 
     Item gearMelee;
     Item gearArmor;
@@ -1110,6 +1122,12 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         if (!readPod(in, energy)) return false;
     }
 
+    // v49+: procedural monster variants (rank + affix mask)
+    if (version >= 49u) {
+        if (!readPod(in, procRank)) return false;
+        if (!readPod(in, procMask)) return false;
+    }
+
     e.id = id;
     e.kind = static_cast<EntityKind>(kind);
     e.pos = { x, y };
@@ -1118,6 +1136,16 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     e.baseAtk = atk;
     e.baseDef = def;
     e.spriteSeed = seed;
+
+    if (version >= 49u) {
+        if (procRank > static_cast<uint8_t>(ProcMonsterRank::Mythic)) procRank = 0;
+        e.procRank = static_cast<ProcMonsterRank>(procRank);
+        e.procAffixMask = procMask;
+    } else {
+        e.procRank = ProcMonsterRank::Normal;
+        e.procAffixMask = 0u;
+    }
+
     e.groupId = groupId;
     e.alerted = alerted != 0;
 

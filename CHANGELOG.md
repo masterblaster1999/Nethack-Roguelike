@@ -4,8 +4,19 @@
 ## [0.22.0] - Unreleased
 
 ### Added
+- **Procedural monster variants**: rare monsters now roll a persistent **rank** (Elite/Champion/Mythic) plus 1-3 **affixes** at spawn.
+  - Affixes implemented this round: **Swift**, **Stonehide**, **Savage**, **Blinking** (panic blink reposition), and **Gilded** (bonus gold + higher key/drop odds).
+  - New combat-proc affixes: **Venomous** (poison), **Flaming** (burn), **Vampiric** (life drain), and **Webbing** (ensnare).
+  - LOOK/targeting now surfaces rank + affixes, and XP rewards scale with procedural rank/affixes.
+  - HP pip color hints rank (hidden while hallucinating).
+  - Rolls are deterministic per monster (seeded from its sprite seed + depth + room type) and are **saved/loaded** so variants survive reloads.
 - Game-driven procedural particle FX events (spells + digging) via `FXParticleEvent` queue.
 - **Procedural sprite animation**: entities, items, and projectiles now use smooth, renderer-side procedural motion (move tween + hop/squash, idle bob, and hit recoil) to reduce "teleporty" feel in both top-down and isometric views.
+- **Procedural VFX custom animation (4-frame)**: the renderer now samples **4 animation frames** for procedural hazard tiles (gas + fire), and cross-fades between frames with per-tile phase offsets so large fields don’t flicker in sync.
+- Fountain ripples now animate across all 4 frames, and item sprites (ground + UI icons) also get a small per-item phase offset to avoid synchronized blinking.
+- **Procedural room ambiance decals (4-frame)**: lair floors now get an animated **biofilm shimmer** decal, and shrine rooms now get **rotating rune** decals (top-down + isometric).
+  - The renderer de-syncs these animated decal styles per-tile so special rooms feel alive instead of flashing in perfect unison.
+- **Ambient environmental particles (procedural)**: fountains now exhale cool mist puffs (plus rare water sparkles) and altars shed slow arcane motes tinted to your UI theme. These are visual-only and phase-driven so they stay stable across frame rates.
 - **Ring of Searching**: a new ring that grants **automatic searching** each turn, helping you uncover nearby **traps, trapped chests, and secret doors** without spending an extra action.
 - **Ring of Sustenance**: a new ring that grants **passive sustenance**, slowing **hunger loss** when the hunger system is enabled.
   - **Enchant/bless** increases potency; **curses** remove the benefit.
@@ -35,13 +46,15 @@
   - Default bind: **Ctrl+N** (`bind_sound_preview` in settings; rebindable via `#bind`).
 - **Per-level wind drafts**: each floor now has a deterministic **cardinal wind** (CALM/N/E/S/W) that gently biases **gas drift** and **fire spread** through corridors.
   - Announced once when a floor is first generated; check anytime with `#wind`.
-- **Annex micro-dungeons**: some floors now carve a larger optional **side area** (a mini-maze or mini-cavern) into solid rock behind a door.
+- **Annex micro-dungeons**: some floors now carve a larger optional **side area** (a mini-maze, mini-cavern, or mini-ruins) into solid rock behind a door.
+  - New annex style: **MiniRuins** packs several small rooms connected by corridors (MST + a couple extra loops) and places internal doors (some broken open) for a classic roguelike side-complex feel.
   - Doors can be **secret** or **locked**, and the annex always contains one or more **deep chest caches** to reward exploration.
 - **Procedural per-run palette & patina**: terrain rendering now mixes the run seed into a cosmetic "style seed" to generate a gentle per-run palette and subtle per-tile value-noise shading (visual-only, deterministic).
 - **Per-run isometric tileset**: isometric terrain assets (diamond floors, chasms, 2.5D blocks, decals, stairs overlays, and hazard VFX) now re-seed from the run’s cosmetic style seed, giving each run a distinct (but deterministic) isometric look.
 - **Isometric cutaway**: optional 2.5D rendering aid that fades foreground walls/doors/pillars in front of the player (or LOOK/target cursor) so interiors stay readable.
   - Toggle in Options, via `#isocutaway`, or `iso_cutaway` in settings.
 - Renderer build fix: removed an accidental duplicate depth-tint block introduced during palette work.
+- Build fixes: corrected a missing room-type lookup in item spawning, and fixed an AI visibility helper call used by the Blink affix FX.
 
 
 - **Isometric depth shading**: isometric view now adds **procedurally generated diamond edge shading** (contact shadows against walls/objects + subtle chasm rim) so the 2.5D map reads with more depth.

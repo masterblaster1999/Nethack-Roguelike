@@ -1,6 +1,198 @@
 #include "game_internal.hpp"
 
+#include "combat_rules.hpp"
 #include "hallucination.hpp"
+
+#include <cmath>
+#include <iomanip>
+
+namespace {
+
+struct ToHitOdds {
+    float pHit = 0.0f;        // includes crit
+    float pHitNonCrit = 0.0f; // excludes crit
+    float pCrit = 0.0f;       // natural 20
+};
+
+// Mirrors the d20 rules used in combat.cpp:
+//   - natural 1: always miss
+//   - natural 20: always hit + crit
+//   - otherwise hit if (natural + attackBonus) >= targetAC
+static ToHitOdds d20ToHitOdds(int attackBonus, int targetAC) {
+    ToHitOdds o;
+    o.pCrit = 1.0f / 20.0f;
+
+    // Count hit outcomes for natural 2..19.
+    const int threshold = targetAC - attackBonus; // natural >= threshold
+    const int minRoll = std::max(2, threshold);
+    int hitCount = 0;
+    if (minRoll <= 19) {
+        // Inclusive range [minRoll, 19]
+        hitCount = 19 - minRoll + 1;
+    }
+
+    o.pHitNonCrit = static_cast<float>(hitCount) / 20.0f;
+    o.pHit = o.pHitNonCrit + o.pCrit;
+    return o;
+}
+
+static float expectedDice(DiceExpr d) {
+    d.count = std::max(0, d.count);
+    d.sides = std::max(0, d.sides);
+    // Expected value of a fair 1..sides roll is (sides+1)/2.
+    return static_cast<float>(d.count) * (static_cast<float>(d.sides) + 1.0f) * 0.5f + static_cast<float>(d.bonus);
+}
+
+// Expected value of max(0, raw - U(0..dr)), approximated with a continuous uniform.
+static float expectedAfterAbsorb(float raw, int dr) {
+    if (raw <= 0.0f) return 0.0f;
+    if (dr <= 0) return raw;
+    const float fdr = static_cast<float>(dr);
+    if (raw >= fdr) {
+        return raw - 0.5f * fdr;
+    }
+    // raw in (0, dr): E = raw^2 / (2*dr)
+    return (raw * raw) / (2.0f * fdr);
+}
+
+static int targetACForLook(const Game& g, const Entity& e) {
+    // Matches combat.cpp targetAC(): monsters use baseDef; player uses playerDefense().
+    const int def = (e.kind == EntityKind::Player) ? g.playerDefense() : e.baseDef;
+    return 10 + def;
+}
+
+static int damageReductionForLook(const Game& g, const Entity& e) {
+    // Matches combat.cpp damageReduction().
+    if (e.kind != EntityKind::Player) {
+        int dr = std::max(0, e.baseDef);
+
+        if (monsterCanEquipArmor(e.kind) && e.gearArmor.id != 0 && isArmor(e.gearArmor.kind)) {
+            const Item& a = e.gearArmor;
+            const int b = (a.buc < 0) ? -1 : (a.buc > 0 ? 1 : 0);
+            dr += itemDef(a.kind).defense + a.enchant + b;
+        }
+
+        return std::max(0, dr);
+    }
+
+    const int evasion = g.playerEvasion();
+    return std::max(0, g.playerDefense() - evasion);
+}
+
+struct DuelForecast {
+    float youTtk = INFINITY;   // expected turns for player to kill target
+    float youHit = 0.0f;
+    float youDmg = 0.0f;       // expected dmg per swing (includes misses)
+
+    float foeTtd = INFINITY;   // expected turns for foe to kill player
+    float foeHit = 0.0f;
+    float foeDmg = 0.0f;
+
+    bool ambush = false;
+    bool backstab = false;
+};
+
+static DuelForecast computeDuelForecast(const Game& g, const Entity& foe) {
+    DuelForecast out;
+
+    const Entity& p = g.player();
+    if (p.hp <= 0 || foe.hp <= 0) return out;
+
+    // ------------------------------------------------------------
+    // Player -> foe
+    // ------------------------------------------------------------
+    int atkBonus = g.playerAttack();
+
+    // Ambush/backstab bonuses (mirrors combat.cpp).
+    if (foe.kind != EntityKind::Player && !foe.alerted) {
+        out.ambush = true;
+        const int agi = g.playerAgility();
+        atkBonus += 2 + std::min(3, agi / 4);
+
+        const bool invis = (p.effects.invisTurns > 0);
+        const bool sneak = g.isSneaking();
+        out.backstab = (invis || sneak);
+    }
+
+    const int acFoe = targetACForLook(g, foe);
+    const ToHitOdds oddsP = d20ToHitOdds(atkBonus, acFoe);
+    out.youHit = oddsP.pHit;
+
+    const Item* w = g.equippedMelee();
+    DiceExpr baseDice{1, 2, 0};
+    if (w) baseDice = meleeDiceForWeapon(w->kind);
+
+    int atkStatForBonus = p.baseAtk + g.playerMight();
+    int bonus = statDamageBonusFromAtk(atkStatForBonus);
+    if (w) bonus += w->enchant;
+
+    float raw = expectedDice(baseDice) + static_cast<float>(bonus);
+    if (out.ambush) {
+        raw += static_cast<float>(1 + std::min(3, g.playerAgility() / 4));
+        if (out.backstab) {
+            raw += expectedDice(baseDice);
+        }
+    }
+
+    const int drFoe = damageReductionForLook(g, foe);
+    const float nonCrit = expectedAfterAbsorb(raw, drFoe);
+    const float crit = expectedAfterAbsorb(raw + expectedDice(baseDice), drFoe / 2);
+
+    out.youDmg = oddsP.pHitNonCrit * nonCrit + oddsP.pCrit * crit;
+    if (out.youDmg > 0.001f) {
+        out.youTtk = static_cast<float>(foe.hp) / out.youDmg;
+    }
+
+    // ------------------------------------------------------------
+    // Foe -> player
+    // ------------------------------------------------------------
+    int foeAtk = foe.baseAtk;
+    DiceExpr foeDice = meleeDiceForMonster(foe.kind);
+
+    int foeBonus = statDamageBonusFromAtk(foe.baseAtk);
+    if (monsterCanEquipWeapons(foe.kind) && foe.gearMelee.id != 0 && isMeleeWeapon(foe.gearMelee.kind)) {
+        foeDice = meleeDiceForWeapon(foe.gearMelee.kind);
+        const int b = (foe.gearMelee.buc < 0) ? -1 : (foe.gearMelee.buc > 0 ? 1 : 0);
+        foeAtk += foe.gearMelee.enchant + b;
+        foeBonus += foe.gearMelee.enchant + b;
+    }
+
+    const int acP = targetACForLook(g, p);
+    const ToHitOdds oddsF = d20ToHitOdds(foeAtk, acP);
+    out.foeHit = oddsF.pHit;
+
+    const float foeRaw = expectedDice(foeDice) + static_cast<float>(foeBonus);
+    const int drP = damageReductionForLook(g, p);
+    const float foeNonCrit = expectedAfterAbsorb(foeRaw, drP);
+    const float foeCrit = expectedAfterAbsorb(foeRaw + expectedDice(foeDice), drP / 2);
+
+    out.foeDmg = oddsF.pHitNonCrit * foeNonCrit + oddsF.pCrit * foeCrit;
+    if (out.foeDmg > 0.001f) {
+        out.foeTtd = static_cast<float>(p.hp) / out.foeDmg;
+    }
+
+    return out;
+}
+
+static std::string duelForecastLabel(const DuelForecast& f) {
+    // Keep this short; it lives in the LOOK bottom-line.
+    auto fmtT = [](float t) -> std::string {
+        if (!std::isfinite(t) || t > 999.0f) return "INF";
+        std::ostringstream ss;
+        ss << std::fixed << std::setprecision((t < 10.0f) ? 1 : 0) << t;
+        return ss.str();
+    };
+
+    std::ostringstream ss;
+    if (f.ambush) {
+        ss << (f.backstab ? "SNEAK " : "AMBUSH ");
+    }
+
+    ss << "DUEL: KILL~" << fmtT(f.youTtk) << " DIE~" << fmtT(f.foeTtd);
+    return ss.str();
+}
+
+} // namespace
 
 void Game::beginLook() {
     // Close other overlays
@@ -13,12 +205,18 @@ void Game::beginLook() {
     codexOpen = false;
     msgScroll = 0;
 
+    // UI-only helper: acoustic preview is scoped to LOOK mode.
+    soundPreviewOpen = false;
+    soundPreviewDist.clear();
+
     looking = true;
     lookPos = player().pos;
 }
 
 void Game::endLook() {
     looking = false;
+    soundPreviewOpen = false;
+    soundPreviewDist.clear();
 }
 
 void Game::beginLookAt(Vec2i p) {
@@ -31,6 +229,12 @@ void Game::setLookCursor(Vec2i p) {
     p.x = clampi(p.x, 0, dung.width - 1);
     p.y = clampi(p.y, 0, dung.height - 1);
     lookPos = p;
+
+    // Keep acoustic preview locked to the cursor while active.
+    if (soundPreviewOpen) {
+        soundPreviewSrc = lookPos;
+        soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, soundPreviewVol);
+    }
 }
 
 void Game::setTargetCursor(Vec2i p) {
@@ -47,6 +251,39 @@ void Game::moveLookCursor(int dx, int dy) {
     p.x = clampi(p.x + dx, 0, dung.width - 1);
     p.y = clampi(p.y + dy, 0, dung.height - 1);
     lookPos = p;
+
+    // Keep acoustic preview locked to the cursor while active.
+    if (soundPreviewOpen) {
+        soundPreviewSrc = lookPos;
+        soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, soundPreviewVol);
+    }
+
+}
+
+void Game::toggleSoundPreview() {
+    // This is a UI-only planning helper; it never consumes a turn.
+    if (!looking) {
+        beginLook();
+    }
+
+    soundPreviewOpen = !soundPreviewOpen;
+    if (!soundPreviewOpen) {
+        soundPreviewDist.clear();
+        return;
+    }
+
+    // Default to the noise level of a single careful step (sneak vs normal).
+    soundPreviewVol = isSneaking() ? 8 : 12;
+    soundPreviewSrc = lookPos;
+    soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, soundPreviewVol);
+}
+
+void Game::adjustSoundPreviewVolume(int delta) {
+    if (!soundPreviewOpen) return;
+    // Common in-game noises fall roughly in the 1..18 range; keep a little headroom.
+    soundPreviewVol = clampi(soundPreviewVol + delta, 1, 30);
+    soundPreviewSrc = lookPos;
+    soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, soundPreviewVol);
 }
 
 std::string Game::describeAt(Vec2i p) const {
@@ -190,12 +427,11 @@ std::string Game::describeAt(Vec2i p) const {
                     }
                 }
 
-                
                 if (!hallu && e->friendly && e->pocketConsumable.id != 0 && e->pocketConsumable.count > 0) {
                     ss << " | PACK: " << displayItemName(e->pocketConsumable);
                 }
 
-if (e->effects.fearTurns > 0) {
+                if (e->effects.fearTurns > 0) {
                     ss << " | FEARED";
                 }
 
@@ -207,6 +443,13 @@ if (e->effects.fearTurns > 0) {
                     }
                     if (e->gearArmor.id != 0 && isArmor(e->gearArmor.kind)) {
                         ss << " | ARM: " << itemDisplayNameSingle(e->gearArmor.kind);
+                    }
+
+                    // Quick melee duel forecast (expected turns to kill / die) for visible non-allies.
+                    // Keep this intentionally compact; it renders in the LOOK bottom-line.
+                    if (!e->friendly && e->hp > 0) {
+                        const DuelForecast f = computeDuelForecast(*this, *e);
+                        ss << " | " << duelForecastLabel(f);
                     }
                 }
 
@@ -273,7 +516,11 @@ if (e->effects.fearTurns > 0) {
 
 std::string Game::lookInfoText() const {
     if (!looking) return std::string();
-    return describeAt(lookPos);
+    std::string s = describeAt(lookPos);
+    if (soundPreviewOpen) {
+        s += " | SOUND PREVIEW VOL " + std::to_string(soundPreviewVol) + "  ([ ] ADJUST)";
+    }
+    return s;
 }
 
 void Game::restUntilSafe() {

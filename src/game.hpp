@@ -322,6 +322,9 @@ enum class Action : uint8_t {
 
     // Debug (append-only)
     TogglePerfOverlay,
+
+    // UI-only (append-only)
+    ToggleSoundPreview, // Toggle the acoustic/sound propagation preview overlay (Look-mode helper)
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -906,8 +909,8 @@ public:
     static constexpr int MAP_H = Dungeon::DEFAULT_H;
 
     // Run structure / quest pacing.
-    // The default run now spans 20 floors.
-    static constexpr int DUNGEON_MAX_DEPTH = 20;
+    // The default run now spans 25 floors.
+    static constexpr int DUNGEON_MAX_DEPTH = 25;
     static constexpr int QUEST_DEPTH = DUNGEON_MAX_DEPTH; // where the Amulet of Yendor is guaranteed
     static constexpr int MIDPOINT_DEPTH = DUNGEON_MAX_DEPTH / 2;
 
@@ -1019,6 +1022,13 @@ public:
     // 0 means no scent. Only meaningful on in-bounds tiles.
     uint8_t scentAt(int x, int y) const;
 
+    // Procedural per-level wind (deterministic from run seed + level id).
+    // Used to bias gas and fire drift/spread. Returns a cardinal direction vector
+    // (dx,dy) or {0,0} for calm.
+    Vec2i windDir() const;
+    // 0 = calm, 1..3 = increasing strength.
+    int windStrength() const;
+
     const Entity& player() const;
     Entity& playerMut();
 
@@ -1097,6 +1107,11 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     bool isoVoxelRaytraceEnabled() const { return isoVoxelRaytraceEnabled_; }
     void setIsoVoxelRaytraceEnabled(bool enabled) { isoVoxelRaytraceEnabled_ = enabled; }
 
+    // Isometric-only: fade foreground occluders near the player/cursor for readability.
+    bool isoCutawayEnabled() const { return isoCutawayEnabled_; }
+    void setIsoCutawayEnabled(bool enabled) { isoCutawayEnabled_ = enabled; }
+
+
     // Inventory/UI accessors for renderer
     const std::vector<Item>& inventory() const { return inv; }
     bool isInventoryOpen() const { return invOpen; }
@@ -1106,6 +1121,15 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     int inventorySelection() const { return invSel; }
     bool isEquipped(int itemId) const;
     std::string equippedTag(int itemId) const; // e.g. "M", "R", "A", "1", "2"
+
+    // Equipped item accessors (UI/debug). These return pointers into the inventory.
+    // Null means the slot is empty.
+    const Item* equippedMelee() const;
+    const Item* equippedRanged() const;
+    const Item* equippedArmor() const;
+    const Item* equippedRing1() const;
+    const Item* equippedRing2() const;
+
     std::string equippedMeleeName() const;
     std::string equippedRangedName() const;
     std::string equippedArmorName() const;
@@ -1209,6 +1233,16 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     // Per-run randomized appearance id for an item kind (used by renderer for NetHack-style identification visuals).
     uint8_t itemAppearanceFor(ItemKind k) const { return appearanceFor(k); }
 
+// NetHack-style "call" labels for unidentified appearances (per-run, saved).
+// This lets players attach a short note to a randomized appearance (e.g. "RUBY POTION" -> "HEAL?").
+// Notes are shown as a {LABEL} suffix for unidentified items (inventory / LOOK) and in the Discoveries overlay.
+bool hasItemCallLabel(ItemKind k) const;
+std::string itemCallLabel(ItemKind k) const;
+// Sets (or replaces) the call label. Returns true if the label changed.
+bool setItemCallLabel(ItemKind k, const std::string& label);
+// Clears any existing call label. Returns true if something was cleared.
+bool clearItemCallLabel(ItemKind k);
+
     // Optional hunger system (survival / NetHack-like pacing).
     void setHungerEnabled(bool enabled);
     bool hungerEnabled() const { return hungerEnabled_; }
@@ -1277,6 +1311,10 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     Vec2i targetingCursor() const { return targetPos; }
     const std::vector<Vec2i>& targetingLine() const { return targetLine; }
     bool targetingIsValid() const { return targetValid; }
+
+    // True when the current target is considered risky (friendly fire / self-damage) and
+    // the game will require an extra confirmation press before executing the action.
+    bool targetingNeedsConfirm() const { return targeting && targetUnsafe_ && !targetUnsafeConfirmed_; }
     // HUD-friendly info string describing the current targeting cursor.
     // Used by the targeting overlay.
     std::string targetingInfoText() const;
@@ -1288,6 +1326,11 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     // When targetingIsValid() is false, this provides a short explanation suitable for the HUD
     // (e.g. "OUT OF RANGE", "NO CLEAR SHOT"). Empty when valid.
     std::string targetingStatusText() const;
+
+    // Optional warning/hint shown during targeting even when the shot is otherwise valid
+    // (e.g., friendly-fire risk for ranged attacks / AoE spells).
+    // Empty when there is no warning.
+    std::string targetingWarningText() const;
 
     // Kick prompt (directional)
     bool isKicking() const { return kicking; }
@@ -1304,6 +1347,14 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     bool isLooking() const { return looking; }
     Vec2i lookCursor() const { return lookPos; }
     std::string lookInfoText() const;
+
+    // Acoustic preview overlay (LOOK helper; UI-only)
+    bool isSoundPreviewOpen() const { return soundPreviewOpen; }
+    int soundPreviewVolume() const { return soundPreviewVol; }
+    Vec2i soundPreviewSource() const { return soundPreviewSrc; }
+    const std::vector<int>& soundPreviewMap() const { return soundPreviewDist; }
+    void toggleSoundPreview();
+    void adjustSoundPreviewVolume(int delta);
 
     // Minimap / stats overlays
     bool isMinimapOpen() const { return minimapOpen; }
@@ -1659,6 +1710,12 @@ private:
     bool targetValid = false;
     std::string targetStatusText_; // reason for invalid targeting (UI-only; not serialized)
 
+    // Targeting safety (UI-only; not serialized): used for friendly-fire/self-damage warnings
+    // and a two-step confirmation when the shot is risky.
+    bool targetUnsafe_ = false;
+    bool targetUnsafeConfirmed_ = false;
+    std::string targetWarningText_;
+
     enum class TargetingMode : uint8_t {
         Ranged = 0,
         Spell,
@@ -1684,6 +1741,13 @@ private:
     // Look/examine mode
     bool looking = false;
     Vec2i lookPos{0,0};
+
+    // Acoustic preview (UI-only; not serialized). When enabled, we cache a sound-cost map
+    // from the LOOK cursor so the renderer can show an in-world sound propagation heatmap.
+    bool soundPreviewOpen = false;
+    int soundPreviewVol = 12;
+    Vec2i soundPreviewSrc{0,0};
+    std::vector<int> soundPreviewDist;
 
     // Minimap / stats overlays
     bool minimapOpen = false;
@@ -1806,6 +1870,7 @@ private:
     bool identifyItemsEnabled = true;
     std::array<uint8_t, ITEM_KIND_COUNT> identKnown{};       // 0/1
     std::array<uint8_t, ITEM_KIND_COUNT> identAppearance{};  // appearance id (category-local)
+    std::array<std::string, ITEM_KIND_COUNT> identCall{};      // user "call" labels (per-run; saved)
 
     // Auto-move / auto-explore state (stepped in update() for UX)
     AutoMoveMode autoMode = AutoMoveMode::None;
@@ -1908,6 +1973,7 @@ private:
     ControlPreset controlPreset_ = ControlPreset::Modern;
     bool voxelSpritesEnabled_ = true;
     bool isoVoxelRaytraceEnabled_ = false;
+    bool isoCutawayEnabled_ = true;
 
     // Autosave
     int autosaveInterval = 0; // 0 = off
@@ -1999,11 +2065,7 @@ private:
     int equippedArmorIndex() const;
     int equippedRing1Index() const;
     int equippedRing2Index() const;
-    const Item* equippedMelee() const;
-    const Item* equippedRanged() const;
-    const Item* equippedArmor() const;
-    const Item* equippedRing1() const;
-    const Item* equippedRing2() const;
+
 
     // Passive equipment bonuses (currently only rings).
     int ringTalentBonusMight() const;

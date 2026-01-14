@@ -853,6 +853,7 @@ static std::vector<std::string> extendedCommandList() {
         "yell",
         "whistle",
         "listen",
+        "wind",
         "throwvoice",
         "pet",
         "tame",
@@ -877,6 +878,7 @@ static std::vector<std::string> extendedCommandList() {
         "autosave",
         "stepdelay",
         "identify",
+        "call",
         "encumbrance",
         "timers",
         "uitheme",
@@ -977,6 +979,9 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
         ok &= updateIniKey(settingsPath, "bind_sneak", "n");
     }
 
+
+    // Acoustic preview helper (UI-only). Keep a consistent bind across presets.
+    ok &= updateIniKey(settingsPath, "bind_sound_preview", "ctrl+n");
     game.setControlPreset(preset);
 
     if (ok) {
@@ -1017,9 +1022,70 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     else if (cmdIn == "vent" || cmdIn == "ventriloquism" || cmdIn == "voice" || cmdIn == "decoy") cmdIn = "throwvoice";
     else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn == "prophecy") cmdIn = "augury";
     else if (cmdIn == "where" || cmdIn == "location" || cmdIn == "loc") cmdIn = "pos";
+    else if (cmdIn == "label") cmdIn = "call";
     else if (cmdIn == "tile" || cmdIn == "whatis" || cmdIn == "describe") cmdIn = "what";
 
     std::vector<std::string> cmds = extendedCommandList();
+
+    // When a command is unknown, suggest close matches to reduce friction (typos, muscle-memory, etc.).
+    // This is intentionally conservative to avoid noisy spam for very short inputs.
+    auto editDistance = [](const std::string& a, const std::string& b) -> int {
+        // Levenshtein distance (iterative DP).
+        const size_t n = a.size();
+        const size_t m = b.size();
+        if (n == 0) return static_cast<int>(m);
+        if (m == 0) return static_cast<int>(n);
+
+        std::vector<int> prev(m + 1), cur(m + 1);
+        for (size_t j = 0; j <= m; ++j) prev[j] = static_cast<int>(j);
+
+        for (size_t i = 1; i <= n; ++i) {
+            cur[0] = static_cast<int>(i);
+            for (size_t j = 1; j <= m; ++j) {
+                const int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+                cur[j] = std::min({ prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost });
+            }
+            prev.swap(cur);
+        }
+
+        return prev[m];
+    };
+
+    auto suggestCommands = [&](const std::string& in) -> std::vector<std::string> {
+        struct Cand { int d; std::string cmd; };
+
+        std::vector<Cand> cands;
+        cands.reserve(cmds.size());
+
+        for (const auto& c : cmds) {
+            // Very cheap filter: for very short inputs, only suggest commands that share the
+            // first character to avoid drowning the player in unrelated options.
+            if (!in.empty() && in.size() <= 3 && !c.empty() && in[0] != c[0]) continue;
+
+            const int d = editDistance(in, c);
+            cands.push_back(Cand{d, c});
+        }
+
+        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+            if (a.d != b.d) return a.d < b.d;
+            return a.cmd < b.cmd;
+        });
+
+        int maxDist = 1;
+        if (in.size() >= 5) maxDist = 2;
+        if (in.size() >= 8) maxDist = 3;
+        if (in.size() >= 12) maxDist = 4;
+        maxDist = std::min(maxDist, 4);
+
+        std::vector<std::string> out;
+        for (const auto& c : cands) {
+            if (c.d > maxDist) break;
+            out.push_back(c.cmd);
+            if (out.size() >= 3) break;
+        }
+
+        return out;
+    };
 
     // Exact match first, else unique prefix match.
     std::vector<std::string> matches;
@@ -1037,6 +1103,18 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     if (matches.empty()) {
         game.pushSystemMessage("UNKNOWN COMMAND: " + cmdIn);
+
+        const auto sugg = suggestCommands(cmdIn);
+        if (!sugg.empty()) {
+            std::string msg = "DID YOU MEAN: ";
+            for (size_t i = 0; i < sugg.size(); ++i) {
+                msg += sugg[i];
+                if (i + 1 < sugg.size()) msg += ", ";
+            }
+            msg += "?";
+            game.pushSystemMessage(msg);
+        }
+
         return;
     }
 
@@ -1133,6 +1211,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         if (a == "toggle_minimap" || a == "minimap") { outKey = "bind_toggle_minimap"; return true; }
         if (a == "toggle_stats" || a == "stats") { outKey = "bind_toggle_stats"; return true; }
         if (a == "toggle_perf_overlay" || a == "toggle_perf" || a == "perf" || a == "perf_overlay") { outKey = "bind_toggle_perf_overlay"; return true; }
+        if (a == "sound_preview" || a == "toggle_sound_preview" || a == "soundpreview" || a == "acoustic" || a == "acoustic_preview") { outKey = "bind_sound_preview"; return true; }
         if (a == "fullscreen" || a == "toggle_fullscreen" || a == "togglefullscreen") { outKey = "bind_fullscreen"; return true; }
         if (a == "screenshot") { outKey = "bind_screenshot"; return true; }
         if (a == "save") { outKey = "bind_save"; return true; }
@@ -2364,6 +2443,38 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "isocutaway" || cmd == "iso_cutaway" || cmd == "cutaway") {
+        if (toks.size() <= 1) {
+            game.pushSystemMessage(std::string("ISO CUTAWAY: ") + (game.isoCutawayEnabled() ? "ON" : "OFF"));
+            game.pushSystemMessage("USAGE: #isocutaway on/off/toggle");
+            return;
+        }
+
+        const std::string v = toLower(toks[1]);
+        if (v == "on" || v == "true" || v == "1") {
+            game.setIsoCutawayEnabled(true);
+            game.markSettingsDirty();
+            game.pushSystemMessage("ISO CUTAWAY: ON");
+            return;
+        }
+        if (v == "off" || v == "false" || v == "0") {
+            game.setIsoCutawayEnabled(false);
+            game.markSettingsDirty();
+            game.pushSystemMessage("ISO CUTAWAY: OFF");
+            return;
+        }
+        if (v == "toggle" || v == "t") {
+            game.setIsoCutawayEnabled(!game.isoCutawayEnabled());
+            game.markSettingsDirty();
+            game.pushSystemMessage(std::string("ISO CUTAWAY: ") + (game.isoCutawayEnabled() ? "ON" : "OFF"));
+            return;
+        }
+
+        game.pushSystemMessage("USAGE: #isocutaway on/off/toggle");
+        return;
+    }
+
+
     if (cmd == "bones") {
         if (toks.size() > 1) {
             const std::string v = toLower(toks[1]);
@@ -2506,6 +2617,143 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "call") {
+        // NetHack-style "call" labels for unidentified appearances.
+        //
+        // Usage:
+        //   #call <label...>          (uses LOOK cursor if active, else inventory selection, else item underfoot)
+        //   #call <x> <y> <label...>  (explicit ground tile coordinates)
+        //   #label ...                (alias)
+        //
+        // Clearing:
+        //   #call clear|none|off|-
+        //
+        // Notes are attached to the *appearance* (per-run randomized) via the underlying ItemKind.
+
+        auto joinFrom = [&](size_t start) -> std::string {
+            std::string out;
+            for (size_t i = start; i < toks.size(); ++i) {
+                if (i > start) out.push_back(' ');
+                out += toks[i];
+            }
+            return out;
+        };
+
+        ItemKind target = static_cast<ItemKind>(0);
+        bool haveTarget = false;
+
+        auto setTargetFromKind = [&](ItemKind k) {
+            if (!isIdentifiableKind(k)) return false;
+            target = k;
+            haveTarget = true;
+            return true;
+        };
+
+        bool usePos = false;
+        Vec2i pos{0, 0};
+        size_t labelStart = 1;
+
+        const bool looking = game.isLooking();
+
+        // Explicit coords: call x y label...
+        if (!looking && toks.size() >= 4) {
+            try {
+                const int x = std::stoi(toks[1]);
+                const int y = std::stoi(toks[2]);
+                pos = Vec2i{x, y};
+                usePos = true;
+                labelStart = 3;
+            } catch (...) {
+                // Not coords; fall through.
+            }
+        }
+
+        // LOOK cursor has priority over other contexts.
+        if (looking) {
+            pos = game.lookCursor();
+            usePos = true;
+            labelStart = 1;
+        }
+
+        if (usePos) {
+            // Prefer an *unidentified* identifiable item (most useful), otherwise any identifiable item.
+            ItemKind fallback = static_cast<ItemKind>(0);
+            bool haveFallback = false;
+
+            for (const GroundItem& gi : game.groundItems()) {
+                if (gi.pos != pos) continue;
+                const ItemKind k = gi.item.kind;
+                if (!isIdentifiableKind(k)) continue;
+
+                if (!game.discoveriesIsIdentified(k)) {
+                    setTargetFromKind(k);
+                    break;
+                }
+                if (!haveFallback) {
+                    fallback = k;
+                    haveFallback = true;
+                }
+            }
+
+            if (!haveTarget && haveFallback) setTargetFromKind(fallback);
+        } else if (game.isInventoryOpen()) {
+            const int sel = game.inventorySelection();
+            const auto& inv = game.inventory();
+            if (sel >= 0 && sel < static_cast<int>(inv.size())) {
+                setTargetFromKind(inv[static_cast<size_t>(sel)].kind);
+            }
+        } else {
+            // Default: first identifiable ground item under the player.
+            pos = game.player().pos;
+            for (const GroundItem& gi : game.groundItems()) {
+                if (gi.pos != pos) continue;
+                if (setTargetFromKind(gi.item.kind)) break;
+            }
+        }
+
+        if (!haveTarget) {
+            game.pushSystemMessage("CALL: NO POTION/SCROLL/RING/WAND IN CONTEXT (TRY LOOK CURSOR OR INVENTORY).");
+            return;
+        }
+
+        std::string label = trim(joinFrom(labelStart));
+        const std::string labelLow = toLower(label);
+
+        if (label.empty()) {
+            if (game.hasItemCallLabel(target)) {
+                game.pushSystemMessage("CALL: " + game.discoveryAppearanceLabel(target));
+            } else {
+                game.pushSystemMessage("CALL: NO LABEL SET. USAGE: #call <label...>  (OR #call clear)");
+            }
+            return;
+        }
+
+        const bool wantClear =
+            (labelLow == "clear" || labelLow == "none" || labelLow == "off" || labelLow == "-" || labelLow == "reset");
+
+        if (wantClear) {
+            if (game.clearItemCallLabel(target)) {
+                game.pushSystemMessage("CALL CLEARED: " + game.discoveryAppearanceLabel(target));
+            } else {
+                game.pushSystemMessage("CALL: NO LABEL TO CLEAR FOR " + game.discoveryAppearanceLabel(target));
+            }
+            return;
+        }
+
+        if (game.setItemCallLabel(target, label)) {
+            game.pushSystemMessage("CALLED: " + game.discoveryAppearanceLabel(target));
+        } else {
+            // Either unchanged or sanitized to empty (which clears).
+            if (game.hasItemCallLabel(target)) {
+                game.pushSystemMessage("CALLED: " + game.discoveryAppearanceLabel(target));
+            } else {
+                game.pushSystemMessage("CALL: CLEARED.");
+            }
+        }
+
+        return;
+    }
+
     if (cmd == "encumbrance") {
         const std::string v = arg(1);
         if (v.empty()) {
@@ -2579,6 +2827,29 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     if (cmd == "tame") {
         game.tame();
+        return;
+    }
+
+    if (cmd == "wind") {
+        const Vec2i w = game.windDir();
+        const int ws = game.windStrength();
+
+        if (ws <= 0 || (w.x == 0 && w.y == 0)) {
+            game.pushSystemMessage("WIND: CALM.");
+            return;
+        }
+
+        const char* dir =
+            (w.x > 0) ? "EAST" :
+            (w.x < 0) ? "WEST" :
+            (w.y > 0) ? "SOUTH" : "NORTH";
+
+        const char* mag =
+            (ws == 1) ? "BREEZE" :
+            (ws == 2) ? "DRAFT" : "GALE";
+
+        std::string msg = std::string("WIND: ") + dir + " (" + mag + ").";
+        game.pushSystemMessage(msg);
         return;
     }
 

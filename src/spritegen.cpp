@@ -3760,8 +3760,8 @@ SpritePixels generateIsometricCastShadowOverlay(uint32_t seed, uint8_t mask, int
     // This is drawn on floor-like tiles adjacent to tall occluders (walls/closed doors/pillars/etc)
     // to reinforce verticality without requiring any new hand-authored art.
     //
-    // The renderer uses only N/W bits of the mask (light from top-left), but we keep
-    // the full 4-neighbor mask encoding for compatibility with other autotile overlays.
+    // Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is a tall shadow caster").
+    // The renderer selects which bits to set based on the global isometric light direction.
     (void)frame; // currently static (no animation)
     pxSize = clampSpriteSize(pxSize);
 
@@ -3806,6 +3806,8 @@ SpritePixels generateIsometricCastShadowOverlay(uint32_t seed, uint8_t mask, int
 
             float shade = 0.0f;
             float tN = 0.0f;
+            float tE = 0.0f;
+            float tS = 0.0f;
             float tW = 0.0f;
 
             // Shadow from a tall occluder immediately north of this tile.
@@ -3816,6 +3818,22 @@ SpritePixels generateIsometricCastShadowOverlay(uint32_t seed, uint8_t mask, int
                 tN = std::clamp(1.0f - (dist / kReachTail), 0.0f, 1.0f);
             }
 
+            // Shadow from a tall occluder immediately east of this tile.
+            // Distance from the right diamond edge for this y: nx_edge = +(1 - |ny|).
+            if (mask & 0x02u) {
+                const float dist = 1.0f - std::abs(ny) - nx; // 0 at boundary, ~1 at center
+                shade += shadowFalloff(dist) * 0.85f;
+                tE = std::clamp(1.0f - (dist / kReachTail), 0.0f, 1.0f);
+            }
+
+            // Shadow from a tall occluder immediately south of this tile.
+            // Distance from the bottom diamond edge for this x: ny_edge = +(1 - |nx|).
+            if (mask & 0x04u) {
+                const float dist = 1.0f - std::abs(nx) - ny; // 0 at boundary, ~1 at center
+                shade += shadowFalloff(dist) * 0.85f;
+                tS = std::clamp(1.0f - (dist / kReachTail), 0.0f, 1.0f);
+            }
+
             // Shadow from a tall occluder immediately west of this tile.
             // Distance from the left diamond edge for this y: nx_edge = -(1 - |ny|).
             if (mask & 0x08u) {
@@ -3824,14 +3842,18 @@ SpritePixels generateIsometricCastShadowOverlay(uint32_t seed, uint8_t mask, int
                 tW = std::clamp(1.0f - (dist / kReachTail), 0.0f, 1.0f);
             }
 
-            // Extra occlusion in tight inner corners (N+W). Makes corridors feel grounded.
-            if ((mask & 0x01u) && (mask & 0x08u)) {
-                float corner = std::min(tN, tW);
+            // Extra occlusion in tight inner corners. Makes corridors feel grounded.
+            auto cornerBoost = [&](float a, float b) {
+                float corner = std::min(a, b);
                 corner = corner * corner;
-                shade += corner * 0.55f;
-            }
+                return corner;
+            };
 
-            // Ignore E/S bits (present for compatibility with the 4-neighbor mask encoding).
+            if ((mask & 0x01u) && (mask & 0x08u)) shade += cornerBoost(tN, tW) * 0.55f; // NW
+            if ((mask & 0x01u) && (mask & 0x02u)) shade += cornerBoost(tN, tE) * 0.55f; // NE
+            if ((mask & 0x04u) && (mask & 0x02u)) shade += cornerBoost(tS, tE) * 0.55f; // SE
+            if ((mask & 0x04u) && (mask & 0x08u)) shade += cornerBoost(tS, tW) * 0.55f; // SW
+
             shade = std::clamp(shade, 0.0f, 1.0f);
 
             // Soft falloff so the shadow reads like lighting rather than a hard band.
@@ -3864,7 +3886,8 @@ SpritePixels generateIsometricCastShadowOverlay(uint32_t seed, uint8_t mask, int
 }
 
 
-SpritePixels generateIsometricEntityShadowOverlay(uint32_t seed, int frame, int pxSize) {
+
+SpritePixels generateIsometricEntityShadowOverlay(uint32_t seed, uint8_t lightDir, int frame, int pxSize) {
     // A small, soft diamond shadow used to anchor sprites to the ground plane in
     // isometric view. This improves depth/readability without requiring per-entity
     // authored shadows or expensive lighting.
@@ -3885,9 +3908,25 @@ SpritePixels generateIsometricEntityShadowOverlay(uint32_t seed, int frame, int 
     const float hw = std::max(1.0f, static_cast<float>(w) * 0.5f);
     const float hh = std::max(1.0f, static_cast<float>(h) * 0.5f);
 
-    // Bias the shadow slightly toward the bottom-right (light from top-left).
-    const float cx = (static_cast<float>(w) - 1.0f) * 0.5f + static_cast<float>(w) * 0.06f;
-    const float cy = (static_cast<float>(h) - 1.0f) * 0.5f + static_cast<float>(h) * 0.14f;
+    // Bias the shadow slightly away from the light direction.
+    // lightDir encoding (from the renderer):
+    //   0 = light from NW, 1 = light from NE, 2 = light from SE, 3 = light from SW
+    // Shadows fall in the opposite direction.
+    const float ox = static_cast<float>(w) * 0.06f;
+    const float oy = static_cast<float>(h) * 0.14f;
+
+    float dx = 0.0f;
+    float dy = 0.0f;
+    switch (lightDir & 0x03u) {
+        default:
+        case 0: dx = +ox; dy = +oy; break; // NW light -> SE shadow
+        case 1: dx = -ox; dy = +oy; break; // NE light -> SW shadow
+        case 2: dx = -ox; dy = -oy; break; // SE light -> NW shadow
+        case 3: dx = +ox; dy = -oy; break; // SW light -> NE shadow
+    }
+
+    const float cx = (static_cast<float>(w) - 1.0f) * 0.5f + dx;
+    const float cy = (static_cast<float>(h) - 1.0f) * 0.5f + dy;
 
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
@@ -3918,13 +3957,14 @@ SpritePixels generateIsometricEntityShadowOverlay(uint32_t seed, int frame, int 
             if (li <= 0) continue;
             const uint8_t alpha = static_cast<uint8_t>(std::clamp((li * static_cast<int>(kMaxAlpha)) / 4, 0, 255));
 
-            // White RGB so the renderer can tint it (usually to black).
+            // White RGB so the renderer can tint it (typically black).
             out.at(x, y) = {255, 255, 255, alpha};
         }
     }
 
     return out;
 }
+
 
 
 SpritePixels generateIsometricStairsOverlay(uint32_t seed, bool up, int frame, int pxSize) {

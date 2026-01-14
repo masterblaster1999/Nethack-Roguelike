@@ -1082,6 +1082,7 @@ void Game::tickYendorDoom() {
 void Game::initIdentificationTables() {
     identKnown.fill(1);
     identAppearance.fill(0);
+    identCall.fill(std::string());
 
     if (!identifyItemsEnabled) {
         // All items show true names.
@@ -1230,6 +1231,17 @@ std::string Game::unknownDisplayName(const Item& it) const {
         return itemDisplayName(it);
     }
 
+    // NetHack-style "call" label: user notes about an unidentified appearance.
+    const size_t callIdx = static_cast<size_t>(it.kind);
+    if (callIdx < static_cast<size_t>(ITEM_KIND_COUNT)) {
+        const std::string& note = identCall[callIdx];
+        if (!note.empty()) {
+            std::string shown = note;
+            if (shown.size() > 28) shown.resize(28);
+            ss << " {" << toUpper(shown) << "}";
+        }
+    }
+
     // Preserve shop price tags even while unidentified.
     if (it.shopPrice > 0 && it.shopDepth > 0) {
         const ItemDef& d = itemDef(it.kind);
@@ -1273,6 +1285,66 @@ std::string Game::displayItemNameSingle(ItemKind k) const {
     tmp.count = 1;
     return displayItemName(tmp);
 }
+
+bool Game::hasItemCallLabel(ItemKind k) const {
+    if (!isIdentifiableKind(k)) return false;
+    const size_t idx = static_cast<size_t>(k);
+    if (idx >= static_cast<size_t>(ITEM_KIND_COUNT)) return false;
+    return !identCall[idx].empty();
+}
+
+std::string Game::itemCallLabel(ItemKind k) const {
+    if (!isIdentifiableKind(k)) return std::string();
+    const size_t idx = static_cast<size_t>(k);
+    if (idx >= static_cast<size_t>(ITEM_KIND_COUNT)) return std::string();
+    return identCall[idx];
+}
+
+static std::string sanitizeCallLabel(std::string s) {
+    s = trim(std::move(s));
+    if (s.empty()) return std::string();
+
+    // Strip control chars so the HUD/CSV/log remain clean.
+    std::string filtered;
+    filtered.reserve(s.size());
+    for (char c : s) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (uc < 32 || uc == 127) continue;
+        filtered.push_back(c);
+    }
+
+    filtered = trim(std::move(filtered));
+    if (filtered.empty()) return std::string();
+
+    // Keep it short so inventory rows stay readable.
+    if (filtered.size() > 28) filtered.resize(28);
+    return filtered;
+}
+
+bool Game::setItemCallLabel(ItemKind k, const std::string& label) {
+    if (!isIdentifiableKind(k)) return false;
+    const size_t idx = static_cast<size_t>(k);
+    if (idx >= static_cast<size_t>(ITEM_KIND_COUNT)) return false;
+
+    const std::string v = sanitizeCallLabel(label);
+    if (v.empty()) {
+        return clearItemCallLabel(k);
+    }
+
+    if (identCall[idx] == v) return false;
+    identCall[idx] = v;
+    return true;
+}
+
+bool Game::clearItemCallLabel(ItemKind k) {
+    if (!isIdentifiableKind(k)) return false;
+    const size_t idx = static_cast<size_t>(k);
+    if (idx >= static_cast<size_t>(ITEM_KIND_COUNT)) return false;
+    if (identCall[idx].empty()) return false;
+    identCall[idx].clear();
+    return true;
+}
+
 
 void Game::newGame(uint32_t seed) {
     if (seed == 0) {
@@ -2565,6 +2637,27 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         pushSystemMessage(ms.str());
     }
 
+    // Environmental flavor: a per-level draft direction that biases drifting hazards (gas, fire).
+    // Only announce it once, when a floor is first generated, to avoid spamming on revisits.
+    if (!restored && !atCamp()) {
+        const Vec2i w = windDir();
+        const int ws = windStrength();
+        if (ws > 0 && (w.x != 0 || w.y != 0)) {
+            const char* dir =
+                (w.x > 0) ? "EAST" :
+                (w.x < 0) ? "WEST" :
+                (w.y > 0) ? "SOUTH" : "NORTH";
+
+            const char* mag =
+                (ws == 1) ? "A LIGHT" :
+                (ws == 2) ? "A STEADY" : "A STRONG";
+
+            std::string msg = std::string(mag) + " DRAFT BLOWS TO THE " + dir + ".";
+            pushSystemMessage(msg);
+        }
+    }
+
+
     if (followedCount > 0) {
         std::ostringstream ms;
         if (goingDown) {
@@ -2648,6 +2741,11 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
             pushMsg("YOU HEAR THE RATTLE OF CHAINS IN THE DARK.", MessageKind::System, true);
         }
 
+        // Hint: annex micro-dungeons are optional side areas behind (usually) hidden doors.
+        if (goingDown && dung.annexCount > 0) {
+            pushMsg("YOU HEAR A HOLLOW ECHO BEHIND THE STONE.", MessageKind::System, true);
+        }
+
         // Special floor callout: the Sokoban puzzle floor teaches/spotlights the
         // boulder-into-chasm bridging mechanic.
         if (goingDown && depth_ == Dungeon::SOKOBAN_DEPTH) {
@@ -2659,6 +2757,13 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         // echoing classic Rogue/NetHack pacing.
         if (goingDown && depth_ == Dungeon::ROGUE_LEVEL_DEPTH) {
             pushMsg("YOU ENTER WHAT SEEMS TO BE AN OLDER, MORE PRIMITIVE WORLD.", MessageKind::System, true);
+        }
+
+        // Deep descent callout: the default run is longer now, so the "final approach"
+        // begins a few floors earlier than the labyrinth setpiece.
+        if (goingDown && depth_ == QUEST_DEPTH - 6) {
+            pushMsg("THE DUNGEON PLUNGES EVEN DEEPER...", MessageKind::System, true);
+            pushMsg("THE AIR GROWS THICK WITH OLD MAGIC.", MessageKind::System, true);
         }
 
         if (goingDown && depth_ == QUEST_DEPTH - 1) {
@@ -3155,6 +3260,45 @@ uint64_t Game::determinismHash() const {
 
     return hh.h;
 }
+
+
+Vec2i Game::windDir() const {
+    // Camp is sheltered; keep the surface calm.
+    if (branch_ == DungeonBranch::Camp || depth_ <= 0) return {0, 0};
+
+    // Derive from run seed + level id without consuming RNG.
+    // This keeps replays deterministic and avoids subtly changing dungeon generation.
+    const uint32_t b = static_cast<uint32_t>(static_cast<int>(branch_));
+    const uint32_t d = static_cast<uint32_t>(std::max(0, depth_));
+    const uint32_t h = hashCombine(seed_, hashCombine(b * 0x9E3779B9u, d * 0x85EBCA6Bu));
+
+    // 1/5 chance of calm air. Otherwise one of four cardinal drafts.
+    switch (h % 5u) {
+        case 0: return {0, 0};   // calm
+        case 1: return {1, 0};   // east
+        case 2: return {-1, 0};  // west
+        case 3: return {0, 1};   // south
+        default: return {0, -1}; // north
+    }
+}
+
+int Game::windStrength() const {
+    const Vec2i w = windDir();
+    if (w.x == 0 && w.y == 0) return 0;
+
+    // Independent-ish hash so direction and strength aren't perfectly correlated.
+    const uint32_t b = static_cast<uint32_t>(static_cast<int>(branch_));
+    const uint32_t d = static_cast<uint32_t>(std::max(0, depth_));
+    const uint32_t h = hashCombine(seed_ ^ 0xA341316Cu, hashCombine(b * 0xC8013EA4u, d * 0x7E95761Eu));
+
+    int s = 1 + static_cast<int>((h >> 3) % 3u); // 1..3
+
+    // Gentle depth bias: deeper floors trend slightly draftier, but never exceed 3.
+    if (branch_ == DungeonBranch::Main && depth_ >= 13) s += 1;
+
+    return clampi(s, 1, 3);
+}
+
 
 
 void Game::pushFxParticle(FXParticlePreset preset, Vec2i pos, int intensity, float duration, float delay, uint32_t seed) {

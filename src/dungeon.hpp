@@ -126,6 +126,8 @@ public:
     int terrainSculptCount = 0;
     // Not serialized: corridor braiding pass tunnels carved (dead-end reduction / extra loops).
     int corridorBraidCount = 0;
+    // Not serialized: optional "annex" micro-dungeons carved into wall pockets (mini-maze/cavern side areas).
+    int annexCount = 0;
     // Not serialized: surface camp stash anchor (depth 0).
     Vec2i campStashSpot{ -1, -1 };
     Vec2i stairsUp{ -1, -1 };

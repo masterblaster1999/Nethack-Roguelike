@@ -123,6 +123,16 @@ inline void fillIsoDiamond(SDL_Renderer* r, int cx, int cy, int halfW, int halfH
 }
 
 
+
+
+// Procedural global isometric light direction.
+//  0 = NW, 1 = NE, 2 = SE, 3 = SW.
+// Chosen per-run from the cosmetic style seed so each run can have a slightly
+// different lighting mood (purely visual, deterministic).
+inline uint8_t isoLightDirFromStyleSeed(uint32_t styleSeed) {
+    if (styleSeed == 0u) return 0u;
+    return static_cast<uint8_t>(hash32(styleSeed ^ 0x51A0F00Du) & 0x03u);
+}
 // --- Coherent procedural variation helpers ---------------------------------
 //
 // Tile variants were previously selected purely via (hash % N), which can read as
@@ -2445,14 +2455,14 @@ void Renderer::ensureUIAssets(const Game& game) {
     uiAssetsValid = true;
 }
 
-void Renderer::ensureIsoTerrainAssets() {
-    if (isoTerrainAssetsValid) return;
+void Renderer::ensureIsoTerrainAssets(uint32_t styleSeed) {
     if (!renderer || !pixfmt) return;
 
     // Tile textures are generated in a clamped "sprite" resolution to keep VRAM reasonable
     // for very large tile sizes. This matches the logic in Renderer::init().
     const int spritePx = std::max(16, std::min(256, tile));
     const int tileVars = (spritePx >= 224) ? 8 : (spritePx >= 160) ? 10 : (spritePx >= 96) ? 14 : 18;
+    if (isoTerrainAssetsValid && isoTerrainStyleSeedCached_ == styleSeed && isoTerrainSpritePxCached_ == spritePx) return;
 
     // Defensive cleanup in case we ever re-generate (e.g., future runtime tile-size changes).
     for (auto& styleVec : floorThemeVarIso) {
@@ -2559,6 +2569,10 @@ void Renderer::ensureIsoTerrainAssets() {
     }
     floorDecalVarIso.clear();
 
+    auto mixSeed = [&](uint32_t base) -> uint32_t {
+        return (styleSeed != 0u) ? hashCombine(styleSeed, base) : base;
+    };
+
     // --- Build isometric terrain ---
     // Floors are generated directly as 2:1 diamond tiles in diamond space (no projection).
     for (int st = 0; st < ROOM_STYLES; ++st) {
@@ -2566,8 +2580,7 @@ void Renderer::ensureIsoTerrainAssets() {
         vec.resize(static_cast<size_t>(tileVars));
         for (int i = 0; i < tileVars; ++i) {
             for (int f = 0; f < FRAMES; ++f) {
-                const uint32_t seed = hashCombine(0xC011Du ^ (static_cast<uint32_t>(st) * 0x9E3779B9u),
-                                                  static_cast<uint32_t>(i * 1000 + f * 17));
+                const uint32_t seed = hashCombine(mixSeed(0xC011Du ^ (static_cast<uint32_t>(st) * 0x9E3779B9u)), static_cast<uint32_t>(i * 1000 + f * 17));
                 const SpritePixels iso = generateIsometricThemedFloorTile(seed, static_cast<uint8_t>(st), f, spritePx);
                 vec[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
             }
@@ -2576,7 +2589,7 @@ void Renderer::ensureIsoTerrainAssets() {
 
     chasmVarIso.resize(static_cast<size_t>(tileVars));
     for (int i = 0; i < tileVars; ++i) {
-        const uint32_t seed = hashCombine(0xC1A500u, static_cast<uint32_t>(i));
+        const uint32_t seed = hashCombine(mixSeed(0xC1A500u), static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
             const SpritePixels iso = generateIsometricChasmTile(seed, f, spritePx);
             chasmVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
@@ -2586,7 +2599,7 @@ void Renderer::ensureIsoTerrainAssets() {
     // 2.5D walls are drawn as sprites (square textures) so they can extend above the ground plane.
     wallBlockVarIso.resize(static_cast<size_t>(tileVars));
     for (int i = 0; i < tileVars; ++i) {
-        const uint32_t seed = hashCombine(0xAA110u ^ 0xB10Cu, static_cast<uint32_t>(i));
+        const uint32_t seed = hashCombine(mixSeed(0xAA110u ^ 0xB10Cu), static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
             wallBlockVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] =
                 textureFromSprite(generateIsometricWallBlockTile(seed, f, spritePx));
@@ -2599,7 +2612,7 @@ void Renderer::ensureIsoTerrainAssets() {
     doorBlockLockedVarIso.resize(static_cast<size_t>(tileVars));
     doorBlockOpenVarIso.resize(static_cast<size_t>(tileVars));
     for (int i = 0; i < tileVars; ++i) {
-        const uint32_t baseSeed = hashCombine(0xD00Du ^ 0xB10Cu, static_cast<uint32_t>(i));
+        const uint32_t baseSeed = hashCombine(mixSeed(0xD00Du ^ 0xB10Cu), static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
             doorBlockClosedVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] =
                 textureFromSprite(generateIsometricDoorBlockTile(baseSeed ^ 0xC105EDu, /*locked=*/false, f, spritePx));
@@ -2616,8 +2629,8 @@ void Renderer::ensureIsoTerrainAssets() {
     pillarBlockVarIso.resize(static_cast<size_t>(tileVars));
     boulderBlockVarIso.resize(static_cast<size_t>(tileVars));
     for (int i = 0; i < tileVars; ++i) {
-        const uint32_t pSeed = hashCombine(0x9111A0u ^ 0xB10Cu, static_cast<uint32_t>(i));
-        const uint32_t bSeed = hashCombine(0xB011D3u ^ 0xB10Cu, static_cast<uint32_t>(i));
+        const uint32_t pSeed = hashCombine(mixSeed(0x9111A0u ^ 0xB10Cu), static_cast<uint32_t>(i));
+        const uint32_t bSeed = hashCombine(mixSeed(0xB011D3u ^ 0xB10Cu), static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
             pillarBlockVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] =
                 textureFromSprite(generateIsometricPillarBlockTile(pSeed, f, spritePx));
@@ -2634,7 +2647,7 @@ void Renderer::ensureIsoTerrainAssets() {
                 isoEdgeShadeVar[static_cast<size_t>(m)][static_cast<size_t>(f)] = nullptr;
                 continue;
             }
-            const uint32_t seed = hashCombine(0x150A0u, static_cast<uint32_t>(m * 131 + f * 17));
+            const uint32_t seed = hashCombine(mixSeed(0x150A0u), static_cast<uint32_t>(m * 131 + f * 17));
             isoEdgeShadeVar[static_cast<size_t>(m)][static_cast<size_t>(f)] =
                 textureFromSprite(generateIsometricEdgeShadeOverlay(seed, static_cast<uint8_t>(m), f, spritePx));
         }
@@ -2649,7 +2662,7 @@ void Renderer::ensureIsoTerrainAssets() {
                 isoChasmGloomVar[static_cast<size_t>(m)][static_cast<size_t>(f)] = nullptr;
                 continue;
             }
-            const uint32_t seed = hashCombine(0xC11A500u, static_cast<uint32_t>(m * 97 + f * 19));
+            const uint32_t seed = hashCombine(mixSeed(0xC11A500u), static_cast<uint32_t>(m * 97 + f * 19));
             isoChasmGloomVar[static_cast<size_t>(m)][static_cast<size_t>(f)] =
                 textureFromSprite(generateIsometricChasmGloomOverlay(seed, static_cast<uint8_t>(m), f, spritePx));
         }
@@ -2663,34 +2676,35 @@ void Renderer::ensureIsoTerrainAssets() {
                 isoCastShadowVar[static_cast<size_t>(m)][static_cast<size_t>(f)] = nullptr;
                 continue;
             }
-            const uint32_t seed = hashCombine(0xCA570u, static_cast<uint32_t>(m * 97 + f * 19));
+            const uint32_t seed = hashCombine(mixSeed(0xCA570u), static_cast<uint32_t>(m * 97 + f * 19));
             isoCastShadowVar[static_cast<size_t>(m)][static_cast<size_t>(f)] =
                 textureFromSprite(generateIsometricCastShadowOverlay(seed, static_cast<uint8_t>(m), f, spritePx));
         }
     }
 
+    const uint8_t isoLightDir = isoLightDirFromStyleSeed(styleSeed);
     // Ground-plane overlays that should sit on the diamond.
     // Isometric entity ground shadows (diamond overlays) used under sprites.
     for (int f = 0; f < FRAMES; ++f) {
-        const uint32_t seed = 0x5AD0F00u;
+        const uint32_t seed = mixSeed(0x5AD0F00u);
         isoEntityShadowTex[static_cast<size_t>(f)] =
-            textureFromSprite(generateIsometricEntityShadowOverlay(seed, f, spritePx));
+            textureFromSprite(generateIsometricEntityShadowOverlay(seed, isoLightDir, f, spritePx));
     }
 
     for (int f = 0; f < FRAMES; ++f) {
         {
-            const uint32_t seed = 0x515A1u;
+            const uint32_t seed = mixSeed(0x515A1u);
             // Purpose-built isometric stairs overlay (diamond space) for better depth/readability.
             const SpritePixels iso = generateIsometricStairsOverlay(seed, /*up=*/true, f, spritePx);
             stairsUpOverlayIsoTex[static_cast<size_t>(f)] = textureFromSprite(iso);
         }
         {
-            const uint32_t seed = 0x515A2u;
+            const uint32_t seed = mixSeed(0x515A2u);
             const SpritePixels iso = generateIsometricStairsOverlay(seed, /*up=*/false, f, spritePx);
             stairsDownOverlayIsoTex[static_cast<size_t>(f)] = textureFromSprite(iso);
         }
         {
-            const uint32_t seed = 0xD00Du;
+            const uint32_t seed = mixSeed(0xD00Du);
             const SpritePixels sq = generateDoorTile(seed, true, f, spritePx);
             const SpritePixels iso = projectToIsometricDiamond(sq, seed, f, /*outline=*/false);
             doorOpenOverlayIsoTex[static_cast<size_t>(f)] = textureFromSprite(iso);
@@ -2703,7 +2717,7 @@ void Renderer::ensureIsoTerrainAssets() {
     floorDecalVarIso.resize(static_cast<size_t>(DECAL_STYLES * static_cast<size_t>(decalsPerStyleUsed)));
     for (int st = 0; st < DECAL_STYLES; ++st) {
         for (int i = 0; i < decalsPerStyleUsed; ++i) {
-            const uint32_t fSeed = hashCombine(0xD3CA10u + static_cast<uint32_t>(st) * 131u, static_cast<uint32_t>(i));
+            const uint32_t fSeed = hashCombine(mixSeed(0xD3CA10u + static_cast<uint32_t>(st) * 131u), static_cast<uint32_t>(i));
             const size_t idx = static_cast<size_t>(st * decalsPerStyleUsed + i);
             for (int f = 0; f < FRAMES; ++f) {
                 const SpritePixels iso = generateIsometricFloorDecalOverlay(fSeed, static_cast<uint8_t>(st), f, spritePx);
@@ -2714,20 +2728,22 @@ void Renderer::ensureIsoTerrainAssets() {
 
     // Isometric environmental overlays (gas/fire) so effects follow the diamond grid.
     for (int i = 0; i < GAS_VARS; ++i) {
-        const uint32_t gSeed = hashCombine(0x6A5u, static_cast<uint32_t>(i));
+        const uint32_t gSeed = hashCombine(mixSeed(0x6A5u), static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
             const SpritePixels iso = generateIsometricGasTile(gSeed, f, spritePx);
             gasVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
         }
     }
     for (int i = 0; i < FIRE_VARS; ++i) {
-        const uint32_t fSeed = hashCombine(0xF17Eu, static_cast<uint32_t>(i));
+        const uint32_t fSeed = hashCombine(mixSeed(0xF17Eu), static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
             const SpritePixels iso = generateIsometricFireTile(fSeed, f, spritePx);
             fireVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(iso);
         }
     }
 
+    isoTerrainStyleSeedCached_ = styleSeed;
+    isoTerrainSpritePxCached_ = spritePx;
     isoTerrainAssetsValid = true;
 }
 
@@ -2999,17 +3015,42 @@ void Renderer::render(const Game& game) {
 
     const bool isoView = (viewMode_ == ViewMode::Isometric);
 
-    // Encode branch + depth into a stable per-level key for procedural terrain variation.
-    // Main branch keeps the legacy key (depth) so existing visuals don't shift.
-    const int levelKey = (game.branch() == DungeonBranch::Main)
+    // Isometric cutaway focus: used to fade foreground occluders near the player/cursor.
+    Vec2i isoCutawayFocus = game.player().pos;
+    if (isoView) {
+        if (game.isTargeting()) isoCutawayFocus = game.targetingCursor();
+        else if (game.isLooking()) isoCutawayFocus = game.lookCursor();
+    }
+    if (d.width > 0 && d.height > 0) {
+        isoCutawayFocus.x = std::clamp(isoCutawayFocus.x, 0, d.width - 1);
+        isoCutawayFocus.y = std::clamp(isoCutawayFocus.y, 0, d.height - 1);
+    }
+    const int isoFocusSum = isoCutawayFocus.x + isoCutawayFocus.y;
+    const int isoFocusDiff = isoCutawayFocus.x - isoCutawayFocus.y;
+    const bool isoCutawayOn = isoView && game.isoCutawayEnabled();
+
+    // Visual style seed: purely cosmetic per-run "paint job" derived from the game seed.
+    // This keeps gameplay determinism untouched, while letting each run look distinct.
+    const uint32_t runSeed = game.seed();
+    const uint32_t styleSeed = (runSeed != 0u) ? (hash32(runSeed ^ 0xA11C0DEu) | 1u) : 0u;
+    const uint8_t isoLightDir = isoLightDirFromStyleSeed(styleSeed);
+
+    // Encode branch + depth into a per-level key for procedural terrain variation.
+    // Then mix in the run styleSeed so the same depth can have a different look across runs.
+    const int levelKeyBase = (game.branch() == DungeonBranch::Main)
         ? game.depth()
         : ((static_cast<int>(game.branch()) + 1) * 1000 + game.depth());
-    const uint32_t lvlSeed = static_cast<uint32_t>(levelKey);
+
+    const uint32_t lvlSeed = (styleSeed != 0u)
+        ? hashCombine(static_cast<uint32_t>(levelKeyBase), styleSeed)
+        : static_cast<uint32_t>(levelKeyBase);
+
+    const int levelKey = static_cast<int>(lvlSeed);
 
     // Build isometric-diamond terrain textures lazily so top-down mode doesn't pay
     // the VRAM + CPU cost unless it is actually used.
     if (isoView) {
-        ensureIsoTerrainAssets();
+        ensureIsoTerrainAssets(styleSeed);
     }
 
     // Update procedural particles and emit new ones from current game FX.
@@ -3195,6 +3236,7 @@ void Renderer::render(const Game& game) {
     };
 
     // Subtle per-depth color grading so each floor feels distinct.
+    // If styleSeed is non-zero, we derive a gentle per-run palette so each run feels visually unique.
     auto depthTint = [&]() -> Color {
         auto lerpU8 = [](uint8_t a, uint8_t b, float t) -> uint8_t {
             t = std::clamp(t, 0.0f, 1.0f);
@@ -3209,15 +3251,55 @@ void Renderer::render(const Game& game) {
         const int maxDepth = std::max(1, game.dungeonMaxDepth());
         const float t = (maxDepth > 1) ? (static_cast<float>(depth - 1) / static_cast<float>(maxDepth - 1)) : 0.0f;
 
-        // Warm torchlit stone up top -> colder, bluer depths below.
-        const Color warm{255, 246, 232, 255};
-        const Color deep{222, 236, 255, 255};
+        // Default (legacy): warm torchlit stone up top -> colder, bluer depths below.
+        Color warm{255, 246, 232, 255};
+        Color deep{222, 236, 255, 255};
+
+        if (styleSeed != 0u) {
+            auto softTint = [](uint32_t seed, int base, int spread, int biasR, int biasG, int biasB) -> Color {
+                seed = hash32(seed);
+                auto chan = [&](int shift, int bias) -> uint8_t {
+                    const int d = static_cast<int>((seed >> shift) & 0xFFu) - 128;
+                    int v = base + (d * spread) / 128 + bias;
+                    v = std::clamp(v, 200, 255);
+                    return static_cast<uint8_t>(v);
+                };
+                return { chan(0, biasR), chan(8, biasG), chan(16, biasB), 255 };
+            };
+
+            // Branch offset keeps side branches from sharing the exact same palette.
+            const uint32_t palSeed = hashCombine(styleSeed, static_cast<uint32_t>(game.branch()));
+
+            warm = softTint(palSeed ^ 0x57A8C0DEu, 245, 18, 0, 0, 0);
+            deep = softTint(palSeed ^ 0xC0FFEE99u, 232, 30, 0, 0, 0);
+
+            // UI theme gently biases the palette so the dungeon feel matches the HUD tone.
+            switch (game.uiTheme()) {
+                case UITheme::Parchment:
+                    warm = softTint(palSeed ^ 0x11A7000Fu, 247, 14, +6, +3, -2);
+                    deep = softTint(palSeed ^ 0xD00D000Fu, 235, 26, +3, +1, -3);
+                    break;
+                case UITheme::Arcane:
+                    warm = softTint(palSeed ^ 0xBADC0FFEu, 244, 18, -1, +1, +6);
+                    deep = softTint(palSeed ^ 0xC001D00Du, 230, 30, -2, 0, +8);
+                    break;
+                case UITheme::DarkStone:
+                default:
+                    break;
+            }
+
+            // Avoid very dark tints; lighting is applied after this.
+            deep.r = std::max<uint8_t>(deep.r, 205u);
+            deep.g = std::max<uint8_t>(deep.g, 205u);
+            deep.b = std::max<uint8_t>(deep.b, 205u);
+        }
 
         return { lerpU8(warm.r, deep.r, t),
                  lerpU8(warm.g, deep.g, t),
                  lerpU8(warm.b, deep.b, t),
                  255 };
     };
+
 
 
 
@@ -3289,39 +3371,61 @@ void Renderer::render(const Game& game) {
             };
         }
 
-        if (!game.darknessActive()) {
-            return { tint.r, tint.g, tint.b, 255 };
+        // Start with the global depth tint (and then layer lighting / flicker / patina on top).
+        Color out{ tint.r, tint.g, tint.b, 255 };
+
+        if (game.darknessActive()) {
+            const uint8_t m = lightMod(x, y);
+            Color lc = game.tileLightColor(x, y);
+
+            // If the light color is (0,0,0) but the tile is still "visible" due to the short dark-vision radius,
+            // fall back to a grayscale minimum brightness so the player can still read nearby terrain.
+            if (lc.r == 0 && lc.g == 0 && lc.b == 0) {
+                lc = { m, m, m, 255 };
+            } else {
+                const int minChan = std::max<int>(0, static_cast<int>(m) / 4);
+                lc.r = static_cast<uint8_t>(std::max<int>(lc.r, minChan));
+                lc.g = static_cast<uint8_t>(std::max<int>(lc.g, minChan));
+                lc.b = static_cast<uint8_t>(std::max<int>(lc.b, minChan));
+                lc.a = 255;
+            }
+
+            out = {
+                static_cast<uint8_t>((static_cast<int>(lc.r) * tint.r) / 255),
+                static_cast<uint8_t>((static_cast<int>(lc.g) * tint.g) / 255),
+                static_cast<uint8_t>((static_cast<int>(lc.b) * tint.b) / 255),
+                255
+            };
+
+            // Flame flicker: only modulate colors near active torch sources.
+            const float f = torchFlicker(x, y);
+            if (f != 1.0f) {
+                out.r = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(out.r) * f)), 0, 255));
+                out.g = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(out.g) * f)), 0, 255));
+                out.b = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(out.b) * f)), 0, 255));
+            }
         }
 
-        const uint8_t m = lightMod(x, y);
-        Color lc = game.tileLightColor(x, y);
+        // Procedural "patina" micro-variation: adds a tiny bit of per-tile value noise so floors/walls
+        // don't read as perfectly flat even at small tile sizes. This is purely cosmetic.
+        if (styleSeed != 0u && d.inBounds(x, y)) {
+            float strength = 0.04f;
+            const TileType tt = d.at(x, y).type;
+            if (tt == TileType::Floor) strength = 0.055f;
+            else if (tt == TileType::Wall || tt == TileType::DoorClosed || tt == TileType::DoorLocked) strength = 0.030f;
+            else if (tt == TileType::Chasm) strength = 0.022f;
 
-        // If the light color is (0,0,0) but the tile is still "visible" due to the short dark-vision radius,
-        // fall back to a grayscale minimum brightness so the player can still read nearby terrain.
-        if (lc.r == 0 && lc.g == 0 && lc.b == 0) {
-            lc = { m, m, m, 255 };
-        } else {
-            const int minChan = std::max<int>(0, static_cast<int>(m) / 4);
-            lc.r = static_cast<uint8_t>(std::max<int>(lc.r, minChan));
-            lc.g = static_cast<uint8_t>(std::max<int>(lc.g, minChan));
-            lc.b = static_cast<uint8_t>(std::max<int>(lc.b, minChan));
-            lc.a = 255;
+            if (isoView) strength *= 0.75f;
+
+            const uint32_t h = hash32(hashCombine(lvlSeed ^ 0x9A71ACAu, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y))));
+            const float n = (static_cast<float>(static_cast<int>(h & 0xFFu) - 128) / 128.0f); // [-1, 1]
+            const float m = std::clamp(1.0f + n * strength, 0.85f, 1.15f);
+
+            out.r = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(out.r) * m)), 0, 255));
+            out.g = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(out.g) * m)), 0, 255));
+            out.b = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(out.b) * m)), 0, 255));
         }
 
-        Color out{
-            static_cast<uint8_t>((static_cast<int>(lc.r) * tint.r) / 255),
-            static_cast<uint8_t>((static_cast<int>(lc.g) * tint.g) / 255),
-            static_cast<uint8_t>((static_cast<int>(lc.b) * tint.b) / 255),
-            255
-        };
-
-        // Flame flicker: only modulate colors near active torch sources.
-        const float f = torchFlicker(x, y);
-        if (f != 1.0f) {
-            out.r = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(out.r) * f)), 0, 255));
-            out.g = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(out.g) * f)), 0, 255));
-            out.b = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(out.b) * f)), 0, 255));
-        }
         return out;
     };
 
@@ -3545,22 +3649,117 @@ void Renderer::render(const Game& game) {
                 };
 
                 if (!isIsoShadowCaster(t.type)) {
-                    uint8_t shMask = 0u;
+                    // Procedural per-run isometric light direction. We only shade from occluders that are
+                    // known (visible or explored) to avoid leaking information about unexplored space.
+                    struct ShadowDir { int dx; int dy; uint8_t bit; };
 
-                    auto mark = [&](int nx, int ny, uint8_t bit) {
-                        if (!d.inBounds(nx, ny)) return;
-                        const TileType nt = d.at(nx, ny).type;
-                        if (isIsoShadowCaster(nt)) shMask |= bit;
+                    ShadowDir sdA{0, -1, 0x01u};
+                    ShadowDir sdB{-1, 0, 0x08u};
+                    int dxDiag = -1;
+                    int dyDiag = -1;
+
+                    switch (isoLightDir & 0x03u) {
+                        default:
+                        case 0: // light from NW (shadows to SE)
+                            sdA = ShadowDir{0, -1, 0x01u};
+                            sdB = ShadowDir{-1, 0, 0x08u};
+                            dxDiag = -1; dyDiag = -1;
+                            break;
+                        case 1: // light from NE (shadows to SW)
+                            sdA = ShadowDir{0, -1, 0x01u};
+                            sdB = ShadowDir{1, 0, 0x02u};
+                            dxDiag = 1; dyDiag = -1;
+                            break;
+                        case 2: // light from SE (shadows to NW)
+                            sdA = ShadowDir{0, 1, 0x04u};
+                            sdB = ShadowDir{1, 0, 0x02u};
+                            dxDiag = 1; dyDiag = 1;
+                            break;
+                        case 3: // light from SW (shadows to NE)
+                            sdA = ShadowDir{0, 1, 0x04u};
+                            sdB = ShadowDir{-1, 0, 0x08u};
+                            dxDiag = -1; dyDiag = 1;
+                            break;
+                    }
+
+                    // Scale shadow strength by caster type: walls/closed doors should feel taller
+                    // than props like altars/fountains, so their cast shadow reads more clearly.
+                    auto shadowStrengthFor = [&](TileType tt) -> float {
+                        switch (tt) {
+                            case TileType::Wall:
+                            case TileType::DoorSecret:
+                                return 1.00f;
+                            case TileType::DoorClosed:
+                            case TileType::DoorLocked:
+                                return 0.95f;
+                            case TileType::Pillar:
+                                return 0.85f;
+                            case TileType::Boulder:
+                                return 0.80f;
+                            case TileType::Fountain:
+                                return 0.72f;
+                            case TileType::Altar:
+                                return 0.68f;
+                            case TileType::DoorOpen:
+                                return 0.65f;
+                            default:
+                                return 0.80f;
+                        }
                     };
 
-                    // Light from top-left => shadows fall toward bottom-right, so only N/W occluders cast onto this tile.
-                    mark(x, y - 1, 0x01u); // N
-                    mark(x - 1, y, 0x08u); // W
+                    auto distFalloff = [&](int dist) -> float {
+                        // Lightweight distance falloff for multi-tile soft shadows.
+                        switch (dist) {
+                            case 1: return 1.00f;
+                            case 2: return 0.62f;
+                            case 3: return 0.38f;
+                            default: return 0.24f;
+                        }
+                    };
 
-                    // A NW occluder boosts the corner a bit so tight corridors feel more grounded.
-                    if (d.inBounds(x - 1, y - 1) && isIsoShadowCaster(d.at(x - 1, y - 1).type)) {
-                        shMask |= 0x01u | 0x08u;
+                    constexpr int kMaxShadowDist = 3;
+
+                    uint8_t shMask = 0u;
+                    float strength = 0.0f;
+
+                    auto considerRay = [&](const ShadowDir& sd) {
+                        for (int dist = 1; dist <= kMaxShadowDist; ++dist) {
+                            const int nx = x + sd.dx * dist;
+                            const int ny = y + sd.dy * dist;
+                            if (!d.inBounds(nx, ny)) break;
+
+                            const Tile& ntile = d.at(nx, ny);
+                            // Stop at unknown tiles to avoid revealing information about unexplored space.
+                            if (!ntile.visible && !ntile.explored) break;
+
+                            if (isIsoShadowCaster(ntile.type)) {
+                                shMask |= sd.bit;
+                                strength = std::max(strength, shadowStrengthFor(ntile.type) * distFalloff(dist));
+                                break;
+                            }
+                        }
+                    };
+
+                    considerRay(sdA);
+                    considerRay(sdB);
+
+                    // Diagonal occluder boosts the inner corner (tight corridor grounding).
+                    for (int dist = 1; dist <= kMaxShadowDist; ++dist) {
+                        const int nx = x + dxDiag * dist;
+                        const int ny = y + dyDiag * dist;
+                        if (!d.inBounds(nx, ny)) break;
+
+                        const Tile& ntile = d.at(nx, ny);
+                        if (!ntile.visible && !ntile.explored) break;
+
+                        if (isIsoShadowCaster(ntile.type)) {
+                            shMask |= (sdA.bit | sdB.bit);
+                            strength = std::max(strength, shadowStrengthFor(ntile.type) * distFalloff(dist) * 0.92f);
+                            break;
+                        }
                     }
+
+                    strength = std::clamp(strength, 0.0f, 1.0f);
 
                     if (shMask != 0u) {
                         SDL_Texture* stex = isoCastShadowVar[static_cast<size_t>(shMask)][static_cast<size_t>(frame % FRAMES)];
@@ -3569,41 +3768,6 @@ void Renderer::render(const Game& game) {
                             int a2 = 44;
                             a2 = (a2 * static_cast<int>(lm)) / 255;
                             if (!t.visible) a2 = std::min(a2, 26);
-
-                            // Scale shadow strength by caster type: walls/closed doors should feel taller
-                            // than props like altars/fountains, so their cast shadow reads more clearly.
-                            auto shadowStrengthFor = [&](TileType tt) -> float {
-                                switch (tt) {
-                                    case TileType::Wall:
-                                    case TileType::DoorSecret:
-                                        return 1.00f;
-                                    case TileType::DoorClosed:
-                                    case TileType::DoorLocked:
-                                        return 0.95f;
-                                    case TileType::Pillar:
-                                        return 0.85f;
-                                    case TileType::Boulder:
-                                        return 0.80f;
-                                    case TileType::Fountain:
-                                        return 0.72f;
-                                    case TileType::Altar:
-                                        return 0.68f;
-                                    case TileType::DoorOpen:
-                                        return 0.65f;
-                                    default:
-                                        return 0.80f;
-                                }
-                            };
-
-                            float strength = 0.0f;
-                            auto considerStrength = [&](int nx, int ny) {
-                                if (!d.inBounds(nx, ny)) return;
-                                const TileType nt = d.at(nx, ny).type;
-                                if (isIsoShadowCaster(nt)) strength = std::max(strength, shadowStrengthFor(nt));
-                            };
-                            considerStrength(x, y - 1);
-                            considerStrength(x - 1, y);
-                            considerStrength(x - 1, y - 1);
 
                             if (strength > 0.0f) {
                                 a2 = static_cast<int>(std::lround(static_cast<float>(a2) * strength));
@@ -3617,6 +3781,7 @@ void Renderer::render(const Game& game) {
                         }
                     }
                 }
+
             }
 
             // Isometric edge shading: contact shadows against tall occluders + a cool rim against chasms.
@@ -3710,9 +3875,33 @@ void Renderer::render(const Game& game) {
             auto drawTall = [&](SDL_Texture* tex, bool outline) {
                 if (!tex) return;
                 SDL_Rect sdst = spriteDst(x, y);
+
                 // In explored-but-not-visible memory view we draw a bit darker so the
                 // player can still navigate without everything looking "lit".
-                const Uint8 aa = t.visible ? 255 : (game.darknessActive() ? 150 : 190);
+                Uint8 aa = t.visible ? 255 : (game.darknessActive() ? 150 : 190);
+
+                // Isometric cutaway: fade foreground occluders near the player/cursor so
+                // interiors remain readable in the 2.5D camera.
+                if (isoCutawayOn) {
+                    const int focusSum = isoFocusSum;
+                    const int focusDiff = isoFocusDiff;
+
+                    const int ahead = (x + y) - focusSum;                         // >0 = in front (towards camera)
+                    const int side  = std::abs((x - y) - focusDiff);              // horizontal band in screen space
+                    const int man   = std::abs(x - isoCutawayFocus.x) + std::abs(y - isoCutawayFocus.y);
+
+                    // Only cut away a shallow wedge in front of the focus tile.
+                    if (ahead >= 1 && ahead <= 5 && side <= 2 && man <= 6) {
+                        const int cut = ahead + side; // 1..7 typically
+                        const int maxCut = 7;
+
+                        const int minA = t.visible ? 70 : 55; // keep some presence even when heavily faded
+                        const int target = minA + (cut * (static_cast<int>(aa) - minA)) / maxCut;
+
+                        aa = static_cast<Uint8>(std::min<int>(static_cast<int>(aa), std::max(minA, target)));
+                    }
+                }
+
                 drawSpriteWithShadowOutline(renderer, tex, sdst, mod, aa, /*shadow=*/false, outline);
             };
 
@@ -5741,6 +5930,22 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     const auto& inv = game.inventory();
     const int sel = game.inventorySelection();
 
+    // Precompute current stats + equipped items once (used for quick-compare badges and preview).
+    const Entity& p = game.player();
+    const int baseAtk = p.baseAtk;
+    const int shieldBonus = (p.effects.shieldTurns > 0) ? 2 : 0;
+    const int curAtk = game.playerAttack();
+    const int curDef = game.playerDefense();
+
+    const Item* eqM = game.equippedMelee();
+    const Item* eqR = game.equippedRanged();
+    const Item* eqA = game.equippedArmor();
+
+    auto bucScalar = [](const Item& it) -> int {
+        return (it.buc < 0 ? -1 : (it.buc > 0 ? 1 : 0));
+    };
+
+
     // Layout: list (left) + preview/info (right)
     const int colGap = 18;
     const int listW = (bg.w * 58) / 100;
@@ -5810,6 +6015,127 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         return "EFFECT: —";
     };
 
+    auto fmtSigned = [](int v) -> std::string {
+        if (v == 0) return "+0";
+        return (v > 0 ? "+" : "") + std::to_string(v);
+    };
+
+    // Compact per-item quick-compare badge shown in the inventory list (left panel).
+    // Examples: "ATK+2", "DEF-1", "RA+1 RN+2", "D+1 M+1".
+    // Returned polarity: +1 = upgrade (positive), -1 = downgrade (negative), 0 = neutral/none.
+    auto quickBadge = [&](const Item& it, const std::string& tag) -> std::pair<std::string, int> {
+        const ItemDef& def = itemDef(it.kind);
+        const int buc = bucScalar(it);
+
+        // Don't spam badges on equipped items; the [M]/[R]/[A]/[1]/[2] tag already conveys state.
+        if (!tag.empty()) {
+            if ((tag.find('M') != std::string::npos && isMeleeWeapon(it.kind)) ||
+                (tag.find('R') != std::string::npos && isRangedWeapon(it.kind)) ||
+                (tag.find('A') != std::string::npos && isArmor(it.kind)) ||
+                ((tag.find('1') != std::string::npos || tag.find('2') != std::string::npos) && isRingKind(it.kind))) {
+                return {"", 0};
+            }
+        }
+
+        // Melee weapon upgrade/downgrade versus equipped melee weapon.
+        if (isMeleeWeapon(it.kind)) {
+            int cur = 0;
+            if (eqM) {
+                const ItemDef& cd = itemDef(eqM->kind);
+                cur = cd.meleeAtk + eqM->enchant + bucScalar(*eqM);
+            }
+            const int cand = def.meleeAtk + it.enchant + buc;
+            const int delta = cand - cur;
+            if (delta == 0) return {"", 0};
+            return {"ATK" + fmtSigned(delta), (delta > 0 ? 1 : -1)};
+        }
+
+        // Armor upgrade/downgrade versus equipped armor.
+        if (isArmor(it.kind)) {
+            int cur = 0;
+            if (eqA) {
+                const ItemDef& cd = itemDef(eqA->kind);
+                cur = cd.defense + eqA->enchant + bucScalar(*eqA);
+            }
+            const int cand = def.defense + it.enchant + buc;
+            const int delta = cand - cur;
+            if (delta == 0) return {"", 0};
+            return {"DEF" + fmtSigned(delta), (delta > 0 ? 1 : -1)};
+        }
+
+        // Ranged weapon: show ranged attack and range deltas versus equipped ranged.
+        if (isRangedWeapon(it.kind)) {
+            int curAtk = 0;
+            int curRng = 0;
+            if (eqR) {
+                const ItemDef& cd = itemDef(eqR->kind);
+                curAtk = cd.rangedAtk + eqR->enchant + bucScalar(*eqR);
+                curRng = cd.range;
+            }
+            const int candAtk = def.rangedAtk + it.enchant + buc;
+            const int candRng = def.range;
+
+            const int dAtk = candAtk - curAtk;
+            const int dRng = candRng - curRng;
+
+            std::string s;
+            int pol = 0;
+            if (dAtk != 0) {
+                s += "RA" + fmtSigned(dAtk);
+                pol = (dAtk > 0 ? 1 : -1);
+            }
+            if (dRng != 0) {
+                if (!s.empty()) s += " ";
+                s += "RN" + fmtSigned(dRng);
+                if (pol == 0) pol = (dRng > 0 ? 1 : -1);
+            }
+            return {s, pol};
+        }
+
+        // Rings: show up to two strongest modifiers (not relative; just quick scan info).
+        if (isRingKind(it.kind)) {
+            auto applyMod = [&](int base) -> int {
+                if (base == 0) return 0;
+                return base + it.enchant + buc;
+            };
+
+            std::vector<std::pair<char, int>> mods;
+            mods.reserve(5);
+            mods.push_back({'D', applyMod(def.defense)});
+            mods.push_back({'M', applyMod(def.modMight)});
+            mods.push_back({'A', applyMod(def.modAgility)});
+            mods.push_back({'V', applyMod(def.modVigor)});
+            mods.push_back({'F', applyMod(def.modFocus)});
+
+            std::vector<std::pair<char, int>> nz;
+            for (const auto& m : mods) {
+                if (m.second != 0) nz.push_back(m);
+            }
+            if (nz.empty()) return {"", 0};
+
+            std::sort(nz.begin(), nz.end(), [](const auto& a, const auto& b) {
+                const int aa = std::abs(a.second);
+                const int bb = std::abs(b.second);
+                if (aa != bb) return aa > bb;
+                return a.first < b.first;
+            });
+
+            std::string s;
+            int pol = 0;
+            const int take = std::min(2, (int)nz.size());
+            for (int i = 0; i < take; ++i) {
+                if (!s.empty()) s += " ";
+                s.push_back(nz[(size_t)i].first);
+                s += fmtSigned(nz[(size_t)i].second);
+                if (pol == 0) pol = (nz[(size_t)i].second > 0 ? 1 : -1);
+            }
+            if ((int)nz.size() > take) s += " ...";
+            return {s, pol};
+        }
+
+        return {"", 0};
+    };
+
     // Draw list (with item icons)
     int yy = listRect.y;
 
@@ -5855,7 +6181,29 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             row += "] ";
         }
         row += game.displayItemName(it);
-        drawText5x7(renderer, textX, yy, scale, c, fitToChars(row, maxChars));
+
+        const auto badgeInfo = quickBadge(it, tag);
+        const std::string& badge = badgeInfo.first;
+        const int badgePol = badgeInfo.second;
+
+        // Reserve space for the badge on the right (1 char gap).
+        int nameChars = maxChars;
+        if (!badge.empty()) {
+            nameChars = std::max(1, maxChars - (int)badge.size() - 1);
+        }
+
+        drawText5x7(renderer, textX, yy, scale, c, fitToChars(row, nameChars));
+
+        if (!badge.empty()) {
+            const int charW = scale * 6;
+            const int badgeX = listRect.x + listRect.w - charW - (int)badge.size() * charW;
+            if (badgeX > textX + charW) {
+                Color bc = gray;
+                if (badgePol > 0) bc = cyan;
+                else if (badgePol < 0) bc = yellow;
+                drawText5x7(renderer, badgeX, yy, scale, bc, badge);
+            }
+        }
 
         yy += lineH;
     }
@@ -5918,28 +6266,6 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			statLine(ss.str(), gray);
 		};
 
-		// Find currently equipped gear by tag (renderer can't see equip IDs directly).
-		auto findEquippedBy = [&](char ch) -> const Item* {
-			for (const Item& v : inv) {
-				const std::string t = game.equippedTag(v.id);
-				if (t.find(ch) != std::string::npos) return &v;
-			}
-			return nullptr;
-		};
-
-		const Entity& p = game.player();
-		const int baseAtk = p.baseAtk;
-		const int baseDef = p.baseDef;
-		const int shieldBonus = (p.effects.shieldTurns > 0) ? 2 : 0;
-		const int curAtk = game.playerAttack();
-		const int curDef = game.playerDefense();
-
-		const Item* eqM = findEquippedBy('M');
-		const Item* eqR = findEquippedBy('R');
-		const Item* eqA = findEquippedBy('A');
-		(void)eqM;
-		(void)eqA;
-
 		const bool identifiable = isIdentifiableKind(it.kind);
 		const bool isWand = isRangedWeapon(it.kind) && def.maxCharges > 0 && def.ammo == AmmoKind::None;
 		const bool isFood = (def.hungerRestore > 0) || (it.kind == ItemKind::FoodRation);
@@ -5972,11 +6298,27 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			}
 		} else if (isMeleeWeapon(it.kind)) {
 			statLine("TYPE: MELEE WEAPON", white);
-			const int newAtk = baseAtk + def.meleeAtk + it.enchant;
+			const int cand = def.meleeAtk + it.enchant + bucScalar(it);
+
+			int newAtk = curAtk;
+			if (eqM) {
+				const ItemDef& curD = itemDef(eqM->kind);
+				newAtk -= (curD.meleeAtk + eqM->enchant + bucScalar(*eqM));
+			}
+			newAtk += cand;
+
 			statCompare("ATK", curAtk, newAtk);
 		} else if (isArmor(it.kind)) {
 			statLine("TYPE: ARMOR", white);
-			const int newDef = baseDef + shieldBonus + def.defense + it.enchant;
+			const int cand = def.defense + it.enchant + bucScalar(it);
+
+			int newDef = curDef;
+			if (eqA) {
+				const ItemDef& curD = itemDef(eqA->kind);
+				newDef -= (curD.defense + eqA->enchant + bucScalar(*eqA));
+			}
+			newDef += cand;
+
 			statCompare("DEF", curDef, newDef);
 			if (shieldBonus > 0) {
 				statLine("(INCLUDES SHIELD +2)", gray);
@@ -6015,10 +6357,10 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			}
 		} else if (isRangedWeapon(it.kind)) {
 			statLine("TYPE: RANGED WEAPON", white);
-			const int thisRAtk = std::max(1, baseAtk + def.rangedAtk + it.enchant);
+			const int thisRAtk = std::max(1, baseAtk + def.rangedAtk + it.enchant + bucScalar(it));
 			if (eqR) {
 				const ItemDef& curD = itemDef(eqR->kind);
-				const int curRAtk = std::max(1, baseAtk + curD.rangedAtk + eqR->enchant);
+				const int curRAtk = std::max(1, baseAtk + curD.rangedAtk + eqR->enchant + bucScalar(*eqR));
 				statCompare("RATK", curRAtk, thisRAtk);
 			} else {
 				statLine("RATK (BASE): " + std::to_string(thisRAtk), gray);
@@ -6226,7 +6568,7 @@ void Renderer::drawChestOverlay(const Game& game) {
 
 void Renderer::drawOptionsOverlay(const Game& game) {
     const int panelW = std::min(winW - 80, 820);
-    const int panelH = 440;
+    const int panelH = 460;
     const int x0 = (winW - panelW) / 2;
     const int y0 = (winH - panelH) / 2;
 
@@ -6293,9 +6635,10 @@ void Renderer::drawOptionsOverlay(const Game& game) {
     drawOpt(14, "UI THEME", uiThemeLabel(game.uiTheme()));
     drawOpt(15, "UI PANELS", (game.uiPanelsTextured() ? "TEXTURED" : "SOLID"));
     drawOpt(16, "3D SPRITES", yesNo(game.voxelSpritesEnabled()));
-    drawOpt(17, "CONTROL PRESET", game.controlPresetDisplayName());
-    drawOpt(18, "KEYBINDS", "");
-    drawOpt(19, "CLOSE", "");
+    drawOpt(17, "ISO CUTAWAY", yesNo(game.isoCutawayEnabled()));
+    drawOpt(18, "CONTROL PRESET", game.controlPresetDisplayName());
+    drawOpt(19, "KEYBINDS", "");
+    drawOpt(20, "CLOSE", "");
 
     y += 14;
     drawText5x7(renderer, x0 + 16, y, scale, gray,
@@ -8289,8 +8632,18 @@ void Renderer::drawTargetingOverlay(const Game& game) {
     Vec2i cursor = game.targetingCursor();
     bool ok = game.targetingIsValid();
 
+    const std::string warning = game.targetingWarningText();
+    const bool warn = ok && !warning.empty();
+
+    int lr = 0, lg = 255, lb = 0;
+    if (!ok) {
+        lr = 255; lg = 0; lb = 0;
+    } else if (warn) {
+        lr = 255; lg = 200; lb = 0;
+    }
+
     // Draw LOS line tiles (excluding player tile)
-    SDL_SetRenderDrawColor(renderer, ok ? 0 : 255, ok ? 255 : 0, 0, 80);
+    SDL_SetRenderDrawColor(renderer, lr, lg, lb, 80);
     for (size_t i = 1; i < linePts.size(); ++i) {
         Vec2i p = linePts[i];
         SDL_Rect base = mapTileDst(p.x, p.y);
@@ -8308,10 +8661,10 @@ void Renderer::drawTargetingOverlay(const Game& game) {
 
     // Crosshair on cursor
     SDL_Rect c = mapTileDst(cursor.x, cursor.y);
-    SDL_SetRenderDrawColor(renderer, ok ? 0 : 255, ok ? 255 : 0, 0, 200);
+    SDL_SetRenderDrawColor(renderer, lr, lg, lb, 200);
     if (iso) {
         drawIsoDiamondOutline(renderer, c);
-        SDL_SetRenderDrawColor(renderer, ok ? 0 : 255, ok ? 255 : 0, 0, 110);
+        SDL_SetRenderDrawColor(renderer, lr, lg, lb, 110);
         drawIsoDiamondCross(renderer, c);
     } else {
         SDL_RenderDrawRect(renderer, &c);
@@ -8340,8 +8693,13 @@ void Renderer::drawTargetingOverlay(const Game& game) {
         label += " | " + preview;
     }
 
+    if (!warning.empty()) {
+        label += " | " + warning;
+    }
+
     if (ok) {
-        label += " | ENTER FIRE  ESC CANCEL  TAB NEXT  SHIFT+TAB PREV";
+        label += game.targetingNeedsConfirm() ? " | ENTER CONFIRM  ESC CANCEL  TAB NEXT  SHIFT+TAB PREV"
+                                           : " | ENTER FIRE  ESC CANCEL  TAB NEXT  SHIFT+TAB PREV";
     } else {
         label += " | " + (status.empty() ? std::string("NO CLEAR SHOT") : status);
     }
@@ -8359,6 +8717,49 @@ void Renderer::drawLookOverlay(const Game& game) {
     const Dungeon& d = game.dungeon();
     Vec2i cursor = game.lookCursor();
     if (!d.inBounds(cursor.x, cursor.y)) return;
+
+    // Acoustic preview heatmap (UI-only): visualize sound propagation from the LOOK cursor
+    // without revealing unexplored tiles.
+    if (game.isSoundPreviewOpen()) {
+        const auto& dist = game.soundPreviewMap();
+        const int vol = game.soundPreviewVolume();
+        const Vec2i src = game.soundPreviewSource();
+
+        if (!dist.empty() && (int)dist.size() == d.width * d.height && vol > 0) {
+            // Color choice: a cool tint reads as sound/echo without clashing with
+            // targeting lines (usually warm). Alpha encodes remaining loudness.
+            for (int y = 0; y < d.height; ++y) {
+                for (int x = 0; x < d.width; ++x) {
+                    const Tile& t = d.at(x, y);
+                    if (!t.explored) continue;
+                    const int idx = y * d.width + x;
+                    const int dd = dist[idx];
+                    if (dd < 0 || dd > vol) continue;
+
+                    const int strength = vol - dd;
+                    const int alpha = std::clamp(20 + strength * 10, 20, 190);
+                    SDL_SetRenderDrawColor(renderer, 90, 200, 255, alpha);
+                    SDL_Rect r = mapTileDst(x, y);
+                    if (iso) {
+                        fillIsoDiamond(renderer, r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2);
+                    } else {
+                        SDL_RenderFillRect(renderer, &r);
+                    }
+                }
+            }
+
+            // Slightly accent the source tile to make the heatmap origin obvious.
+            if (d.inBounds(src.x, src.y)) {
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 80);
+                SDL_Rect r = mapTileDst(src.x, src.y);
+                if (iso) {
+                    drawIsoDiamondOutline(renderer, r);
+                } else {
+                    SDL_RenderDrawRect(renderer, &r);
+                }
+            }
+        }
+    }
 
     // Cursor box
     SDL_Rect c = mapTileDst(cursor.x, cursor.y);
@@ -8386,6 +8787,8 @@ void Renderer::drawLookOverlay(const Game& game) {
     if (!game.isCommandOpen()) {
         std::string s = game.lookInfoText();
         if (s.empty()) s = "LOOK";
-        drawText5x7(renderer, 10, hudTop - 18, scale, yellow, s);
+        const int charW = 6 * scale;
+        const int maxChars = (winW - 20) / std::max(1, charW);
+        drawText5x7(renderer, 10, hudTop - 18, scale, yellow, fitToChars(s, maxChars));
     }
 }

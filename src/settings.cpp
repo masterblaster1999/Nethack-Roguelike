@@ -212,6 +212,9 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "iso_voxel_raytrace" || key == "voxel_iso_raytrace" || key == "isometric_voxel_raytrace") {
             bool b = false;
             if (parseBool(val, b)) s.isoVoxelRaytrace = b;
+        } else if (key == "iso_cutaway" || key == "isometric_cutaway" || key == "iso_wall_cutaway") {
+            bool b = true;
+            if (parseBool(val, b)) s.isoCutaway = b;
         } else if (key == "texture_cache_mb") {
             int v = 0;
             if (parseInt(val, v)) {
@@ -349,6 +352,11 @@ voxel_sprites = true
 # custom voxel raytracer (orthographic DDA) instead of the face-meshed isometric rasterizer.
 iso_voxel_raytrace = false
 
+# iso_cutaway: true/false
+# Isometric view only. When true, foreground walls/doors (in front of the player/cursor)
+# are faded ("cutaway") so interiors remain readable.
+iso_cutaway = true
+
 # texture_cache_mb: 0 or 16..2048
 # Approximate VRAM budget for cached entity/item/projectile textures.
 # 0 disables eviction (unlimited). If you use huge tile sizes, consider lowering this.
@@ -453,6 +461,7 @@ bind_lock_door = shift+k
 bind_kick = b
 bind_dig = shift+d
 bind_look = l, v
+bind_sound_preview = ctrl+n
 bind_stairs_up = shift+comma, less
 bind_stairs_down = shift+period, greater
 bind_auto_explore = o

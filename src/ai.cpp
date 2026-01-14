@@ -77,6 +77,16 @@ void Game::monsterTurn() {
 
     const int dirs[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
 
+    // Two-side team helper used for tactical AI decisions (e.g. friendly-fire avoidance).
+    // Player side: the player entity + any friendly companions.
+    auto isPlayerSide = [&](const Entity& e) -> bool {
+        return (e.id == playerId_ || e.kind == EntityKind::Player || e.friendly);
+    };
+
+    auto sameSide = [&](const Entity& a, const Entity& b) -> bool {
+        return isPlayerSide(a) == isPlayerSide(b);
+    };
+
     // Discovered traps are visible in the world; most creatures will try to route around them
     // when possible. Build a per-tile penalty map so pathfinding can be trap-aware without
     // doing an O(traps) lookup per tile expansion.
@@ -1662,12 +1672,113 @@ void Game::monsterTurn() {
                     }
                 }
 
-                if (m.rangedAmmo != AmmoKind::None) {
-                    m.rangedAmmoCount = std::max(0, m.rangedAmmoCount - 1);
-                }
+                // Friendly-fire avoidance: if an allied body blocks the line of fire, try to
+                // sidestep for a clear shot instead of peppering our own pack.
+                //
+                // NOTE: We only treat the *first* body in the projectile line as a blocker.
+                // In projectile combat, a miss can continue beyond the first creature, but
+                // being overly cautious would make ranged monsters feel indecisive.
+                auto allyBlocksShotFrom = [&](Vec2i from, Vec2i to, const Entity& attacker) -> bool {
+                    std::vector<Vec2i> line = bresenhamLine(from, to);
+                    if (line.size() <= 1) return false;
 
-                attackRanged(m, p.pos, m.rangedRange, m.rangedAtk, 0, m.rangedProjectile, false);
-                return;
+                    // Clamp to range (+ start tile) to match projectile behavior.
+                    const int range = attacker.rangedRange;
+                    if (range > 0 && static_cast<int>(line.size()) > range + 1) {
+                        line.resize(static_cast<size_t>(range + 1));
+                    }
+
+                    for (size_t ii = 1; ii < line.size(); ++ii) {
+                        const Vec2i p0 = line[ii];
+                        if (!dung.inBounds(p0.x, p0.y)) break;
+
+                        // Corner blocking identical to combat projectile rules.
+                        const Vec2i prev = line[ii - 1];
+                        const int dx = (p0.x > prev.x) ? 1 : (p0.x < prev.x) ? -1 : 0;
+                        const int dy = (p0.y > prev.y) ? 1 : (p0.y < prev.y) ? -1 : 0;
+                        if (dx != 0 && dy != 0) {
+                            const int ax = prev.x + dx;
+                            const int ay = prev.y;
+                            const int bx = prev.x;
+                            const int by = prev.y + dy;
+
+                            if (dung.inBounds(ax, ay) && dung.inBounds(bx, by) &&
+                                dung.blocksProjectiles(ax, ay) && dung.blocksProjectiles(bx, by)) {
+                                break;
+                            }
+                        }
+
+                        if (dung.blocksProjectiles(p0.x, p0.y)) break;
+
+                        const Entity* e = entityAt(p0.x, p0.y);
+                        if (!e || e->hp <= 0) continue;
+                        if (e->id == attacker.id) continue;
+
+                        // Reached the intended target without an allied blocker.
+                        if (p0 == to) break;
+
+                        // First body in the line decides: if it's an ally, don't take the shot.
+                        return sameSide(attacker, *e);
+                    }
+
+                    return false;
+                };
+
+                if (allyBlocksShotFrom(m.pos, p.pos, m)) {
+                    Vec2i bestStep = m.pos;
+                    int bestScore = std::numeric_limits<int>::max();
+                    bool found = false;
+
+                    for (auto& dv : dirs) {
+                        const int dx = dv[0];
+                        const int dy = dv[1];
+                        const int nx = m.pos.x + dx;
+                        const int ny = m.pos.y + dy;
+
+                        if (!dung.inBounds(nx, ny)) continue;
+                        if (dx != 0 && dy != 0 && !diagOkForMode(m.pos.x, m.pos.y, dx, dy, pathMode)) continue;
+                        if (!passableForMode(nx, ny, pathMode)) continue;
+                        if (entityAt(nx, ny)) continue;
+
+                        // Still need LoS and range after stepping.
+                        const int newMan = manhattan(Vec2i{nx, ny}, p.pos);
+                        if (newMan > m.rangedRange) continue;
+                        if (!dung.hasLineOfSight(nx, ny, p.pos.x, p.pos.y)) continue;
+                        if (allyBlocksShotFrom({nx, ny}, p.pos, m)) continue;
+
+                        int score = 0;
+
+                        // Prefer not to step closer (keeps kiting behavior stable).
+                        if (newMan < man) score += (man - newMan) * 40;
+
+                        // Avoid stepping into melee range unless we have no choice.
+                        if (newMan <= 2) score += 400;
+
+                        // Prefer "cheaper" tiles (includes hazards).
+                        const int stepC = stepCostForMode(nx, ny, pathMode);
+                        if (stepC > 0) score += stepC * 10;
+
+                        if (!found || score < bestScore) {
+                            found = true;
+                            bestScore = score;
+                            bestStep = {nx, ny};
+                        }
+                    }
+
+                    if (found && bestStep != m.pos) {
+                        tryMove(m, bestStep.x - m.pos.x, bestStep.y - m.pos.y);
+                        return;
+                    }
+
+                    // No good sidestep: hold fire and fall through to movement logic below.
+                } else {
+                    if (m.rangedAmmo != AmmoKind::None) {
+                        m.rangedAmmoCount = std::max(0, m.rangedAmmoCount - 1);
+                    }
+
+                    attackRanged(m, p.pos, m.rangedRange, m.rangedAtk, 0, m.rangedProjectile, false);
+                    return;
+                }
             }
         }
 

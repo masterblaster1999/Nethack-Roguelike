@@ -102,11 +102,11 @@ SpritePixels generateIsometricEdgeShadeOverlay(uint32_t seed, uint8_t mask, int 
 SpritePixels generateIsometricChasmGloomOverlay(uint32_t seed, uint8_t mask, int frame, int pxSize = 16);
 // Isometric cast shadow overlay (diamond, transparent).
 // Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is a tall shadow caster")
-// In the current lighting model (light from top-left), only N and W are used by the renderer.
+// The renderer selects which bits to use based on the global isometric light direction.
 SpritePixels generateIsometricCastShadowOverlay(uint32_t seed, uint8_t mask, int frame, int pxSize = 16);
 // Isometric entity ground shadow overlay (diamond, transparent).
 // Intended to be drawn under sprites in isometric view to anchor them to the ground plane.
-SpritePixels generateIsometricEntityShadowOverlay(uint32_t seed, int frame, int pxSize = 16);
+SpritePixels generateIsometricEntityShadowOverlay(uint32_t seed, uint8_t lightDir, int frame, int pxSize = 16);
 // Isometric stairs overlay (diamond, transparent).
 // Intended to be drawn on top of the themed floor diamond so stairs read clearly
 // in 2.5D isometric view without relying on a projected top-down sprite.

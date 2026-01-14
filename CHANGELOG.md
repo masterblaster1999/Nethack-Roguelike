@@ -19,6 +19,31 @@
   - `#mapstats`: prints quick floor stats (exploration %, rooms, monsters, items, traps, marks, engravings).
 - **Perf overlay**: added a tiny optional debug HUD that shows **FPS/frame time**, sprite-cache stats, and a low-rate **determinism hash**.
   - Toggle via **Shift+F10** (default), `show_perf_overlay` in settings, or `#perf on/off`.
+
+- **Safe-fire targeting**: ranged and offensive spell targeting now surfaces **friendly-fire / self-damage warnings** (line-of-fire and AoE), and requires a **second confirmation press** before committing a risky shot.
+
+- **LOOK duel forecast**: LOOK mode now appends a compact **DUEL** estimate for visible non-allies (expected turns to **KILL** / **DIE** based on your current melee stats).
+  - Accounts for the same d20 hit rules, armor damage reduction, weapon enchants, and sneak/ambush bonuses used by real combat.
+  - The LOOK bottom-line now clips to the window width so long descriptions never run off-screen.
+- **Item calling (NetHack-style)**: you can attach a short **CALL** label to unidentified potion/scroll/ring/wand appearances via `#call <label>`.
+  - Uses the LOOK cursor (if active), otherwise your inventory selection, otherwise the first identifiable item underfoot.
+  - `#call clear|none|off|-` clears the label; `#label` is an alias.
+  - Labels persist in saves and render as a `{LABEL}` suffix on unidentified items (inventory/LOOK) and in Discoveries.
+
+- **Acoustic preview (Sound lens)**: LOOK mode can now toggle a **sound propagation heatmap** that shows where noise would travel (respecting door muffling) **without revealing unexplored tiles**.
+  - Defaults to your current footstep loudness (sneak vs normal); adjust volume with `[` / `]` while in LOOK.
+  - Default bind: **Ctrl+N** (`bind_sound_preview` in settings; rebindable via `#bind`).
+- **Per-level wind drafts**: each floor now has a deterministic **cardinal wind** (CALM/N/E/S/W) that gently biases **gas drift** and **fire spread** through corridors.
+  - Announced once when a floor is first generated; check anytime with `#wind`.
+- **Annex micro-dungeons**: some floors now carve a larger optional **side area** (a mini-maze or mini-cavern) into solid rock behind a door.
+  - Doors can be **secret** or **locked**, and the annex always contains one or more **deep chest caches** to reward exploration.
+- **Procedural per-run palette & patina**: terrain rendering now mixes the run seed into a cosmetic "style seed" to generate a gentle per-run palette and subtle per-tile value-noise shading (visual-only, deterministic).
+- **Per-run isometric tileset**: isometric terrain assets (diamond floors, chasms, 2.5D blocks, decals, stairs overlays, and hazard VFX) now re-seed from the run’s cosmetic style seed, giving each run a distinct (but deterministic) isometric look.
+- **Isometric cutaway**: optional 2.5D rendering aid that fades foreground walls/doors/pillars in front of the player (or LOOK/target cursor) so interiors stay readable.
+  - Toggle in Options, via `#isocutaway`, or `iso_cutaway` in settings.
+- Renderer build fix: removed an accidental duplicate depth-tint block introduced during palette work.
+
+
 - **Isometric depth shading**: isometric view now adds **procedurally generated diamond edge shading** (contact shadows against walls/objects + subtle chasm rim) so the 2.5D map reads with more depth.
 - **Isometric bevel lighting**: isometric diamond terrain tiles now apply a subtle **edge-only bevel ramp** (top-left highlight / bottom-right shadow) to reinforce the 2.5D ground plane.
 - **Isometric themed floor diamonds**: themed floor tiles in isometric view are now generated directly in **diamond space** (no projection), keeping seams/cracks/planks aligned to the 2:1 grid and improving crispness at larger tile sizes.
@@ -29,6 +54,7 @@
 - **Isometric voxel raytracer (optional)**: add `iso_voxel_raytrace` to render isometric voxel sprites using a custom **orthographic DDA raytracer** (instead of the face-mesh rasterizer).
   - Toggle at runtime via `#isoraytrace on/off/toggle`.
 - **Isometric cast shadows**: floor tiles in isometric view now receive subtle **directional cast shadows** from nearby tall blockers (walls/closed doors/pillars/etc), improving 2.5D depth cues.
+- **Procedural isometric sun direction**: isometric view now chooses a deterministic per-run diagonal light direction (NW/NE/SE/SW) and rotates **cast shadows** + **entity ground-shadow offsets** accordingly, with a short multi-tile soft shadow reach that stops at unknown tiles (no map leaks).
 - **Top-down wall contact shadows**: floor tiles now receive subtle **ambient occlusion** shading along edges adjacent to wall-mass terrain (walls/closed doors/pillars) and tall props (boulders/fountains/altars), improving depth cues and readability.
 - **Isometric floor decals**: themed floor decal overlays (cracks/runes/stains) are now generated directly in isometric diamond space, keeping thin lines crisp and patterns aligned to the 2.5D grid.
 - **Isometric environmental overlays**: gas and fire floor hazards now generate directly in isometric diamond space (instead of projecting square sprites), so animated VFX align cleanly to the 2.5D grid. Poison gas now uses the isometric diamond variants as well.
@@ -162,15 +188,21 @@
 - Save version bumped to **v43** (v41 adds `Item.flags`; v42 adds merchant guild pursuit; v43 adds shrine piety + prayer cooldown).
 
 ### Changed
+- **Dungeon length**: increased the default run from **20** to **25** floors (5 additional depths before the labyrinth and final sanctum).
 - Extended command prompt: **TAB completion** now extends to the **longest common prefix** and lets you **cycle** through ambiguous matches by pressing **TAB** repeatedly (also works for pasted NetHack-style `#cmd` inputs).
+- Extended command prompt: unknown commands now show a short **DID YOU MEAN** suggestion list to make typos less punishing.
+- Inventory overlay: the left-hand list now shows compact **quick-compare** badges (ATK/DEF/RA/RN deltas + ring mods) so upgrades are visible at a glance; fixed gear stat comparisons to include **bless/curse** modifiers.
 - Keybinds editor overlay: added an in-overlay **filter/search** (press `/`), **DEL** to unbind (writes `none`), and highlighted **conflicting** duplicate chords.
 - Keyboard input: SDL key repeat is now honored for movement and menu navigation (hold a direction to keep moving; repeats are still suppressed for toggles/confirm/ESC to avoid accidental spam).
 - **#whistle** now calls **all friendly companions** with **Follow/Fetch** orders (not just the starting dog).
 - Auto-travel: you can now **target locked doors** directly (when you have keys/lockpicks), making it easier to walk to vault doors intentionally.
 - Auto-explore: when no normal frontiers remain, it will now **walk to reachable locked doors** that border unexplored tiles (if you have keys/lockpicks) so it doesn't incorrectly report the floor as fully explored.
+- Auto-move hazard awareness: **auto-travel** now strongly prefers routes that avoid **confusion/poison gas** tiles, and **auto-explore** will not path through gas clouds (similar to fire) until they dissipate.
+  - Auto-move also stops immediately if you end up standing in a gas cloud (even before the status effect lands), preventing accidental turn-burning in hazards.
 - Floor trap scatter now avoids **shops** and **shrines** (keeps safe spaces consistent; traps still appear elsewhere).
 - Darkness lighting now treats **burning creatures** and **flaming ego weapons** as small moving light sources (in addition to torches, room ambient light, and fire fields).
 - Monster pathfinding now treats **poison gas** and **discovered traps** as higher-cost tiles, so monsters (and pets) will route around known hazards when practical.
+- Ranged monster tactics: ranged attackers now avoid shooting through **allied** monsters (and peaceful shopkeepers), and will try to **sidestep** for a clear shot instead of friendly-firing.
 - Procedural terrain visuals: floor/wall/chasm variant selection now uses low-frequency coherent noise (less "TV static", more natural patches).
 - Floor decals now use jittered-grid placement to reduce clumping; wall stains avoid adjacent clusters for a cleaner, more deliberate look (top-down + isometric).
 - Isometric floor decals are now generated directly in diamond space (instead of projecting top-down squares), keeping thin cracks/runes crisper and better aligned to the 2.5D grid.
@@ -183,6 +215,7 @@
 - Isometric block sprites: wall/door/doorway/pillar block sprites now get subtle vertical-face ambient occlusion (under-cap overhang, ridge seam, and base grounding) plus a light-facing cap rim highlight, improving volume/readability in 2.5D view.
 
 ### Fixed
+- Fixed a build break in LOOK/renderer UI helpers by exposing the `equippedMelee/Ranged/Armor/Ring1/Ring2` accessors publicly.
 - Shops now correctly spawn a **Shopkeeper** (enabling **#pay** and selling), and shop rooms no longer spawn random monsters.
 - Shrine item-targeting prompts (**Identify/Bless/Recharge/Sacrifice**) now resolve properly from the inventory UI.
 - Fixed build-breaking errors in the merchant guild theft-alarm helper.

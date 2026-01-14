@@ -268,6 +268,18 @@ bool Game::stepAutoMove() {
         return false;
     }
 
+    if (confusionGasAt(player().pos.x, player().pos.y) > 0u) {
+        pushMsg("AUTO-MOVE STOPPED (YOU ARE IN CONFUSION GAS).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
+    if (poisonGasAt(player().pos.x, player().pos.y) > 0u) {
+        pushMsg("AUTO-MOVE STOPPED (YOU ARE IN POISON GAS).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
     // Movement blockers: auto-move would just burn turns (and potentially make noise).
     // Stop immediately so the player can choose a deliberate action.
     if (player().effects.webTurns > 0) {
@@ -713,6 +725,8 @@ Vec2i Game::findNearestExploreFrontier() const {
         if (!dung.at(x, y).explored) return false;
         if (!dung.isPassable(x, y)) return false;
         if (fireAt(x, y) > 0u) return false;
+        if (confusionGasAt(x, y) > 0u) return false;
+        if (poisonGasAt(x, y) > 0u) return false;
 
         for (int dir = 0; dir < 8; ++dir) {
             const int nx = x + dirs[dir][0];
@@ -727,6 +741,8 @@ Vec2i Game::findNearestExploreFrontier() const {
         if (!dung.inBounds(x, y)) return false;
         if (!dung.at(x, y).explored) return false;
         if (fireAt(x, y) > 0u) return false;
+        if (confusionGasAt(x, y) > 0u) return false;
+        if (poisonGasAt(x, y) > 0u) return false;
 
         const TileType tt = dung.at(x, y).type;
         const bool passable = dung.isPassable(x, y) || (canUnlockDoors && tt == TileType::DoorLocked);
@@ -830,6 +846,8 @@ Vec2i Game::findNearestExploreFrontier() const {
             if (!t.explored) return false;
             if (t.type != TileType::DoorLocked) return false;
             if (fireAt(x, y) > 0u) return false;
+            if (confusionGasAt(x, y) > 0u) return false;
+            if (poisonGasAt(x, y) > 0u) return false;
 
             for (int dir = 0; dir < 8; ++dir) {
                 const int nx = x + dirs[dir][0];
@@ -947,6 +965,8 @@ Vec2i Game::findNearestExploreSearchSpot() const {
 
         if (isKnownTrap(x, y)) return false;
         if (fireAt(x, y) > 0u) return false;
+        if (confusionGasAt(x, y) > 0u) return false;
+        if (poisonGasAt(x, y) > 0u) return false;
 
         if (const Entity* occ = entityAt(x, y)) {
             if (occ->id != playerId_ && !occ->friendly) return false;
@@ -962,6 +982,8 @@ Vec2i Game::findNearestExploreSearchSpot() const {
         if (!passable(x, y)) return false;
         if (isKnownTrap(x, y)) return false;
         if (fireAt(x, y) > 0u) return false;
+        if (confusionGasAt(x, y) > 0u) return false;
+        if (poisonGasAt(x, y) > 0u) return false;
 
         const int ii = idxOf(x, y);
         const int tried = (ii >= 0 && static_cast<size_t>(ii) < autoExploreSearchTriedTurns.size())
@@ -1124,6 +1146,11 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
 
         // Strongly prefer routes that avoid lingering fire, but don't hard-block.
         if (fireAt(x, y) > 0u) cost += 25;
+        // Prefer to avoid standing in hazardous gas clouds during auto-travel.
+        const uint8_t cg = confusionGasAt(x, y);
+        if (cg > 0u) cost += 12 + static_cast<int>(cg) / 32;
+        const uint8_t pg = poisonGasAt(x, y);
+        if (pg > 0u) cost += 16 + static_cast<int>(pg) / 32;
         if (allowKnownTraps) {
             if (const Trap* t = discoveredTrapAt(trapsCur, x, y)) {
                 cost += autoMoveTrapPenalty(t->kind);

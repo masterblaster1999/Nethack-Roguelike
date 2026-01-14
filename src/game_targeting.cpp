@@ -37,6 +37,51 @@ static bool isTargetCandidateHostile(const Game& g, const Entity& e) {
     return true;
 }
 
+
+static bool isProtectedNonHostile(const Game& g, const Entity& e) {
+    if (e.id == g.player().id) return false;
+    if (e.hp <= 0) return false;
+
+    if (e.friendly) return true;
+
+    // Peaceful shopkeepers are intentionally treated as "protected" for player safety prompts.
+    if (e.kind == EntityKind::Shopkeeper && !e.alerted) return true;
+
+    return false;
+}
+
+static std::string protectedNameForUI(const Entity& e) {
+    // Keep this short: the targeting HUD has limited room.
+    if (e.kind == EntityKind::Player) return "YOU";
+
+    const std::string n = kindName(e.kind);
+    if (e.friendly) {
+        return std::string("YOUR ") + n;
+    }
+
+    if (e.kind == EntityKind::Shopkeeper && !e.alerted) {
+        return "SHOPKEEPER";
+    }
+
+    return n;
+}
+
+static std::string summarizeNames(const std::vector<std::string>& names, size_t maxNames = 2) {
+    if (names.empty()) return std::string();
+    std::ostringstream ss;
+
+    const size_t n = names.size();
+    const size_t m = std::min(maxNames, n);
+    for (size_t i = 0; i < m; ++i) {
+        if (i > 0) ss << ", ";
+        ss << names[i];
+    }
+    if (n > m) {
+        ss << " +" << (n - m);
+    }
+    return ss.str();
+}
+
 static bool projectileCornerBlocked(const Dungeon& dung, const Vec2i& prev, const Vec2i& p) {
     const int dx = (p.x > prev.x) ? 1 : (p.x < prev.x) ? -1 : 0;
     const int dy = (p.y > prev.y) ? 1 : (p.y < prev.y) ? -1 : 0;
@@ -96,6 +141,12 @@ std::string Game::targetingStatusText() const {
     if (!targeting) return std::string();
     return targetStatusText_;
 }
+
+std::string Game::targetingWarningText() const {
+    if (!targeting) return std::string();
+    return targetWarningText_;
+}
+
 
 std::string Game::targetingCombatPreviewText() const {
     if (!targeting) return std::string();
@@ -420,6 +471,9 @@ bool Game::endTargeting(bool fire) {
         targetLine.clear();
         targetValid = false;
         targetStatusText_.clear();
+        targetWarningText_.clear();
+        targetUnsafe_ = false;
+        targetUnsafeConfirmed_ = false;
         targetingMode_ = TargetingMode::Ranged;
     };
 
@@ -434,6 +488,19 @@ bool Game::endTargeting(bool fire) {
             if (!targetStatusText_.empty()) pushMsg(targetStatusText_ + ".");
             else pushMsg("NO CLEAR TARGET.");
             // Keep targeting open; do not consume the turn.
+            return false;
+        }
+
+
+        // Safety: require a second press to confirm risky casts (friendly fire / self-damage).
+        if (targetUnsafe_ && !targetUnsafeConfirmed_) {
+            targetUnsafeConfirmed_ = true;
+            if (!targetWarningText_.empty()) {
+                targetWarningText_ += " (FIRE AGAIN)";
+            } else {
+                targetWarningText_ = "UNSAFE TARGET (FIRE AGAIN)";
+            }
+            pushMsg("UNSAFE TARGET - PRESS FIRE AGAIN TO CONFIRM.", MessageKind::Warning, true);
             return false;
         }
 
@@ -457,6 +524,19 @@ bool Game::endTargeting(bool fire) {
         if (!targetStatusText_.empty()) pushMsg(targetStatusText_ + ".");
         else pushMsg("NO CLEAR SHOT.");
         // Keep targeting open; do not consume the turn.
+        return false;
+    }
+
+
+    // Safety: require a second press to confirm risky shots (friendly fire / self-damage).
+    if (targetUnsafe_ && !targetUnsafeConfirmed_) {
+        targetUnsafeConfirmed_ = true;
+        if (!targetWarningText_.empty()) {
+            targetWarningText_ += " (FIRE AGAIN)";
+        } else {
+            targetWarningText_ = "UNSAFE TARGET (FIRE AGAIN)";
+        }
+        pushMsg("UNSAFE TARGET - PRESS FIRE AGAIN TO CONFIRM.", MessageKind::Warning, true);
         return false;
     }
 
@@ -571,6 +651,13 @@ void Game::moveTargetCursor(int dx, int dy) {
 
 void Game::recomputeTargetLine() {
     targetStatusText_.clear();
+
+    // Reset safety warnings whenever the cursor changes.
+    // (If the player had confirmed a risky shot, moving the cursor should require a fresh confirm.)
+    targetWarningText_.clear();
+    targetUnsafe_ = false;
+    targetUnsafeConfirmed_ = false;
+
     targetValid = false;
 
     targetLine = bresenhamLine(player().pos, targetPos);
@@ -667,6 +754,139 @@ void Game::recomputeTargetLine() {
     }
 
     targetValid = true;
+
+    // ------------------------------------------------------------
+    // Safety warnings (UI-only)
+    // ------------------------------------------------------------
+    // Only warn when we can do so without leaking hidden information.
+    // (We only consider entities on tiles currently visible to the player.)
+
+    bool checkLine = false;
+    bool checkAoe = false;
+    int aoeRadius = 0;
+
+    // Determine whether the current targeting mode produces a projectile and/or an AoE.
+    if (targetingMode_ == TargetingMode::Spell) {
+        switch (targetingSpell_) {
+            case SpellKind::MagicMissile:
+                checkLine = true;
+                break;
+            case SpellKind::Fireball:
+                checkLine = true;
+                checkAoe = true;
+                aoeRadius = 1;
+                break;
+            case SpellKind::PoisonCloud:
+                checkAoe = true;
+                aoeRadius = 2;
+                break;
+            default:
+                break;
+        }
+    } else {
+        // Ranged weapons / throwing.
+        ProjectileKind pk = ProjectileKind::Arrow;
+        bool isDigWand = false;
+
+        if (const Item* w = equippedRanged()) {
+            const ItemDef& d = itemDef(w->kind);
+            const bool chargesOk = (d.maxCharges <= 0) || (w->charges > 0);
+            const bool ammoOk = (d.ammo == AmmoKind::None) || (ammoCount(inv, d.ammo) > 0);
+            if (d.range > 0 && chargesOk && ammoOk) {
+                pk = d.projectile;
+                isDigWand = (w->kind == ItemKind::WandDigging);
+            }
+        }
+
+        if (!isDigWand) {
+            checkLine = true;
+            if (pk == ProjectileKind::Fireball) {
+                checkAoe = true;
+                aoeRadius = 1;
+            }
+        }
+    }
+
+    const Entity* protectedOnLine = nullptr;
+    int protectedDist = 0;
+
+    if (checkLine) {
+        for (size_t i = 1; i < targetLine.size(); ++i) {
+            const Vec2i p = targetLine[i];
+            if (!dung.inBounds(p.x, p.y)) continue;
+            if (!dung.at(p.x, p.y).visible) continue;
+
+            const Entity* e = entityAt(p.x, p.y);
+            if (!e || e->hp <= 0) continue;
+            if (isProtectedNonHostile(*this, *e)) {
+                protectedOnLine = e;
+                protectedDist = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+
+    std::vector<std::string> aoeHits;
+    if (checkAoe && aoeRadius > 0) {
+        std::vector<uint8_t> mask;
+        dung.computeFovMask(targetPos.x, targetPos.y, aoeRadius, mask);
+
+        auto inMask = [&](int x, int y) -> bool {
+            if (!dung.inBounds(x, y)) return false;
+            const int idx = y * dung.width + x;
+            if (idx < 0 || idx >= static_cast<int>(mask.size())) return false;
+            return mask[static_cast<size_t>(idx)] != 0u;
+        };
+
+        // Player self-hit.
+        const Vec2i pp = player().pos;
+        const int dx = std::abs(pp.x - targetPos.x);
+        const int dy = std::abs(pp.y - targetPos.y);
+        if (std::max(dx, dy) <= aoeRadius && inMask(pp.x, pp.y)) {
+            aoeHits.push_back("YOU");
+        }
+
+        // Protected friendlies.
+        for (const Entity& e : ents) {
+            if (e.hp <= 0) continue;
+            if (e.id == player().id) continue;
+            if (!isProtectedNonHostile(*this, e)) continue;
+            if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
+
+            const int ex = std::abs(e.pos.x - targetPos.x);
+            const int ey = std::abs(e.pos.y - targetPos.y);
+            if (std::max(ex, ey) > aoeRadius) continue;
+
+            // Only warn about visible entities to avoid leaking hidden info.
+            if (!dung.at(e.pos.x, e.pos.y).visible) continue;
+
+            if (!inMask(e.pos.x, e.pos.y)) continue;
+
+            aoeHits.push_back(protectedNameForUI(e));
+        }
+    }
+
+    if (protectedOnLine || !aoeHits.empty()) {
+        targetUnsafe_ = true;
+
+        std::vector<std::string> parts;
+        if (protectedOnLine) {
+            std::ostringstream ss;
+            ss << "LINE " << protectedDist << ": " << protectedNameForUI(*protectedOnLine);
+            parts.push_back(ss.str());
+        }
+        if (!aoeHits.empty()) {
+            parts.push_back(std::string("AOE: ") + summarizeNames(aoeHits));
+        }
+
+        std::ostringstream ws;
+        ws << "WARNING: ";
+        for (size_t i = 0; i < parts.size(); ++i) {
+            if (i > 0) ws << "; ";
+            ws << parts[i];
+        }
+        targetWarningText_ = ws.str();
+    }
 }
 
 

@@ -468,6 +468,7 @@ int main(int argc, char** argv) {
     game.setBonesEnabled(settings.bonesEnabled);
     game.setVoxelSpritesEnabled(settings.voxelSprites);
     game.setIsoVoxelRaytraceEnabled(settings.isoVoxelRaytrace);
+    game.setIsoCutawayEnabled(settings.isoCutaway);
     game.setSaveBackups(settings.saveBackups);
 
     if (replayMode) {
@@ -1321,6 +1322,7 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "bones_enabled", game.bonesEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "voxel_sprites", game.voxelSpritesEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "iso_voxel_raytrace", game.isoVoxelRaytraceEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "iso_cutaway", game.isoCutawayEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "autosave_every_turns", std::to_string(game.autosaveEveryTurns()));
             ok &= updateIniKey(settingsPath, "save_backups", std::to_string(game.saveBackups()));
 
@@ -1384,6 +1386,7 @@ int main(int argc, char** argv) {
             game.setMinimapZoom(newSettings.minimapZoom);
             game.setControlPreset(newSettings.controlPreset);
             game.setIsoVoxelRaytraceEnabled(newSettings.isoVoxelRaytrace);
+            game.setIsoCutawayEnabled(newSettings.isoCutaway);
 
             // Keep the local copy up-to-date for any later use.
             settings = newSettings;

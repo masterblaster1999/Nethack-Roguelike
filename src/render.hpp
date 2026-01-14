@@ -301,6 +301,8 @@ private:
     // ViewMode::Isometric). These are true 2:1 diamond tiles rather than squashed
     // square sprites.
     bool isoTerrainAssetsValid = false;
+    uint32_t isoTerrainStyleSeedCached_ = 0u;
+    int isoTerrainSpritePxCached_ = 0;
     std::array<std::vector<AnimTex>, ROOM_STYLES> floorThemeVarIso;
     std::vector<AnimTex> chasmVarIso;
     // 2.5D wall "blocks" (drawn as sprites in isometric view to add verticality).
@@ -440,7 +442,7 @@ private:
     // UI skin helpers
     void ensureUIAssets(const Game& game);
     // Terrain helpers
-    void ensureIsoTerrainAssets();
+    void ensureIsoTerrainAssets(uint32_t styleSeed);
     void drawPanel(const Game& game, const SDL_Rect& rect, uint8_t alpha, int frame);
 
     void drawHud(const Game& game);

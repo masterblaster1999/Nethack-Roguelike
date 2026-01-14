@@ -1715,6 +1715,11 @@ void Game::applyEndOfTurnEffects() {
 
     Entity& p = playerMut();
 
+    // Per-level wind: biases drifting hazards (gas, fire). Deterministic from run seed + level id.
+    const Vec2i wind = windDir();
+    const int windStr = windStrength();
+    const Vec2i upWind = {-wind.x, -wind.y};
+
 
     // ------------------------------------------------------------
     // Environmental fields: Confusion Gas (persistent, tile-based)
@@ -2527,12 +2532,30 @@ void Game::applyEndOfTurnEffects() {
                     if (next[i] < self) next[i] = self;
 
                     // Spread to neighbors with extra decay.
+                    //
+                    // Wind bias: downwind tiles get a slightly "stronger" spread, while upwind tiles
+                    // dissipate a bit faster. This makes gas feel like it's drifting through corridors.
                     if (s >= 3u) {
-                        const uint8_t spread = static_cast<uint8_t>(s - 2u);
+                        const uint8_t baseSpread = static_cast<uint8_t>(s - 2u);
                         for (const Vec2i& d : kDirs) {
                             const int nx = x + d.x;
                             const int ny = y + d.y;
                             if (!passable(nx, ny)) continue;
+
+                            uint8_t spread = baseSpread;
+                            if (windStr > 0) {
+                                if (d.x == wind.x && d.y == wind.y) {
+                                    int sp = static_cast<int>(baseSpread) + windStr;
+                                    if (sp > static_cast<int>(s)) sp = static_cast<int>(s);
+                                    spread = static_cast<uint8_t>(sp);
+                                } else if (d.x == upWind.x && d.y == upWind.y) {
+                                    int sp = static_cast<int>(baseSpread) - windStr;
+                                    if (sp < 0) sp = 0;
+                                    spread = static_cast<uint8_t>(sp);
+                                }
+                            }
+
+                            if (spread == 0u) continue;
                             const size_t j = idx2(nx, ny);
                             if (next[j] < spread) next[j] = spread;
                         }
@@ -2580,12 +2603,31 @@ void Game::applyEndOfTurnEffects() {
                     if (next[i] < self) next[i] = self;
 
                     // Spread to neighbors with extra decay (more dissipative than confusion gas).
+                    //
+                    // Wind bias: poison gas stays localized, but still drifts downwind in corridors.
                     if (s >= 4u) {
-                        const uint8_t spread = static_cast<uint8_t>(s - 3u);
+                        const uint8_t baseSpread = static_cast<uint8_t>(s - 3u);
                         for (const Vec2i& d : kDirs) {
                             const int nx = x + d.x;
                             const int ny = y + d.y;
                             if (!passable(nx, ny)) continue;
+
+                            uint8_t spread = baseSpread;
+                            if (windStr > 0) {
+                                // Slightly weaker than confusion gas so poison doesn't become too "flowy".
+                                const int bonus = std::max(1, windStr - 1);
+                                if (d.x == wind.x && d.y == wind.y) {
+                                    int sp = static_cast<int>(baseSpread) + bonus;
+                                    if (sp > static_cast<int>(s)) sp = static_cast<int>(s);
+                                    spread = static_cast<uint8_t>(sp);
+                                } else if (d.x == upWind.x && d.y == upWind.y) {
+                                    int sp = static_cast<int>(baseSpread) - bonus;
+                                    if (sp < 0) sp = 0;
+                                    spread = static_cast<uint8_t>(sp);
+                                }
+                            }
+
+                            if (spread == 0u) continue;
                             const size_t j = idx2(nx, ny);
                             if (next[j] < spread) next[j] = spread;
                         }
@@ -2659,7 +2701,19 @@ void Game::applyEndOfTurnEffects() {
                             if (!passable(nx, ny)) continue;
                             const size_t j = idx2(nx, ny);
                             if (fireField_[j] != 0u) continue;
-                            if (rng.chance(baseChance)) {
+
+                            float chance = baseChance;
+                            if (windStr > 0) {
+                                // Downwind flames jump more readily; upwind spread is suppressed.
+                                if (d.x == wind.x && d.y == wind.y) {
+                                    chance *= (1.0f + 0.35f * static_cast<float>(windStr));
+                                } else if (d.x == upWind.x && d.y == upWind.y) {
+                                    chance *= std::max(0.20f, (1.0f - 0.25f * static_cast<float>(windStr)));
+                                }
+                            }
+                            chance = std::min(0.35f, std::max(0.0f, chance));
+
+                            if (rng.chance(chance)) {
                                 if (next[j] < spread) next[j] = spread;
                             }
                         }

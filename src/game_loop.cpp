@@ -1117,7 +1117,7 @@ void Game::handleAction(Action a) {
 
     // Overlay: options menu (does not consume turns)
     if (optionsOpen) {
-        constexpr int kOptionCount = 20;
+        constexpr int kOptionCount = 21;
 
         if (a == Action::Cancel || a == Action::Options) {
             optionsOpen = false;
@@ -1328,8 +1328,17 @@ if (optionsSel == 16) {
     return;
 }
 
-// 17) Control preset (Modern / NetHack)
+// 17) ISO cutaway (foreground wall fade for readability; visual-only)
 if (optionsSel == 17) {
+    if (left || right || confirm) {
+        setIsoCutawayEnabled(!isoCutawayEnabled());
+        settingsDirtyFlag = true;
+    }
+    return;
+}
+
+// 18) Control preset (Modern / NetHack)
+if (optionsSel == 20) {
     if (left || right || confirm) {
         ControlPreset next = (controlPreset_ == ControlPreset::Modern) ? ControlPreset::Nethack : ControlPreset::Modern;
         setControlPreset(next);
@@ -1338,7 +1347,7 @@ if (optionsSel == 17) {
     return;
 }
 
-// 18) Keybinds editor
+// 19) Keybinds editor
 if (optionsSel == 18) {
     if (left || right || confirm) {
         optionsOpen = false;
@@ -1352,7 +1361,7 @@ if (optionsSel == 18) {
     return;
 }
 
-// 19) Close
+// 20) Close
 if (optionsSel == 19) {
     if (left || right || confirm) optionsOpen = false;
     return;
@@ -1745,6 +1754,17 @@ if (optionsSel == 19) {
                     }
                 }
                 break;
+
+            case Action::ToggleSoundPreview:
+                toggleSoundPreview();
+                break;
+            case Action::MinimapZoomIn:
+                if (soundPreviewOpen) adjustSoundPreviewVolume(+1);
+                break;
+            case Action::MinimapZoomOut:
+                if (soundPreviewOpen) adjustSoundPreviewVolume(-1);
+                break;
+
             case Action::Confirm:
                 // Auto-travel to the looked-at tile (doesn't consume a turn by itself).
                 if (requestAutoTravel(lookPos)) {
@@ -2093,6 +2113,10 @@ if (optionsSel == 19) {
             break;
         case Action::Look:
             beginLook();
+            acted = false;
+            break;
+        case Action::ToggleSoundPreview:
+            toggleSoundPreview();
             acted = false;
             break;
         case Action::Rest:

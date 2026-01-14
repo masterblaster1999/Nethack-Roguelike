@@ -55,6 +55,7 @@ void fillWalls(Dungeon& d) {
     d.terrainSculptCount = 0;
     d.corridorBraidCount = 0;
     d.deadEndClosetCount = 0;
+    d.annexCount = 0;
 }
 
 void carveRect(Dungeon& d, int x, int y, int w, int h, TileType type = TileType::Floor) {
@@ -5142,6 +5143,596 @@ GenKind chooseGenKind(int depth, int maxDepth, RNG& rng) {
 // The goal is to make exploring dead ends feel like a meaningful risk/reward
 // choice, without affecting critical path connectivity between the stairs.
 // ------------------------------------------------------------
+
+// ------------------------------------------------------------
+// Annex micro-dungeons: larger optional side areas carved into solid rock.
+// These act like "pocket dungeons" behind a (sometimes secret/locked) door,
+// providing extra exploration and optional rewards without ever gating the
+// critical stairs-to-stairs path.
+//
+// The generator uses local sub-grid algorithms (perfect maze via recursive
+// backtracking, or a small cellular-automata cavern) and then stamps the
+// result into a wall pocket off an existing corridor.
+// ------------------------------------------------------------
+enum class AnnexStyle : uint8_t {
+    MiniMaze = 0,
+    MiniCavern = 1,
+};
+
+struct AnnexGrid {
+    int w = 0;
+    int h = 0;
+    std::vector<uint8_t> cell; // 0 = wall, 1 = floor
+
+    uint8_t& at(int x, int y) { return cell[static_cast<size_t>(y * w + x)]; }
+    uint8_t at(int x, int y) const { return cell[static_cast<size_t>(y * w + x)]; }
+
+    bool inBounds(int x, int y) const { return x >= 0 && y >= 0 && x < w && y < h; }
+};
+
+static Vec2i annexFarthestFloor(const AnnexGrid& g, Vec2i start) {
+    if (!g.inBounds(start.x, start.y)) return {-1, -1};
+    if (g.at(start.x, start.y) == 0) return {-1, -1};
+
+    std::vector<int> dist(static_cast<size_t>(g.w * g.h), -1);
+    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * g.w + x); };
+
+    std::deque<Vec2i> q;
+    q.push_back(start);
+    dist[idx(start.x, start.y)] = 0;
+
+    Vec2i best = start;
+    int bestD = 0;
+
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    while (!q.empty()) {
+        Vec2i p = q.front();
+        q.pop_front();
+        const int d0 = dist[idx(p.x, p.y)];
+        if (d0 > bestD) {
+            bestD = d0;
+            best = p;
+        }
+
+        for (const auto& dv : dirs) {
+            const int nx = p.x + dv[0];
+            const int ny = p.y + dv[1];
+            if (!g.inBounds(nx, ny)) continue;
+            if (g.at(nx, ny) == 0) continue;
+            const size_t ii = idx(nx, ny);
+            if (dist[ii] >= 0) continue;
+            dist[ii] = d0 + 1;
+            q.push_back({nx, ny});
+        }
+    }
+
+    return best;
+}
+
+static bool annexGenPerfectMaze(AnnexGrid& g, RNG& rng, Vec2i entry) {
+    // Expect odd dimensions so that cell centers are on odd coordinates.
+    if (g.w < 9 || g.h < 9) return false;
+    if ((g.w % 2) == 0 || (g.h % 2) == 0) return false;
+
+    // Clear to walls.
+    std::fill(g.cell.begin(), g.cell.end(), 0u);
+
+    const int cellW = (g.w - 1) / 2;
+    const int cellH = (g.h - 1) / 2;
+    if (cellW <= 1 || cellH <= 1) return false;
+
+    auto cidx = [&](int cx, int cy) -> size_t { return static_cast<size_t>(cy * cellW + cx); };
+    auto cellToPos = [&](int cx, int cy) -> Vec2i { return {1 + cx * 2, 1 + cy * 2}; };
+
+    // Clamp entry to a valid odd cell center.
+    int startCx = std::clamp((entry.x - 1) / 2, 0, cellW - 1);
+    int startCy = std::clamp((entry.y - 1) / 2, 0, cellH - 1);
+
+    std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), 0u);
+    std::vector<Vec2i> st;
+    st.reserve(static_cast<size_t>(cellW * cellH));
+
+    st.push_back({startCx, startCy});
+    vis[cidx(startCx, startCy)] = 1u;
+    {
+        const Vec2i p = cellToPos(startCx, startCy);
+        g.at(p.x, p.y) = 1u;
+    }
+
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    while (!st.empty()) {
+        const Vec2i cur = st.back();
+
+        // Collect unvisited neighbors.
+        int opts[4] = {0,1,2,3};
+        // Shuffle directions a bit.
+        for (int i = 3; i > 0; --i) {
+            const int j = rng.range(0, i);
+            std::swap(opts[i], opts[j]);
+        }
+
+        bool advanced = false;
+        for (int k = 0; k < 4; ++k) {
+            const int di = opts[k];
+            const int ncx = cur.x + dirs[di][0];
+            const int ncy = cur.y + dirs[di][1];
+            if (ncx < 0 || ncy < 0 || ncx >= cellW || ncy >= cellH) continue;
+            const size_t ni = cidx(ncx, ncy);
+            if (vis[ni]) continue;
+
+            // Carve the wall between the two cells.
+            const Vec2i a = cellToPos(cur.x, cur.y);
+            const Vec2i b = cellToPos(ncx, ncy);
+            const Vec2i mid{ (a.x + b.x) / 2, (a.y + b.y) / 2 };
+
+            g.at(mid.x, mid.y) = 1u;
+            g.at(b.x, b.y) = 1u;
+
+            vis[ni] = 1u;
+            st.push_back({ncx, ncy});
+            advanced = true;
+            break;
+        }
+
+        if (!advanced) {
+            st.pop_back();
+        }
+    }
+
+    // Ensure the entry is floor (and on the interior ring, not the border wall ring).
+    if (g.inBounds(entry.x, entry.y) && entry.x > 0 && entry.y > 0 && entry.x < g.w - 1 && entry.y < g.h - 1) {
+        g.at(entry.x, entry.y) = 1u;
+    }
+
+    // Add a few loops by breaking random internal walls (keeps it from being a strict tree).
+    const int wantBreaks = std::clamp((cellW * cellH) / 6, 6, 26);
+    for (int i = 0; i < wantBreaks; ++i) {
+        // Pick a candidate wall location on even coordinates within the interior ring.
+        int x = rng.range(2, g.w - 3);
+        int y = rng.range(2, g.h - 3);
+        if ((x % 2) == 1 && (y % 2) == 1) continue; // skip cell centers
+        if (g.at(x, y) != 0u) continue;
+
+        // Break walls that connect two existing floor regions.
+        bool ok = false;
+        if (x % 2 == 0 && (g.at(x - 1, y) != 0u) && (g.at(x + 1, y) != 0u)) ok = true;
+        if (y % 2 == 0 && (g.at(x, y - 1) != 0u) && (g.at(x, y + 1) != 0u)) ok = true;
+        if (!ok) continue;
+
+        g.at(x, y) = 1u;
+    }
+
+    return true;
+}
+
+static bool annexGenSmallCavern(AnnexGrid& g, RNG& rng, Vec2i entry, int depth) {
+    if (g.w < 11 || g.h < 11) return false;
+
+    // Start with walls; only carve within the interior ring so we always keep a solid border.
+    std::fill(g.cell.begin(), g.cell.end(), 0u);
+
+    // Depth influences density a bit (deeper = a little more closed).
+    float floorChance = 0.58f - 0.015f * static_cast<float>(std::clamp(depth - 3, 0, 12));
+    floorChance = std::clamp(floorChance, 0.42f, 0.62f);
+
+    for (int y = 1; y < g.h - 1; ++y) {
+        for (int x = 1; x < g.w - 1; ++x) {
+            g.at(x, y) = rng.chance(floorChance) ? 1u : 0u;
+        }
+    }
+
+    auto countWalls8 = [&](int x, int y) -> int {
+        int w = 0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                const int nx = x + dx;
+                const int ny = y + dy;
+                if (!g.inBounds(nx, ny)) { w += 1; continue; }
+                if (g.at(nx, ny) == 0u) w += 1;
+            }
+        }
+        return w;
+    };
+
+    // A few smoothing passes (classic CA cave trick).
+    for (int it = 0; it < 5; ++it) {
+        AnnexGrid next = g;
+        for (int y = 1; y < g.h - 1; ++y) {
+            for (int x = 1; x < g.w - 1; ++x) {
+                const int w8 = countWalls8(x, y);
+                // 4-5-ish rule: lots of walls nearby -> wall; otherwise floor.
+                next.at(x, y) = (w8 >= 5) ? 0u : 1u;
+            }
+        }
+        g.cell.swap(next.cell);
+    }
+
+    // Flood-fill connected components; keep the largest one.
+    std::vector<int> comp(static_cast<size_t>(g.w * g.h), -1);
+    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * g.w + x); };
+
+    int bestComp = -1;
+    int bestSize = -1;
+    int compId = 0;
+
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    for (int y = 1; y < g.h - 1; ++y) {
+        for (int x = 1; x < g.w - 1; ++x) {
+            if (g.at(x, y) == 0u) continue;
+            if (comp[idx(x, y)] >= 0) continue;
+
+            int size = 0;
+            std::deque<Vec2i> q;
+            q.push_back({x, y});
+            comp[idx(x, y)] = compId;
+
+            while (!q.empty()) {
+                Vec2i p = q.front();
+                q.pop_front();
+                size += 1;
+
+                for (const auto& dv : dirs) {
+                    const int nx = p.x + dv[0];
+                    const int ny = p.y + dv[1];
+                    if (!g.inBounds(nx, ny)) continue;
+                    if (g.at(nx, ny) == 0u) continue;
+                    const size_t ii = idx(nx, ny);
+                    if (comp[ii] >= 0) continue;
+                    comp[ii] = compId;
+                    q.push_back({nx, ny});
+                }
+            }
+
+            if (size > bestSize) {
+                bestSize = size;
+                bestComp = compId;
+            }
+            compId += 1;
+        }
+    }
+
+    if (bestComp < 0) return false;
+
+    // Cull non-largest components.
+    for (int y = 1; y < g.h - 1; ++y) {
+        for (int x = 1; x < g.w - 1; ++x) {
+            if (g.at(x, y) == 0u) continue;
+            if (comp[idx(x, y)] != bestComp) g.at(x, y) = 0u;
+        }
+    }
+
+    // Ensure the entry area is open.
+    if (g.inBounds(entry.x, entry.y)) {
+        for (int dy = -2; dy <= 2; ++dy) {
+            for (int dx = -2; dx <= 2; ++dx) {
+                const int nx = entry.x + dx;
+                const int ny = entry.y + dy;
+                if (nx <= 0 || ny <= 0 || nx >= g.w - 1 || ny >= g.h - 1) continue;
+                g.at(nx, ny) = 1u;
+            }
+        }
+        g.at(entry.x, entry.y) = 1u;
+    }
+
+    // If entry is not connected to the main component, tunnel to the nearest floor.
+    // (This keeps annexes always solvable once the door is opened.)
+    {
+        // BFS from entry over floors.
+        std::vector<int> dist(static_cast<size_t>(g.w * g.h), -1);
+        std::deque<Vec2i> q;
+        auto didx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * g.w + x); };
+
+        if (g.inBounds(entry.x, entry.y) && g.at(entry.x, entry.y) != 0u) {
+            dist[didx(entry.x, entry.y)] = 0;
+            q.push_back(entry);
+        }
+
+        while (!q.empty()) {
+            Vec2i p = q.front();
+            q.pop_front();
+            const int d0 = dist[didx(p.x, p.y)];
+            for (const auto& dv : dirs) {
+                const int nx = p.x + dv[0];
+                const int ny = p.y + dv[1];
+                if (!g.inBounds(nx, ny)) continue;
+                if (g.at(nx, ny) == 0u) continue;
+                const size_t ii = didx(nx, ny);
+                if (dist[ii] >= 0) continue;
+                dist[ii] = d0 + 1;
+                q.push_back({nx, ny});
+            }
+        }
+
+        // Find any floor tile not reached.
+        Vec2i target{-1, -1};
+        int bestMan = 999999;
+
+        for (int y = 1; y < g.h - 1; ++y) {
+            for (int x = 1; x < g.w - 1; ++x) {
+                if (g.at(x, y) == 0u) continue;
+                if (dist[didx(x, y)] >= 0) continue;
+                const int man = std::abs(x - entry.x) + std::abs(y - entry.y);
+                if (man < bestMan) {
+                    bestMan = man;
+                    target = {x, y};
+                }
+            }
+        }
+
+        if (g.inBounds(target.x, target.y)) {
+            // Drill a simple L-shaped tunnel to connect.
+            int x = entry.x;
+            int y = entry.y;
+            while (x != target.x) {
+                x += (target.x > x) ? 1 : -1;
+                if (x <= 0 || x >= g.w - 1) break;
+                g.at(x, y) = 1u;
+            }
+            while (y != target.y) {
+                y += (target.y > y) ? 1 : -1;
+                if (y <= 0 || y >= g.h - 1) break;
+                g.at(x, y) = 1u;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool maybeCarveAnnexMicroDungeon(Dungeon& d, RNG& rng, int depth, GenKind g) {
+    d.annexCount = 0;
+
+    // NOTE: special floors (camp/sokoban/finale) are handled by early returns in Dungeon::generate.
+
+    const int W = d.width;
+    const int H = d.height;
+    if (W < 40 || H < 30) return false;
+
+    // Decide whether this floor gets an annex.
+    float pAny = 0.08f + 0.03f * static_cast<float>(std::clamp(depth - 2, 0, 12));
+    if (g == GenKind::Mines) pAny += 0.10f;
+    if (g == GenKind::Catacombs) pAny += 0.08f;
+    if (g == GenKind::Maze) pAny += 0.05f;
+    if (g == GenKind::Cavern) pAny *= 0.75f;
+    pAny = std::clamp(pAny, 0.05f, 0.55f);
+
+    if (!rng.chance(pAny)) return false;
+
+    // Distance map from stairs-up helps avoid "free annex right next to stairs".
+    const auto distFromUp = bfsDistanceMap(d, d.stairsUp);
+    auto distAt = [&](int x, int y) -> int {
+        const size_t ii = static_cast<size_t>(y * W + x);
+        if (ii >= distFromUp.size()) return -1;
+        return distFromUp[ii];
+    };
+
+    auto tooCloseToStairs = [&](Vec2i p) -> bool {
+        if (d.inBounds(d.stairsUp.x, d.stairsUp.y) && manhattan2(p, d.stairsUp) <= 7) return true;
+        if (d.inBounds(d.stairsDown.x, d.stairsDown.y) && manhattan2(p, d.stairsDown) <= 7) return true;
+        return false;
+    };
+
+    struct Cand {
+        Vec2i door;      // wall tile that becomes a door
+        Vec2i outside;   // adjacent corridor/room floor
+        Vec2i intoDir;   // direction from door -> inside the annex pocket
+        int dist = 0;    // dist from stairs-up (proxy for "not too early")
+    };
+
+    std::vector<Cand> cands;
+    cands.reserve(static_cast<size_t>((W * H) / 24));
+
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    for (int y = 2; y < H - 2; ++y) {
+        for (int x = 2; x < W - 2; ++x) {
+            if (d.at(x, y).type != TileType::Wall) continue;
+
+            // Require at least one adjacent floor to serve as an "outside" anchor.
+            Vec2i outside{-1, -1};
+            Vec2i intoDir{0, 0};
+            int found = 0;
+
+            for (const auto& dv : dirs) {
+                const int nx = x + dv[0];
+                const int ny = y + dv[1];
+                if (!d.inBounds(nx, ny)) continue;
+                if (d.at(nx, ny).type != TileType::Floor) continue;
+
+                // Avoid attaching annex doors inside special rooms (shops/vaults/etc).
+                const Room* rr = findRoomContaining(d, nx, ny);
+                if (rr) {
+                    if (rr->type == RoomType::Shop) continue;
+                    if (rr->type == RoomType::Vault) continue;
+                    if (rr->type == RoomType::Secret) continue;
+                    if (rr->type == RoomType::Treasure) continue;
+                }
+
+                found += 1;
+                // Prefer corridor-like anchors (not deep inside rooms) by taking the first hit;
+                // later we sort by distance anyway.
+                outside = {nx, ny};
+                intoDir = {x - nx, y - ny}; // points from outside -> door; annex extends same direction beyond door
+                break;
+            }
+
+            if (found <= 0) continue;
+
+            const Vec2i doorPos{x, y};
+            if (tooCloseToStairs(doorPos) || tooCloseToStairs(outside)) continue;
+            if (anyDoorInRadius(d, x, y, 2)) continue;
+
+            const int di = distAt(outside.x, outside.y);
+            if (di < 0) continue;
+            if (di < 14) continue;
+
+            cands.push_back({doorPos, outside, intoDir, di});
+        }
+    }
+
+    if (cands.empty()) return false;
+
+    // Prefer far candidates.
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+        return a.dist > b.dist;
+    });
+
+    auto allWalls = [&](int rx, int ry, int rw, int rh) -> bool {
+        for (int yy = ry; yy < ry + rh; ++yy) {
+            for (int xx = rx; xx < rx + rw; ++xx) {
+                if (!d.inBounds(xx, yy)) return false;
+                if (d.at(xx, yy).type != TileType::Wall) return false;
+            }
+        }
+        return true;
+    };
+
+    auto chooseDoorType = [&]() -> TileType {
+        float secretChance = 0.20f + 0.04f * static_cast<float>(std::clamp(depth - 3, 0, 12));
+        float lockedChance = 0.10f + 0.04f * static_cast<float>(std::clamp(depth - 4, 0, 12));
+        if (g == GenKind::Mines) lockedChance += 0.08f;
+        if (g == GenKind::Catacombs) secretChance += 0.10f;
+        secretChance = std::clamp(secretChance, 0.10f, 0.65f);
+        lockedChance = std::clamp(lockedChance, 0.05f, 0.55f);
+
+        if (rng.chance(secretChance)) return TileType::DoorSecret;
+        if (rng.chance(lockedChance)) return TileType::DoorLocked;
+        return TileType::DoorClosed;
+    };
+
+    auto chooseStyle = [&]() -> AnnexStyle {
+        // Contrast the main floor generator a bit for variety.
+        if (g == GenKind::Cavern || g == GenKind::Warrens) {
+            return rng.chance(0.65f) ? AnnexStyle::MiniMaze : AnnexStyle::MiniCavern;
+        }
+        if (g == GenKind::Maze) {
+            return rng.chance(0.70f) ? AnnexStyle::MiniCavern : AnnexStyle::MiniMaze;
+        }
+        return rng.chance(0.62f) ? AnnexStyle::MiniMaze : AnnexStyle::MiniCavern;
+    };
+
+    auto makeOdd = [&](int v) -> int { return (v % 2 == 0) ? (v + 1) : v; };
+
+    auto tryCarveAt = [&](const Cand& c) -> bool {
+        AnnexStyle style = chooseStyle();
+
+        // Pick pocket size. Keep odd sizes for maze-friendly grids.
+        int len = rng.range(17, (depth >= 9 ? 29 : 25));
+        int span = rng.range(11, (depth >= 9 ? 19 : 17));
+        len = makeOdd(len);
+        span = makeOdd(span);
+
+        // Slightly larger pockets for caverns (they look better when roomy).
+        if (style == AnnexStyle::MiniCavern) {
+            len = makeOdd(len + 2);
+            span = makeOdd(span + 2);
+        }
+
+        // Clamp to sane ranges.
+        len = std::clamp(len, 17, 31);
+        span = std::clamp(span, 11, 21);
+
+        // Decide door offset along the perpendicular span; ensure it's odd so that
+        // the entry tile lands on an odd coordinate for maze generation.
+        int off = span / 2;
+        if ((off % 2) == 0) off += rng.chance(0.5f) ? 1 : -1;
+        off = std::clamp(off, 1, span - 2);
+        if ((off % 2) == 0) off = (off == span - 2) ? (off - 1) : (off + 1);
+
+        int rx = 0, ry = 0, rw = 0, rh = 0;
+
+        if (c.intoDir.x != 0) {
+            rw = len;
+            rh = span;
+            ry = c.door.y - off;
+            rx = (c.intoDir.x > 0) ? c.door.x : (c.door.x - rw + 1);
+        } else {
+            rw = span;
+            rh = len;
+            rx = c.door.x - off;
+            ry = (c.intoDir.y > 0) ? c.door.y : (c.door.y - rh + 1);
+        }
+
+        // Keep a safe border margin.
+        if (rx <= 1 || ry <= 1 || (rx + rw) >= W - 1 || (ry + rh) >= H - 1) return false;
+
+        // Ensure we don't overlap existing geometry.
+        if (!allWalls(rx, ry, rw, rh)) return false;
+
+        const Vec2i doorInside{c.door.x + c.intoDir.x, c.door.y + c.intoDir.y};
+        if (!d.inBounds(doorInside.x, doorInside.y)) return false;
+
+        // Entry relative to pocket origin.
+        const Vec2i entryRel{doorInside.x - rx, doorInside.y - ry};
+        if (!entryRel.x || !entryRel.y || entryRel.x >= rw - 1 || entryRel.y >= rh - 1) return false;
+
+        AnnexGrid grid;
+        grid.w = rw;
+        grid.h = rh;
+        grid.cell.assign(static_cast<size_t>(rw * rh), 0u);
+
+        bool ok = false;
+        if (style == AnnexStyle::MiniMaze) ok = annexGenPerfectMaze(grid, rng, entryRel);
+        else ok = annexGenSmallCavern(grid, rng, entryRel, depth);
+
+        if (!ok) return false;
+
+        // Stamp the interior floors into the dungeon; keep the pocket border ring as solid wall.
+        for (int yy = 1; yy < rh - 1; ++yy) {
+            for (int xx = 1; xx < rw - 1; ++xx) {
+                if (grid.at(xx, yy) == 0u) continue;
+                carveFloor(d, rx + xx, ry + yy);
+            }
+        }
+
+        // Place the door tile.
+        d.at(c.door.x, c.door.y).type = chooseDoorType();
+
+        // Reward: a chest deep inside the annex (spawns via bonusLootSpots).
+        // Choose the farthest reachable floor tile from the entry.
+        Vec2i farRel = annexFarthestFloor(grid, entryRel);
+        if (grid.inBounds(farRel.x, farRel.y)) {
+            const Vec2i loot{rx + farRel.x, ry + farRel.y};
+            if (d.inBounds(loot.x, loot.y) && d.at(loot.x, loot.y).type == TileType::Floor) {
+                d.bonusLootSpots.push_back(loot);
+                // Deeper floors sometimes get a second cache.
+                if (depth >= 7 && rng.chance(0.35f)) {
+                    // Nudge toward another distant-ish tile by stepping a bit.
+                    Vec2i alt = farRel;
+                    for (int k = 0; k < 20; ++k) {
+                        const int dd = rng.range(0, 3);
+                        const int nx = alt.x + dirs[dd][0];
+                        const int ny = alt.y + dirs[dd][1];
+                        if (!grid.inBounds(nx, ny)) continue;
+                        if (grid.at(nx, ny) == 0u) continue;
+                        alt = {nx, ny};
+                    }
+                    const Vec2i loot2{rx + alt.x, ry + alt.y};
+                    if (d.inBounds(loot2.x, loot2.y) && d.at(loot2.x, loot2.y).type == TileType::Floor) {
+                        if (manhattan2(loot2, loot) >= 6) d.bonusLootSpots.push_back(loot2);
+                    }
+                }
+            }
+        }
+
+        d.annexCount += 1;
+        return true;
+    };
+
+    // Try a handful of candidates.
+    const int maxTries = std::min(40, static_cast<int>(cands.size()));
+    for (int i = 0; i < maxTries; ++i) {
+        const Cand& c = cands[static_cast<size_t>(i)];
+        if (tryCarveAt(c)) return true;
+    }
+
+    return false;
+}
+
 bool maybeCarveDeadEndClosets(Dungeon& d, RNG& rng, int depth, GenKind g) {
     d.deadEndClosetCount = 0;
 
@@ -8822,6 +9413,7 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth) 
     vaultPrefabCount = 0;
     deadEndClosetCount = 0;
     corridorBraidCount = 0;
+    annexCount = 0;
     hasCavernLake = false;
     hasWarrens = false;
 
@@ -8995,6 +9587,10 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth) 
             terrainSculptCount = r.totalEdits();
         }
     }
+
+    // Annex micro-dungeons: carve a larger optional side area (mini-maze/cavern)
+    // into solid rock behind a secret/locked door. Always optional; never gates the critical stairs path.
+    (void)maybeCarveAnnexMicroDungeon(*this, rng, depth, g);
 
     // Dead-end stash closets: carve tiny side closets off corridor/tunnel dead ends.
     // These are optional rewards and never gate main progression.

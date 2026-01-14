@@ -684,7 +684,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 47u; // v47: trapdoorFallers keyed by (branch,depth) // v46: Message.branch (dungeon branch for log/history) // v45: dungeon branches (LevelId) // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
+constexpr uint32_t SAVE_VERSION = 48u; // v48: item call labels (NetHack-style) // v47: trapdoorFallers keyed by (branch,depth) // v46: Message.branch (dungeon branch for log/history) // v45: dungeon branches (LevelId) // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -1327,6 +1327,13 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
         writePod(mem, app);
     }
 
+    // v48+: per-run "call" labels for unidentified appearances (NetHack-style notes).
+    if constexpr (SAVE_VERSION >= 48u) {
+        for (uint32_t i = 0; i < kindCount; ++i) {
+            writeString(mem, identCall[static_cast<size_t>(i)]);
+        }
+    }
+
     // v7+: hunger system state (per-run)
     uint8_t hungerEnabledTmp = hungerEnabled_ ? 1u : 0u;
     int32_t hungerTmp = static_cast<int32_t>(hunger);
@@ -1886,6 +1893,8 @@ bool Game::loadFromFile(const std::string& path, bool reportErrors) {
         // v6+: item identification tables
         std::array<uint8_t, ITEM_KIND_COUNT> identKnownTmp{};
         std::array<uint8_t, ITEM_KIND_COUNT> identAppTmp{};
+        std::array<std::string, ITEM_KIND_COUNT> identCallTmp{};
+        identCallTmp.fill(std::string());
         identKnownTmp.fill(1); // older saves had fully-known item names
         identAppTmp.fill(0);
 
@@ -1900,6 +1909,17 @@ bool Game::loadFromFile(const std::string& path, bool reportErrors) {
                 if (i < static_cast<uint32_t>(ITEM_KIND_COUNT)) {
                     identKnownTmp[static_cast<size_t>(i)] = known;
                     identAppTmp[static_cast<size_t>(i)] = app;
+                }
+            }
+
+            // v48+: per-run "call" labels for unidentified appearances (NetHack-style notes).
+            if (ver >= 48u) {
+                for (uint32_t i = 0; i < kindCount; ++i) {
+                    std::string note;
+                    if (!readString(in, note)) return fail();
+                    if (i < static_cast<uint32_t>(ITEM_KIND_COUNT)) {
+                        identCallTmp[static_cast<size_t>(i)] = std::move(note);
+                    }
                 }
             }
 
@@ -2576,6 +2596,7 @@ if (ver >= 33u) {
         // v6+: identification tables (or default "all known" for older saves)
         identKnown = identKnownTmp;
         identAppearance = identAppTmp;
+        identCall = identCallTmp;
 
         // v7+: hunger state
         if (ver >= 7u) {

@@ -1,13 +1,13 @@
 {
-  "patch_id": "round15_patch",
-  "previous_patch_id": "round14_patch",
-  "round": 15,
+  "patch_id": "round16_patch",
+  "previous_patch_id": "round15_patch",
+  "round": 16,
   "date": "2026-01-14",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Procedural annex micro-dungeons: some floors now carve a larger optional side-area (mini-maze or mini-cavern) into solid rock behind a door, adding fresh exploration variety without ever gating stairs progression.",
-    "Annex doors can be secret or locked; the annex interior is generated on a local sub-grid (recursive-backtracker perfect maze or cellular-automata cavern) and stamped into the dungeon as a single-entrance pocket with deep chest caches.",
-    "New floor-entry hint when an annex exists: \"YOU HEAR A HOLLOW ECHO BEHIND THE STONE.\""
+    "Fixed MSVC build break in render.cpp: centralized fitToChars helpers so LOOK/targeting HUD text no longer references an out-of-scope lambda.",
+    "Targeting and LOOK bottom HUD labels now use a compact two-line hint bar plus a middle-ellipsis fitter, keeping both context and control hints visible on narrow windows.",
+    "Removed MSVC C4244 warnings by type-correcting SDL_SetRenderDrawColor arguments (Uint8) and by using uint8_t{0} for byte-grid fills/initialization in dungeon/spawn generation."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",

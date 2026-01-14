@@ -1409,7 +1409,7 @@ void Game::spawnTraps() {
         return static_cast<size_t>(y * W + x);
     };
 
-    std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), 0u);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), uint8_t{0});
     for (const Room& r : dung.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -2510,7 +2510,7 @@ void Game::applyEndOfTurnEffects() {
             const int h = dung.height;
             const size_t n = static_cast<size_t>(w * h);
 
-            std::vector<uint8_t> next(n, 0u);
+            std::vector<uint8_t> next(n, uint8_t{0});
             auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
             auto passable = [&](int x, int y) -> bool {
                 if (!dung.inBounds(x, y)) return false;
@@ -2581,7 +2581,7 @@ void Game::applyEndOfTurnEffects() {
             const int h = dung.height;
             const size_t n = static_cast<size_t>(w * h);
 
-            std::vector<uint8_t> next(n, 0u);
+            std::vector<uint8_t> next(n, uint8_t{0});
             auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
             auto passable = [&](int x, int y) -> bool {
                 if (!dung.inBounds(x, y)) return false;
@@ -2670,7 +2670,7 @@ void Game::applyEndOfTurnEffects() {
             const int h = dung.height;
             const size_t n = static_cast<size_t>(w * h);
 
-            std::vector<uint8_t> next(n, 0u);
+            std::vector<uint8_t> next(n, uint8_t{0});
             auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
             auto passable = [&](int x, int y) -> bool {
                 if (!dung.inBounds(x, y)) return false;

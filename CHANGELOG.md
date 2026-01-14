@@ -215,6 +215,9 @@
 - Isometric block sprites: wall/door/doorway/pillar block sprites now get subtle vertical-face ambient occlusion (under-cap overhang, ridge seam, and base grounding) plus a light-facing cap rim highlight, improving volume/readability in 2.5D view.
 
 ### Fixed
+- Fixed MSVC build break: LOOK/targeting HUD no longer references an out-of-scope `fitToChars` lambda (shared helper lives in render.cpp).
+- Targeting + LOOK bottom hint text now uses a compact **two-line** layout and a middle-ellipsis fitter, keeping both context and keybind hints readable on narrow windows.
+- Removed MSVC C4244 warnings by passing properly typed `Uint8` color channels to `SDL_SetRenderDrawColor` and by using `uint8_t{0}` for byte-grid fills/initialization.
 - Fixed a build break in LOOK/renderer UI helpers by exposing the `equippedMelee/Ranged/Armor/Ring1/Ring2` accessors publicly.
 - Shops now correctly spawn a **Shopkeeper** (enabling **#pay** and selling), and shop rooms no longer spawn random monsters.
 - Shrine item-targeting prompts (**Identify/Bless/Recharge/Sacrifice**) now resolve properly from the inventory UI.

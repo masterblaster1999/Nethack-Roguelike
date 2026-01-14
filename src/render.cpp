@@ -39,6 +39,96 @@ struct ClipRectGuard {
     ClipRectGuard& operator=(const ClipRectGuard&) = delete;
 };
 
+// Clamp any integer to SDL's Uint8 channel range.
+inline Uint8 clampToU8(int v) {
+    if (v < 0) return Uint8{0};
+    if (v > 255) return Uint8{255};
+    return static_cast<Uint8>(v);
+}
+
+// Fit a string to a fixed character width by truncating the end with "...".
+inline std::string fitToChars(const std::string& s, int maxChars) {
+    if (maxChars <= 0) return std::string();
+    if (static_cast<int>(s.size()) <= maxChars) return s;
+    if (maxChars <= 3) return s.substr(0, static_cast<size_t>(maxChars));
+    return s.substr(0, static_cast<size_t>(maxChars - 3)) + "...";
+}
+
+// Fit a string to a fixed character width using a *middle* ellipsis, preserving
+// both the beginning and end (useful for HUD lines that end with controls).
+inline std::string fitToCharsMiddle(const std::string& s, int maxChars) {
+    if (maxChars <= 0) return std::string();
+    if (static_cast<int>(s.size()) <= maxChars) return s;
+    if (maxChars <= 3) return s.substr(0, static_cast<size_t>(maxChars));
+
+    const int avail = maxChars - 3;
+    const int head = avail / 2;
+    const int tail = avail - head;
+
+    if (head <= 0 || tail <= 0) {
+        return s.substr(0, static_cast<size_t>(maxChars - 3)) + "...";
+    }
+
+    return s.substr(0, static_cast<size_t>(head)) + "..." + s.substr(s.size() - static_cast<size_t>(tail));
+}
+
+// Basic ASCII-ish word wrap for the fixed-width 5x7 UI font.
+// Returns at least one line and caps output to maxLines.
+// The last line is ellipsized if text overflows maxLines.
+inline std::vector<std::string> wrapToChars(const std::string& s, int maxChars, int maxLines) {
+    std::vector<std::string> out;
+    if (maxChars <= 0 || maxLines <= 0) {
+        out.push_back(std::string());
+        return out;
+    }
+
+    size_t pos = 0;
+    while (pos < s.size() && static_cast<int>(out.size()) < maxLines) {
+        // Skip leading spaces for the next line.
+        while (pos < s.size() && s[pos] == ' ') ++pos;
+        if (pos >= s.size()) break;
+
+        size_t end = std::min(s.size(), pos + static_cast<size_t>(maxChars));
+        if (end >= s.size()) {
+            out.push_back(s.substr(pos));
+            pos = end;
+            break;
+        }
+
+        // Prefer breaking on the last space inside the window.
+        size_t space = s.rfind(' ', end);
+        if (space != std::string::npos && space > pos) {
+            end = space;
+        }
+
+        std::string line = s.substr(pos, end - pos);
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        out.push_back(line);
+
+        pos = end;
+    }
+
+    if (out.empty()) out.push_back(std::string());
+
+    // If we ran out of lines but still have remaining text, fold it into the last
+    // line and ellipsize.
+    if (pos < s.size() && !out.empty()) {
+        std::string merged = out.back();
+        if (!merged.empty()) merged += " ";
+        merged += s.substr(pos);
+        out.back() = fitToChars(merged, maxChars);
+    }
+
+    // Ensure no line exceeds maxChars (defensive).
+    for (std::string& line : out) {
+        if (static_cast<int>(line.size()) > maxChars) {
+            line = fitToChars(line, maxChars);
+        }
+    }
+
+    return out;
+}
+
 inline std::string depthLabel(int depth) {
     if (depth <= 0) return "CAMP";
     return std::to_string(depth);
@@ -8594,7 +8684,7 @@ void Renderer::drawMessageHistoryOverlay(const Game& game) {
                         static_cast<int>(matchLen) * charW + 4,
                         lineH - 2
                     };
-                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 55);
+                    SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{55});
                     SDL_RenderFillRect(renderer, &hi);
                     SDL_SetRenderDrawBlendMode(renderer, oldBm);
 
@@ -8630,20 +8720,20 @@ void Renderer::drawTargetingOverlay(const Game& game) {
 
     const auto& linePts = game.targetingLine();
     Vec2i cursor = game.targetingCursor();
-    bool ok = game.targetingIsValid();
+    const bool ok = game.targetingIsValid();
 
     const std::string warning = game.targetingWarningText();
     const bool warn = ok && !warning.empty();
 
-    int lr = 0, lg = 255, lb = 0;
+    Uint8 lr = 0, lg = Uint8{255}, lb = 0;
     if (!ok) {
-        lr = 255; lg = 0; lb = 0;
+        lr = Uint8{255}; lg = 0; lb = 0;
     } else if (warn) {
-        lr = 255; lg = 200; lb = 0;
+        lr = Uint8{255}; lg = Uint8{200}; lb = 0;
     }
 
     // Draw LOS line tiles (excluding player tile)
-    SDL_SetRenderDrawColor(renderer, lr, lg, lb, 80);
+    SDL_SetRenderDrawColor(renderer, lr, lg, lb, Uint8{80});
     for (size_t i = 1; i < linePts.size(); ++i) {
         Vec2i p = linePts[i];
         SDL_Rect base = mapTileDst(p.x, p.y);
@@ -8661,54 +8751,53 @@ void Renderer::drawTargetingOverlay(const Game& game) {
 
     // Crosshair on cursor
     SDL_Rect c = mapTileDst(cursor.x, cursor.y);
-    SDL_SetRenderDrawColor(renderer, lr, lg, lb, 200);
+    SDL_SetRenderDrawColor(renderer, lr, lg, lb, Uint8{200});
     if (iso) {
         drawIsoDiamondOutline(renderer, c);
-        SDL_SetRenderDrawColor(renderer, lr, lg, lb, 110);
+        SDL_SetRenderDrawColor(renderer, lr, lg, lb, Uint8{110});
         drawIsoDiamondCross(renderer, c);
     } else {
         SDL_RenderDrawRect(renderer, &c);
     }
 
-    // Small label near bottom HUD
+    // Small label near bottom HUD: two-line hint bar.
+    // Line 1: targeting context (enemy/tile + preview/warnings).
+    // Line 2: controls (or the current failure reason).
     const int scale = 2;
     const Color yellow{ 255, 230, 120, 255 };
     const int hudTop = winH - hudH;
-    auto fitToChars = [](const std::string& s, int maxChars) -> std::string {
-        if (maxChars <= 0) return std::string();
-        if (static_cast<int>(s.size()) <= maxChars) return s;
-        if (maxChars <= 3) return s.substr(0, static_cast<size_t>(maxChars));
-        return s.substr(0, static_cast<size_t>(maxChars - 3)) + "...";
-    };
 
     const std::string info = game.targetingInfoText();
     const std::string preview = game.targetingCombatPreviewText();
     const std::string status = game.targetingStatusText();
 
-    std::string label;
-    if (!info.empty()) label = "TARGET: " + info;
-    else label = "TARGET:";
-
+    std::string line1 = info.empty() ? "TARGET:" : ("TARGET: " + info);
     if (!preview.empty()) {
-        label += " | " + preview;
+        line1 += " | " + preview;
     }
-
     if (!warning.empty()) {
-        label += " | " + warning;
+        line1 += " | " + warning;
     }
 
+    std::string line2;
     if (ok) {
-        label += game.targetingNeedsConfirm() ? " | ENTER CONFIRM  ESC CANCEL  TAB NEXT  SHIFT+TAB PREV"
-                                           : " | ENTER FIRE  ESC CANCEL  TAB NEXT  SHIFT+TAB PREV";
+        line2 = game.targetingNeedsConfirm()
+                    ? "ENTER CONFIRM  ESC CANCEL  TAB NEXT  SHIFT+TAB PREV"
+                    : "ENTER FIRE  ESC CANCEL  TAB NEXT  SHIFT+TAB PREV";
     } else {
-        label += " | " + (status.empty() ? std::string("NO CLEAR SHOT") : status);
+        line2 = status.empty() ? std::string("NO CLEAR SHOT") : status;
+        line2 += "  (ESC CANCEL)";
     }
 
     const int charW = 6 * scale;
     const int maxChars = (winW - 20) / std::max(1, charW);
-    drawText5x7(renderer, 10, hudTop - 18, scale, yellow, fitToChars(label, maxChars));
-}
+    const int lineH = 16;
 
+    // Controls/status closest to the HUD.
+    drawText5x7(renderer, 10, hudTop - 18, scale, yellow, fitToCharsMiddle(line2, maxChars));
+    // Context line above it.
+    drawText5x7(renderer, 10, hudTop - 18 - lineH, scale, yellow, fitToCharsMiddle(line1, maxChars));
+}
 void Renderer::drawLookOverlay(const Game& game) {
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
@@ -8738,7 +8827,7 @@ void Renderer::drawLookOverlay(const Game& game) {
 
                     const int strength = vol - dd;
                     const int alpha = std::clamp(20 + strength * 10, 20, 190);
-                    SDL_SetRenderDrawColor(renderer, 90, 200, 255, alpha);
+                    SDL_SetRenderDrawColor(renderer, Uint8{90}, Uint8{200}, Uint8{255}, clampToU8(alpha));
                     SDL_Rect r = mapTileDst(x, y);
                     if (iso) {
                         fillIsoDiamond(renderer, r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2);
@@ -8750,7 +8839,7 @@ void Renderer::drawLookOverlay(const Game& game) {
 
             // Slightly accent the source tile to make the heatmap origin obvious.
             if (d.inBounds(src.x, src.y)) {
-                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 80);
+                SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{80});
                 SDL_Rect r = mapTileDst(src.x, src.y);
                 if (iso) {
                     drawIsoDiamondOutline(renderer, r);
@@ -8763,7 +8852,7 @@ void Renderer::drawLookOverlay(const Game& game) {
 
     // Cursor box
     SDL_Rect c = mapTileDst(cursor.x, cursor.y);
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 200);
+    SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{200});
     if (iso) {
         drawIsoDiamondOutline(renderer, c);
     } else {
@@ -8771,7 +8860,7 @@ void Renderer::drawLookOverlay(const Game& game) {
     }
 
     // Crosshair lines (subtle)
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 90);
+    SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{90});
     if (iso) {
         drawIsoDiamondCross(renderer, c);
     } else {
@@ -8787,8 +8876,21 @@ void Renderer::drawLookOverlay(const Game& game) {
     if (!game.isCommandOpen()) {
         std::string s = game.lookInfoText();
         if (s.empty()) s = "LOOK";
+
         const int charW = 6 * scale;
         const int maxChars = (winW - 20) / std::max(1, charW);
-        drawText5x7(renderer, 10, hudTop - 18, scale, yellow, fitToChars(s, maxChars));
+
+        // Use up to two wrapped lines (prevents valuable info from being lost on
+        // narrow windows), and preserve both ends if we still have to ellipsize.
+        const std::vector<std::string> lines = wrapToChars(s, maxChars, 2);
+        const int lineH = 16;
+
+        if (lines.size() >= 2) {
+            drawText5x7(renderer, 10, hudTop - 18 - lineH, scale, yellow, fitToCharsMiddle(lines[0], maxChars));
+            drawText5x7(renderer, 10, hudTop - 18,          scale, yellow, fitToCharsMiddle(lines[1], maxChars));
+        } else {
+            drawText5x7(renderer, 10, hudTop - 18, scale, yellow, fitToCharsMiddle(lines[0], maxChars));
+        }
     }
 }
+

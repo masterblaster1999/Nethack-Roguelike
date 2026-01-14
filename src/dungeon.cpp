@@ -5216,7 +5216,7 @@ static bool annexGenPerfectMaze(AnnexGrid& g, RNG& rng, Vec2i entry) {
     if ((g.w % 2) == 0 || (g.h % 2) == 0) return false;
 
     // Clear to walls.
-    std::fill(g.cell.begin(), g.cell.end(), 0u);
+    std::fill(g.cell.begin(), g.cell.end(), uint8_t{0});
 
     const int cellW = (g.w - 1) / 2;
     const int cellH = (g.h - 1) / 2;
@@ -5229,7 +5229,7 @@ static bool annexGenPerfectMaze(AnnexGrid& g, RNG& rng, Vec2i entry) {
     int startCx = std::clamp((entry.x - 1) / 2, 0, cellW - 1);
     int startCy = std::clamp((entry.y - 1) / 2, 0, cellH - 1);
 
-    std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), 0u);
+    std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), uint8_t{0});
     std::vector<Vec2i> st;
     st.reserve(static_cast<size_t>(cellW * cellH));
 
@@ -5311,7 +5311,7 @@ static bool annexGenSmallCavern(AnnexGrid& g, RNG& rng, Vec2i entry, int depth) 
     if (g.w < 11 || g.h < 11) return false;
 
     // Start with walls; only carve within the interior ring so we always keep a solid border.
-    std::fill(g.cell.begin(), g.cell.end(), 0u);
+    std::fill(g.cell.begin(), g.cell.end(), uint8_t{0});
 
     // Depth influences density a bit (deeper = a little more closed).
     float floorChance = 0.58f - 0.015f * static_cast<float>(std::clamp(depth - 3, 0, 12));
@@ -5745,7 +5745,7 @@ bool maybeCarveDeadEndClosets(Dungeon& d, RNG& rng, int depth, GenKind g) {
     if (W <= 4 || H <= 4) return false;
 
     // Build an "in room" mask so we only consider corridor/tunnel dead-ends.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), 0u);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), uint8_t{0});
     for (const auto& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {

@@ -1114,7 +1114,7 @@ public:
     // Procedural map size selection used during level generation.
     // Returns {w,h}. Consumes RNG in the same way as real generation,
     // so callers should pass a copy if they want a "peek" without perturbing fate.
-    Vec2i proceduralMapSizeFor(RNG& rng, DungeonBranch branch, int depth) const;
+    Vec2i proceduralMapSizeFor(RNG& rngRef, DungeonBranch branch, int depth) const;
 
     void handleAction(Action a);
 

@@ -2334,7 +2334,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     d.ensureMaterials(static_cast<uint32_t>(game.seed()), game.branch(), game.depth(), game.dungeonMaxDepth());
 
     std::vector<int> counts(static_cast<size_t>(TerrainMaterial::COUNT), 0);
-    int total = 0;
+    int materialTotal = 0;
 
     for (int y = 0; y < d.height; ++y) {
         for (int x = 0; x < d.width; ++x) {
@@ -2342,7 +2342,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             if (t.type == TileType::Chasm) continue; // void is not a "material"
             const TerrainMaterial m = d.materialAtCached(x, y);
             counts[static_cast<size_t>(m)] += 1;
-            total += 1;
+            materialTotal += 1;
         }
     }
 
@@ -2361,9 +2361,9 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     const int kShow = std::min(3, static_cast<int>(top.size()));
     for (int i = 0; i < kShow; ++i) {
-        if (top[i].count <= 0 || total <= 0) break;
-        const int pct = static_cast<int>(std::round(100.0 * static_cast<double>(top[i].count) / static_cast<double>(total)));
-        ss << " | " << terrainMaterialName(static_cast<TerrainMaterial>(top[i].idx)) << " " << pct << "%";
+        if (top[i].count <= 0 || materialTotal <= 0) break;
+        const int materialPct = static_cast<int>(std::round(100.0 * static_cast<double>(top[i].count) / static_cast<double>(materialTotal)));
+        ss << " | " << terrainMaterialName(static_cast<TerrainMaterial>(top[i].idx)) << " " << materialPct << "%";
     }
 
     game.pushSystemMessage(ss.str());

@@ -11767,7 +11767,7 @@ static bool applyOpenSpaceBreakup(Dungeon& d, RNG& rng, int depth, GenKind g) {
 
         // Choose from the best slice to keep variety while still targeting maxima.
         const int slice = std::max(1, static_cast<int>(cands.size()) / 3);
-        Vec2i p = cands[static_cast<size_t>(rng.range(0, slice - 1))];
+        Vec2i pos = cands[static_cast<size_t>(rng.range(0, slice - 1))];
 
         // Decide cover type: rooms like pillars (LOS blockers), caverns/tunnels like boulders.
         TileType place = TileType::Pillar;
@@ -11778,19 +11778,19 @@ static bool applyOpenSpaceBreakup(Dungeon& d, RNG& rng, int depth, GenKind g) {
 
         if (rng.chance(pBoulder)) place = TileType::Boulder;
 
-        const TileType prev = d.at(p.x, p.y).type;
-        d.at(p.x, p.y).type = place;
+        const TileType prev = d.at(pos.x, pos.y).type;
+        d.at(pos.x, pos.y).type = place;
 
         if (!stairsConnected(d)) {
-            d.at(p.x, p.y).type = prev;
-            markBlocked(p.x, p.y, minSep);
+            d.at(pos.x, pos.y).type = prev;
+            markBlocked(pos.x, pos.y, minSep);
             continue;
         }
 
         if (place == TileType::Pillar) d.openSpacePillarCount += 1;
         else if (place == TileType::Boulder) d.openSpaceBoulderCount += 1;
 
-        markBlocked(p.x, p.y, minSep);
+        markBlocked(pos.x, pos.y, minSep);
         ops += 1;
     }
 
@@ -11927,7 +11927,7 @@ static bool applyFireLaneDampening(Dungeon& d, RNG& rng, int depth, GenKind g) {
         return d.at(x, y).type == TileType::Wall;
     };
 
-    auto tryChicaneAt = [&](int x, int y, int dx, int dy) -> bool {
+    auto tryChicaneAt = [&](int x, int y, int dx, int /*dy*/) -> bool {
         // Place a boulder in (x,y) and carve a 3-tile bypass on one side.
         // Horizontal lane -> carve above/below; vertical lane -> carve left/right.
         if (!isOkBaseTile(x, y)) return false;
@@ -12344,7 +12344,7 @@ static int countDeadEnds(const Dungeon& d) {
 }
 
 static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, int depth, int maxDepth, GenKind g, uint32_t worldSeed, const EndlessStratumInfo& stratum) {
-    const EndlessStratumTheme theme = stratum.theme;
+    [[maybe_unused]] const EndlessStratumTheme theme = stratum.theme;
     d.bonusLootSpots.clear();
     fillWalls(d);
 
@@ -12728,7 +12728,7 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     // (stairs redundancy, path length, density, dead-end ratio) without changing any
     // gameplay rules or requiring backtracking-heavy retries.
     const EndlessStratumInfo stratum = computeEndlessStratum(worldSeed, branch, depth, maxDepth);
-    const EndlessStratumTheme theme = stratum.theme;
+    [[maybe_unused]] const EndlessStratumTheme theme = stratum.theme;
     const GenKind g = chooseGenKind(depth, maxDepth, worldSeed, rng);
 
     int attempts = 1;
@@ -12827,7 +12827,7 @@ inline TerrainMaterial pickFromPool(const TerrainMaterial* pool, size_t n, uint3
     return pool[static_cast<size_t>(r % static_cast<uint32_t>(n))];
 }
 
-TerrainMaterial pickSiteMaterial(uint32_t siteHash, DungeonBranch branch, int depth, int maxDepth, const EndlessStratumInfo& st) {
+TerrainMaterial pickSiteMaterial(uint32_t siteHash, DungeonBranch branch, int depth, int /*maxDepth*/, const EndlessStratumInfo& st) {
     // siteHash is already well-mixed; rehash once with a fixed salt so other uses don't correlate.
     const uint32_t r = hash32(siteHash ^ 0x4D475D5Bu);
 

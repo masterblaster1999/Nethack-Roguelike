@@ -69,8 +69,6 @@ void Game::monsterTurn() {
         ents.reserve(wantCap);
     }
 
-    Dungeon& dung = dung_;
-
     const Entity& p = player();
 
     // Friendly companions (dog, tamed beasts, etc.)
@@ -1098,8 +1096,10 @@ void Game::monsterTurn() {
 
             const bool anyAbil = (aSlots[0] != ProcMonsterAbility::None) || (aSlots[1] != ProcMonsterAbility::None);
             if (tier > 0 && anyAbil) {
+                std::vector<uint8_t> aoeMask;
+
                 auto ensureField = [&](std::vector<uint8_t>& f) {
-                    const size_t n = static_cast<size_t>(w * h);
+                    const size_t n = static_cast<size_t>(W * H);
                     if (n == 0) return;
                     if (f.size() != n) f.assign(n, 0u);
                 };
@@ -1107,10 +1107,7 @@ void Game::monsterTurn() {
                 auto seedPoisonGas = [&](Vec2i c, int radius, uint8_t baseStrength) {
                     ensureField(poisonGas_);
                     if (poisonGas_.empty()) return;
-
-                    std::vector<int> fovMask(static_cast<size_t>(w * h), 0);
-                    dung.computeFovMask(c.x, c.y, radius, fovMask);
-
+                    dung.computeFovMask(c.x, c.y, radius, aoeMask);
                     for (int dy = -radius; dy <= radius; ++dy) {
                         for (int dx = -radius; dx <= radius; ++dx) {
                             const int man = std::abs(dx) + std::abs(dy);
@@ -1121,8 +1118,8 @@ void Game::monsterTurn() {
                             if (!dung.isWalkable(nx, ny)) continue;
 
                             const size_t i = static_cast<size_t>(idx(nx, ny));
-                            if (i >= fovMask.size()) continue;
-                            if (fovMask[i] == 0) continue;
+                            if (i >= aoeMask.size()) continue;
+                            if (aoeMask[i] == 0) continue;
 
                             int s = static_cast<int>(baseStrength) - man * 6;
                             if (s <= 0) continue;
@@ -1136,10 +1133,7 @@ void Game::monsterTurn() {
                 auto seedFireField = [&](Vec2i c, int radius, uint8_t baseStrength) {
                     ensureField(fireField_);
                     if (fireField_.empty()) return;
-
-                    std::vector<int> fovMask(static_cast<size_t>(w * h), 0);
-                    dung.computeFovMask(c.x, c.y, radius, fovMask);
-
+                    dung.computeFovMask(c.x, c.y, radius, aoeMask);
                     for (int dy = -radius; dy <= radius; ++dy) {
                         for (int dx = -radius; dx <= radius; ++dx) {
                             const int man = std::abs(dx) + std::abs(dy);
@@ -1150,8 +1144,8 @@ void Game::monsterTurn() {
                             if (!dung.isWalkable(nx, ny)) continue;
 
                             const size_t i = static_cast<size_t>(idx(nx, ny));
-                            if (i >= fovMask.size()) continue;
-                            if (fovMask[i] == 0) continue;
+                            if (i >= aoeMask.size()) continue;
+                            if (aoeMask[i] == 0) continue;
 
                             int s = static_cast<int>(baseStrength) - man * 7;
                             if (s <= 0) continue;
@@ -1227,8 +1221,8 @@ void Game::monsterTurn() {
                                 pushMsg(ss.str(), MessageKind::Warning, false);
                             }
 
-                            pushFxParticle(FXParticlePreset::Blink, m.pos, 1.0f, 16, 1.0f);
-                            pushFxParticle(FXParticlePreset::Blink, best, 1.0f, 16, 1.0f);
+                            pushFxParticle(FXParticlePreset::Blink, m.pos, 16, 0.18f);
+                            pushFxParticle(FXParticlePreset::Blink, best, 16, 0.18f, 0.03f);
 
                             m.pos = best;
                             emitNoise(m.pos, 10);
@@ -1255,7 +1249,7 @@ void Game::monsterTurn() {
                                 ss << "THE " << kindName(m.kind) << " EXHALES TOXIC VAPOR!";
                                 pushMsg(ss.str(), MessageKind::Warning, false);
                             }
-                            pushFxParticle(FXParticlePreset::Poison, p.pos, 1.0f, 18, 1.0f);
+                            pushFxParticle(FXParticlePreset::Poison, p.pos, 18, 0.50f);
                             emitNoise(m.pos, 8);
 
                             cd = 12 + rng.range(0, 5);
@@ -1297,7 +1291,7 @@ void Game::monsterTurn() {
                                 ss << "THE " << kindName(m.kind) << " RAISES A WARD!";
                                 pushMsg(ss.str(), MessageKind::Warning, false);
                             }
-                            pushFxParticle(FXParticlePreset::Buff, m.pos, 1.0f, 14, 1.0f);
+                            pushFxParticle(FXParticlePreset::Buff, m.pos, 14, 0.35f);
                             emitNoise(m.pos, 6);
 
                             cd = 18 + rng.range(0, 6);

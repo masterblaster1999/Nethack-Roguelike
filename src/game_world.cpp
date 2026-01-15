@@ -489,9 +489,9 @@ void Game::updateScentMap() {
         if (v == 0u) continue;
 
         const TerrainMaterial m = dung.materialAtCached(x, y);
-        const TerrainMaterialFx fx = terrainMaterialFx(m);
+        const TerrainMaterialFx matFx = terrainMaterialFx(m);
 
-        const int decay = clampi(BASE_DECAY + fx.scentDecayDelta, 0, 20);
+        const int decay = clampi(BASE_DECAY + matFx.scentDecayDelta, 0, 20);
         scentField_[i] = (v > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(v - static_cast<uint8_t>(decay)) : 0u;
     }
 
@@ -566,8 +566,8 @@ void Game::updateScentMap() {
             }
 
             const TerrainMaterial m = dung.materialAtCached(x, y);
-            const TerrainMaterialFx fx = terrainMaterialFx(m);
-            const int drop = clampi(BASE_SPREAD_DROP + fx.scentSpreadDropDelta, 6, 40);
+            const TerrainMaterialFx matFx = terrainMaterialFx(m);
+            const int drop = clampi(BASE_SPREAD_DROP + matFx.scentSpreadDropDelta, 6, 40);
             const uint8_t spread = (bestN > static_cast<uint8_t>(drop)) ? static_cast<uint8_t>(bestN - static_cast<uint8_t>(drop)) : 0u;
             if (spread > next[i]) next[i] = spread;
         }

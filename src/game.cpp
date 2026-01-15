@@ -360,8 +360,8 @@ static MapSizeWH pickProceduralMapSize(RNG& rng, DungeonBranch branch, int depth
 
 } // namespace
 
-Vec2i Game::proceduralMapSizeFor(RNG& rng, DungeonBranch branch, int depth) const {
-    const MapSizeWH msz = pickProceduralMapSize(rng, branch, depth, DUNGEON_MAX_DEPTH, infiniteWorldEnabled_, seed_);
+Vec2i Game::proceduralMapSizeFor(RNG& rngRef, DungeonBranch branch, int depth) const {
+    const MapSizeWH msz = pickProceduralMapSize(rngRef, branch, depth, DUNGEON_MAX_DEPTH, infiniteWorldEnabled_, seed_);
     return Vec2i{msz.w, msz.h};
 }
 

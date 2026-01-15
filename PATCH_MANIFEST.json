@@ -1,14 +1,12 @@
 {
-  "patch_id": "round41_patch",
-  "previous_patch_id": "round40_patch",
-  "round": 41,
+  "patch_id": "round42_patch",
+  "previous_patch_id": "round41_patch",
+  "round": 42,
   "date": "2026-01-15",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Procedural VTuber holo card editions: each VTUBER HOLOCARD now deterministically rolls an edition (STANDARD/FOIL/ALT/SIGNED/COLLAB) derived from the item sprite seed.",
-    "New card art variants: FOIL increases holo sheen, ALT adds a tiny starfield accent, SIGNED adds an autograph scribble, and COLLAB renders two mini portraits with split accent edges.",
-    "UI polish: item names, LOOK hints, and #vtubers roster now surface card editions (and collab partner/serial when applicable).",
-    "Economy: VTuber merch sell value now scales procedurally by rarity, card edition, and a coarse follower band (still with small deterministic shop variance)."
+    "Fixed MSVC build errors in monster AI procedural abilities: corrected dungeon member usage, FOV mask typing, and map dimension references; also reused a scratch FOV mask to reduce per-cast allocations when seeding hazard fields.",
+    "Cleaned up MSVC warnings: eliminated shadowing of Game members (`rng`, `fx`) and debug locals (`total`, `pct`, `p`), removed/annotated unused dungeon-generator variables/parameters, and corrected `pushFxParticle` call argument ordering to avoid float->int conversions."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",

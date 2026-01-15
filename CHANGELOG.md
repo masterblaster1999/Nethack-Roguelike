@@ -4,6 +4,9 @@
 ## [0.22.0] - Unreleased
 
 ### Added
+- Procedural terrain palette: per-run/per-floor HSL tints with room-style accents; configurable via settings and the new `#palette` command.
+- Procedural terrain materials: deterministic, depth-aware cellular-noise substrate (STONE/BRICK/BASALT/...) used for subtle tinting (scaled by proc_palette strength) and LOOK descriptions.
+- Material acoustics + scent absorption: substrate materials now modulate **footstep/dig noise** and **scent trail decay/spread** (moss/dirt dampen; metal/crystal ring out).
 - **Procedural monster variants**: rare monsters now roll a persistent **rank** (Elite/Champion/Mythic) plus 1-3 **affixes** at spawn.
 - **Procedural monster abilities**: Elite+ monsters can roll 1–2 active abilities (pounce, toxic miasma, cinder nova, arcane ward, summoning, screech) with cooldowns, saved/loaded per-entity.
   - Affixes implemented this round: **Swift**, **Stonehide**, **Savage**, **Blinking** (panic blink reposition), and **Gilded** (bonus gold + higher key/drop odds).
@@ -29,6 +32,57 @@
   - `#pos [x y]` (`#where` alias): prints coordinates + depth + level size (uses the LOOK cursor when active).
   - `#what [x y]` (`#tile`/`#describe`/`#whatis` aliases): prints the same rich tile description used by LOOK mode.
   - `#mapstats`: prints quick floor stats (exploration %, rooms, monsters, items, traps, marks, engravings).
+- **Stairs-path weaving (procgen)**: a new late-generation pass analyzes bridge (cut-edge) chokepoints on the shortest path between stairs and conservatively carves tiny 2x2 bypass loops to encourage alternate routes.
+  - Surfaced in `#mapstats` as **BRIDGES** (remaining cut-edges on the shortest stairs path) and **BYPASSES** (loops carved this floor).
+- **Generate-and-test floor picking (procgen)**: standard floors now generate **2–3 candidate layouts** (same generator kind) and pick the best by a deterministic quality score (stairs redundancy, path length pacing, density, and dead-end ratio).
+  - Surfaced in `#mapstats` as **GEN PICK** (chosen attempt/score/seed).
+- **Procedural VTuber figurines**: a rare treasure collectible with a deterministic stage name + archetype (from its sprite seed) and a new chibi portrait item sprite that blinks/animates subtly.
+- **Procedural VTuber holo cards**: an additional VTuber collectible whose display name includes a deterministic rarity tier, with a new framed portrait card sprite.
+- **VTuber holo card editions**: VTuber HOLOCARD drops now deterministically roll an **edition** (STANDARD/FOIL/ALT/SIGNED/COLLAB) from the card's sprite seed.
+  - **FOIL** and **ALT** editions render with distinct holo/alt-art flair; **SIGNED** adds a tiny autograph scribble + serial ticks.
+  - **COLLAB** editions feature **two** generated VTuber personas on one card and display both names in item labels and `#vtubers`.
+- Shop economy: VTuber merch base value now scales procedurally by **rarity**, **edition**, and a coarse **follower band** (still with small deterministic shop variance).
+- `#vtubers` (alias `#vt`): prints a compact roster of VTuber personas currently present (inventory + ground), including rarity, agency, tag, followers, and an optional catchphrase.
+  - Added `#vtubers` (and `#vt`) to list VTuber collectibles currently present on the floor/in your inventory.
+
+- **Infinite world (experimental)**: new settings `infinite_world` / `infinite_keep_window` allow descent beyond the normal bottom depth.
+  - Depth == maxDepth remains a special "sanctum" floor, but it gains a downstairs in infinite mode so depth 26+ is reachable.
+  - Deterministic per-depth generation (seeded from the run seed + depth) enables safe pruning/regeneration of deep floors.
+  - Save version bumped to v51 to persist endless mode + keep window across reloads.
+  - Trapdoors can now spawn on depth > maxDepth (except the sanctum), matching endless descent.
+  - HUD shows "ENDLESS" for depths beyond the normal bottom.
+  - Endless depths gradually bias generator selection toward more irregular layouts (maze/cavern/catacombs) while keeping occasional room floors for pacing.
+  - **Endless strata (macro theming)**: depths > maxDepth are grouped into run-seeded bands (5–9 floors each) with a stable theme (Ruins/Caverns/Labyrinth/Warrens/Mines/Catacombs) that nudges generator choice + biome zone styles, announced on entry and surfaced in `#mapstats` as STRATUM.
+  - **Endless map-size drift**: depths > maxDepth now vary map width/height smoothly (aligned to the same Endless Strata bands) so infinite descent isn’t stuck at one fixed layout scale forever.
+    - Augury now previews the correct next-floor dimensions and uses the run seed for infinite-world generation, making the omen vision much closer to what you’ll actually face.
+
+  - **Endless rift continuity**: endless depths can now spawn a run-seeded, stratum-aligned **faultline rift** (a curved chasm seam) that **drifts smoothly** across floors to create large-scale geological continuity.
+    - Always preserves the guaranteed stairs path by adding natural **stone bridges** (rolls back if it can’t keep connectivity).
+    - Surfaced in `#mapstats` as **RIFT** (ON/OFF, intensity, chasm tiles, bridges, and seed).
+
+- **Biome zones (procgen)**: a new macro-structure post-pass partitions the *passable* map into **2–4 contiguous regions** (a Voronoi diagram over the passable graph) and applies coherent region styles:
+  - **Pillar fields** (colonnaded ruins), **rubble gardens** (boulder clusters), and rare **cracked zones** (short chasm seams).
+  - Never overwrites doors/stairs/special rooms, protects the main stairs path, and rolls back any region that would break stairs connectivity.
+  - Surfaced in `#mapstats` as **BIOMES** (zone/style counts + edits).
+- **Fire lane dampening (procgen)**: a new tactical post-pass measures the floor’s longest straight **projectile lane** and (when needed) inserts micro-cover to break extreme “sniper alleys” without harming stairs connectivity.
+  - Prefers **barricade chicanes**: a **boulder** is placed in the lane *and* a tiny 1-tile side-step bypass is carved so movement remains smooth.
+  - Falls back to dropping a single **cover tile** in open areas if chicane carving isn’t possible (always rolls back if stairs would disconnect).
+  - Surfaced in `#mapstats` as **LANES** (max lane length + cover/chicane counts).
+  - The generate-and-test floor score now softly prefers a **moderate** maximum lane length.
+- **Open-space breakup (procgen)**: a new late-generation pass computes a simple distance-to-obstacle **clearance field** and (when the floor is too "wide open") drops a few **pillars/boulders** at clearance maxima to break up giant empty kill-box areas.
+  - Always protects the shortest stairs path, avoids doors/special rooms, and rolls back any placement that would disconnect stairs.
+  - Surfaced in `#mapstats` as **OPEN** (max clearance + pillar/boulder counts).
+
+- **Moated room setpieces (procgen)**: treasure/shrine rooms can now occasionally generate a central **"island"** surrounded by a 1-tile **chasm moat**, connected by 1–2 narrow **bridges** for tactical variety.
+  - Applied as a late post-pass and always rolled back if it would ever break the guaranteed stairs path.
+  - Surfaced in `#mapstats` as **MOATS** (rooms, bridges, and chasm tiles).
+  - The generate-and-test floor score now softly prefers a **moderate** max clearance.
+
+- **Path-aware special-room placement (procgen)**: special room selection now understands the stairs **critical path**.
+  - Rooms that intersect the shortest stairs path are labeled the **"spine"** and are preferred for **shops/shrines**, while **treasure/lairs** are biased **off-spine** to reward exploration.
+  - Adds a soft minimum separation between selected special rooms to reduce clumping.
+  - Surfaced in `#mapstats` as **SPECIALS** (counts + SPINE + MINSEP).
+
 - **Perf overlay**: added a tiny optional debug HUD that shows **FPS/frame time**, sprite-cache stats, and a low-rate **determinism hash**.
   - Toggle via **Shift+F10** (default), `show_perf_overlay` in settings, or `#perf on/off`.
 

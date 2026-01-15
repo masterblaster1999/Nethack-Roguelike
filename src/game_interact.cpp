@@ -212,7 +212,12 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
                 if (mw->kind == ItemKind::Pickaxe && dung.isDiggable(nx, ny)) {
                     const TileType before = dung.at(nx, ny).type;
                     if (dung.dig(nx, ny)) {
-                        emitNoise(e.pos, 14);
+                        // Digging noise depends on the local substrate material (metal rings, moss muffles, ...).
+                        dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+                        const TerrainMaterial digMat = dung.materialAtCached(nx, ny);
+                        int digNoise = 14 + terrainMaterialFx(digMat).digNoiseDelta;
+                        digNoise = clampi(digNoise, 6, 20);
+                        emitNoise(e.pos, digNoise);
                         pushFxParticle(FXParticlePreset::Dig, Vec2i{nx, ny}, 24, 0.14f);
 
                         switch (before) {
@@ -303,6 +308,15 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
             if (a->kind == ItemKind::PlateArmor) vol += 2;
         }
 
+        // Substrate materials subtly affect how much sound you make while moving.
+        // (Moss/dirt dampen; metal/crystal ring out.)
+        int matDelta = 0;
+        {
+            dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+            const TerrainMaterial m = dung.materialAtCached(e.pos.x, e.pos.y);
+            matDelta = terrainMaterialFx(m).footstepNoiseDelta;
+        }
+
         if (isSneaking()) {
             // Sneaking can reduce footstep noise to near-silent levels, but
             // heavy armor / encumbrance still makes at least some noise.
@@ -325,8 +339,10 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
             }
 
             vol = clampi(vol, minVol, 14);
+            vol = clampi(vol + matDelta, minVol, 14);
         } else {
             vol = clampi(vol, 2, 14);
+            vol = clampi(vol + matDelta, 1, 14);
         }
 
         if (vol > 0) {
@@ -908,7 +924,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
                 // Single-use: remove before changing levels so it persists correctly on the old floor.
                 trapsCur.erase(trapsCur.begin() + tIndex);
 
-                if (depth_ >= DUNGEON_MAX_DEPTH) {
+                if (depth_ >= DUNGEON_MAX_DEPTH && !(infiniteWorldEnabled_ && branch_ == DungeonBranch::Main)) {
                     pushMsg("THE TRAP DOOR SLAMS SHUT.", MessageKind::Info, true);
                     return;
                 }
@@ -970,7 +986,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
                 trapsCur.erase(trapsCur.begin() + tIndex);
 
                 // Defensive: trap doors on the bottom floor should act as a dead-end.
-                if (depth_ >= DUNGEON_MAX_DEPTH) {
+                if (depth_ >= DUNGEON_MAX_DEPTH && !(infiniteWorldEnabled_ && branch_ == DungeonBranch::Main)) {
                     pushMsg("YOU HEAR THE TRAP DOOR SLAM SHUT.", MessageKind::Info, false);
                     return;
                 }
@@ -2587,7 +2603,7 @@ bool Game::sacrificeAtShrine() {
 bool Game::augury() {
     if (gameOver || gameWon) return false;
 
-    if (depth_ >= DUNGEON_MAX_DEPTH) {
+    if (depth_ >= DUNGEON_MAX_DEPTH && !(infiniteWorldEnabled_ && branch_ == DungeonBranch::Main)) {
         pushMsg("NO DEEPER FUTURE CALLS.", MessageKind::Info, true);
         return false;
     }
@@ -2619,8 +2635,6 @@ bool Game::augury() {
 
     // Preview the next floor using a COPY of the RNG so the vision itself doesn't perturb fate.
     // NOTE: the vision can still be "wrong" if you do other RNG-consuming actions before descending.
-        RNG previewRng = rng;
-    Dungeon preview(dung.width, dung.height);
 
     DungeonBranch nextBranch = branch_;
     int nextDepth = depth_ + 1;
@@ -2631,7 +2645,15 @@ bool Game::augury() {
         nextDepth = 1;
     }
 
-    preview.generate(previewRng, nextBranch, nextDepth, DUNGEON_MAX_DEPTH);
+    RNG previewRng = rng;
+    if (infiniteWorldEnabled_ && nextBranch == DungeonBranch::Main) {
+        previewRng.state = infiniteLevelSeed(LevelId{nextBranch, nextDepth});
+    }
+    const Vec2i msz = proceduralMapSizeFor(previewRng, nextBranch, nextDepth);
+    Dungeon preview(msz.x, msz.y);
+
+    preview.generate(previewRng, nextBranch, nextDepth, DUNGEON_MAX_DEPTH, seed_);
+    ensureEndlessSanctumDownstairs(LevelId{nextBranch, nextDepth}, preview, previewRng);
 
     auto dirFromDelta = [&](int dx, int dy) -> std::string {
         if (dx == 0 && dy == 0) return "HERE";
@@ -3196,7 +3218,12 @@ bool Game::digInDirection(int dx, int dy) {
     }
 
     // Attempting to dig always costs a turn (like lockpicking), even if nothing happens.
-    emitNoise(src, 14);
+    // Substrate materials modulate how loud the digging is.
+    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+    const TerrainMaterial digMat = dung.materialAtCached(p.x, p.y);
+    int digNoise = 14 + terrainMaterialFx(digMat).digNoiseDelta;
+    digNoise = clampi(digNoise, 6, 20);
+    emitNoise(src, digNoise);
 
     if (Entity* e = entityAtMut(p.x, p.y)) {
         (void)e;

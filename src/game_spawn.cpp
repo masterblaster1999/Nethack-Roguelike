@@ -987,9 +987,16 @@ void Game::spawnItems() {
         else if (roll < 187) dropItemAt(ItemKind::RingSustenance, randomFreeTileInRoom(r), 1);
         else if (roll < 193) dropItemAt(ItemKind::PotionEnergy, randomFreeTileInRoom(r), 1);
         else {
-            // Rare: a spellbook.
-            ItemKind bk = (depth_ >= 2) ? pickSpellbookKind(rng, depth_) : ItemKind::ScrollIdentify;
-            dropItemAt(bk, randomFreeTileInRoom(r), 1);
+            // Rare: a spellbook (or occasionally a collectible VTuber merch drop).
+            // Cards are a bit more common than figurines.
+            if (rng.chance(0.12f)) {
+                dropItemAt(ItemKind::VtuberFigurine, randomFreeTileInRoom(r), 1);
+            } else if (rng.chance(0.22f)) {
+                dropItemAt(ItemKind::VtuberHoloCard, randomFreeTileInRoom(r), 1);
+            } else {
+                ItemKind bk = (depth_ >= 2) ? pickSpellbookKind(rng, depth_) : ItemKind::ScrollIdentify;
+                dropItemAt(bk, randomFreeTileInRoom(r), 1);
+            }
         }
     };
 
@@ -1973,7 +1980,7 @@ void Game::spawnTraps() {
             else if (roll < 90) tk = TrapKind::PoisonGas;
             else if (roll < 92) tk = TrapKind::LetheMist;
             else if (roll < 96) tk = TrapKind::RollingBoulder;
-            else if (depth_ < DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
+            else if (depth_ != DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
         } else if (depth_ <= 1) {
             tk = (roll < 70) ? TrapKind::Spike : TrapKind::PoisonDart;
@@ -1994,7 +2001,7 @@ void Game::spawnTraps() {
             else if (roll < 93) tk = TrapKind::PoisonGas;
             else if (roll < 95) tk = TrapKind::LetheMist;
             else if (roll < 97) tk = TrapKind::RollingBoulder;
-            else if (depth_ < DUNGEON_MAX_DEPTH && roll < 99) tk = TrapKind::TrapDoor;
+            else if (depth_ != DUNGEON_MAX_DEPTH && roll < 99) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
         }
         return tk;

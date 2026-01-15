@@ -334,6 +334,63 @@ inline bool shouldPlaceDecalJittered(int x, int y, uint32_t seed, int cellSize, 
     return roll < chance;
 }
 
+
+// -------------------------------------------------------------------------
+// Color helpers (HSL, lerp, multiply) for procedural palette tints.
+// These are used to derive near-white SDL texture color mods from a seed.
+// -------------------------------------------------------------------------
+inline float frac01(float x) {
+    return x - std::floor(x);
+}
+
+inline float hue2rgb(float p, float q, float t) {
+    t = frac01(t);
+    if (t < 1.0f / 6.0f) return p + (q - p) * 6.0f * t;
+    if (t < 1.0f / 2.0f) return q;
+    if (t < 2.0f / 3.0f) return p + (q - p) * (2.0f / 3.0f - t) * 6.0f;
+    return p;
+}
+
+inline Color hslToRgb(float h, float s, float l) {
+    h = frac01(h);
+    s = std::clamp(s, 0.0f, 1.0f);
+    l = std::clamp(l, 0.0f, 1.0f);
+
+    float r = l, g = l, b = l;
+    if (s > 1e-5f) {
+        const float q = (l < 0.5f) ? (l * (1.0f + s)) : (l + s - l * s);
+        const float p = 2.0f * l - q;
+        r = hue2rgb(p, q, h + 1.0f / 3.0f);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1.0f / 3.0f);
+    }
+
+    return Color{clampToU8(static_cast<int>(r * 255.0f + 0.5f)),
+                 clampToU8(static_cast<int>(g * 255.0f + 0.5f)),
+                 clampToU8(static_cast<int>(b * 255.0f + 0.5f)),
+                 Uint8{255}};
+}
+
+inline Color lerpColor(const Color& a, const Color& b, float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    const auto lerpChan = [&](Uint8 x, Uint8 y) {
+        return clampToU8(static_cast<int>(static_cast<float>(x) + (static_cast<float>(y) - static_cast<float>(x)) * t + 0.5f));
+    };
+    return Color{lerpChan(a.r, b.r), lerpChan(a.g, b.g), lerpChan(a.b, b.b), Uint8{255}};
+}
+
+inline Color mulColor(const Color& a, const Color& b) {
+    const auto mulChan = [&](Uint8 x, Uint8 y) {
+        return static_cast<Uint8>((static_cast<int>(x) * static_cast<int>(y) + 127) / 255);
+    };
+    return Color{mulChan(a.r, b.r), mulChan(a.g, b.g), mulChan(a.b, b.b), Uint8{255}};
+}
+
+inline Color tintFromHsl(float h, float s, float l, float mix) {
+    const Color c = hslToRgb(h, s, l);
+    return lerpColor(Color{255, 255, 255, 255}, c, mix);
+}
+
 } // namespace
 
 
@@ -3380,6 +3437,10 @@ void Renderer::render(const Game& game) {
 
     const int levelKey = static_cast<int>(lvlSeed);
 
+// Precompute deterministic terrain materials for this dungeon (used for tinting + LOOK adjectives).
+d.ensureMaterials(runSeed, game.branch(), game.depth(), game.dungeonMaxDepth());
+
+
     // Build isometric-diamond terrain textures lazily so top-down mode doesn't pay
     // the VRAM + CPU cost unless it is actually used.
     if (isoView) {
@@ -3640,6 +3701,168 @@ void Renderer::render(const Game& game) {
     // Draw map tiles
     const Color tint = depthTint();
 
+const float procPalStrength =
+    (game.procPaletteEnabled() ? (std::clamp(game.procPaletteStrength(), 0, 100) / 100.0f) : 0.0f);
+
+struct TerrainPaletteTints {
+    std::array<Color, ROOM_STYLES> floorStyle{};
+    Color wall{255, 255, 255, 255};
+    Color chasm{255, 255, 255, 255};
+    Color door{255, 255, 255, 255};
+};
+
+const TerrainPaletteTints terrainPalette = [&]() -> TerrainPaletteTints {
+    TerrainPaletteTints p;
+    for (auto& c : p.floorStyle) c = Color{255, 255, 255, 255};
+    p.wall = Color{255, 255, 255, 255};
+    p.chasm = Color{255, 255, 255, 255};
+    p.door = Color{255, 255, 255, 255};
+
+    if (procPalStrength <= 0.001f) return p;
+
+    const float depth01 = static_cast<float>(std::clamp(depth, 0, std::max(1, dungeonMaxDepth))) /
+                          static_cast<float>(std::max(1, dungeonMaxDepth));
+
+    // Base hue is per-run (styleSeed) with a gentle per-depth drift so each floor has
+    // a distinct mood but remains coherent within a run.
+    float baseHue = (hash32(styleSeed ^ 0xC0FFEEu) / 4294967296.0f);
+    baseHue = frac01(baseHue + depth01 * 0.14f);
+
+    float themeHueBias = 0.0f;
+    float themeSatBias = 0.0f;
+    float themeMixBias = 0.0f;
+    switch (game.uiTheme()) {
+        case UITheme::Parchment:
+            themeHueBias = 0.03f;
+            themeSatBias = 0.03f;
+            themeMixBias = 0.02f;
+            break;
+        case UITheme::Arcane:
+            themeHueBias = 0.74f;
+            themeSatBias = 0.05f;
+            themeMixBias = 0.04f;
+            break;
+        case UITheme::DarkStone:
+        default:
+            break;
+    }
+
+    baseHue = frac01(baseHue + themeHueBias);
+
+    const float runJitter =
+        ((hash32(styleSeed ^ 0x9E3779B9u) & 0xFFFFu) / 65535.0f - 0.5f) * 0.04f;
+    baseHue = frac01(baseHue + runJitter);
+
+    // Room-style palette offsets (relative to baseHue).
+    constexpr float kHueOff[ROOM_STYLES] = {0.00f, 0.10f, 0.33f, 0.76f, 0.56f, 0.58f, 0.12f};
+    constexpr float kSat[ROOM_STYLES] = {0.12f, 0.30f, 0.24f, 0.26f, 0.10f, 0.22f, 0.18f};
+    constexpr float kLum[ROOM_STYLES] = {0.76f, 0.74f, 0.73f, 0.74f, 0.70f, 0.72f, 0.77f};
+    constexpr float kMix[ROOM_STYLES] = {0.14f, 0.30f, 0.24f, 0.26f, 0.18f, 0.22f, 0.20f};
+
+    for (int i = 0; i < ROOM_STYLES; ++i) {
+        const float h = frac01(baseHue + kHueOff[i]);
+        const float s = std::clamp(kSat[i] + themeSatBias, 0.0f, 0.85f);
+        const float l = std::clamp(kLum[i], 0.0f, 1.0f);
+        const float mix = std::clamp((kMix[i] + themeMixBias) * procPalStrength, 0.0f, 0.55f);
+        p.floorStyle[static_cast<size_t>(i)] = tintFromHsl(h, s, l, mix);
+    }
+
+    const float wallMix = std::clamp((0.12f + themeMixBias) * procPalStrength, 0.0f, 0.40f);
+    p.wall = tintFromHsl(baseHue + 0.02f, std::clamp(0.10f + themeSatBias * 0.5f, 0.0f, 0.40f), 0.66f,
+                         wallMix);
+
+    const float chasmMix = std::clamp((0.16f + themeMixBias) * procPalStrength, 0.0f, 0.45f);
+    p.chasm = tintFromHsl(baseHue + 0.55f, std::clamp(0.16f + themeSatBias * 0.6f, 0.0f, 0.55f), 0.56f,
+                          chasmMix);
+
+    const float doorMix = std::clamp((0.20f + themeMixBias) * procPalStrength, 0.0f, 0.55f);
+    p.door = tintFromHsl(baseHue + 0.08f, std::clamp(0.32f + themeSatBias, 0.0f, 0.85f), 0.66f, doorMix);
+
+    return p;
+}();
+
+auto terrainPaletteTint = [&](TileType tt, int floorStyle) -> Color {
+    if (procPalStrength <= 0.001f) return Color{255, 255, 255, 255};
+
+    switch (tt) {
+        case TileType::Wall:
+        case TileType::DoorSecret:
+            return terrainPalette.wall;
+        case TileType::Chasm:
+            return terrainPalette.chasm;
+        case TileType::DoorClosed:
+        case TileType::DoorLocked:
+        case TileType::DoorOpen:
+            return terrainPalette.door;
+        default:
+            break;
+    }
+
+    const int s = std::clamp(floorStyle, 0, ROOM_STYLES - 1);
+    return terrainPalette.floorStyle[static_cast<size_t>(s)];
+};
+
+auto applyTerrainPalette = [&](const Color& baseMod, TileType tt, int floorStyle) -> Color {
+    return mulColor(baseMod, terrainPaletteTint(tt, floorStyle));
+};
+
+auto terrainMaterialTint = [&](TerrainMaterial mat, TileType tt) -> Color {
+    if (procPalStrength <= 0.001f) return Color{255, 255, 255, 255};
+
+    // Doors are "objects" more than terrain substrate; keep them readable.
+    if (tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorOpen) {
+        return Color{255, 255, 255, 255};
+    }
+
+    // Chasms are effectively void; don't "material tint" them.
+    if (tt == TileType::Chasm) return Color{255, 255, 255, 255};
+
+    float h = 0.58f;
+    float s = 0.08f;
+    float l = 0.62f;
+    float mix = 0.22f;
+
+    switch (mat) {
+        case TerrainMaterial::Stone:
+            h = 0.58f; s = 0.06f; l = 0.62f; mix = 0.16f; break;
+        case TerrainMaterial::Brick:
+            h = 0.04f; s = 0.34f; l = 0.56f; mix = 0.26f; break;
+        case TerrainMaterial::Marble:
+            h = 0.10f; s = 0.10f; l = 0.82f; mix = 0.22f; break;
+        case TerrainMaterial::Basalt:
+            h = 0.60f; s = 0.08f; l = 0.42f; mix = 0.22f; break;
+        case TerrainMaterial::Obsidian:
+            h = 0.76f; s = 0.20f; l = 0.30f; mix = 0.24f; break;
+        case TerrainMaterial::Moss:
+            h = 0.33f; s = 0.28f; l = 0.56f; mix = 0.22f; break;
+        case TerrainMaterial::Dirt:
+            h = 0.08f; s = 0.28f; l = 0.50f; mix = 0.22f; break;
+        case TerrainMaterial::Wood:
+            h = 0.09f; s = 0.32f; l = 0.55f; mix = 0.24f; break;
+        case TerrainMaterial::Metal:
+            h = 0.56f; s = 0.10f; l = 0.60f; mix = 0.20f; break;
+        case TerrainMaterial::Crystal:
+            h = 0.55f; s = 0.38f; l = 0.78f; mix = 0.26f; break;
+        case TerrainMaterial::Bone:
+            h = 0.12f; s = 0.18f; l = 0.78f; mix = 0.22f; break;
+        default:
+            break;
+    }
+
+    const bool wallish = (tt == TileType::Wall) || (tt == TileType::DoorSecret) || (tt == TileType::Pillar);
+    l = wallish ? std::clamp(l - 0.08f, 0.12f, 0.92f) : std::clamp(l + 0.03f, 0.12f, 0.92f);
+
+    // Scale with the existing procedural palette strength so users have one knob.
+    const float m = std::clamp(mix * procPalStrength, 0.0f, 0.45f);
+    return tintFromHsl(frac01(h), s, l, m);
+};
+
+auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyle, TerrainMaterial mat) -> Color {
+    // Palette first (run+room themed), then substrate material tint.
+    return mulColor(applyTerrainPalette(baseMod, tt, floorStyle), terrainMaterialTint(mat, tt));
+};
+
+
     // Gather dynamic torch light sources so we can add subtle flame flicker in the renderer.
     // (The lightmap itself updates on turns; flicker is a purely visual, per-frame modulation.)
     struct TorchSrc {
@@ -3881,7 +4104,10 @@ void Renderer::render(const Game& game) {
             const int style = (base == TileType::Floor) ? floorStyleAt(x, y) : 0;
 
             SDL_Texture* btex = tileTexture(base, x, y, levelKey, frame, style);
-            const Color mod = tileColorMod(x, y, t.visible);
+            const Color baseMod = tileColorMod(x, y, t.visible);
+            const TerrainMaterial mat = d.materialAtCached(x, y);
+            const Color mod = applyTerrainStyleMod(baseMod, base, style, mat);
+            const Color modTall = applyTerrainStyleMod(baseMod, t.type, style, mat);
             const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 115 : 175);
 
             if (btex) {
@@ -3961,7 +4187,8 @@ void Renderer::render(const Game& game) {
                     SDL_Texture* otex = doorOpenOverlayIsoTex[static_cast<size_t>(frame % FRAMES)];
                     if (!otex) otex = doorOpenOverlayTex[static_cast<size_t>(frame % FRAMES)];
                     if (otex) {
-                        SDL_SetTextureColorMod(otex, mod.r, mod.g, mod.b);
+                        const Color doorMod = applyTerrainPalette(baseMod, t.type, style);
+                        SDL_SetTextureColorMod(otex, doorMod.r, doorMod.g, doorMod.b);
                         SDL_SetTextureAlphaMod(otex, a);
                         SDL_RenderCopy(renderer, otex, nullptr, &dst);
                         SDL_SetTextureColorMod(otex, 255, 255, 255);
@@ -4244,7 +4471,7 @@ void Renderer::render(const Game& game) {
                     }
                 }
 
-                drawSpriteWithShadowOutline(renderer, tex, sdst, mod, aa, /*shadow=*/false, outline);
+                drawSpriteWithShadowOutline(renderer, tex, sdst, modTall, aa, /*shadow=*/false, outline);
             };
 
             if (t.type == TileType::Wall || t.type == TileType::DoorSecret) {
@@ -4341,7 +4568,10 @@ void Renderer::render(const Game& game) {
         SDL_Texture* tex = tileTexture(baseType, x, y, levelKey, frame, floorStyle);
         if (!tex) return;
 
-        const Color mod = tileColorMod(x, y, t.visible);
+        const Color baseMod = tileColorMod(x, y, t.visible);
+        const TerrainMaterial mat = d.materialAtCached(x, y);
+        const Color mod = applyTerrainStyleMod(baseMod, baseType, floorStyle, mat);
+        const Color modObj = isOverlayTile(t.type) ? applyTerrainStyleMod(baseMod, t.type, floorStyle, mat) : mod;
         SDL_SetTextureColorMod(tex, mod.r, mod.g, mod.b);
         SDL_SetTextureAlphaMod(tex, 255);
 
@@ -4575,7 +4805,7 @@ void Renderer::render(const Game& game) {
             }
 
             if (otex) {
-                SDL_SetTextureColorMod(otex, mod.r, mod.g, mod.b);
+                SDL_SetTextureColorMod(otex, modObj.r, modObj.g, modObj.b);
                 SDL_SetTextureAlphaMod(otex, 255);
                 SDL_RenderCopy(renderer, otex, nullptr, &dst);
                 SDL_SetTextureColorMod(otex, 255, 255, 255);
@@ -5978,8 +6208,13 @@ void Renderer::drawHud(const Game& game) {
     const int rocks  = ammoCount(game.inventory(), AmmoKind::Rock);
     if (arrows > 0) ss << " | ARROWS: " << arrows;
     if (rocks > 0)  ss << " | ROCKS: " << rocks;
-    if (game.atCamp()) ss << " | DEPTH: CAMP";
-    else ss << " | DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth();
+    if (game.atCamp()) {
+        ss << " | DEPTH: CAMP";
+    } else if (game.infiniteWorldEnabled() && game.depth() > game.dungeonMaxDepth()) {
+        ss << " | DEPTH: " << game.depth() << " (ENDLESS)";
+    } else {
+        ss << " | DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth();
+    }
     ss << " | DEEPEST: " << game.maxDepthReached();
     ss << " | TURNS: " << game.turns();
     ss << " | KILLS: " << game.kills();

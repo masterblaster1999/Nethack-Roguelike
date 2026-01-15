@@ -466,9 +466,13 @@ int main(int argc, char** argv) {
     game.setConfirmQuitEnabled(settings.confirmQuit);
     game.setAutoMortemEnabled(settings.autoMortem);
     game.setBonesEnabled(settings.bonesEnabled);
+    game.setInfiniteWorldEnabled(settings.infiniteWorld);
+    game.setInfiniteKeepWindow(settings.infiniteKeepWindow);
     game.setVoxelSpritesEnabled(settings.voxelSprites);
     game.setIsoVoxelRaytraceEnabled(settings.isoVoxelRaytrace);
     game.setIsoCutawayEnabled(settings.isoCutaway);
+    game.setProcPaletteEnabled(settings.procPalette);
+    game.setProcPaletteStrength(settings.procPaletteStrength);
     game.setSaveBackups(settings.saveBackups);
 
     if (replayMode) {
@@ -1323,6 +1327,8 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "voxel_sprites", game.voxelSpritesEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "iso_voxel_raytrace", game.isoVoxelRaytraceEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "iso_cutaway", game.isoCutawayEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "proc_palette", game.procPaletteEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "proc_palette_strength", std::to_string(game.procPaletteStrength()));
             ok &= updateIniKey(settingsPath, "autosave_every_turns", std::to_string(game.autosaveEveryTurns()));
             ok &= updateIniKey(settingsPath, "save_backups", std::to_string(game.saveBackups()));
 
@@ -1387,6 +1393,8 @@ int main(int argc, char** argv) {
             game.setControlPreset(newSettings.controlPreset);
             game.setIsoVoxelRaytraceEnabled(newSettings.isoVoxelRaytrace);
             game.setIsoCutawayEnabled(newSettings.isoCutaway);
+            game.setProcPaletteEnabled(newSettings.procPalette);
+            game.setProcPaletteStrength(newSettings.procPaletteStrength);
 
             // Keep the local copy up-to-date for any later use.
             settings = newSettings;

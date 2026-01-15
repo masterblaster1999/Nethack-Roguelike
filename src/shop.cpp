@@ -1,5 +1,7 @@
 #include "shop.hpp"
 
+#include "vtuber_gen.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -69,6 +71,38 @@ int shopBaseValuePerUnit(const Item& it) {
         }
     }
 
+
+
+    // VTuber collectibles: procedural value based on persona rarity/edition/followers.
+    // This makes the "gacha" feel real without relying on extra saved state.
+    if (it.spriteSeed != 0u && isVtuberCollectible(it.kind)) {
+        const uint32_t s = it.spriteSeed;
+        const VtuberRarity rar = vtuberRarity(s);
+
+        int vv = (v * vtuberRarityValueMultiplierPct(rar)) / 100;
+
+        // Mild follower-band bonus (kept small; rarity is the main driver).
+        const int fol = vtuberFollowerCount(s);
+        int folPct = 100;
+        if (fol >= 100'000) folPct = 112;
+        if (fol >= 800'000) folPct = 125;
+        vv = (vv * folPct) / 100;
+
+        if (it.kind == ItemKind::VtuberHoloCard) {
+            const VtuberCardEdition ed = vtuberCardEdition(s);
+            vv = (vv * vtuberCardEditionValueMultiplierPct(ed)) / 100;
+
+            // Signed/collab cards get a tiny flat premium so their value isn't
+            // fully eaten by integer rounding.
+            if (ed == VtuberCardEdition::Signed) vv += 15;
+            if (ed == VtuberCardEdition::Collab) vv += 25;
+        } else if (it.kind == ItemKind::VtuberFigurine) {
+            // Figurines are bulkier collectibles; nudge them up slightly.
+            vv = (vv * 115) / 100;
+        }
+
+        v = std::max(1, vv);
+    }
     return std::max(1, v);
 }
 

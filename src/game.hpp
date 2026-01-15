@@ -1111,6 +1111,11 @@ public:
 
     void newGame(uint32_t seed);
 
+    // Procedural map size selection used during level generation.
+    // Returns {w,h}. Consumes RNG in the same way as real generation,
+    // so callers should pass a copy if they want a "peek" without perturbing fate.
+    Vec2i proceduralMapSizeFor(RNG& rng, DungeonBranch branch, int depth) const;
+
     void handleAction(Action a);
 
     // Spend a turn to emit a loud noise (useful to lure monsters).
@@ -1303,6 +1308,14 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     // Isometric-only: fade foreground occluders near the player/cursor for readability.
     bool isoCutawayEnabled() const { return isoCutawayEnabled_; }
     void setIsoCutawayEnabled(bool enabled) { isoCutawayEnabled_ = enabled; }
+
+    // Procedural terrain palette (cosmetic): seed-derived per-floor tints that
+    // nudge terrain towards a coherent palette for this run/floor.
+    bool procPaletteEnabled() const { return procPaletteEnabled_; }
+    int procPaletteStrength() const { return procPaletteStrength_; }
+    void setProcPaletteEnabled(bool enabled) { procPaletteEnabled_ = enabled; }
+    void setProcPaletteStrength(int pct) { procPaletteStrength_ = std::clamp(pct, 0, 100); }
+
 
 
     // Inventory/UI accessors for renderer
@@ -1500,6 +1513,15 @@ bool clearItemCallLabel(ItemKind k);
     // Bones files (persistent death remnants between runs).
     void setBonesEnabled(bool enabled) { bonesEnabled_ = enabled; }
     bool bonesEnabled() const { return bonesEnabled_; }
+
+    // Endless / infinite world (experimental): allow descending beyond the normal bottom.
+    void setInfiniteWorldEnabled(bool enabled) { infiniteWorldEnabled_ = enabled; }
+    bool infiniteWorldEnabled() const { return infiniteWorldEnabled_; }
+
+    // Infinite world memory cap: keep only a sliding window of post-quest levels cached.
+    // 0 disables pruning.
+    void setInfiniteKeepWindow(int n) { infiniteKeepWindow_ = std::clamp(n, 0, 200); }
+    int infiniteKeepWindow() const { return infiniteKeepWindow_; }
 
 
     // Targeting
@@ -2044,6 +2066,11 @@ private:
     bool bonesEnabled_ = true;
     bool bonesWritten_ = false;
 
+    // Endless / infinite world (experimental): allow depths beyond DUNGEON_MAX_DEPTH.
+    bool infiniteWorldEnabled_ = false;
+    // Sliding window size (in floors) for keeping deep (post-quest) levels cached.
+    int infiniteKeepWindow_ = 12;
+
     // Hunger system (optional; when disabled, hunger does not tick).
     bool hungerEnabled_ = false;
     int hunger = 0;
@@ -2170,6 +2197,8 @@ private:
     bool voxelSpritesEnabled_ = true;
     bool isoVoxelRaytraceEnabled_ = false;
     bool isoCutawayEnabled_ = true;
+    bool procPaletteEnabled_ = true;
+    int procPaletteStrength_ = 70; // 0..100
 
     // Autosave
     int autosaveInterval = 0; // 0 = off
@@ -2237,6 +2266,11 @@ private:
     bool restoreLevel(LevelId id);
     void changeLevel(int newDepth, bool goingDown);
     void changeLevel(LevelId newLevel, bool goingDown);
+
+    // Endless / infinite world helpers.
+    uint32_t infiniteLevelSeed(LevelId id) const;
+    void ensureEndlessSanctumDownstairs(LevelId id, Dungeon& d, RNG& rngForPlacement) const;
+    void pruneEndlessLevels();
 
     // Shops / economy
     // Triggered when the player escapes a shop with unpaid goods or attacks the shopkeeper.

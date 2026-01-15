@@ -1,5 +1,6 @@
 #include "items.hpp"
 #include "content.hpp"
+#include "vtuber_gen.hpp"
 #include <algorithm>
 #include <sstream>
 
@@ -166,6 +167,8 @@ const ItemDef& itemDef(ItemKind k) {
         { ItemKind::RingSearching, "RING OF SEARCHING", false, false, false, EquipSlot::Ring, 0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock, 0, 0, 0, 1, 200, 0, 0, 0, 0 },
         { ItemKind::RingSustenance, "RING OF SUSTENANCE", false, false, false, EquipSlot::Ring, 0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock, 0, 0, 0, 1, 190, 0, 0, 0, 0 },
         { ItemKind::ScrollEnchantRing, "SCROLL OF ENCHANT RING", true,  true,  false, EquipSlot::None,   0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 95 },
+        { ItemKind::VtuberFigurine,  "VTUBER FIGURINE",       false, false, false, EquipSlot::None,   0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 2, 180 },
+        { ItemKind::VtuberHoloCard,  "VTUBER HOLOCARD",       false, false, false, EquipSlot::None,   0, 0, 0, 0, AmmoKind::None,  ProjectileKind::Rock,  0, 0, 0, 1, 120 },
     };
 
     static std::vector<ItemDef> defs;
@@ -244,7 +247,39 @@ std::string itemDisplayName(const Item& it) {
         }
     }
 
-    if (d.stackable && it.count > 1) {
+
+    if (it.kind == ItemKind::VtuberFigurine) {
+        ss << d.name;
+        if (it.spriteSeed != 0u) {
+            ss << ": " << vtuberStageName(it.spriteSeed);
+            ss << " (" << vtuberArchetype(it.spriteSeed) << ")";
+        }
+    } else if (it.kind == ItemKind::VtuberHoloCard) {
+        ss << d.name;
+        if (it.spriteSeed != 0u) {
+            const uint32_t s = it.spriteSeed;
+            const VtuberRarity rar = vtuberRarity(s);
+            const VtuberCardEdition ed = vtuberCardEdition(s);
+
+            ss << ": ";
+            if (ed == VtuberCardEdition::Collab) {
+                const uint32_t ps = vtuberCollabPartnerSeed(s);
+                ss << vtuberStageName(s) << " x " << vtuberStageName(ps);
+            } else {
+                ss << vtuberStageName(s);
+            }
+
+            ss << " [" << vtuberRarityName(rar) << "]";
+
+            const char* et = vtuberCardEditionTag(ed);
+            if (et && et[0]) {
+                ss << " {" << et << "}";
+                if (vtuberCardHasSerial(ed)) {
+                    ss << " #" << vtuberCardSerial(s);
+                }
+            }
+        }
+    } else if (d.stackable && it.count > 1) {
         ss << it.count << " " << pluralizeStackableName(it.kind, d.name, it.count);
     } else {
         ss << d.name;

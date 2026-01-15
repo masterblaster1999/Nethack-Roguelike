@@ -2,6 +2,7 @@
 #include "spritegen3d.hpp"
 #include "game.hpp"      // EntityKind
 #include "items.hpp"     // ItemKind, ProjectileKind
+#include "vtuber_gen.hpp"
 #include <algorithm>
 #include <cmath>
 #include <utility>
@@ -1408,6 +1409,434 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
             // Highlight
             setPx(s, 9, 3, {255,255,255,200});
             sparkle();
+            break;
+        }
+
+        // --- Collectibles (append-only) ---
+        case ItemKind::VtuberFigurine: {
+            // A tiny chibi \"VTuber\" figurine: big head, big eyes, lots of hair color.
+            // The persona text uses vtuberMixSeed(seed) too (vtuber_gen.hpp), so the name
+            // and visual tend to \"match\" consistently across runs.
+            RNG vrng(vtuberMixSeed(seed));
+
+            static constexpr Color SKIN[] = {
+                {255, 224, 200, 255},
+                {245, 210, 180, 255},
+                {235, 195, 165, 255},
+                {255, 236, 220, 255},
+                {225, 185, 155, 255},
+            };
+            static constexpr Color HAIR[] = {
+                {245, 120, 200, 255}, // pink
+                {120, 190, 255, 255}, // sky
+                {165, 120, 255, 255}, // purple
+                {255, 220, 120, 255}, // blonde
+                { 90, 240, 190, 255}, // mint
+                {235,  95,  95, 255}, // red
+                {210, 210, 225, 255}, // silver
+                { 40,  40,  55, 255}, // black
+            };
+            static constexpr Color EYES[] = {
+                { 90, 210, 255, 255},
+                {255, 120, 200, 255},
+                {120, 255, 160, 255},
+                {255, 190,  80, 255},
+                {180, 130, 255, 255},
+                {255, 255, 140, 255},
+            };
+
+            const int skinN = static_cast<int>(sizeof(SKIN) / sizeof(SKIN[0]));
+            const int hairN = static_cast<int>(sizeof(HAIR) / sizeof(HAIR[0]));
+            const int eyeN  = static_cast<int>(sizeof(EYES)  / sizeof(EYES[0]));
+
+            Color skin = SKIN[vrng.range(0, skinN - 1)];
+            Color skinShade = mul(skin, 0.88f);
+
+            Color hair = HAIR[vrng.range(0, hairN - 1)];
+            Color hairDark = mul(hair, 0.70f);
+            Color hairLight = add(hair, 20, 20, 20);
+
+            Color eye = EYES[vrng.range(0, eyeN - 1)];
+            Color eyeDark = mul(eye, 0.70f);
+
+            // Accent: a small hue-ish shift from eye color.
+            Color accent = add(eye, vrng.range(-25, 25), vrng.range(-25, 25), vrng.range(-25, 25));
+            Color outfit = mul(accent, 0.85f);
+
+            const int hairStyle = vrng.range(0, 3);
+            const int accessory = vrng.range(0, 4);
+
+            const bool blink = ((frame + static_cast<int>(seed & 31u)) % 34) <= 1;
+            const bool mouthOpen = ((frame + static_cast<int>((seed >> 5) & 31u)) % 16) < 6;
+
+            // Hair base behind the head
+            circle(s, 8, 6, 7, hairDark);
+            circle(s, 8, 5, 6, hair);
+
+            // Face / head (big)
+            circle(s, 8, 9, 5, skin);
+            circle(s, 8, 11, 4, skinShade);
+
+            // Side locks (vary slightly per style)
+            if (hairStyle == 0) {
+                rect(s, 3, 7, 2, 6, hairDark);
+                rect(s, 11, 7, 2, 6, hairDark);
+            } else if (hairStyle == 1) {
+                rect(s, 2, 8, 3, 6, hairDark);
+                rect(s, 11, 8, 3, 6, hairDark);
+                // tiny \"twin tail\" bobbles
+                circle(s, 2, 12, 2, hair);
+                circle(s, 14, 12, 2, hair);
+            } else if (hairStyle == 2) {
+                rect(s, 3, 8, 2, 5, hair);
+                rect(s, 11, 8, 2, 5, hair);
+            } else {
+                rect(s, 3, 8, 2, 6, hairDark);
+                rect(s, 11, 8, 2, 6, hair);
+            }
+
+            // Bangs / fringe
+            switch (hairStyle) {
+                case 0: // straight bangs
+                    rect(s, 4, 6, 8, 2, hair);
+                    rect(s, 4, 8, 8, 1, mul(hair, 0.85f));
+                    break;
+                case 1: // zig-zag bangs
+                    for (int x = 4; x <= 11; ++x) {
+                        int y = 6 + ((x + (seed & 3u)) % 2);
+                        setPx(s, x, y, hair);
+                        setPx(s, x, y + 1, mul(hair, 0.85f));
+                    }
+                    break;
+                case 2: // side-swept
+                    line(s, 4, 6, 11, 8, hair);
+                    line(s, 4, 7, 11, 9, mul(hair, 0.85f));
+                    break;
+                case 3: // choppy
+                default:
+                    for (int x = 4; x <= 11; ++x) {
+                        int y = 6 + (vrng.range(0, 1));
+                        setPx(s, x, y, hair);
+                    }
+                    rect(s, 5, 8, 6, 1, mul(hair, 0.85f));
+                    break;
+            }
+
+            // Accessory
+            switch (accessory) {
+                case 0: { // cat ears
+                    // left ear
+                    setPx(s, 5, 2, hair);
+                    setPx(s, 4, 3, hair);
+                    setPx(s, 5, 3, hair);
+                    setPx(s, 6, 3, hair);
+                    setPx(s, 5, 4, accent);
+                    // right ear
+                    setPx(s, 11, 2, hair);
+                    setPx(s, 10, 3, hair);
+                    setPx(s, 11, 3, hair);
+                    setPx(s, 12, 3, hair);
+                    setPx(s, 11, 4, accent);
+                    break;
+                }
+                case 1: { // halo
+                    Color gold = {255, 230, 140, 190};
+                    circle(s, 8, 2, 3, gold);
+                    circle(s, 8, 2, 2, {0,0,0,0});
+                    break;
+                }
+                case 2: { // headset + mic
+                    circle(s, 4, 9, 1, accent);
+                    circle(s, 12, 9, 1, accent);
+                    line(s, 12, 10, 14, 12, accent);
+                    setPx(s, 14, 12, {255,255,255,110});
+                    break;
+                }
+                case 3: { // ribbon
+                    setPx(s, 8, 4, accent);
+                    setPx(s, 7, 4, accent);
+                    setPx(s, 9, 4, accent);
+                    setPx(s, 6, 4, mul(accent, 0.85f));
+                    setPx(s, 10, 4, mul(accent, 0.85f));
+                    setPx(s, 8, 5, mul(accent, 0.85f));
+                    break;
+                }
+                case 4: // tiny horns
+                default: {
+                    setPx(s, 5, 3, accent);
+                    setPx(s, 6, 2, accent);
+                    setPx(s, 11, 3, accent);
+                    setPx(s, 10, 2, accent);
+                    break;
+                }
+            }
+
+            // Eyes (big)
+            Color white = {245, 245, 245, 255};
+            if (blink) {
+                line(s, 5, 10, 7, 10, eyeDark);
+                line(s, 9, 10, 11, 10, eyeDark);
+            } else {
+                rect(s, 5, 9, 3, 3, white);
+                rect(s, 9, 9, 3, 3, white);
+
+                // iris
+                rect(s, 6, 10, 1, 2, eye);
+                rect(s, 10, 10, 1, 2, eye);
+
+                // darker top
+                rect(s, 6, 9, 1, 1, eyeDark);
+                rect(s, 10, 9, 1, 1, eyeDark);
+
+                // highlight
+                setPx(s, 6, 10, {255,255,255,170});
+                setPx(s, 10, 10, {255,255,255,170});
+            }
+
+            // Mouth
+            Color mouth = {120, 60, 70, 255};
+            if (mouthOpen) {
+                rect(s, 7, 13, 3, 1, mouth);
+                setPx(s, 8, 12, mouth);
+            } else {
+                line(s, 7, 12, 9, 12, mouth);
+            }
+
+            // Blush (sometimes)
+            if (vrng.chance(0.45f)) {
+                Color blush = {255, 140, 170, 90};
+                setPx(s, 4, 11, blush);
+                setPx(s, 12, 11, blush);
+                setPx(s, 5, 11, {255, 140, 170, 60});
+                setPx(s, 11, 11, {255, 140, 170, 60});
+            }
+
+            // Outfit / base
+            rect(s, 5, 14, 7, 2, outfit);
+            rect(s, 5, 15, 7, 1, mul(outfit, 0.85f));
+            // collar highlight
+            setPx(s, 8, 14, {255,255,255,120});
+            setPx(s, 7, 14, {255,255,255,90});
+            setPx(s, 9, 14, {255,255,255,90});
+
+            // Hair highlight flicker
+            if (frame % 2 == 1) {
+                setPx(s, 6, 5, hairLight);
+                setPx(s, 10, 5, hairLight);
+                setPx(s, 8, 4, {255,255,255,60});
+            }
+
+            break;
+        }
+
+        case ItemKind::VtuberHoloCard: {
+            // A "holo card" for a procedural VTuber persona: a tiny framed portrait
+            // with rarity-dependent border flair + deterministic "edition" variants
+            // (foil / alt-art / signed / collab).
+            //
+            // NOTE: 16x16 sprites are tight; we keep this deliberately iconic.
+            RNG vrng(vtuberMixSeed(seed ^ 0xA9B4C2D1u));
+
+            const VtuberRarity rar = vtuberRarity(seed);
+            const VtuberCardEdition ed = vtuberCardEdition(seed);
+            const uint32_t partnerSeed = (ed == VtuberCardEdition::Collab) ? vtuberCollabPartnerSeed(seed) : 0u;
+
+            const Color accent = vtuberAccentColor(seed);
+            const Color accent2 = (partnerSeed != 0u) ? vtuberAccentColor(partnerSeed) : accent;
+            const Color bg = {18, 18, 22, 255};
+
+            // Paper tint by edition (subtle, but readable in 16x16).
+            Color paper = mul({220, 220, 230, 255}, 0.78f);
+            if (ed == VtuberCardEdition::Foil)   paper = mul({235, 235, 245, 255}, 0.82f);
+            if (ed == VtuberCardEdition::AltArt) paper = mul(add(accent, 150, 150, 150), 0.55f);
+            if (ed == VtuberCardEdition::Signed) paper = mul({230, 230, 240, 255}, 0.78f);
+            if (ed == VtuberCardEdition::Collab) paper = mul({225, 225, 235, 255}, 0.78f);
+
+            // Card body
+            rect(s, 2, 1, 12, 14, mul(bg, 0.95f));
+            rect(s, 3, 2, 10, 12, paper);
+
+            // Inner "holo" sheen band (foil has extra sheen).
+            const int sheenMod = (ed == VtuberCardEdition::Foil) ? 4 : 6;
+            const int sheenWin = (ed == VtuberCardEdition::Foil) ? 3 : 2;
+            if ((frame + static_cast<int>(seed & 7u)) % sheenMod <= sheenWin) {
+                const uint8_t a = (ed == VtuberCardEdition::Foil) ? 75 : 55;
+                for (int y = 2; y <= 13; ++y) {
+                    int x = 3 + ((y + static_cast<int>((seed >> 3) & 3u)) % 8);
+                    setPx(s, x, y, {255, 255, 255, a});
+                    if (ed == VtuberCardEdition::Foil) {
+                        int x2 = 3 + ((x + 3) % 10);
+                        if (x2 >= 3 && x2 <= 12) setPx(s, x2, y, {255,255,255,45});
+                    }
+                }
+            }
+
+            // Alt-art: add a tiny starfield pattern.
+            if (ed == VtuberCardEdition::AltArt) {
+                const bool tw = ((frame + static_cast<int>((seed >> 9) & 31u)) % 8) < 3;
+                if (tw) {
+                    for (int i = 0; i < 6; ++i) {
+                        int x = 3 + ((i * 3 + static_cast<int>(seed & 7u)) % 10);
+                        int y = 2 + ((i * 5 + static_cast<int>((seed >> 4) & 7u)) % 10);
+                        setPx(s, x, y, {255,255,255,70});
+                    }
+                }
+            }
+
+            // Border (rarity)
+            Color border = accent;
+            if (rar == VtuberRarity::Common) border = mul(accent, 0.80f);
+            if (rar == VtuberRarity::Rare)   border = add(accent, 10, 10, 10);
+            if (rar == VtuberRarity::Epic)   border = add(accent, 25, 25, 25);
+            if (rar == VtuberRarity::Mythic) border = add(accent, 40, 40, 40);
+
+            // Edition tints
+            if (ed == VtuberCardEdition::Foil)   border = add(border, 15, 15, 25);
+            if (ed == VtuberCardEdition::Signed) border = add(border, 10, 10, 10);
+            if (ed == VtuberCardEdition::Collab) border = add(border, 20, 20, 20);
+
+            // Outer border
+            rectOutline(s, 2, 1, 12, 14, border);
+
+            // Collab: split accent along bottom/right edges.
+            if (partnerSeed != 0u) {
+                Color b2 = accent2;
+                if (rar == VtuberRarity::Common) b2 = mul(accent2, 0.80f);
+                if (rar == VtuberRarity::Rare)   b2 = add(accent2, 10, 10, 10);
+                if (rar == VtuberRarity::Epic)   b2 = add(accent2, 25, 25, 25);
+                if (rar == VtuberRarity::Mythic) b2 = add(accent2, 40, 40, 40);
+                b2 = add(b2, 20, 20, 20);
+                for (int x = 2; x <= 13; ++x) setPx(s, x, 14, b2);
+                for (int y = 1; y <= 14; ++y) setPx(s, 13, y, b2);
+            }
+
+            // Rare+: double border
+            if (rar >= VtuberRarity::Rare) {
+                rectOutline(s, 3, 2, 10, 12, mul(border, 0.75f));
+            }
+
+            // Epic/Mythic OR Foil: corner sparkles.
+            if (rar >= VtuberRarity::Epic || ed == VtuberCardEdition::Foil) {
+                const bool twinkle = ((frame + static_cast<int>((seed >> 8) & 31u)) % 8) < 3;
+                Color sp = twinkle ? Color{255,255,255,180} : mul(border, 0.85f);
+                setPx(s, 2, 1, sp);  setPx(s, 13, 1, sp);
+                setPx(s, 2, 14, sp); setPx(s, 13, 14, sp);
+            }
+
+            if (rar == VtuberRarity::Mythic || ed == VtuberCardEdition::Foil) {
+                // Animated "glint" traveling along the top edge.
+                int gx = 3 + ((frame + static_cast<int>((seed >> 16) & 15u)) % 10);
+                setPx(s, gx, 1, {255,255,255,220});
+                setPx(s, gx + 1, 1, {255,255,255,120});
+            }
+
+            // Mini portrait region (top half of inner panel).
+            static constexpr Color SKIN[] = {
+                {255, 224, 200, 255},
+                {245, 210, 180, 255},
+                {235, 195, 165, 255},
+                {255, 236, 220, 255},
+                {225, 185, 155, 255},
+            };
+
+            auto drawHead = [&](int cx, int cy, uint32_t sseed, const Color& acc, bool small) {
+                RNG rr(vtuberMixSeed(sseed ^ 0xA9B4C2D1u));
+
+                const int skinN = static_cast<int>(sizeof(SKIN) / sizeof(SKIN[0]));
+                Color skin = SKIN[rr.range(0, skinN - 1)];
+                Color skinShade = mul(skin, 0.88f);
+
+                Color hair = mul(acc, 0.9f);
+                // Nudge hair away from accent to avoid monochrome cards.
+                hair = add(hair, rr.range(-45, 45), rr.range(-35, 35), rr.range(-45, 45));
+                Color hairDark = mul(hair, 0.70f);
+
+                Color eye = add(acc, rr.range(-25, 25), rr.range(-25, 25), rr.range(-25, 25));
+                Color eyeDark = mul(eye, 0.70f);
+
+                const int rHair  = small ? 2 : 4;
+                const int rHair2 = small ? 1 : 3;
+                const int rSkin  = small ? 1 : 3;
+                const int rSkin2 = small ? 0 : 2;
+
+                // Hair + head
+                circle(s, cx, cy, rHair, hairDark);
+                circle(s, cx, cy, rHair2, hair);
+                circle(s, cx, cy + 1, rSkin, skin);
+                if (!small) {
+                    circle(s, cx, cy + 2, rSkin2, skinShade);
+                } else {
+                    setPx(s, cx, cy + 1, skinShade);
+                }
+
+                // Eyes (blink sometimes)
+                const bool blink = ((frame + static_cast<int>(sseed & 31u)) % 28) <= 1;
+                if (blink) {
+                    line(s, cx - 1, cy + 1, cx + 1, cy + 1, mul({40,40,40,255}, 0.8f));
+                } else {
+                    // For the tiny collab heads, just do 1px eyes.
+                    setPx(s, cx - 1, cy + 1, eyeDark);
+                    setPx(s, cx + 1, cy + 1, eyeDark);
+                    if (!small) {
+                        circle(s, cx - 1, cy + 1, 1, eye);
+                        circle(s, cx + 1, cy + 1, 1, eye);
+                        setPx(s, cx - 1, cy, {255,255,255,150});
+                        setPx(s, cx + 1, cy, {255,255,255,150});
+                    }
+                }
+
+                // Alt-art: small accent star above the portrait.
+                if (ed == VtuberCardEdition::AltArt && !small && rr.chance(0.55f)) {
+                    setPx(s, cx, cy - 2, add(acc, 40, 40, 40));
+                }
+            };
+
+            if (partnerSeed != 0u) {
+                // Two tiny portraits.
+                drawHead(6, 5, seed, accent, true);
+                drawHead(10, 5, partnerSeed, accent2, true);
+            } else {
+                // Single portrait.
+                drawHead(8, 5, seed, accent, false);
+            }
+
+            // Nameplate / "logo" strip (bottom)
+            rect(s, 4, 11, 8, 2, mul(border, 0.45f));
+
+            // Tiny diagonal "sigil" pattern (brighter for foil).
+            const float sigMul = (ed == VtuberCardEdition::Foil) ? 0.36f : 0.28f;
+            for (int i = 0; i < 6; ++i) {
+                int x = 4 + i;
+                int y = 11 + (i % 2);
+                setPx(s, x, y, mul({255,255,255,255}, sigMul));
+            }
+
+            // Signed: scribble autograph in the bottom panel.
+            if (ed == VtuberCardEdition::Signed) {
+                RNG sr(vtuberMixSeed(seed ^ 0x13579BDFu));
+                Color ink = mul(add(border, 30, 30, 30), 0.85f);
+                int x = 4 + sr.range(0, 2);
+                int y = 12;
+                for (int i = 0; i < 7; ++i) {
+                    int nx = 4 + sr.range(0, 7);
+                    int ny = 11 + sr.range(0, 2);
+                    line(s, x, y, nx, ny, ink);
+                    x = nx; y = ny;
+                }
+                // Tiny serial "ticks".
+                setPx(s, 11, 13, {255,255,255,90});
+                setPx(s, 12, 13, {255,255,255,70});
+            }
+
+            // Collab: small 'X' mark on the nameplate.
+            if (ed == VtuberCardEdition::Collab) {
+                setPx(s, 8, 12, {255,255,255,120});
+                setPx(s, 7, 11, {255,255,255,90});
+                setPx(s, 9, 11, {255,255,255,90});
+                setPx(s, 7, 13, {255,255,255,90});
+                setPx(s, 9, 13, {255,255,255,90});
+            }
+
             break;
         }
 

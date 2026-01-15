@@ -6,6 +6,27 @@
 
 enum class DungeonBranch : uint8_t;
 
+enum class EndlessStratumTheme : uint8_t {
+    Ruins = 0,
+    Caverns,
+    Labyrinth,
+    Warrens,
+    Mines,
+    Catacombs,
+};
+
+inline const char* endlessStratumThemeName(EndlessStratumTheme t) {
+    switch (t) {
+        case EndlessStratumTheme::Ruins:      return "RUINS";
+        case EndlessStratumTheme::Caverns:    return "CAVERNS";
+        case EndlessStratumTheme::Labyrinth:  return "LABYRINTH";
+        case EndlessStratumTheme::Warrens:    return "WARRENS";
+        case EndlessStratumTheme::Mines:      return "MINES";
+        case EndlessStratumTheme::Catacombs:  return "CATACOMBS";
+        default:                              return "RUINS";
+    }
+}
+
 enum class TileType : uint8_t {
     Wall = 0,
     Floor,
@@ -29,6 +50,106 @@ enum class TileType : uint8_t {
     // Append-only: walkable altar overlay used to visually mark shrine rooms.
     Altar,
 };
+
+enum class TerrainMaterial : uint8_t {
+    Stone = 0,
+    Brick,
+    Marble,
+    Basalt,
+    Obsidian,
+    Moss,
+    Dirt,
+    Wood,
+    Metal,
+    Crystal,
+    Bone,
+    COUNT,
+};
+
+inline const char* terrainMaterialName(TerrainMaterial m) {
+    switch (m) {
+        case TerrainMaterial::Stone:    return "STONE";
+        case TerrainMaterial::Brick:    return "BRICK";
+        case TerrainMaterial::Marble:   return "MARBLE";
+        case TerrainMaterial::Basalt:   return "BASALT";
+        case TerrainMaterial::Obsidian: return "OBSIDIAN";
+        case TerrainMaterial::Moss:     return "MOSS";
+        case TerrainMaterial::Dirt:     return "DIRT";
+        case TerrainMaterial::Wood:     return "WOOD";
+        case TerrainMaterial::Metal:    return "METAL";
+        case TerrainMaterial::Crystal:  return "CRYSTAL";
+        case TerrainMaterial::Bone:     return "BONE";
+        default:                        return "STONE";
+    }
+}
+
+// Short adjective used for LOOK descriptions ("MOSSY FLOOR", "METALLIC WALL", ...).
+inline const char* terrainMaterialAdj(TerrainMaterial m) {
+    switch (m) {
+        case TerrainMaterial::Moss:    return "MOSSY";
+        case TerrainMaterial::Dirt:    return "EARTHEN";
+        case TerrainMaterial::Wood:    return "WOODEN";
+        case TerrainMaterial::Metal:   return "METALLIC";
+        case TerrainMaterial::Crystal: return "CRYSTALLINE";
+        case TerrainMaterial::Bone:    return "BONY";
+        default:                       return terrainMaterialName(m);
+    }
+}
+
+// Gameplay-adjacent effects of substrate materials.
+// These are deliberately small nudges: the substrate field is primarily visual,
+// but surfaces that are mossy/earthy dampen sound + scent, while metal/crystal
+// makes noise travel farther.
+struct TerrainMaterialFx {
+    int footstepNoiseDelta = 0;   // additive to footstep emitNoise() volume
+    int digNoiseDelta = 0;        // additive to dig emitNoise() volume
+    int scentDecayDelta = 0;      // additive to global scent decay per turn
+    int scentSpreadDropDelta = 0; // additive to scent spread drop per tile
+};
+
+inline TerrainMaterialFx terrainMaterialFx(TerrainMaterial m) {
+    TerrainMaterialFx fx;
+    switch (m) {
+        case TerrainMaterial::Moss:
+            fx.footstepNoiseDelta = -2;
+            fx.digNoiseDelta = -2;
+            fx.scentDecayDelta = 2;
+            fx.scentSpreadDropDelta = 6;
+            break;
+        case TerrainMaterial::Dirt:
+            fx.footstepNoiseDelta = -1;
+            fx.digNoiseDelta = -1;
+            fx.scentDecayDelta = 1;
+            fx.scentSpreadDropDelta = 4;
+            break;
+        case TerrainMaterial::Wood:
+            // Wooden boards can creak, but also absorb scent more than stone.
+            fx.footstepNoiseDelta = 1;
+            fx.digNoiseDelta = -1;
+            fx.scentDecayDelta = 1;
+            fx.scentSpreadDropDelta = 2;
+            break;
+        case TerrainMaterial::Metal:
+            fx.footstepNoiseDelta = 2;
+            fx.digNoiseDelta = 2;
+            break;
+        case TerrainMaterial::Crystal:
+            fx.footstepNoiseDelta = 1;
+            fx.digNoiseDelta = 1;
+            break;
+        case TerrainMaterial::Bone:
+            fx.footstepNoiseDelta = 1; // crunch
+            break;
+        case TerrainMaterial::Basalt:
+        case TerrainMaterial::Obsidian:
+            fx.footstepNoiseDelta = 1;
+            fx.digNoiseDelta = 1;
+            break;
+        default:
+            break;
+    }
+    return fx;
+}
 
 struct Tile {
     TileType type = TileType::Wall;
@@ -102,6 +223,15 @@ public:
 
     std::vector<Room> rooms;
 
+// Procedural terrain materials (cosmetic only; not serialized).
+// Cached per-cell material ids used for renderer tinting and LOOK descriptions.
+mutable uint32_t materialCacheKey = 0u;
+mutable int materialCacheW = 0;
+mutable int materialCacheH = 0;
+mutable int materialCacheCell = 0;
+mutable std::vector<uint8_t> materialCache;
+
+
     // Generator hints: optional guaranteed bonus loot spawns (e.g. boulder bridge caches).
     // Used only during floor generation; not serialized.
     std::vector<Vec2i> bonusLootSpots;
@@ -128,6 +258,88 @@ public:
     int corridorBraidCount = 0;
     // Not serialized: optional "annex" micro-dungeons carved into wall pockets (mini-maze/cavern side areas).
     int annexCount = 0;
+    // Not serialized: stairs-path connectivity analysis + weaving.
+    // We compute how "tree-like" the passable graph is between the stairs, and
+    // (optionally) carve a few tiny bypass loops around critical corridor bridges
+    // to encourage alternate routes / flanking without rewriting the whole layout.
+    int stairsBypassLoopCount = 0;
+    // Not serialized: number of bridge edges on the current shortest path between
+    // stairsUp and stairsDown (0 means there is no single-edge chokepoint).
+    int stairsBridgeCount = 0;
+    // Not serialized: true if stairsUp and stairsDown are in the same 2-edge-connected
+    // component (i.e., there exist at least two edge-disjoint paths between them).
+    bool stairsRedundancyOk = false;
+    // Not serialized: meta-procgen selection stats (generate multiple candidates and pick the best).
+    // This is a "generate-and-test" style pass that improves floor quality without changing gameplay rules.
+    int genPickAttempts = 1;
+    int genPickChosenIndex = 0;
+    int genPickScore = 0;
+    uint32_t genPickSeed = 0;
+
+    // Not serialized: biome-zone theming (Voronoi-style regions) for more coherent floor "flavors".
+    // This is a lightweight post-pass that groups walkable space into a few contiguous regions and
+    // applies a distinct obstacle/hazard style to each region without ever blocking stair connectivity.
+    int biomeZoneCount = 0;
+    int biomePillarZoneCount = 0;
+    int biomeRubbleZoneCount = 0;
+    int biomeCrackedZoneCount = 0;
+    int biomeEdits = 0;
+
+    // Not serialized: tactical "fire lane" dampening.
+    // We measure the longest straight line where a projectile could travel without hitting cover,
+    // then optionally insert small barricade chicanes (boulder + side-step bypass) to break extreme
+    // sniper lanes without harming stair connectivity.
+    int fireLaneMaxBefore = 0;
+    int fireLaneMaxAfter = 0;
+    int fireLaneCoverCount = 0;
+    int fireLaneChicaneCount = 0;
+
+    // Not serialized: open-space breakup / cover equalization.
+    // We estimate how "wide open" the map is by computing a distance-to-obstacle
+    // (clearance) field over passable tiles. When the max clearance is excessively
+    // high (large empty kill-box rooms/caverns), a late post-pass can place a few
+    // pillars/boulders at clearance maxima to add tactical occlusion/cover while
+    // always preserving stair connectivity (rolls back on failure).
+    int openSpaceClearanceMaxBefore = 0;
+    int openSpaceClearanceMaxAfter = 0;
+    int openSpacePillarCount = 0;
+    int openSpaceBoulderCount = 0;
+
+    // Not serialized: endless-depth macro theming ("strata") for Infinite World.
+    // Derived from the run's worldSeed and the depth; used to create coherent regions of
+    // generator bias across infinite descent (so deep floors feel like they belong to
+    // larger themed bands rather than pure per-floor noise).
+    int endlessStratumIndex = -1;       // 0-based within endless depths (depth > maxDepth)
+    int endlessStratumStartDepth = -1;  // absolute depth where this stratum begins
+    int endlessStratumLen = 0;          // number of floors in this stratum band
+    int endlessStratumLocal = 0;        // 0..len-1 position within the stratum
+    EndlessStratumTheme endlessStratumTheme = EndlessStratumTheme::Ruins;
+    uint32_t endlessStratumSeed = 0u;
+
+    // Not serialized: endless-depth persistent rift / faultline (Infinite World macro terrain).
+    // This is a stratum-aligned, run-seeded ravine-like feature that drifts smoothly across
+    // endless depths, giving a sense of large-scale geological continuity.
+    bool endlessRiftActive = false;
+    int endlessRiftIntensityPct = 0; // 0..100
+    int endlessRiftChasmCount = 0;
+    int endlessRiftBridgeCount = 0;
+    int endlessRiftBoulderCount = 0;
+    uint32_t endlessRiftSeed = 0u;
+
+    // Not serialized: special-room setpieces (moated islands).
+    // These carve a chasm ring inside select special rooms, leaving a central "island" reached
+    // via 1-2 narrow bridges for tactical variety.
+    int moatedRoomCount = 0;
+    int moatedRoomBridgeCount = 0;
+    int moatedRoomChasmCount = 0;
+
+    // Not serialized: special-room placement analytics.
+    // We classify rooms as being on the stairs critical path ("spine") or off it, then
+    // bias shops/shrines to appear on-spine while treasure/lairs tend to spawn off-spine.
+    // These values are for debugging/tuning only and do not affect saves.
+    int spineRoomCount = 0;     // Unique rooms that intersect the shortest stairs path.
+    int specialRoomMinSep = 0;  // Min BFS distance between representative tiles of special rooms.
+
     // Not serialized: surface camp stash anchor (depth 0).
     Vec2i campStashSpot{ -1, -1 };
     Vec2i stairsUp{ -1, -1 };
@@ -169,7 +381,16 @@ public:
     //
     // `branch` selects the dungeon branch's layout rules (e.g. Camp hub vs Main dungeon).
     // `depth` is a branch-local depth used for pacing and special floors.
-    void generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth);
+    void generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, uint32_t worldSeed = 0u);
+    void computeEndlessStratumInfo(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth);
+
+// Procedural terrain materials (cosmetic): computed deterministically from the run seed + depth.
+// Call ensureMaterials() once (per floor/per frame) before querying materialAtCached() in tight loops.
+void ensureMaterials(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const;
+TerrainMaterial materialAt(int x, int y, uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const;
+TerrainMaterial materialAtCached(int x, int y) const;
+int materialCellSize() const { return materialCacheCell; }
+
 
     // Convenience overload (legacy): generates using the Main branch rules.
     void generate(RNG& rng, int depth, int maxDepth);

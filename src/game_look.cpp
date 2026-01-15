@@ -2,6 +2,7 @@
 
 #include "combat_rules.hpp"
 #include "hallucination.hpp"
+#include "vtuber_gen.hpp"
 
 #include <cmath>
 #include <iomanip>
@@ -298,23 +299,46 @@ std::string Game::describeAt(Vec2i p) const {
 
     const bool hallu = isHallucinating(*this);
 
-    // Base tile description
-    switch (t.type) {
-        case TileType::Wall: ss << "WALL"; break;
-        case TileType::DoorSecret: ss << "WALL"; break; // don't spoil undiscovered secrets
-        case TileType::Pillar: ss << "PILLAR"; break;
-        case TileType::Boulder: ss << "BOULDER"; break;
-        case TileType::Chasm: ss << "CHASM"; break;
-        case TileType::Floor: ss << "FLOOR"; break;
-        case TileType::Fountain: ss << "FOUNTAIN"; break;
-        case TileType::Altar: ss << "ALTAR"; break;
-        case TileType::StairsUp: ss << "STAIRS UP"; break;
-        case TileType::StairsDown: ss << "STAIRS DOWN"; break;
-        case TileType::DoorClosed: ss << "DOOR (CLOSED)"; break;
-        case TileType::DoorLocked: ss << "DOOR (LOCKED)"; break;
-        case TileType::DoorOpen: ss << "DOOR (OPEN)"; break;
-        default: ss << "TILE"; break;
+// Base tile description (with deterministic "substrate" material adjectives).
+std::string baseDesc;
+switch (t.type) {
+    case TileType::Wall: baseDesc = "WALL"; break;
+    case TileType::DoorSecret: baseDesc = "WALL"; break; // don't spoil undiscovered secrets
+    case TileType::Pillar: baseDesc = "PILLAR"; break;
+    case TileType::Boulder: baseDesc = "BOULDER"; break;
+    case TileType::Chasm: baseDesc = "CHASM"; break;
+    case TileType::Floor: baseDesc = "FLOOR"; break;
+    case TileType::Fountain: baseDesc = "FOUNTAIN"; break;
+    case TileType::Altar: baseDesc = "ALTAR"; break;
+    case TileType::StairsUp: baseDesc = "STAIRS UP"; break;
+    case TileType::StairsDown: baseDesc = "STAIRS DOWN"; break;
+    case TileType::DoorClosed: baseDesc = "DOOR (CLOSED)"; break;
+    case TileType::DoorLocked: baseDesc = "DOOR (LOCKED)"; break;
+    case TileType::DoorOpen: baseDesc = "DOOR (OPEN)"; break;
+    default: baseDesc = "TILE"; break;
+}
+
+if (!hallu) {
+    const bool allowMat =
+        (t.type == TileType::Wall) || (t.type == TileType::DoorSecret) ||
+        (t.type == TileType::Floor) || (t.type == TileType::Pillar) ||
+        (t.type == TileType::Boulder) || (t.type == TileType::Fountain) ||
+        (t.type == TileType::Altar) || (t.type == TileType::StairsUp) ||
+        (t.type == TileType::StairsDown);
+
+    if (allowMat) {
+        const TerrainMaterial mat =
+            dung.materialAt(p.x, p.y,
+                            static_cast<uint32_t>(seed_),
+                            branch_,
+                            depth_,
+                            dungeonMaxDepth());
+
+        baseDesc = std::string(terrainMaterialAdj(mat)) + " " + baseDesc;
     }
+}
+
+ss << baseDesc;
 
     // Branch-aware stair destination hints.
     // This keeps look/inspect readable now that multiple branches can share the same numeric depth.
@@ -494,6 +518,22 @@ std::string Game::describeAt(Vec2i p) const {
             }
 
             std::string itemLabel = displayItemName(showItem);
+
+            // Compact VTuber metadata hint (only when not hallucinating).
+            if (!hallu && isVtuberCollectible(first->item.kind) && first->item.spriteSeed != 0u) {
+                const uint32_t s = first->item.spriteSeed;
+
+                std::string extra = vtuberStreamTag(s) + " " + vtuberFollowerText(s);
+                if (first->item.kind == ItemKind::VtuberHoloCard) {
+                    const char* et = vtuberCardEditionTag(vtuberCardEdition(s));
+                    if (et && et[0]) {
+                        extra += " ";
+                        extra += et;
+                    }
+                }
+
+                itemLabel += " <" + extra + ">";
+            }
 
             // Chest metadata is deliberately suppressed while hallucinating: it would otherwise
             // reveal the true underlying object even if the player "sees" something else.

@@ -26,10 +26,13 @@
 #include "slot_utils.hpp"
 #include "shop.hpp"
 #include "version.hpp"
+#include "vtuber_gen.hpp"
 #include <algorithm>
+#include <cmath>
 #include <numeric>
 #include <cctype>
 #include <cstdlib>
+#include <limits>
 #include <deque>
 #include <sstream>
 #include <fstream>
@@ -57,6 +60,17 @@ static std::string rtrim(std::string s) {
 
 static std::string trim(std::string s) {
     return rtrim(ltrim(std::move(s)));
+}
+
+static bool parseInt(const std::string& s, int& out) {
+    const std::string t = trim(s);
+    if (t.empty()) return false;
+    char* end = nullptr;
+    const long v = std::strtol(t.c_str(), &end, 10);
+    if (end == t.c_str() || *end != '\0') return false;
+    if (v < std::numeric_limits<int>::min() || v > std::numeric_limits<int>::max()) return false;
+    out = static_cast<int>(v);
+    return true;
 }
 
 static std::string toLower(std::string s) {
@@ -882,6 +896,10 @@ static std::vector<std::string> extendedCommandList() {
         "encumbrance",
         "timers",
         "uitheme",
+        "palette",
+        "pal",
+        "vtubers",
+        "vt",
         "uipanels",
         "seed",
         "pos",
@@ -2053,6 +2071,118 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return;
     }
 
+    if (cmd == "vtubers" || cmd == "vt") {
+        // Lists procedural VTuber personas currently present (inventory + ground).
+        // Usage:
+        //   #vtubers        (full)
+        //   #vtubers short  (omit catchphrase)
+        const bool shortMode = (toks.size() >= 2 && toks[1] == "short");
+
+        struct Entry {
+            uint32_t seed = 0u;
+            ItemKind kind = ItemKind::VtuberFigurine;
+        };
+        std::vector<Entry> found;
+        found.reserve(32);
+
+        auto pushUnique = [&](ItemKind k, uint32_t seed) {
+            if (seed == 0u) return;
+            for (const auto& e : found) {
+                if (e.seed == seed) return;
+            }
+            found.push_back({seed, k});
+        };
+
+        // Inventory
+        for (const auto& it : game.inventory()) {
+            if (!isVtuberCollectible(it.kind)) continue;
+            pushUnique(it.kind, it.spriteSeed);
+        }
+        // Ground (current level)
+        for (const auto& gi : game.groundItems()) {
+            if (!isVtuberCollectible(gi.item.kind)) continue;
+            pushUnique(gi.item.kind, gi.item.spriteSeed);
+        }
+
+        int figs = 0, cards = 0;
+        for (const auto& e : found) {
+            if (e.kind == ItemKind::VtuberFigurine) ++figs;
+            else if (e.kind == ItemKind::VtuberHoloCard) ++cards;
+        }
+
+        {
+            std::ostringstream ss;
+            ss << "VTUBERS " << found.size();
+            ss << " | FIG " << figs;
+            ss << " | CARD " << cards;
+            if (shortMode) ss << " | SHORT";
+            game.pushSystemMessage(ss.str());
+        }
+
+        if (found.empty()) {
+            game.pushSystemMessage("TIP: Treasure rooms can rarely drop VTuber figurines and holo cards.");
+            return;
+        }
+
+        std::sort(found.begin(), found.end(), [](const Entry& a, const Entry& b) {
+            if (a.kind != b.kind) return static_cast<int>(a.kind) < static_cast<int>(b.kind);
+            return a.seed < b.seed;
+        });
+
+        const int maxLines = 18;
+        int lines = 0;
+        for (const auto& e : found) {
+            if (lines++ >= maxLines) {
+                game.pushSystemMessage("... (MORE TRUNCATED)");
+                break;
+            }
+
+            const std::string name = vtuberStageName(e.seed);
+            const std::string arch = vtuberArchetype(e.seed);
+            const std::string agency = vtuberAgency(e.seed);
+            const std::string tag = vtuberStreamTag(e.seed);
+            const std::string fol = vtuberFollowerText(e.seed);
+            const std::string emo = vtuberEmote(e.seed);
+            const VtuberRarity rar = vtuberRarity(e.seed);
+
+            std::string title = name;
+            std::string edTag;
+            int serial = 0;
+            if (e.kind == ItemKind::VtuberHoloCard) {
+                const VtuberCardEdition ed = vtuberCardEdition(e.seed);
+                if (ed == VtuberCardEdition::Collab) {
+                    const uint32_t ps = vtuberCollabPartnerSeed(e.seed);
+                    title = title + " x " + vtuberStageName(ps);
+                }
+                const char* t = vtuberCardEditionTag(ed);
+                if (t && t[0]) edTag = t;
+                if (vtuberCardHasSerial(ed)) serial = vtuberCardSerial(e.seed);
+            }
+
+            std::ostringstream ss;
+            ss << (e.kind == ItemKind::VtuberFigurine ? "FIG" : "CARD") << ": ";
+            ss << title << " [" << vtuberRarityName(rar) << "]";
+            if (!edTag.empty()) {
+                ss << " {" << edTag << "}";
+                if (serial > 0) ss << " #" << serial;
+            }
+            ss << " | " << arch;
+            ss << " | " << agency;
+            ss << " | " << tag;
+            ss << " | " << fol;
+            ss << " | " << emo;
+            if (!shortMode) {
+                // Keep it compact for the message log.
+                std::string cp = vtuberCatchphrase(e.seed);
+                if (cp.size() > 46) cp = cp.substr(0, 46) + "...";
+                ss << " | \"" << cp << "\"";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
+        return;
+    }
+
     if (cmd == "mapstats") {
         const Dungeon& d = game.dungeon();
 
@@ -2109,6 +2239,52 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             ss << " | ITEMS " << items;
             game.pushSystemMessage(ss.str());
         }
+
+        {
+            int treasure = 0;
+            int lair = 0;
+            int shrine = 0;
+            int shop = 0;
+            int themed = 0;
+            int secret = 0;
+            int vault = 0;
+            for (const auto& r : d.rooms) {
+                switch (r.type) {
+                    case RoomType::Treasure: ++treasure; break;
+                    case RoomType::Lair: ++lair; break;
+                    case RoomType::Shrine: ++shrine; break;
+                    case RoomType::Shop: ++shop; break;
+                    case RoomType::Secret: ++secret; break;
+                    case RoomType::Vault: ++vault; break;
+                    case RoomType::Armory:
+                    case RoomType::Library:
+                    case RoomType::Laboratory:
+                        ++themed;
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            std::ostringstream ss;
+            ss << "SPECIALS";
+            ss << " | TREASURE " << treasure;
+            ss << " | LAIR " << lair;
+            ss << " | SHRINE " << shrine;
+            ss << " | SHOP " << shop;
+            ss << " | THEMED " << themed;
+            if (secret > 0 || vault > 0) {
+                ss << " | SECRET " << secret;
+                ss << " | VAULT " << vault;
+            }
+            if (d.spineRoomCount > 0) {
+                ss << " | SPINE " << d.spineRoomCount;
+            }
+            if (d.specialRoomMinSep > 0) {
+                ss << " | MINSEP " << d.specialRoomMinSep;
+            }
+            game.pushSystemMessage(ss.str());
+        }
         {
             std::ostringstream ss;
             ss << "TRAPS " << trapsDiscovered << "/" << trapsTotal;
@@ -2116,6 +2292,175 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             ss << " | ENGR " << engr;
             ss << " | DOORS " << doors;
             ss << " | CHASMS " << chasm;
+            game.pushSystemMessage(ss.str());
+        }
+        {
+            std::ostringstream ss;
+            const bool haveUp = d.inBounds(d.stairsUp.x, d.stairsUp.y);
+            const bool haveDown = d.inBounds(d.stairsDown.x, d.stairsDown.y);
+            if (!haveUp || !haveDown) {
+                ss << "STAIRS PATH N/A";
+            } else {
+                ss << "STAIRS PATH " << (d.stairsRedundancyOk ? "REDUNDANT" : "BRIDGED");
+                ss << " | BRIDGES " << d.stairsBridgeCount;
+                ss << " | BYPASSES " << d.stairsBypassLoopCount;
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            if (d.biomeZoneCount > 0) {
+                ss << "BIOMES " << d.biomeZoneCount;
+                ss << " | PILLARZ " << d.biomePillarZoneCount;
+                ss << " | RUBBLEZ " << d.biomeRubbleZoneCount;
+                ss << " | CRACKZ " << d.biomeCrackedZoneCount;
+                ss << " | EDITS " << d.biomeEdits;
+            } else {
+                ss << "BIOMES 0";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            ss << "PALETTE " << (game.procPaletteEnabled() ? "ON" : "OFF");
+            ss << " | STRENGTH " << game.procPaletteStrength();
+            game.pushSystemMessage(ss.str());
+        }
+
+{
+    // Deterministic "substrate materials" (STONE/BRICK/BASALT/...) used for tinting and LOOK adjectives.
+    d.ensureMaterials(static_cast<uint32_t>(game.seed()), game.branch(), game.depth(), game.dungeonMaxDepth());
+
+    std::vector<int> counts(static_cast<size_t>(TerrainMaterial::COUNT), 0);
+    int total = 0;
+
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const Tile& t = d.at(x, y);
+            if (t.type == TileType::Chasm) continue; // void is not a "material"
+            const TerrainMaterial m = d.materialAtCached(x, y);
+            counts[static_cast<size_t>(m)] += 1;
+            total += 1;
+        }
+    }
+
+    struct Entry { int idx; int count; };
+    std::vector<Entry> top;
+    top.reserve(counts.size());
+    for (int i = 0; i < static_cast<int>(counts.size()); ++i) {
+        top.push_back({i, counts[static_cast<size_t>(i)]});
+    }
+    std::sort(top.begin(), top.end(), [](const Entry& a, const Entry& b) { return a.count > b.count; });
+
+    std::ostringstream ss;
+    ss << "MATERIALS";
+    ss << " | FX STEP+SCENT";
+    ss << " | CELL " << d.materialCellSize();
+
+    const int kShow = std::min(3, static_cast<int>(top.size()));
+    for (int i = 0; i < kShow; ++i) {
+        if (top[i].count <= 0 || total <= 0) break;
+        const int pct = static_cast<int>(std::round(100.0 * static_cast<double>(top[i].count) / static_cast<double>(total)));
+        ss << " | " << terrainMaterialName(static_cast<TerrainMaterial>(top[i].idx)) << " " << pct << "%";
+    }
+
+    game.pushSystemMessage(ss.str());
+}
+
+        {
+            std::ostringstream ss;
+            ss << "ENDLESS " << (game.infiniteWorldEnabled() ? "ON" : "OFF");
+            ss << " | KEEP " << game.infiniteKeepWindow();
+            game.pushSystemMessage(ss.str());
+        }
+
+        // Infinite World macro theming: deep floors belong to larger "strata" bands.
+        if (game.infiniteWorldEnabled() && game.branch() == DungeonBranch::Main && game.depth() > Game::DUNGEON_MAX_DEPTH) {
+            std::ostringstream ss;
+            if (d.endlessStratumIndex >= 0 && d.endlessStratumLen > 0) {
+                ss << "STRATUM " << (d.endlessStratumIndex + 1);
+                ss << " | THEME " << endlessStratumThemeName(d.endlessStratumTheme);
+                ss << " | BAND " << d.endlessStratumStartDepth << "-" << (d.endlessStratumStartDepth + d.endlessStratumLen - 1);
+                ss << " | POS " << (d.endlessStratumLocal + 1) << "/" << d.endlessStratumLen;
+                if (d.endlessStratumSeed != 0u) {
+                    ss << " | SEED 0x" << std::hex << std::uppercase << d.endlessStratumSeed << std::dec;
+                }
+            } else {
+                ss << "STRATUM ?";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
+        // Infinite World macro terrain: stratum-aligned persistent rift / faultline.
+        if (game.infiniteWorldEnabled() && game.branch() == DungeonBranch::Main && game.depth() > Game::DUNGEON_MAX_DEPTH) {
+            std::ostringstream ss;
+            if (d.endlessRiftActive) {
+                ss << "RIFT ON";
+                ss << " | INT " << d.endlessRiftIntensityPct << "%";
+                ss << " | CHASM " << d.endlessRiftChasmCount;
+                ss << " | BRIDGES " << d.endlessRiftBridgeCount;
+                ss << " | BOULDERS " << d.endlessRiftBoulderCount;
+                if (d.endlessRiftSeed != 0u) {
+                    ss << " | SEED 0x" << std::hex << std::uppercase << d.endlessRiftSeed << std::dec;
+                }
+            } else {
+                ss << "RIFT OFF";
+                if (d.endlessRiftIntensityPct > 0) {
+                    ss << " | INT " << d.endlessRiftIntensityPct << "%";
+                }
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            if (d.fireLaneMaxAfter > 0) {
+                ss << "LANES MAX " << d.fireLaneMaxAfter;
+                if (d.fireLaneCoverCount > 0 || d.fireLaneChicaneCount > 0) {
+                    ss << " (WAS " << d.fireLaneMaxBefore << ")";
+                }
+                ss << " | COVER " << d.fireLaneCoverCount;
+                ss << " | CHICANES " << d.fireLaneChicaneCount;
+            } else {
+                ss << "LANES N/A";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+        {
+            std::ostringstream ss;
+            if (d.openSpaceClearanceMaxAfter > 0) {
+                ss << "OPEN MAX " << d.openSpaceClearanceMaxAfter;
+                if (d.openSpacePillarCount > 0 || d.openSpaceBoulderCount > 0) {
+                    ss << " (WAS " << d.openSpaceClearanceMaxBefore << ")";
+                }
+                ss << " | PILLARS " << d.openSpacePillarCount;
+                ss << " | BOULDERS " << d.openSpaceBoulderCount;
+            } else {
+                ss << "OPEN N/A";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+        {
+            std::ostringstream ss;
+            if (d.moatedRoomCount > 0) {
+                ss << "MOATS " << d.moatedRoomCount;
+                ss << " | BRIDGES " << d.moatedRoomBridgeCount;
+                ss << " | CHASM " << d.moatedRoomChasmCount;
+            } else {
+                ss << "MOATS 0";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+        {
+            std::ostringstream ss;
+            const int atts = std::max(1, d.genPickAttempts);
+            ss << "GEN PICK " << (d.genPickChosenIndex + 1) << "/" << atts;
+            ss << " | SCORE " << d.genPickScore;
+            if (d.genPickSeed != 0u) {
+                ss << " | SEED 0x" << std::hex << std::uppercase << d.genPickSeed << std::dec;
+            }
             game.pushSystemMessage(ss.str());
         }
         return;
@@ -2471,6 +2816,56 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         }
 
         game.pushSystemMessage("USAGE: #isocutaway on/off/toggle");
+        return;
+    }
+
+    if (cmd == "palette" || cmd == "pal") {
+        if (toks.size() <= 1) {
+            game.pushSystemMessage(std::string("PROC PALETTE: ") + (game.procPaletteEnabled() ? "ON" : "OFF") +
+                                   " | STRENGTH " + std::to_string(game.procPaletteStrength()));
+            game.pushSystemMessage("USAGE: #palette on/off/toggle");
+            game.pushSystemMessage("       #palette strength <0..100>");
+            return;
+        }
+
+        const std::string v = toLower(toks[1]);
+        if (v == "on" || v == "true" || v == "1") {
+            game.setProcPaletteEnabled(true);
+            game.markSettingsDirty();
+            game.pushSystemMessage("PROC PALETTE: ON");
+            return;
+        }
+        if (v == "off" || v == "false" || v == "0") {
+            game.setProcPaletteEnabled(false);
+            game.markSettingsDirty();
+            game.pushSystemMessage("PROC PALETTE: OFF");
+            return;
+        }
+        if (v == "toggle" || v == "t") {
+            game.setProcPaletteEnabled(!game.procPaletteEnabled());
+            game.markSettingsDirty();
+            game.pushSystemMessage(std::string("PROC PALETTE: ") + (game.procPaletteEnabled() ? "ON" : "OFF"));
+            return;
+        }
+        if (v == "strength" || v == "s") {
+            if (toks.size() < 3) {
+                game.pushSystemMessage("USAGE: #palette strength <0..100>");
+                return;
+            }
+            int pct = 0;
+            if (!parseInt(toks[2], pct)) {
+                game.pushSystemMessage("INVALID STRENGTH (EXPECTED INTEGER 0..100).");
+                return;
+            }
+            pct = std::clamp(pct, 0, 100);
+            game.setProcPaletteStrength(pct);
+            game.markSettingsDirty();
+            game.pushSystemMessage("PROC PALETTE STRENGTH: " + std::to_string(pct));
+            return;
+        }
+
+        game.pushSystemMessage("USAGE: #palette on/off/toggle");
+        game.pushSystemMessage("       #palette strength <0..100>");
         return;
     }
 

@@ -463,18 +463,36 @@ void Game::updateScentMap() {
 
     auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * W + x); };
 
+    // Substrate materials influence scent: mossy/earthy areas absorb odor faster.
+    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
     // --- Tunables ---
-    // How fast scent fades everywhere each player turn.
-    constexpr uint8_t DECAY = 2u;
-    // How much scent is lost when it spreads across one tile of distance.
-    constexpr uint8_t SPREAD_DROP = 14u;
+    // How fast scent fades everywhere each player turn (base, before material adjustments).
+    constexpr int BASE_DECAY = 2;
+    // How much scent is lost when it spreads across one tile of distance (base, before material adjustments).
+    constexpr int BASE_SPREAD_DROP = 14;
     // How strong a fresh scent deposit is at the player position.
     constexpr uint8_t DEPOSIT = 255u;
 
-    // Global decay.
+    // Global decay (per-tile): mossy/earthy surfaces absorb scent faster.
     for (size_t i = 0; i < n; ++i) {
+        const int x = static_cast<int>(i % static_cast<size_t>(W));
+        const int y = static_cast<int>(i / static_cast<size_t>(W));
+
+        // Keep non-walkable tiles scent-free so it can't "leak" through walls.
+        if (!dung.isWalkable(x, y)) {
+            scentField_[i] = 0u;
+            continue;
+        }
+
         const uint8_t v = scentField_[i];
-        scentField_[i] = (v > DECAY) ? static_cast<uint8_t>(v - DECAY) : 0u;
+        if (v == 0u) continue;
+
+        const TerrainMaterial m = dung.materialAtCached(x, y);
+        const TerrainMaterialFx fx = terrainMaterialFx(m);
+
+        const int decay = clampi(BASE_DECAY + fx.scentDecayDelta, 0, 20);
+        scentField_[i] = (v > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(v - static_cast<uint8_t>(decay)) : 0u;
     }
 
     // Deposit at the player's current tile.
@@ -547,7 +565,10 @@ void Game::updateScentMap() {
                 if (nv > bestN) bestN = nv;
             }
 
-            const uint8_t spread = (bestN > SPREAD_DROP) ? static_cast<uint8_t>(bestN - SPREAD_DROP) : 0u;
+            const TerrainMaterial m = dung.materialAtCached(x, y);
+            const TerrainMaterialFx fx = terrainMaterialFx(m);
+            const int drop = clampi(BASE_SPREAD_DROP + fx.scentSpreadDropDelta, 6, 40);
+            const uint8_t spread = (bestN > static_cast<uint8_t>(drop)) ? static_cast<uint8_t>(bestN - static_cast<uint8_t>(drop)) : 0u;
             if (spread > next[i]) next[i] = spread;
         }
     }

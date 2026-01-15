@@ -684,7 +684,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 50u; // v50: procedural monster abilities (active kit + cooldowns) // v49: procedural monster variants (rank + affix mask) // v48: item call labels (NetHack-style) // v47: trapdoorFallers keyed by (branch,depth) // v46: Message.branch (dungeon branch for log/history) // v45: dungeon branches (LevelId) // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
+constexpr uint32_t SAVE_VERSION = 51u; // v51: infinite world options (endless mode + keep window) // v50: procedural monster abilities (active kit + cooldowns) // v49: procedural monster variants (rank + affix mask) // v48: item call labels (NetHack-style) // v47: trapdoorFallers keyed by (branch,depth) // v46: Message.branch (dungeon branch for log/history) // v45: dungeon branches (LevelId) // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -1725,6 +1725,15 @@ if constexpr (SAVE_VERSION >= 33u) {
     }
 }
 
+
+    // v51+: endless / infinite world options (persisted in the save so reload matches the run).
+    if constexpr (SAVE_VERSION >= 51u) {
+        uint8_t endlessEnabledTmp = infiniteWorldEnabled_ ? 1u : 0u;
+        int32_t endlessKeepWindowTmp = static_cast<int32_t>(infiniteKeepWindow_);
+        writePod(mem, endlessEnabledTmp);
+        writePod(mem, endlessKeepWindowTmp);
+    }
+
     std::string payload = mem.str();
 
     // v13+: integrity footer (CRC32 over the entire payload)
@@ -2600,8 +2609,18 @@ if (ver >= 33u) {
     }
 }
 
+        // v51+: endless / infinite world options
+        uint8_t endlessEnabledTmp = infiniteWorldEnabled_ ? 1u : 0u;
+        int32_t endlessKeepWindowTmp = static_cast<int32_t>(infiniteKeepWindow_);
+        if (ver >= 51u) {
+            if (!readPod(in, endlessEnabledTmp)) return fail();
+            if (!readPod(in, endlessKeepWindowTmp)) return fail();
+        }
+
         // If we got here, we have a fully parsed save. Commit state.
         rng = RNG(rngState);
+        infiniteWorldEnabled_ = (endlessEnabledTmp != 0);
+        infiniteKeepWindow_ = clampi(static_cast<int>(endlessKeepWindowTmp), 0, 200);
         branch_ = branchTmp;
         depth_ = depth;
         playerId_ = pId;

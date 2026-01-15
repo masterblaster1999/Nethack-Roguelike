@@ -48,6 +48,13 @@ struct Settings {
     bool isoVoxelRaytrace = false;        // isometric-only: raytraced voxel sprites instead of mesh rasterization
     bool isoCutaway = true;             // isometric-only: fade foreground walls/doors near the player/cursor (cutaway) for readability
 
+    // Procedural terrain palette (purely cosmetic).
+    // Applies a seed-derived color palette to floor/wall/chasm shading so each run/floor can
+    // have its own mood beyond the base sprite colors.
+    bool procPalette = true;              // proc_palette: true|false
+    int procPaletteStrength = 70;         // proc_palette_strength: 0..100 (0 disables the effect)
+
+
     // Rendering / performance
     // - vsync: enables SDL_Renderer vsync (lower CPU usage, smoother rendering).
     // - maxFps: optional software cap when vsync is disabled (0 = uncapped).
@@ -98,6 +105,13 @@ struct Settings {
     bool confirmQuit = true;   // Require ESC twice to quit (prevents accidental quits).
     bool autoMortem = true;   // Write a procrogue_mortem_*.txt dump automatically on win/death.
     bool bonesEnabled = true; // Allow "bones files" (persistent death remnants between runs).
+
+    // Endless / infinite world (experimental): allow descending beyond the normal bottom.
+    bool infiniteWorld = false;
+
+    // Infinite world memory cap: keep a sliding window of post-quest levels cached.
+    // 0 disables pruning.
+    int infiniteKeepWindow = 12;
 };
 
 // Loads settings from disk. If the file is missing or invalid, defaults are used.

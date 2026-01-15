@@ -169,6 +169,12 @@ enum class ItemKind : uint8_t {
 
     // Jewelry enhancement (append-only)
     ScrollEnchantRing,
+
+    // --- Collectibles (append-only) ---
+    VtuberFigurine,
+
+    // --- More collectibles (append-only) ---
+    VtuberHoloCard,
 };
 
 // Item "egos" (NetHack-style brands / special properties) applied to some gear.
@@ -207,7 +213,11 @@ inline int egoValueMultiplierPct(ItemEgo e) {
 }
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::ScrollEnchantRing) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::VtuberHoloCard) + 1;
+
+inline bool isVtuberCollectible(ItemKind k) {
+    return k == ItemKind::VtuberFigurine || k == ItemKind::VtuberHoloCard;
+}
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;

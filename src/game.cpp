@@ -1,4 +1,5 @@
 #include "game_internal.hpp"
+#include <cmath>
 
 uint32_t dailySeedUtc(std::string* outDateIso) {
     const std::time_t t = std::time(nullptr);
@@ -111,18 +112,205 @@ static int lerpInt(int a, int b, int num, int den) {
     return a + (b - a) * num / den;
 }
 
+static float lerpFloat(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+static float smoothstep(float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static float u32ToSignedUnit(uint32_t v) {
+    // Map uint32 -> [-1, +1] (inclusive-ish; exact endpoints aren't important here).
+    constexpr float denom = 4294967295.0f; // 2^32 - 1
+    return (static_cast<float>(v) / denom) * 2.0f - 1.0f;
+}
+
+// Mirror the endless "strata" banding used by Dungeon generation so map size drift aligns with
+// macro-themed stretches (ruins -> mines -> catacombs...) instead of being pure per-floor jitter.
+struct EndlessBandInfo {
+    int index = -1;
+    int startDepth = -1;
+    int len = 0;
+    int local = 0;
+    EndlessStratumTheme theme = EndlessStratumTheme::Ruins;
+    uint32_t seed = 0u;
+};
+
+static EndlessStratumTheme endlessThemeForIndex(uint32_t worldSeed, int idx) {
+    // Deterministically pick a macro theme for an endless band.
+    // Adjacent bands are prevented from repeating the same theme.
+    const uint32_t base = hashCombine(worldSeed, 0xA11B1A0Du);
+    const uint32_t v = hash32(base ^ static_cast<uint32_t>(idx));
+    constexpr int kCount = 6;
+    int t = static_cast<int>(v % static_cast<uint32_t>(kCount));
+
+    if (idx > 0) {
+        const uint32_t pv = hash32(base ^ static_cast<uint32_t>(idx - 1));
+        const int prev = static_cast<int>(pv % static_cast<uint32_t>(kCount));
+        if (t == prev) {
+            // Deterministically pick a different theme using higher bits.
+            const int bump = 1 + static_cast<int>((v / static_cast<uint32_t>(kCount)) % static_cast<uint32_t>(kCount - 1));
+            t = (t + bump) % kCount;
+        }
+    }
+
+    return static_cast<EndlessStratumTheme>(t);
+}
+
+static int endlessBandLengthForIndex(uint32_t worldSeed, int idx) {
+    // 5..9 floors per band, run-seed dependent but stable.
+    const uint32_t base = hashCombine(worldSeed, 0x57A7A11Eu);
+    return 5 + static_cast<int>(hash32(base ^ static_cast<uint32_t>(idx)) % 5u);
+}
+
+static EndlessBandInfo computeEndlessBand(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) {
+    EndlessBandInfo out;
+    if (worldSeed == 0u) return out;
+    if (branch != DungeonBranch::Main) return out;
+    if (depth <= maxDepth) return out;
+
+    const int endlessStart = maxDepth + 1;
+    const int endlessD = depth - endlessStart;
+    if (endlessD < 0) return out;
+
+    int idx = 0;
+    int cursor = 0;
+    int d = endlessD;
+
+    for (;;) {
+        const int len = endlessBandLengthForIndex(worldSeed, idx);
+        if (d < len) {
+            out.index = idx;
+            out.len = len;
+            out.local = d;
+            out.startDepth = endlessStart + cursor;
+            out.theme = endlessThemeForIndex(worldSeed, idx);
+
+            out.seed = hashCombine(hashCombine(worldSeed, 0x517A7A5Eu), static_cast<uint32_t>(idx));
+            if (out.seed == 0u) out.seed = 1u;
+            return out;
+        }
+
+        d -= len;
+        cursor += len;
+        idx += 1;
+
+        // Safety guard for absurd depths (should never trigger in normal play).
+        if (idx > 200000) {
+            out.index = idx;
+            out.len = len;
+            out.local = 0;
+            out.startDepth = endlessStart + cursor;
+            out.theme = endlessThemeForIndex(worldSeed, idx);
+            out.seed = hashCombine(hashCombine(worldSeed, 0x517A7A5Eu), static_cast<uint32_t>(idx));
+            if (out.seed == 0u) out.seed = 1u;
+            return out;
+        }
+    }
+}
+
 // Picks a map size for a newly generated level.
-// Philosophy: early floors slightly smaller/tighter, late floors slightly larger,
-// with mild jitter and a couple of depth-based aspect biases.
-static MapSizeWH pickProceduralMapSize(RNG& rng, int depth, int maxDepth) {
+// Philosophy: early floors slightly smaller/tighter, late floors slightly larger.
+// In Infinite World mode, post-quest depths get a smooth, band-aligned size/aspect drift so
+// infinite descent has large-scale geometric texture instead of one fixed map forever.
+static MapSizeWH pickProceduralMapSize(RNG& rng, DungeonBranch branch, int depth, int maxDepth, bool infiniteWorldEnabled, uint32_t worldSeed) {
     MapSizeWH out{Dungeon::DEFAULT_W, Dungeon::DEFAULT_H};
 
     // Keep bespoke/special layouts at the canonical size (they were authored/tuned for it).
     if (depth <= 0) return out;
-    if (depth >= maxDepth) return out;
-    if (maxDepth >= 2 && depth == maxDepth - 1) return out; // labyrinth / pre-sanctum
     if (depth == Dungeon::SOKOBAN_DEPTH) return out;
     if (depth == Dungeon::ROGUE_LEVEL_DEPTH) return out;
+    if (maxDepth >= 2 && depth == maxDepth - 1) return out; // labyrinth / pre-sanctum
+    if (depth == maxDepth) return out; // sanctum
+    if (branch != DungeonBranch::Main) return out;
+
+    // If infinite world is disabled, depth>maxDepth should never happen; keep stable if it does.
+    if (!infiniteWorldEnabled && depth > maxDepth) return out;
+
+    // Endless depths: coherent drift tied to the same banding used by the generator.
+    if (infiniteWorldEnabled && depth > maxDepth) {
+        const EndlessBandInfo st = computeEndlessBand(worldSeed, branch, depth, maxDepth);
+
+        // Theme-shaped base dimensions (kept conservative; generators have hard bounds).
+        int baseW = 118;
+        int baseH = 74;
+        switch (st.theme) {
+            case EndlessStratumTheme::Ruins:      baseW = 118; baseH = 74; break;
+            case EndlessStratumTheme::Caverns:    baseW = 126; baseH = 82; break;
+            case EndlessStratumTheme::Labyrinth:  baseW = 116; baseH = 76; break;
+            case EndlessStratumTheme::Warrens:    baseW = 112; baseH = 74; break;
+            case EndlessStratumTheme::Mines:      baseW = 110; baseH = 78; break;
+            case EndlessStratumTheme::Catacombs:  baseW = 120; baseH = 80; break;
+            default:                              baseW = 118; baseH = 74; break;
+        }
+
+        // Continuous "knot" values at band boundaries -> smoothstep interpolate within the band.
+        // Using knots(index) and knots(index+1) ensures continuity across band boundaries.
+        auto knot = [&](uint32_t salt, int idx) -> float {
+            const uint32_t h = hash32(hashCombine(hashCombine(worldSeed, salt), static_cast<uint32_t>(idx)));
+            return u32ToSignedUnit(h);
+        };
+
+        const float t = (st.len > 1) ? (static_cast<float>(st.local) / static_cast<float>(st.len - 1)) : 0.0f;
+        const float ft = smoothstep(t);
+
+        const float sizeN = lerpFloat(knot(0x51F17C1Du, st.index), knot(0x51F17C1Du, st.index + 1), ft);
+        const float aspN  = lerpFloat(knot(0xA57EC71Du, st.index), knot(0xA57EC71Du, st.index + 1), ft);
+
+        // Deeper into endless => slightly larger amplitude (slow ramp).
+        const int extra = std::max(0, depth - (maxDepth + 1));
+        const float ramp = std::clamp(extra / 60.0f, 0.0f, 1.0f);
+
+        float sizeAmp = 0.08f + 0.12f * ramp; // 8%..20%
+        float aspAmp  = 0.06f + 0.08f * ramp; // 6%..14%
+
+        // Theme tweaks (subtle): caverns feel bigger, labyrinths less so.
+        switch (st.theme) {
+            case EndlessStratumTheme::Caverns:
+                sizeAmp *= 1.10f;
+                aspAmp  *= 0.90f;
+                break;
+            case EndlessStratumTheme::Labyrinth:
+                sizeAmp *= 0.95f;
+                aspAmp  *= 0.80f;
+                break;
+            case EndlessStratumTheme::Mines:
+                sizeAmp *= 0.95f;
+                aspAmp  *= 1.05f;
+                break;
+            default:
+                break;
+        }
+
+        const float scale = 1.0f + sizeAmp * sizeN;
+        const float aspect = aspAmp * aspN;
+
+        float wf = static_cast<float>(baseW) * scale * (1.0f + aspect);
+        float hf = static_cast<float>(baseH) * scale * (1.0f - aspect);
+
+        int w = static_cast<int>(std::round(wf));
+        int h = static_cast<int>(std::round(hf));
+
+        // Tiny deterministic per-floor jitter to avoid "perfectly smooth" patterns.
+        w += rng.range(-2, 2);
+        h += rng.range(-1, 1);
+
+        // Clamp to safe bounds for generators (same bounds as finite-depth sizing).
+        w = std::clamp(w, 80, 132);
+        h = std::clamp(h, 50, 86);
+
+        w = std::max(w, 32);
+        h = std::max(h, 24);
+
+        out.w = w;
+        out.h = h;
+        return out;
+    }
+
+    // Regular finite-depth sizing (unchanged).
+    if (depth >= maxDepth) return out;
 
     // Depth progress 0..(maxDepth-1) (with depth 1 at 0).
     const int den = std::max(1, maxDepth - 1);
@@ -171,6 +359,11 @@ static MapSizeWH pickProceduralMapSize(RNG& rng, int depth, int maxDepth) {
 }
 
 } // namespace
+
+Vec2i Game::proceduralMapSizeFor(RNG& rng, DungeonBranch branch, int depth) const {
+    const MapSizeWH msz = pickProceduralMapSize(rng, branch, depth, DUNGEON_MAX_DEPTH, infiniteWorldEnabled_, seed_);
+    return Vec2i{msz.w, msz.h};
+}
 
 void Game::pushMsg(const std::string& s, MessageKind kind, bool fromPlayer) {
     // Coalesce consecutive identical messages to reduce spam in combat / auto-move.
@@ -1559,9 +1752,9 @@ void Game::newGame(uint32_t seed) {
     hunger = hungerMax;
     hungerStatePrev = hungerStateFor(hunger, hungerMax);
 
-    const MapSizeWH msz = pickProceduralMapSize(rng, depth_, DUNGEON_MAX_DEPTH);
-    dung = Dungeon(msz.w, msz.h);
-    dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH);
+    const Vec2i msz = proceduralMapSizeFor(rng, branch_, depth_);
+    dung = Dungeon(msz.x, msz.y);
+    dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH, seed_);
     // Environmental fields reset per floor (no lingering gas on a fresh level).
     confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
     poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
@@ -1873,6 +2066,91 @@ bool Game::restoreLevel(LevelId id) {
     }
 
     return true;
+}
+
+uint32_t Game::infiniteLevelSeed(LevelId id) const {
+    // Stable per-level seed derived from the run seed + level identity.
+    // Domain separation constant ensures future seed uses don't accidentally correlate.
+    uint32_t s = seed_;
+    s = hashCombine(s, static_cast<uint32_t>(static_cast<uint8_t>(id.branch)));
+    s = hashCombine(s, static_cast<uint32_t>(id.depth));
+    s = hashCombine(s, 0xE11D5EEDu);
+    if (s == 0u) s = 1u;
+    return s;
+}
+
+void Game::ensureEndlessSanctumDownstairs(LevelId id, Dungeon& d, RNG& rngForPlacement) const {
+    if (!infiniteWorldEnabled_) return;
+    if (id.branch != DungeonBranch::Main) return;
+    if (id.depth != DUNGEON_MAX_DEPTH) return;
+
+    // If a downstairs already exists, don't disturb it.
+    if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) {
+        if (d.at(d.stairsDown.x, d.stairsDown.y).type == TileType::StairsDown) return;
+    }
+
+    // Pick a floor tile reasonably far from the upstairs so the sanctum doesn't become a choke.
+    const Vec2i up = d.stairsUp;
+    Vec2i best{-1, -1};
+    int bestDist = -1;
+
+    for (int tries = 0; tries < 400; ++tries) {
+        const Vec2i cand = d.randomFloor(rngForPlacement, true);
+        if (!d.inBounds(cand.x, cand.y)) continue;
+        if (cand == up) continue;
+        if (!d.isWalkable(cand.x, cand.y)) continue;
+
+        const int md = std::abs(cand.x - up.x) + std::abs(cand.y - up.y);
+        if (md > bestDist) {
+            bestDist = md;
+            best = cand;
+        }
+    }
+
+    if (!d.inBounds(best.x, best.y)) {
+        // Deterministic-ish fallback: first walkable tile that's not the upstairs.
+        for (int y = 1; y < d.height - 1; ++y) {
+            for (int x = 1; x < d.width - 1; ++x) {
+                if (x == up.x && y == up.y) continue;
+                if (!d.isWalkable(x, y)) continue;
+                best = {x, y};
+                break;
+            }
+            if (d.inBounds(best.x, best.y)) break;
+        }
+    }
+
+    if (d.inBounds(best.x, best.y)) {
+        d.stairsDown = best;
+        d.at(best.x, best.y).type = TileType::StairsDown;
+    }
+}
+
+void Game::pruneEndlessLevels() {
+    if (!infiniteWorldEnabled_) return;
+    if (infiniteKeepWindow_ <= 0) return;
+
+    // Only prune post-quest depths in the Main branch.
+    const int lo = std::max(DUNGEON_MAX_DEPTH + 1, depth_ - infiniteKeepWindow_);
+    const int hi = depth_ + infiniteKeepWindow_;
+
+    for (auto it = levels.begin(); it != levels.end(); ) {
+        const LevelId id = it->first;
+        if (id.branch != DungeonBranch::Main) {
+            ++it;
+            continue;
+        }
+        if (id.depth <= DUNGEON_MAX_DEPTH) {
+            ++it;
+            continue;
+        }
+
+        if (id.depth < lo || id.depth > hi) {
+            it = levels.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 const Engraving* Game::engravingAt(Vec2i p) const {
@@ -2225,7 +2503,9 @@ void Game::changeLevel(int newDepth, bool goingDown) {
 void Game::changeLevel(LevelId newLevel, bool goingDown) {
     const int newDepth = newLevel.depth;
     if (newDepth < 0) return;
-    if (newDepth > DUNGEON_MAX_DEPTH) {
+
+    const bool endlessOk = infiniteWorldEnabled_ && newLevel.branch == DungeonBranch::Main;
+    if (newDepth > DUNGEON_MAX_DEPTH && !endlessOk) {
         pushMsg("THE STAIRS END HERE. YOU SENSE YOU ARE AT THE BOTTOM.", MessageKind::System, true);
         return;
     }
@@ -2525,9 +2805,22 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         fireField_.clear();
         scentField_.clear();
 
-        const MapSizeWH msz = pickProceduralMapSize(rng, depth_, DUNGEON_MAX_DEPTH);
-        dung = Dungeon(msz.w, msz.h);
-        dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH);
+        // In infinite world mode, level generation is deterministic per depth and does not
+        // perturb the gameplay RNG stream (so pruned levels can be regenerated identically).
+        const bool deterministicLevel = infiniteWorldEnabled_ && branch_ == DungeonBranch::Main;
+        const uint32_t gameplayRngState = rng.state;
+        if (deterministicLevel) {
+            rng.state = infiniteLevelSeed(newLevel);
+        }
+
+        const Vec2i msz = proceduralMapSizeFor(rng, branch_, depth_);
+        dung = Dungeon(msz.x, msz.y);
+        dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH, seed_);
+
+        // In infinite mode, the sanctum (depth == max) gains a downstairs so depth 26+ is reachable.
+        ensureEndlessSanctumDownstairs(newLevel, dung, rng);
+        dung.computeEndlessStratumInfo(seed_, branch_, depth_, DUNGEON_MAX_DEPTH);
+
         confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
@@ -2545,7 +2838,26 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         p.pos = desiredArrival;
         p.alerted = false;
 
-        // Place stair followers before spawning so spawns avoid them.
+        // Generate deterministic level content (monsters/items/traps/bones) before placing
+        // dynamic arrivals (followers/companions/trapdoor fallers).
+        spawnMonsters();
+        spawnItems();
+        spawnTraps();
+
+        if (branch_ == DungeonBranch::Camp) {
+            setupSurfaceCampInstallations();
+        }
+
+        tryApplyBones();
+
+        spawnFountains();
+
+        // Restore gameplay RNG after deterministic generation/spawns.
+        if (deterministicLevel) {
+            rng.state = gameplayRngState;
+        }
+
+        // Place stair followers after spawning so generation is deterministic in infinite mode.
         followedCount = placeFollowersNear(p.pos);
 
         // Place companions (allies) near the player on the new level.
@@ -2577,18 +2889,6 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
 
         placeTrapdoorFallersHere();
 
-        spawnMonsters();
-        spawnItems();
-        spawnTraps();
-
-        if (branch_ == DungeonBranch::Camp) {
-            setupSurfaceCampInstallations();
-        }
-
-        tryApplyBones();
-
-        spawnFountains();
-
         // Stair arrival is noisy: nearby monsters may wake and investigate.
         emitNoise(p.pos, 12);
 
@@ -2596,6 +2896,9 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         storeCurrentLevel();
     } else {
         // Returning to a visited level.
+        ensureEndlessSanctumDownstairs(newLevel, dung, rng);
+        dung.computeEndlessStratumInfo(seed_, branch_, depth_, DUNGEON_MAX_DEPTH);
+
         const Vec2i desiredArrival = goingDown ? dung.stairsUp : dung.stairsDown;
 
         // If a monster is camping the stairs, don't overlap: step off to the side.
@@ -2761,6 +3064,18 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
             pushMsg("THE CATACOMBS STRETCH OUT IN EVERY DIRECTION.", MessageKind::System, true);
         }
 
+        // Infinite World: endless depths are grouped into run-seeded strata (macro-themed bands).
+        // Announce when we enter a new stratum so the player feels the large-scale progression.
+        if (!restored && goingDown && infiniteWorldEnabled_ && depth_ > DUNGEON_MAX_DEPTH && dung.endlessStratumIndex >= 0) {
+            if (dung.endlessStratumLocal == 0) {
+                pushMsg("THE STONE SHIFTS UNDERFOOT...", MessageKind::System, true);
+
+                std::ostringstream ms;
+                ms << "YOU ENTER THE " << endlessStratumThemeName(dung.endlessStratumTheme) << " STRATUM.";
+                pushMsg(ms.str(), MessageKind::System, true);
+            }
+        }
+
 
 
         // Subtle hint: some floors hide secret shortcut doors between adjacent passages.
@@ -2807,6 +3122,9 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         }
 
     }
+
+    // Infinite world: prune distant deep levels to keep the cache bounded.
+    pruneEndlessLevels();
 
     // Safety: when autosave is enabled, also autosave on floor transitions.
     // This avoids losing progress between levels even if the turn-based autosave interval hasn't triggered yet.

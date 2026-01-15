@@ -215,6 +215,12 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "iso_cutaway" || key == "isometric_cutaway" || key == "iso_wall_cutaway") {
             bool b = true;
             if (parseBool(val, b)) s.isoCutaway = b;
+        } else if (key == "proc_palette" || key == "procedural_palette" || key == "terrain_palette") {
+            bool b = true;
+            if (parseBool(val, b)) s.procPalette = b;
+        } else if (key == "proc_palette_strength" || key == "palette_strength" || key == "terrain_palette_strength") {
+            int v = 0;
+            if (parseInt(val, v)) s.procPaletteStrength = std::clamp(v, 0, 100);
         } else if (key == "texture_cache_mb") {
             int v = 0;
             if (parseInt(val, v)) {
@@ -288,6 +294,14 @@ Settings loadSettings(const std::string& path) {
             bool b = true;
             if (parseBool(val, b)) s.bonesEnabled = b;
         }
+        else if (key == "infinite_world") {
+            bool b = false;
+            if (parseBool(val, b)) s.infiniteWorld = b;
+        }
+        else if (key == "infinite_keep_window") {
+            int v = 0;
+            if (parseInt(val, v)) s.infiniteKeepWindow = std::clamp(v, 0, 200);
+        }
     }
 
     return s;
@@ -357,6 +371,14 @@ iso_voxel_raytrace = false
 # are faded ("cutaway") so interiors remain readable.
 iso_cutaway = true
 
+# proc_palette: true/false
+# Enables the procedural terrain color palette (run/floor-based tinting).
+proc_palette = true
+
+# proc_palette_strength: 0..100
+# 0 disables the effect entirely; 100 is the most colorful.
+proc_palette_strength = 70
+
 # texture_cache_mb: 0 or 16..2048
 # Approximate VRAM budget for cached entity/item/projectile textures.
 # 0 disables eviction (unlimited). If you use huge tile sizes, consider lowering this.
@@ -406,6 +428,12 @@ lighting_enabled = false
 # Optional endgame escalation
 # yendor_doom_enabled: true/false (after you take the Amulet, the dungeon fights back)
 yendor_doom_enabled = true
+
+# Infinite world (experimental)
+# infinite_world: true/false (allow descending beyond the normal bottom)
+infinite_world = false
+# infinite_keep_window: 0 disables pruning; otherwise keeps N post-quest depths cached
+infinite_keep_window = 12
 
 # Item identification
 # identify_items: true/false  (true = potions/scrolls start unidentified)

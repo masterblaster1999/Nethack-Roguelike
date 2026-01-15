@@ -1696,7 +1696,7 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
             if (ed == VtuberCardEdition::Collab) border = add(border, 20, 20, 20);
 
             // Outer border
-            rectOutline(s, 2, 1, 12, 14, border);
+            outlineRect(s, 2, 1, 12, 14, border);
 
             // Collab: split accent along bottom/right edges.
             if (partnerSeed != 0u) {
@@ -1712,7 +1712,7 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
 
             // Rare+: double border
             if (rar >= VtuberRarity::Rare) {
-                rectOutline(s, 3, 2, 10, 12, mul(border, 0.75f));
+                outlineRect(s, 3, 2, 10, 12, mul(border, 0.75f));
             }
 
             // Epic/Mythic OR Foil: corner sparkles.

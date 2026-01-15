@@ -1,12 +1,12 @@
 {
-  "patch_id": "round42_patch",
-  "previous_patch_id": "round41_patch",
-  "round": 42,
+  "patch_id": "round43_patch",
+  "previous_patch_id": "round42_patch",
+  "round": 43,
   "date": "2026-01-15",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Fixed MSVC build errors in monster AI procedural abilities: corrected dungeon member usage, FOV mask typing, and map dimension references; also reused a scratch FOV mask to reduce per-cast allocations when seeding hazard fields.",
-    "Cleaned up MSVC warnings: eliminated shadowing of Game members (`rng`, `fx`) and debug locals (`total`, `pct`, `p`), removed/annotated unused dungeon-generator variables/parameters, and corrected `pushFxParticle` call argument ordering to avoid float->int conversions."
+    "Fixed MSVC build errors in renderer procedural palette code: properly source depth/maxDepth from Game, remove undefined overlay helper usage, and keep overlay object tinting consistent.",
+    "Fixed remaining MSVC build breaks in sprite generation helpers (VTuber holo card borders) and added a subtle deterministic 'glint' modulation for altar/fountain/stairs overlay tiles (scaled by proc_palette strength) to improve readability without breaking pixel-art."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",

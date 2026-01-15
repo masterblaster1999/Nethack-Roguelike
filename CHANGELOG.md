@@ -281,6 +281,7 @@
 - Isometric wall blocks now pick variants coherently along wall segments, improving brickwork continuity in 2.5D view.
 - Isometric ground plane lighting: isometric diamond terrain tiles now apply a subtle whole-tile directional ramp (top-left brighter / bottom-right darker) for better 2.5D depth, and cast shadows now feature stronger corner occlusion with caster-type strength scaling.
 - Isometric block sprites: wall/door/doorway/pillar block sprites now get subtle vertical-face ambient occlusion (under-cap overhang, ridge seam, and base grounding) plus a light-facing cap rim highlight, improving volume/readability in 2.5D view.
+- Renderer: special overlay tiles (stairs, altars, fountains) now get a subtle deterministic **glint** modulation (scaled by proc_palette strength) so interactables pop without breaking pixel-art.
 
 ### Fixed
 - Monster timed-effect timers now tick correctly for enemies as well (regen/shield/invisibility no longer last forever if a monster uses a potion or ability).
@@ -290,6 +291,8 @@
 - Removed MSVC C4244 warnings by passing properly typed `Uint8` color channels to `SDL_SetRenderDrawColor` and by using `uint8_t{0}` for byte-grid fills/initialization.
 - Fixed MSVC build errors in monster AI procedural abilities (undefined dungeon member, incorrect FOV mask type, and undefined dimensions) and reduced per-cast allocations by reusing a scratch FOV mask for hazard seeding.
 - Cleaned up additional MSVC warnings: shadowed `rng`/`fx`/debug locals, unused dungeon-generator parameters, and corrected `pushFxParticle` argument ordering in AI ability FX calls.
+- Fixed MSVC build breaks in the renderer: procedural palette depth normalization now uses `Game::depth()`/`Game::dungeonMaxDepth()` locals, and overlay tile tinting no longer references a missing helper.
+- Fixed MSVC build breaks in sprite generation: VTuber holo card border drawing now uses the existing `outlineRect` helper.
 - Fixed a build break in LOOK/renderer UI helpers by exposing the `equippedMelee/Ranged/Armor/Ring1/Ring2` accessors publicly.
 - Shops now correctly spawn a **Shopkeeper** (enabling **#pay** and selling), and shop rooms no longer spawn random monsters.
 - Shrine item-targeting prompts (**Identify/Bless/Recharge/Sacrifice**) now resolve properly from the inventory UI.

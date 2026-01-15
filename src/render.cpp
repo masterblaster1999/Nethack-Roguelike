@@ -3720,8 +3720,12 @@ const TerrainPaletteTints terrainPalette = [&]() -> TerrainPaletteTints {
 
     if (procPalStrength <= 0.001f) return p;
 
-    const float depth01 = static_cast<float>(std::clamp(depth, 0, std::max(1, dungeonMaxDepth))) /
-                          static_cast<float>(std::max(1, dungeonMaxDepth));
+    const int curDepth = std::max(1, game.depth());
+    const int maxDepth = std::max(1, game.dungeonMaxDepth());
+    const int clampedDepth = std::clamp(curDepth, 1, maxDepth);
+    const float depth01 = (maxDepth > 1)
+                              ? (static_cast<float>(clampedDepth - 1) / static_cast<float>(maxDepth - 1))
+                              : 0.0f;
 
     // Base hue is per-run (styleSeed) with a gentle per-depth drift so each floor has
     // a distinct mood but remains coherent within a run.
@@ -4571,7 +4575,7 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
         const Color baseMod = tileColorMod(x, y, t.visible);
         const TerrainMaterial mat = d.materialAtCached(x, y);
         const Color mod = applyTerrainStyleMod(baseMod, baseType, floorStyle, mat);
-        const Color modObj = isOverlayTile(t.type) ? applyTerrainStyleMod(baseMod, t.type, floorStyle, mat) : mod;
+        const Color modObj = isOverlay ? applyTerrainStyleMod(baseMod, t.type, floorStyle, mat) : mod;
         SDL_SetTextureColorMod(tex, mod.r, mod.g, mod.b);
         SDL_SetTextureAlphaMod(tex, 255);
 
@@ -4805,7 +4809,33 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
             }
 
             if (otex) {
-                SDL_SetTextureColorMod(otex, modObj.r, modObj.g, modObj.b);
+                Color om = modObj;
+
+                // Subtle deterministic "glint" on special overlays (helps stairs/altars/fountains read quickly).
+                // Scales with proc_palette so users have one knob for "extra rendering spice".
+                if (t.visible && procPalStrength > 0.001f) {
+                    const bool glintTile = (t.type == TileType::Altar) || (t.type == TileType::Fountain) ||
+                                           (t.type == TileType::StairsUp) || (t.type == TileType::StairsDown);
+                    if (glintTile) {
+                        const uint32_t hh = hash32(hashCombine(hashCombine(lvlSeed ^ 0x61D11C7u, static_cast<uint32_t>(t.type)),
+                                                              hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y))));
+                        const float phase = static_cast<float>(hh & 0xFFFFu) * (6.2831853f / 65536.0f);
+                        const float speed = 0.0045f + static_cast<float>((hh >> 16) & 0xFFu) * 0.00001f;
+                        const float w = std::sin(static_cast<float>(ticks) * speed + phase);
+
+                        // k is a tiny mix-to-white factor.
+                        const float k = std::clamp(std::max(0.0f, w) * 0.10f * procPalStrength, 0.0f, 0.18f);
+
+                        const int dr = static_cast<int>(std::lround((255.0f - static_cast<float>(om.r)) * k));
+                        const int dg = static_cast<int>(std::lround((255.0f - static_cast<float>(om.g)) * k));
+                        const int db = static_cast<int>(std::lround((255.0f - static_cast<float>(om.b)) * k));
+                        om.r = static_cast<uint8_t>(std::clamp(static_cast<int>(om.r) + dr, 0, 255));
+                        om.g = static_cast<uint8_t>(std::clamp(static_cast<int>(om.g) + dg, 0, 255));
+                        om.b = static_cast<uint8_t>(std::clamp(static_cast<int>(om.b) + db, 0, 255));
+                    }
+                }
+
+                SDL_SetTextureColorMod(otex, om.r, om.g, om.b);
                 SDL_SetTextureAlphaMod(otex, 255);
                 SDL_RenderCopy(renderer, otex, nullptr, &dst);
                 SDL_SetTextureColorMod(otex, 255, 255, 255);

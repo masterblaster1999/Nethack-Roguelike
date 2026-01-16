@@ -977,24 +977,169 @@ int main(int argc, char** argv) {
                         // Extended command prompt: treat the keyboard as text input.
                         if (game.isCommandOpen()) {
                             // Allow key repeat for editing/navigation but avoid repeating command execution.
-                            if (isRepeat && key != SDLK_BACKSPACE && key != SDLK_UP && key != SDLK_DOWN) {
+                            if (isRepeat && key != SDLK_BACKSPACE && key != SDLK_DELETE &&
+                                key != SDLK_UP && key != SDLK_DOWN && key != SDLK_LEFT && key != SDLK_RIGHT) {
                                 break;
                             }
+
+                            auto recordBackspace = [&]() {
+                                if (recording) recorder.writeCommandBackspace(recordTimeMs());
+                                game.commandBackspace();
+                            };
+
+                            // Basic modal behaviour.
                             if (key == SDLK_ESCAPE) {
                                 dispatchAction(Action::Cancel);
                                 lastEscPressMs = 0;
-                            } else if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
+                                break;
+                            }
+                            if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
                                 dispatchAction(Action::Confirm);
-                            } else if (key == SDLK_BACKSPACE) {
-                                if (recording) recorder.writeCommandBackspace(recordTimeMs());
-                                game.commandBackspace();
-                            } else if (key == SDLK_UP) {
+                                break;
+                            }
+
+                            // Cursor navigation.
+                            if (key == SDLK_LEFT) {
+                                dispatchAction(Action::Left);
+                                break;
+                            }
+                            if (key == SDLK_RIGHT) {
+                                dispatchAction(Action::Right);
+                                break;
+                            }
+                            if (key == SDLK_HOME) {
+                                dispatchAction(Action::LogUp);   // home in command line
+                                break;
+                            }
+                            if (key == SDLK_END) {
+                                dispatchAction(Action::LogDown); // end in command line
+                                break;
+                            }
+
+                            // Deletion/editing.
+                            if (key == SDLK_BACKSPACE) {
+                                recordBackspace();
+                                break;
+                            }
+                            if (key == SDLK_DELETE) {
+                                // Forward delete: move right one char then backspace.
+                                const int cur = game.commandCursorByte();
+                                const int end = static_cast<int>(game.commandBuffer().size());
+                                if (cur >= 0 && cur < end) {
+                                    dispatchAction(Action::Right);
+                                    recordBackspace();
+                                }
+                                break;
+                            }
+
+                            // Readline-style helpers (recorded as primitive edit ops so replays work).
+                            if ((mod & KMOD_CTRL) != 0 && !isRepeat) {
+                                // Move by one character (Readline: C-b/C-f).
+                                if (key == SDLK_b) {
+                                    dispatchAction(Action::Left);
+                                    break;
+                                }
+                                if (key == SDLK_f) {
+                                    dispatchAction(Action::Right);
+                                    break;
+                                }
+
+                                // History navigation (Readline: C-p/C-n).
+                                if (key == SDLK_p) {
+                                    dispatchAction(Action::Up);
+                                    break;
+                                }
+                                if (key == SDLK_n) {
+                                    dispatchAction(Action::Down);
+                                    break;
+                                }
+
+                                // Forward delete (Readline: C-d).
+                                if (key == SDLK_d) {
+                                    const int cur = game.commandCursorByte();
+                                    const int end = static_cast<int>(game.commandBuffer().size());
+                                    if (cur >= 0 && cur < end) {
+                                        dispatchAction(Action::Right);
+                                        recordBackspace();
+                                    }
+                                    break;
+                                }
+
+                                if (key == SDLK_a) {
+                                    dispatchAction(Action::LogUp);   // home
+                                    break;
+                                }
+                                if (key == SDLK_e) {
+                                    dispatchAction(Action::LogDown); // end
+                                    break;
+                                }
+                                if (key == SDLK_u) {
+                                    // Kill to start of line.
+                                    while (game.commandCursorByte() > 0) {
+                                        recordBackspace();
+                                    }
+                                    break;
+                                }
+                                if (key == SDLK_k) {
+                                    // Kill to end of line.
+                                    while (true) {
+                                        const int cur = game.commandCursorByte();
+                                        const int end = static_cast<int>(game.commandBuffer().size());
+                                        if (cur < 0 || cur >= end) break;
+                                        dispatchAction(Action::Right);
+                                        recordBackspace();
+                                    }
+                                    break;
+                                }
+                                if (key == SDLK_l) {
+                                    // Clear entire line (consistent with CTRL+L in other UI filters).
+                                    dispatchAction(Action::LogDown);
+                                    while (game.commandCursorByte() > 0) {
+                                        recordBackspace();
+                                    }
+                                    break;
+                                }
+                                if (key == SDLK_w) {
+                                    // Delete previous word.
+                                    auto isSpacePrev = [&]() -> bool {
+                                        const std::string& b = game.commandBuffer();
+                                        size_t curB = static_cast<size_t>(std::clamp(game.commandCursorByte(), 0, static_cast<int>(b.size())));
+                                        if (curB == 0) return false;
+                                        size_t i = curB - 1;
+                                        while (i > 0 && (static_cast<unsigned char>(b[i]) & 0xC0u) == 0x80u) {
+                                            --i;
+                                        }
+                                        const unsigned char ch = static_cast<unsigned char>(b[i]);
+                                        return std::isspace(static_cast<int>(ch)) != 0;
+                                    };
+
+                                    // First delete any whitespace run.
+                                    while (game.commandCursorByte() > 0 && isSpacePrev()) {
+                                        recordBackspace();
+                                    }
+                                    // Then delete the word body.
+                                    while (game.commandCursorByte() > 0 && !isSpacePrev()) {
+                                        recordBackspace();
+                                    }
+                                    break;
+                                }
+                            }
+
+                            // History navigation.
+                            if (key == SDLK_UP) {
                                 dispatchAction(Action::Up);
-                            } else if (key == SDLK_DOWN) {
+                                break;
+                            }
+                            if (key == SDLK_DOWN) {
                                 dispatchAction(Action::Down);
-                            } else if (key == SDLK_TAB) {
+                                break;
+                            }
+
+                            // Completion.
+                            if (key == SDLK_TAB) {
                                 if (recording) recorder.writeCommandAutocomplete(recordTimeMs());
                                 game.commandAutocomplete();
+                                break;
                             }
                             break;
                         }

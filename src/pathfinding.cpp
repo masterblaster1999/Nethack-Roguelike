@@ -169,3 +169,217 @@ std::vector<int> dijkstraCostToTarget(
 
     return dist;
 }
+
+std::vector<int> dijkstraCostToNearestSource(
+    int width,
+    int height,
+    const std::vector<Vec2i>& sources,
+    const PassableFn& passable,
+    const StepCostFn& stepCost,
+    const DiagonalOkFn& diagonalOk,
+    int maxCost)
+{
+    std::vector<DijkstraSeed> seeds;
+    seeds.reserve(sources.size());
+    for (const Vec2i& s : sources) {
+        seeds.push_back(DijkstraSeed{s, 0});
+    }
+
+    return dijkstraCostToNearestSeeded(width, height, seeds, passable, stepCost, diagonalOk, maxCost);
+}
+
+
+std::vector<int> dijkstraCostToNearestSeeded(
+    int width,
+    int height,
+    const std::vector<DijkstraSeed>& seeds,
+    const PassableFn& passable,
+    const StepCostFn& stepCost,
+    const DiagonalOkFn& diagonalOk,
+    int maxCost)
+{
+    const size_t n = static_cast<size_t>(std::max(0, width) * std::max(0, height));
+    std::vector<int> dist(n, -1);
+    if (width <= 0 || height <= 0) return dist;
+    if (seeds.empty()) return dist;
+
+    const int INF = std::numeric_limits<int>::max() / 4;
+    std::vector<int> best(n, INF);
+
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> pq;
+
+    // Seed with all valid sources.
+    for (const DijkstraSeed& s : seeds) {
+        if (!inBounds(width, height, s.pos.x, s.pos.y)) continue;
+        if (!passable(s.pos.x, s.pos.y)) continue;
+
+        int init = s.initialCost;
+        if (init < 0) init = 0;
+        if (maxCost >= 0 && init > maxCost) continue;
+
+        const int si = idxOf(width, s.pos.x, s.pos.y);
+        int& slot = best[static_cast<size_t>(si)];
+        if (init >= slot) continue;
+
+        slot = init;
+        pq.push({init, si});
+    }
+
+    if (pq.empty()) return dist;
+
+    while (!pq.empty()) {
+        const Node cur = pq.top();
+        pq.pop();
+
+        const int costHere = cur.first;
+        const int i = cur.second;
+
+        if (maxCost >= 0 && costHere > maxCost) continue;
+        if (best[static_cast<size_t>(i)] != costHere) continue;
+
+        const int x = i % width;
+        const int y = i / width;
+
+        // While expanding outward (reverse), add the cost of entering the CURRENT tile
+        // so a neighbor -> (x,y) -> ... path is priced correctly.
+        const int enterCostHere = stepCost(x, y);
+        if (enterCostHere <= 0) continue;
+
+        for (const auto& dv : DIRS8) {
+            const int nx = x + dv[0];
+            const int ny = y + dv[1];
+            if (!inBounds(width, height, nx, ny)) continue;
+            if (!passable(nx, ny)) continue;
+
+            if (dv[0] != 0 && dv[1] != 0) {
+                // Reverse move: neighbor -> current, so flip the direction.
+                if (diagonalOk && !diagonalOk(nx, ny, -dv[0], -dv[1])) continue;
+            }
+
+            const int ni = idxOf(width, nx, ny);
+            const int ncost = costHere + enterCostHere;
+            if (maxCost >= 0 && ncost > maxCost) continue;
+
+            int& slot = best[static_cast<size_t>(ni)];
+            if (ncost < slot) {
+                slot = ncost;
+                pq.push({ncost, ni});
+            }
+        }
+    }
+
+    // Convert to the public -1 sentinel format.
+    for (size_t i = 0; i < n; ++i) {
+        if (best[i] == INF) continue;
+        if (maxCost >= 0 && best[i] > maxCost) continue;
+        dist[i] = best[i];
+    }
+
+    return dist;
+}
+
+
+std::vector<int> dijkstraCostFromSources(
+    int width,
+    int height,
+    const std::vector<Vec2i>& sources,
+    const PassableFn& passable,
+    const StepCostFn& stepCost,
+    const DiagonalOkFn& diagonalOk,
+    int maxCost)
+{
+    std::vector<DijkstraSeed> seeds;
+    seeds.reserve(sources.size());
+    for (const Vec2i& s : sources) {
+        seeds.push_back(DijkstraSeed{s, 0});
+    }
+
+    return dijkstraCostFromSeeded(width, height, seeds, passable, stepCost, diagonalOk, maxCost);
+}
+
+
+std::vector<int> dijkstraCostFromSeeded(
+    int width,
+    int height,
+    const std::vector<DijkstraSeed>& seeds,
+    const PassableFn& passable,
+    const StepCostFn& stepCost,
+    const DiagonalOkFn& diagonalOk,
+    int maxCost)
+{
+    const size_t n = static_cast<size_t>(std::max(0, width) * std::max(0, height));
+    std::vector<int> dist(n, -1);
+    if (width <= 0 || height <= 0) return dist;
+    if (seeds.empty()) return dist;
+
+    const int INF = std::numeric_limits<int>::max() / 4;
+    std::vector<int> best(n, INF);
+
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> pq;
+
+    // Seed with all valid sources.
+    for (const DijkstraSeed& s : seeds) {
+        if (!inBounds(width, height, s.pos.x, s.pos.y)) continue;
+        if (!passable(s.pos.x, s.pos.y)) continue;
+
+        int init = s.initialCost;
+        if (init < 0) init = 0;
+        if (maxCost >= 0 && init > maxCost) continue;
+
+        const int si = idxOf(width, s.pos.x, s.pos.y);
+        int& slot = best[static_cast<size_t>(si)];
+        if (init >= slot) continue;
+
+        slot = init;
+        pq.push({init, si});
+    }
+
+    if (pq.empty()) return dist;
+
+    while (!pq.empty()) {
+        const Node cur = pq.top();
+        pq.pop();
+
+        const int costHere = cur.first;
+        const int i = cur.second;
+
+        if (maxCost >= 0 && costHere > maxCost) continue;
+        if (best[static_cast<size_t>(i)] != costHere) continue;
+
+        const int x = i % width;
+        const int y = i / width;
+
+        for (const auto& dv : DIRS8) {
+            const int nx = x + dv[0];
+            const int ny = y + dv[1];
+            if (!inBounds(width, height, nx, ny)) continue;
+            if (!passable(nx, ny)) continue;
+
+            if (dv[0] != 0 && dv[1] != 0) {
+                if (diagonalOk && !diagonalOk(x, y, dv[0], dv[1])) continue;
+            }
+
+            const int step = stepCost(nx, ny);
+            if (step <= 0) continue;
+
+            const int ncost = costHere + step;
+            if (maxCost >= 0 && ncost > maxCost) continue;
+
+            const int ni = idxOf(width, nx, ny);
+            int& slot = best[static_cast<size_t>(ni)];
+            if (ncost < slot) {
+                slot = ncost;
+                pq.push({ncost, ni});
+            }
+        }
+    }
+
+    // Convert to the public -1 sentinel format.
+    for (size_t i = 0; i < n; ++i) {
+        if (best[i] == INF) continue;
+        if (maxCost >= 0 && best[i] > maxCost) continue;
+        dist[i] = best[i];
+    }
+
+    return dist;
+}

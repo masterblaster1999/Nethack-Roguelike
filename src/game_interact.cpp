@@ -1,5 +1,66 @@
 #include "game_internal.hpp"
 
+int Game::playerFootstepNoiseVolumeAt(Vec2i pos) const {
+    if (!dung.inBounds(pos.x, pos.y)) return 0;
+
+    // Footstep noise: small, but enough for nearby monsters to investigate.
+    // Scales a bit with encumbrance + armor clank.
+    int vol = 4;
+    if (encumbranceEnabled_) {
+        switch (burdenState()) {
+            case BurdenState::Unburdened: break;
+            case BurdenState::Burdened:   vol += 1; break;
+            case BurdenState::Stressed:   vol += 2; break;
+            case BurdenState::Strained:   vol += 3; break;
+            case BurdenState::Overloaded: vol += 4; break;
+        }
+    }
+    if (const Item* a = equippedArmor()) {
+        if (a->kind == ItemKind::ChainArmor) vol += 1;
+        if (a->kind == ItemKind::PlateArmor) vol += 2;
+    }
+
+    // Substrate materials subtly affect how much sound you make while moving.
+    // (Moss/dirt dampen; metal/crystal ring out.)
+    int matDelta = 0;
+    {
+        dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+        const TerrainMaterial m = dung.materialAtCached(pos.x, pos.y);
+        matDelta = terrainMaterialFx(m).footstepNoiseDelta;
+    }
+
+    if (isSneaking()) {
+        // Sneaking can reduce footstep noise to near-silent levels, but
+        // heavy armor / encumbrance still makes at least some noise.
+        int reduce = 4 + std::min(2, playerAgility() / 4);
+        vol -= reduce;
+
+        int minVol = 0;
+        if (encumbranceEnabled_) {
+            switch (burdenState()) {
+                case BurdenState::Unburdened: break;
+                case BurdenState::Burdened:   minVol = std::max(minVol, 1); break;
+                case BurdenState::Stressed:   minVol = std::max(minVol, 1); break;
+                case BurdenState::Strained:   minVol = std::max(minVol, 1); break;
+                case BurdenState::Overloaded: minVol = std::max(minVol, 2); break;
+            }
+        }
+        if (const Item* a = equippedArmor()) {
+            if (a->kind == ItemKind::ChainArmor) minVol = std::max(minVol, 1);
+            if (a->kind == ItemKind::PlateArmor) minVol = std::max(minVol, 2);
+        }
+
+        vol = clampi(vol, minVol, 14);
+        vol = clampi(vol + matDelta, minVol, 14);
+    } else {
+        vol = clampi(vol, 2, 14);
+        vol = clampi(vol + matDelta, 1, 14);
+    }
+
+    return std::max(0, vol);
+}
+
+
 bool Game::tryMove(Entity& e, int dx, int dy) {
     if (e.hp <= 0) return false;
     if (dx == 0 && dy == 0) return false;
@@ -74,7 +135,8 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
             // However, a few heavy bruisers can bash them down while hunting.
             // This prevents "perfect safety" behind vault doors and makes
             // late-game chases more exciting.
-            const bool canBash = (e.kind == EntityKind::Ogre || e.kind == EntityKind::Troll || e.kind == EntityKind::Minotaur);
+            // Keep door-bashing policy consistent with AI/pathing helpers.
+            const bool canBash = entityCanBashLockedDoor(e.kind);
             if (!canBash || !e.alerted) {
                 return false;
             }
@@ -292,63 +354,11 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
             }
         }
         // Footstep noise: small, but enough for nearby monsters to investigate.
-        // Scales a bit with encumbrance + armor clank.
-        int vol = 4;
-        if (encumbranceEnabled_) {
-            switch (burdenState()) {
-                case BurdenState::Unburdened: break;
-                case BurdenState::Burdened:   vol += 1; break;
-                case BurdenState::Stressed:   vol += 2; break;
-                case BurdenState::Strained:   vol += 3; break;
-                case BurdenState::Overloaded: vol += 4; break;
-            }
-        }
-        if (const Item* a = equippedArmor()) {
-            if (a->kind == ItemKind::ChainArmor) vol += 1;
-            if (a->kind == ItemKind::PlateArmor) vol += 2;
-        }
-
-        // Substrate materials subtly affect how much sound you make while moving.
-        // (Moss/dirt dampen; metal/crystal ring out.)
-        int matDelta = 0;
-        {
-            dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
-            const TerrainMaterial m = dung.materialAtCached(e.pos.x, e.pos.y);
-            matDelta = terrainMaterialFx(m).footstepNoiseDelta;
-        }
-
-        if (isSneaking()) {
-            // Sneaking can reduce footstep noise to near-silent levels, but
-            // heavy armor / encumbrance still makes at least some noise.
-            int reduce = 4 + std::min(2, playerAgility() / 4);
-            vol -= reduce;
-
-            int minVol = 0;
-            if (encumbranceEnabled_) {
-                switch (burdenState()) {
-                    case BurdenState::Unburdened: break;
-                    case BurdenState::Burdened:   minVol = std::max(minVol, 1); break;
-                    case BurdenState::Stressed:   minVol = std::max(minVol, 1); break;
-                    case BurdenState::Strained:   minVol = std::max(minVol, 1); break;
-                    case BurdenState::Overloaded: minVol = std::max(minVol, 2); break;
-                }
-            }
-            if (const Item* a = equippedArmor()) {
-                if (a->kind == ItemKind::ChainArmor) minVol = std::max(minVol, 1);
-                if (a->kind == ItemKind::PlateArmor) minVol = std::max(minVol, 2);
-            }
-
-            vol = clampi(vol, minVol, 14);
-            vol = clampi(vol + matDelta, minVol, 14);
-        } else {
-            vol = clampi(vol, 2, 14);
-            vol = clampi(vol + matDelta, 1, 14);
-        }
-
+        // Scales with encumbrance + armor clank + substrate material, and respects sneak.
+        const int vol = playerFootstepNoiseVolumeAt(e.pos);
         if (vol > 0) {
             emitNoise(e.pos, vol);
         }
-
         // Convenience / QoL: auto-pickup when stepping on items.
         if (autoPickup != AutoPickupMode::Off) {
             (void)autoPickupAtPlayer();
@@ -1890,6 +1900,7 @@ void Game::beginDig() {
     if (commandOpen) {
         commandOpen = false;
         commandBuf.clear();
+        commandCursor_ = 0;
         commandDraft.clear();
         commandHistoryPos = -1;
     }
@@ -1917,6 +1928,7 @@ void Game::beginKick() {
     if (commandOpen) {
         commandOpen = false;
         commandBuf.clear();
+        commandCursor_ = 0;
         commandDraft.clear();
         commandHistoryPos = -1;
     }
@@ -2633,8 +2645,8 @@ bool Game::augury() {
     (void)spendGoldFromInv(inv, cost);
     pushMsg("YOU PAY " + std::to_string(cost) + " GOLD AND CAST THE BONES...", MessageKind::Info, true);
 
-    // Preview the next floor using a COPY of the RNG so the vision itself doesn't perturb fate.
-    // NOTE: the vision can still be "wrong" if you do other RNG-consuming actions before descending.
+    // Preview the next floor using its deterministic per-level seed.
+    // (Worldgen is decoupled from the gameplay RNG stream, so this vision stays accurate.)
 
     DungeonBranch nextBranch = branch_;
     int nextDepth = depth_ + 1;
@@ -2644,11 +2656,7 @@ bool Game::augury() {
         nextBranch = DungeonBranch::Main;
         nextDepth = 1;
     }
-
-    RNG previewRng = rng;
-    if (infiniteWorldEnabled_ && nextBranch == DungeonBranch::Main) {
-        previewRng.state = infiniteLevelSeed(LevelId{nextBranch, nextDepth});
-    }
+    RNG previewRng(levelGenSeed(LevelId{nextBranch, nextDepth}));
     const Vec2i msz = proceduralMapSizeFor(previewRng, nextBranch, nextDepth);
     Dungeon preview(msz.x, msz.y);
 

@@ -116,6 +116,42 @@ inline const char* entityKindName(EntityKind k) {
 
 
 // -----------------------------------------------------------------------------
+// Hearing (noise sensitivity)
+//
+// Monsters have small per-kind hearing differences.
+// Hearing is expressed as a modifier against positional noise 'volume'
+// (both are in tile-cost units).
+// -----------------------------------------------------------------------------
+inline constexpr int BASE_HEARING = 8;
+
+inline int entityHearing(EntityKind k) {
+    switch (k) {
+        case EntityKind::Bat:            return 12;
+        case EntityKind::Wolf:           return 10;
+        case EntityKind::Snake:          return 9;
+        case EntityKind::Wizard:         return 9;
+        case EntityKind::Spider:         return 8;
+        case EntityKind::Goblin:         return 8;
+        case EntityKind::Leprechaun:     return 11;
+        case EntityKind::Nymph:          return 10;
+        case EntityKind::Orc:            return 8;
+        case EntityKind::KoboldSlinger:  return 8;
+        case EntityKind::SkeletonArcher: return 7;
+        case EntityKind::Troll:          return 7;
+        case EntityKind::Ogre:           return 7;
+        case EntityKind::Shopkeeper:     return 10;
+        case EntityKind::Slime:          return 6;
+        case EntityKind::Mimic:          return 5;
+        default:                         return BASE_HEARING;
+    }
+}
+
+inline int entityHearingDelta(EntityKind k) {
+    return entityHearing(k) - BASE_HEARING;
+}
+
+
+// -----------------------------------------------------------------------------
 // Procedural monster variants (rank + affixes)
 //
 // These are lightweight "roguelike affixes" applied at spawn time to create
@@ -334,6 +370,14 @@ inline bool entityCanPhase(EntityKind k) {
     return (k == EntityKind::Ghost);
 }
 
+
+// Some heavy monsters can bash through locked doors while hunting.
+// Keep this in a header so AI + UI helpers stay consistent.
+inline bool entityCanBashLockedDoor(EntityKind k) {
+    // Keep conservative for balance: only heavy bruisers.
+    return (k == EntityKind::Ogre || k == EntityKind::Troll || k == EntityKind::Minotaur);
+}
+
 inline bool entityIsUndead(EntityKind k) {
     return (k == EntityKind::Ghost || k == EntityKind::SkeletonArcher || k == EntityKind::Zombie);
 }
@@ -505,6 +549,10 @@ enum class Action : uint8_t {
 
     // UI-only (append-only)
     ToggleSoundPreview, // Toggle the acoustic/sound propagation preview overlay (Look-mode helper)
+    ToggleThreatPreview, // Toggle the tactical threat/ETA heatmap overlay (Look-mode helper)
+
+    // Tactical helpers (append-only)
+    Evade, // Smart evasive step away from visible threats (uses threat+hearing fields)
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -1574,6 +1622,14 @@ bool clearItemCallLabel(ItemKind k);
     void toggleSoundPreview();
     void adjustSoundPreviewVolume(int delta);
 
+    // Threat preview overlay (LOOK helper; UI-only)
+    bool isThreatPreviewOpen() const { return threatPreviewOpen; }
+    int threatPreviewHorizon() const { return threatPreviewMaxCost; }
+    const std::vector<Vec2i>& threatPreviewSources() const { return threatPreviewSrcs; }
+    const std::vector<int>& threatPreviewMap() const { return threatPreviewDist; }
+    void toggleThreatPreview();
+    void adjustThreatPreviewHorizon(int delta);
+
     // Minimap / stats overlays
     bool isMinimapOpen() const { return minimapOpen; }
     bool isStatsOpen() const { return statsOpen; }
@@ -1635,9 +1691,25 @@ bool clearItemCallLabel(ItemKind k);
     // NetHack-like extended command prompt
     bool isCommandOpen() const { return commandOpen; }
     const std::string& commandBuffer() const { return commandBuf; }
+    // Byte index into commandBuffer() (UTF-8 safe; always kept on a codepoint boundary).
+    int commandCursorByte() const { return commandCursor_; }
     void commandTextInput(const char* utf8);
     void commandBackspace();
     void commandAutocomplete();
+
+    // Cursor navigation for the extended command prompt (UI-only; does not consume turns).
+    void commandCursorLeft();
+    void commandCursorRight();
+    void commandCursorHome();
+    void commandCursorEnd();
+
+    // Tab completion UI state (UI-only; does not consume turns).
+    const std::vector<std::string>& commandAutocompleteMatches() const { return commandAutoMatches; }
+    const std::vector<std::string>& commandAutocompleteHints() const { return commandAutoHints; }
+    const std::vector<std::string>& commandAutocompleteDescs() const { return commandAutoDescs; }
+    int commandAutocompleteIndex() const { return commandAutoIndex; }
+    const std::string& commandAutocompleteBase() const { return commandAutoBase; }
+    bool commandAutocompleteFuzzy() const { return commandAutoFuzzy; }
 
     // Settings path (for UI hints) + persistence flag for options
     void setSettingsPath(const std::string& path);
@@ -1963,9 +2035,16 @@ private:
     // Acoustic preview (UI-only; not serialized). When enabled, we cache a sound-cost map
     // from the LOOK cursor so the renderer can show an in-world sound propagation heatmap.
     bool soundPreviewOpen = false;
-    int soundPreviewVol = 12;
+    int soundPreviewVol = 12;      // final volume (base + bias), 0..30
+    int soundPreviewVolBase = 12;  // derived from your current footstep model at the LOOK cursor
+    int soundPreviewVolBias = 0;   // user adjustment via [ ] while preview is open
     Vec2i soundPreviewSrc{0,0};
     std::vector<int> soundPreviewDist;
+
+    bool threatPreviewOpen = false;
+    int threatPreviewMaxCost = 12;
+    std::vector<Vec2i> threatPreviewSrcs;
+    std::vector<int> threatPreviewDist;
 
     // Minimap / stats overlays
     bool minimapOpen = false;
@@ -2003,14 +2082,19 @@ private:
 
     bool commandOpen = false;
     std::string commandBuf;
+    int commandCursor_ = 0; // byte index into commandBuf
     std::string commandDraft;
     std::vector<std::string> commandHistory;
     int commandHistoryPos = -1;
 
     // Command prompt tab-completion cycle (UI-only; not serialized).
     std::string commandAutoBase;
+    std::string commandAutoPrefix; // text before the token being completed (e.g. "bind ")
     std::vector<std::string> commandAutoMatches;
+    std::vector<std::string> commandAutoHints;
+    std::vector<std::string> commandAutoDescs;
     int commandAutoIndex = -1;
+    bool commandAutoFuzzy = false;
 
     // Settings persistence + UI helpers
     std::string settingsPath_;
@@ -2113,6 +2197,9 @@ private:
     int autoExploreSearchTurnsLeft = 0;
     bool autoExploreSearchAnnounced = false; // message shown for the current secret-hunt stretch
     std::vector<uint8_t> autoExploreSearchTriedTurns; // per-tile number of auto-search turns already spent
+
+    // Auto-travel: one-time warning throttle when hostiles are visible but still far away.
+    bool autoTravelCautionAnnounced = false;
 
     // Save path overrides (set by main using SDL_GetPrefPath)
     std::string savePathOverride;
@@ -2218,6 +2305,14 @@ private:
     const Entity* entityAt(int x, int y) const;
 
     bool tryMove(Entity& e, int dx, int dy);
+
+    // Compute the positional noise volume produced by a single player step onto `pos`.
+    // Used by movement, and by LOOK-mode Sound Preview so the UI matches real stealth rules.
+    int playerFootstepNoiseVolumeAt(Vec2i pos) const;
+
+    // Recompute the cached LOOK-mode sound preview map (volume + dist field).
+    // Safe to call frequently while the cursor moves.
+    void refreshSoundPreview();
     // If kick=true, perform an unarmed kick attack (ignores equipped melee weapon)
     // with a stronger knockback profile.
     void attackMelee(Entity& attacker, Entity& defender, bool kick = false);
@@ -2267,8 +2362,15 @@ private:
     void changeLevel(int newDepth, bool goingDown);
     void changeLevel(LevelId newLevel, bool goingDown);
 
+    // Deterministic per-level worldgen seed (run seed + level identity).
+    // Used to decouple procedural generation from the gameplay RNG stream.
+    uint32_t levelGenSeed(LevelId id) const;
+
+    // Backwards compatibility: older code called this "infiniteLevelSeed" when the
+    // deterministic mode was only used for Infinite World.
+    uint32_t infiniteLevelSeed(LevelId id) const { return levelGenSeed(id); }
+
     // Endless / infinite world helpers.
-    uint32_t infiniteLevelSeed(LevelId id) const;
     void ensureEndlessSanctumDownstairs(LevelId id, Dungeon& d, RNG& rngForPlacement) const;
     void pruneEndlessLevels();
 
@@ -2360,6 +2462,8 @@ private:
     bool tileHasAutoExploreLoot(Vec2i p) const;
 
     bool stepAutoMove();
+    // Tactical helper: choose a best-effort single-step evasion move away from visible hostiles.
+    bool evadeStep();
     bool buildAutoTravelPath(Vec2i goal, bool requireExplored, bool allowKnownTraps);
     bool buildAutoExplorePath();
     Vec2i findNearestExploreFrontier() const;

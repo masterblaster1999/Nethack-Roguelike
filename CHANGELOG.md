@@ -97,7 +97,8 @@
   - Labels persist in saves and render as a `{LABEL}` suffix on unidentified items (inventory/LOOK) and in Discoveries.
 
 - **Acoustic preview (Sound lens)**: LOOK mode can now toggle a **sound propagation heatmap** that shows where noise would travel (respecting door muffling) **without revealing unexplored tiles**.
-  - Defaults to your current footstep loudness (sneak vs normal); adjust volume with `[` / `]` while in LOOK.
+  - Defaults to your current **real** footstep loudness (sneak/armor/encumbrance/substrate); adjust volume bias with `[` / `]` while in LOOK.
+  - Outlines visible hostiles that would hear the sound (per-kind hearing).
   - Default bind: **Ctrl+N** (`bind_sound_preview` in settings; rebindable via `#bind`).
 - **Per-level wind drafts**: each floor now has a deterministic **cardinal wind** (CALM/N/E/S/W) that gently biases **gas drift** and **fire spread** through corridors.
   - Announced once when a floor is first generated; check anytime with `#wind`.
@@ -258,7 +259,11 @@
 ### Changed
 - **Dungeon length**: increased the default run from **20** to **25** floors (5 additional depths before the labyrinth and final sanctum).
 - Extended command prompt: **TAB completion** now extends to the **longest common prefix** and lets you **cycle** through ambiguous matches by pressing **TAB** repeatedly (also works for pasted NetHack-style `#cmd` inputs).
+- Extended command prompt: upgraded to a proper **caret editor** (LEFT/RIGHT, HOME/END, DEL forward-delete) with familiar shell/Readline shortcuts: **Ctrl+A/E** home/end, **Ctrl+W** delete previous word, **Ctrl+U** clear to start, **Ctrl+K** clear to end; plus **Ctrl+L** clears the whole line (consistent with filter UIs).
+- Extended command prompt: TAB completion now shows an in-overlay **dropdown match list** with the active selection highlighted; added a default **Ctrl+P** binding to open the prompt when `#` is awkward on some layouts.
+- Extended command prompt: completion dropdown now shows **keybinding hints** for common commands (save/load/options/help/etc) and scrolls to keep the active selection visible; TAB completion falls back to a **fuzzy subsequence match** when there are no prefix matches; added additional Readline-style shortcuts inside the prompt (**Ctrl+B/F** move caret, **Ctrl+P/N** history, **Ctrl+D** forward delete).
 - Extended command prompt: unknown commands now show a short **DID YOU MEAN** suggestion list to make typos less punishing.
+- Extended command prompt: TAB completion is now **context-aware** for common argument slots: `bind`/`unbind` completes **action names** (from the shared Action registry), and `preset`/`autopickup`/`identify`/`mortem` complete their common option values.
 - Inventory overlay: the left-hand list now shows compact **quick-compare** badges (ATK/DEF/RA/RN deltas + ring mods) so upgrades are visible at a glance; fixed gear stat comparisons to include **bless/curse** modifiers.
 - Keybinds editor overlay: added an in-overlay **filter/search** (press `/`), **DEL** to unbind (writes `none`), and highlighted **conflicting** duplicate chords.
 - Keyboard input: SDL key repeat is now honored for movement and menu navigation (hold a direction to keep moving; repeats are still suppressed for toggles/confirm/ESC to avoid accidental spam).
@@ -267,6 +272,8 @@
 - Auto-explore: when no normal frontiers remain, it will now **walk to reachable locked doors** that border unexplored tiles (if you have keys/lockpicks) so it doesn't incorrectly report the floor as fully explored.
 - Auto-move hazard awareness: **auto-travel** now strongly prefers routes that avoid **confusion/poison gas** tiles, and **auto-explore** will not path through gas clouds (similar to fire) until they dissipate.
   - Auto-move also stops immediately if you end up standing in a gas cloud (even before the status effect lands), preventing accidental turn-burning in hazards.
+- Auto-travel (Sneak): when **Sneak** is enabled and hostiles are visible, auto-travel/auto-explore path planning now incorporates the dungeon's **sound propagation** model + monster hearing deltas to prefer routes where your **footsteps won't be heard**.
+- Sound/hearing integration: visible-hostile audibility is now computed as a single **multi-source seeded Dijkstra field** (tile→listener), improving performance and making muffling doors/locks model **directionally** (no more listener→tile approximation).
 - Floor trap scatter now avoids **shops** and **shrines** (keeps safe spaces consistent; traps still appear elsewhere).
 - Darkness lighting now treats **burning creatures** and **flaming ego weapons** as small moving light sources (in addition to torches, room ambient light, and fire fields).
 - Monster pathfinding now treats **poison gas** and **discovered traps** as higher-cost tiles, so monsters (and pets) will route around known hazards when practical.
@@ -308,7 +315,21 @@
 - Message history overlay now **wraps** long messages (no more right-edge truncation) and supports **CTRL+C** to copy the filtered history to the clipboard.
 - Mouse wheel scrolling is now **context-sensitive**: it scrolls selection in list-based overlays (inventory/chests/spells/options/codex/discoveries/scores) and enables the minimap’s intended **quick-scroll** behavior (LOG UP/DOWN moves the cursor by 10 tiles instead of scrolling the message log).
 - Auto-explore: frontier selection now respects diagonal "corner-cut" movement rules, avoiding unreachable diagonal targets that could prematurely end exploration.
+- LOOK-mode Threat Preview + sound propagation now share the same Dijkstra grid helper (no duplicated priority-queue implementations).
+- Threat Preview ETA is now computed as a true *enemy-to-tile* travel cost field (forward multi-source Dijkstra), improving correctness around door/lock movement costs.
+- Threat Preview + monster AI now share a single monster pathing policy (doors, chasms, phasing, hazards, discovered-trap avoidance), fixing hybrid cases like levitating door-smashers.
+- Centralized the "heavy monsters can bash locked doors" rule via `entityCanBashLockedDoor()` so monster AI and the UI preview cannot drift.
+- Auto-travel no longer cancels immediately just because a hostile is visible: it now stops only when a visible hostile could reach you (or the next step tile) within a short ETA window, and otherwise continues on a cautious route.
+- Auto-travel path planning is now **threat-aware**: it reuses the same visible-hostile ETA field as LOOK Threat Preview to bias routes away from enemy influence (while still respecting locks/doors, levitation chasms, gas/fire, and known-trap penalties).
+- Auto-travel pathfinding now precomputes a discovered-trap penalty grid once per path build, avoiding O(traps) scanning in the Dijkstra inner loop.
+- New tactical helper: **Evade** (default **CTRL+E**, `#evade`): chooses a best-effort single-step retreat using the same visible-hostile Threat ETA field + hearing/audibility field, avoiding known traps/hazards when possible.
 - Save loading now automatically attempts rotated backups (`.bak1..bakN`) when a primary save/autosave is corrupt (truncated/CRC mismatch), improving recovery after crashes.
+- Extended-command integration: centralized alias normalization so legacy spellings/synonyms (#go/#goto, #ledger, #perf_overlay, #iso_raytrace, etc.) resolve to their canonical commands *before* prefix matching/completion.
+- Fixed several previously unreachable extended commands by bringing the canonicals into the completion/matching list: **#perf**, **#debt** (with #ledger alias), and **#isocutaway** (with #cutaway alias).
+- Command prompt TAB-completion now carries per-command metadata (keybind token + short description) so the dropdown can show a one-line **INFO** description for the current selection while keeping keybind hints accurate and de-duplicated.
+- Consolidated canonical **Action token** metadata into a shared, SDL-free registry (`action_info.hpp`), so keybind parsing and extended command `#bind/#unbind` stay perfectly in sync.
+- Keybinds overlay now shows a contextual **INFO** description for the currently selected action (pulled from the same registry).
+
 
 
 

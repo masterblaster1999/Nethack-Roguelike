@@ -1752,6 +1752,11 @@ void Game::newGame(uint32_t seed) {
     hunger = hungerMax;
     hungerStatePrev = hungerStateFor(hunger, hungerMax);
 
+    // Level generation is deterministic per level identity and does not perturb the gameplay RNG stream.
+    // This keeps the entire 1..25 dungeon stable given the run seed (important for previews).
+    const uint32_t gameplayRngState = rng.state;
+    rng.state = levelGenSeed(LevelId{branch_, depth_});
+
     const Vec2i msz = proceduralMapSizeFor(rng, branch_, depth_);
     dung = Dungeon(msz.x, msz.y);
     dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH, seed_);
@@ -1968,6 +1973,9 @@ void Game::newGame(uint32_t seed) {
 
     spawnFountains();
 
+    // Restore gameplay RNG after deterministic generation/spawns.
+    rng.state = gameplayRngState;
+
     storeCurrentLevel();
 
     recomputeFov();
@@ -2068,7 +2076,7 @@ bool Game::restoreLevel(LevelId id) {
     return true;
 }
 
-uint32_t Game::infiniteLevelSeed(LevelId id) const {
+uint32_t Game::levelGenSeed(LevelId id) const {
     // Stable per-level seed derived from the run seed + level identity.
     // Domain separation constant ensures future seed uses don't accidentally correlate.
     uint32_t s = seed_;
@@ -2805,12 +2813,13 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         fireField_.clear();
         scentField_.clear();
 
-        // In infinite world mode, level generation is deterministic per depth and does not
-        // perturb the gameplay RNG stream (so pruned levels can be regenerated identically).
-        const bool deterministicLevel = infiniteWorldEnabled_ && branch_ == DungeonBranch::Main;
+        // Level generation is deterministic per level identity and does not perturb the gameplay
+        // RNG stream. This makes the 1..25 dungeon stable for previews (Augury) and supports
+        // Infinite World regeneration when pruning old levels.
+        const bool deterministicLevel = true;
         const uint32_t gameplayRngState = rng.state;
         if (deterministicLevel) {
-            rng.state = infiniteLevelSeed(newLevel);
+            rng.state = levelGenSeed(newLevel);
         }
 
         const Vec2i msz = proceduralMapSizeFor(rng, branch_, depth_);

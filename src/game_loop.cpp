@@ -264,11 +264,16 @@ void Game::handleAction(Action a) {
         if (commandOpen) {
             commandOpen = false;
             commandBuf.clear();
+            commandCursor_ = 0;
             commandDraft.clear();
             commandHistoryPos = -1;
             commandAutoBase.clear();
+            commandAutoPrefix.clear();
             commandAutoMatches.clear();
+            commandAutoHints.clear();
+            commandAutoDescs.clear();
             commandAutoIndex = -1;
+            commandAutoFuzzy = false;
         }
 
         msgScroll = 0;
@@ -979,11 +984,16 @@ void Game::handleAction(Action a) {
             if (commandOpen) {
                 commandOpen = false;
                 commandBuf.clear();
+                commandCursor_ = 0;
                 commandDraft.clear();
                 commandHistoryPos = -1;
                 commandAutoBase.clear();
+                commandAutoPrefix.clear();
                 commandAutoMatches.clear();
+                commandAutoHints.clear();
+                commandAutoDescs.clear();
                 commandAutoIndex = -1;
+                commandAutoFuzzy = false;
             } else {
                 // Allow opening the command prompt while in LOOK mode without losing the cursor,
                 // so commands like #mark / #travel / #throwvoice can apply to the looked-at tile.
@@ -992,11 +1002,16 @@ void Game::handleAction(Action a) {
                 closeOverlays();
                 commandOpen = true;
                 commandBuf.clear();
+                commandCursor_ = 0;
                 commandDraft.clear();
                 commandHistoryPos = -1;
                 commandAutoBase.clear();
+                commandAutoPrefix.clear();
                 commandAutoMatches.clear();
+                commandAutoHints.clear();
+                commandAutoDescs.clear();
                 commandAutoIndex = -1;
+                commandAutoFuzzy = false;
                 if (preserveLook) {
                     looking = true;
                     lookPos = savedLook;
@@ -1041,11 +1056,16 @@ void Game::handleAction(Action a) {
         if (a == Action::Cancel || a == Action::Command) {
             commandOpen = false;
             commandBuf.clear();
+            commandCursor_ = 0;
             commandDraft.clear();
             commandHistoryPos = -1;
             commandAutoBase.clear();
+            commandAutoPrefix.clear();
             commandAutoMatches.clear();
+            commandAutoHints.clear();
+            commandAutoDescs.clear();
             commandAutoIndex = -1;
+            commandAutoFuzzy = false;
             return;
         }
 
@@ -1053,11 +1073,16 @@ void Game::handleAction(Action a) {
             std::string line = trim(commandBuf);
             commandOpen = false;
             commandBuf.clear();
+            commandCursor_ = 0;
             commandDraft.clear();
             commandHistoryPos = -1;
             commandAutoBase.clear();
+            commandAutoPrefix.clear();
             commandAutoMatches.clear();
+            commandAutoHints.clear();
+            commandAutoDescs.clear();
             commandAutoIndex = -1;
+            commandAutoFuzzy = false;
             if (!line.empty()) {
                 // Store history (keep it small).
                 if (commandHistory.empty() || commandHistory.back() != line) {
@@ -1074,8 +1099,12 @@ void Game::handleAction(Action a) {
         if (a == Action::Up) {
             // Navigating history cancels any active TAB-completion cycling state.
             commandAutoBase.clear();
+            commandAutoPrefix.clear();
             commandAutoMatches.clear();
+            commandAutoHints.clear();
+            commandAutoDescs.clear();
             commandAutoIndex = -1;
+            commandAutoFuzzy = false;
 
             if (!commandHistory.empty()) {
                 if (commandHistoryPos < 0) {
@@ -1085,6 +1114,7 @@ void Game::handleAction(Action a) {
                     commandHistoryPos = std::max(0, commandHistoryPos - 1);
                 }
                 commandBuf = commandHistory[commandHistoryPos];
+                commandCursor_ = static_cast<int>(commandBuf.size());
             }
             return;
         }
@@ -1092,22 +1122,50 @@ void Game::handleAction(Action a) {
         if (a == Action::Down) {
             // Navigating history cancels any active TAB-completion cycling state.
             commandAutoBase.clear();
+            commandAutoPrefix.clear();
             commandAutoMatches.clear();
+            commandAutoHints.clear();
+            commandAutoDescs.clear();
             commandAutoIndex = -1;
+            commandAutoFuzzy = false;
 
             if (commandHistoryPos >= 0) {
                 if (commandHistoryPos + 1 < static_cast<int>(commandHistory.size())) {
                     ++commandHistoryPos;
                     commandBuf = commandHistory[commandHistoryPos];
+                    commandCursor_ = static_cast<int>(commandBuf.size());
                 } else {
                     commandHistoryPos = -1;
                     commandAutoBase.clear();
+                    commandAutoPrefix.clear();
                     commandAutoMatches.clear();
+                    commandAutoHints.clear();
+                    commandAutoDescs.clear();
                     commandAutoIndex = -1;
+                    commandAutoFuzzy = false;
                     commandBuf = commandDraft;
+                    commandCursor_ = static_cast<int>(commandBuf.size());
                     commandDraft.clear();
                 }
             }
+            return;
+        }
+
+        // Line editing: cursor navigation (UI-only; does not consume turns).
+        if (a == Action::Left) {
+            commandCursorLeft();
+            return;
+        }
+        if (a == Action::Right) {
+            commandCursorRight();
+            return;
+        }
+        if (a == Action::LogUp) {
+            commandCursorHome();
+            return;
+        }
+        if (a == Action::LogDown) {
+            commandCursorEnd();
             return;
         }
 
@@ -1758,11 +1816,16 @@ if (optionsSel == 19) {
             case Action::ToggleSoundPreview:
                 toggleSoundPreview();
                 break;
+            case Action::ToggleThreatPreview:
+                toggleThreatPreview();
+                break;
             case Action::MinimapZoomIn:
-                if (soundPreviewOpen) adjustSoundPreviewVolume(+1);
+                if (threatPreviewOpen) adjustThreatPreviewHorizon(+1);
+                else if (soundPreviewOpen) adjustSoundPreviewVolume(+1);
                 break;
             case Action::MinimapZoomOut:
-                if (soundPreviewOpen) adjustSoundPreviewVolume(-1);
+                if (threatPreviewOpen) adjustThreatPreviewHorizon(-1);
+                else if (soundPreviewOpen) adjustSoundPreviewVolume(-1);
                 break;
 
             case Action::Confirm:
@@ -2119,6 +2182,10 @@ if (optionsSel == 19) {
             toggleSoundPreview();
             acted = false;
             break;
+        case Action::ToggleThreatPreview:
+            toggleThreatPreview();
+            acted = false;
+            break;
         case Action::Rest:
             restUntilSafe();
             acted = false;
@@ -2126,6 +2193,9 @@ if (optionsSel == 19) {
         case Action::ToggleSneak:
             toggleSneakMode();
             acted = false;
+            break;
+        case Action::Evade:
+            acted = evadeStep();
             break;
         case Action::Confirm: {
             if (p.pos == dung.stairsDown) {

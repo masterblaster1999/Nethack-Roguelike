@@ -2,8 +2,12 @@
 
 #include "combat_rules.hpp"
 #include "hallucination.hpp"
+#include "monster_pathing.hpp"
+#include "threat_field.hpp"
 #include "vtuber_gen.hpp"
+#include "pathfinding.hpp"
 
+#include <array>
 #include <cmath>
 #include <iomanip>
 
@@ -209,6 +213,14 @@ void Game::beginLook() {
     // UI-only helper: acoustic preview is scoped to LOOK mode.
     soundPreviewOpen = false;
     soundPreviewDist.clear();
+    soundPreviewVol = 12;
+    soundPreviewVolBase = 12;
+    soundPreviewVolBias = 0;
+
+    // UI-only helper: threat preview is scoped to LOOK mode.
+    threatPreviewOpen = false;
+    threatPreviewSrcs.clear();
+    threatPreviewDist.clear();
 
     looking = true;
     lookPos = player().pos;
@@ -218,6 +230,12 @@ void Game::endLook() {
     looking = false;
     soundPreviewOpen = false;
     soundPreviewDist.clear();
+    soundPreviewVol = 12;
+    soundPreviewVolBase = 12;
+    soundPreviewVolBias = 0;
+    threatPreviewOpen = false;
+    threatPreviewSrcs.clear();
+    threatPreviewDist.clear();
 }
 
 void Game::beginLookAt(Vec2i p) {
@@ -233,8 +251,7 @@ void Game::setLookCursor(Vec2i p) {
 
     // Keep acoustic preview locked to the cursor while active.
     if (soundPreviewOpen) {
-        soundPreviewSrc = lookPos;
-        soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, soundPreviewVol);
+        refreshSoundPreview();
     }
 }
 
@@ -255,10 +272,46 @@ void Game::moveLookCursor(int dx, int dy) {
 
     // Keep acoustic preview locked to the cursor while active.
     if (soundPreviewOpen) {
-        soundPreviewSrc = lookPos;
-        soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, soundPreviewVol);
+        refreshSoundPreview();
     }
 
+}
+
+
+void Game::refreshSoundPreview() {
+    if (!soundPreviewOpen) return;
+
+    soundPreviewSrc = lookPos;
+
+    // Follow the real footstep noise model for the player at the cursor tile.
+    soundPreviewVolBase = playerFootstepNoiseVolumeAt(soundPreviewSrc);
+
+    // Apply user bias and clamp into a reasonable range.
+    soundPreviewVol = clampi(soundPreviewVolBase + soundPreviewVolBias, 0, 30);
+
+    if (soundPreviewVol <= 0) {
+        soundPreviewDist.clear();
+        return;
+    }
+
+    // For per-monster hearing differences, compute a sound map out to the max
+    // effective threshold among *visible hostiles* so we can annotate who would
+    // hear the sound without leaking hidden monster info.
+    int maxEff = soundPreviewVol;
+    for (const auto& m : ents) {
+        if (m.id == playerId_) continue;
+        if (m.hp <= 0) continue;
+        if (m.friendly) continue;
+        if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
+        if (!dung.inBounds(m.pos.x, m.pos.y)) continue;
+        if (!dung.at(m.pos.x, m.pos.y).visible) continue;
+
+        const int eff = soundPreviewVol + entityHearingDelta(m.kind);
+        if (eff > maxEff) maxEff = eff;
+    }
+    maxEff = std::max(0, maxEff);
+
+    soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, maxEff);
 }
 
 void Game::toggleSoundPreview() {
@@ -267,24 +320,67 @@ void Game::toggleSoundPreview() {
         beginLook();
     }
 
+    // Keep LOOK helpers mutually exclusive for clarity.
+    if (!soundPreviewOpen) {
+        threatPreviewOpen = false;
+        threatPreviewSrcs.clear();
+        threatPreviewDist.clear();
+    }
+
     soundPreviewOpen = !soundPreviewOpen;
     if (!soundPreviewOpen) {
         soundPreviewDist.clear();
         return;
     }
 
-    // Default to the noise level of a single careful step (sneak vs normal).
-    soundPreviewVol = isSneaking() ? 8 : 12;
-    soundPreviewSrc = lookPos;
-    soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, soundPreviewVol);
+    // Default to the player's real footstep noise at the cursor tile.
+    soundPreviewVolBias = 0;
+    refreshSoundPreview();
 }
 
 void Game::adjustSoundPreviewVolume(int delta) {
     if (!soundPreviewOpen) return;
     // Common in-game noises fall roughly in the 1..18 range; keep a little headroom.
-    soundPreviewVol = clampi(soundPreviewVol + delta, 1, 30);
-    soundPreviewSrc = lookPos;
-    soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, soundPreviewVol);
+    // `[`/`]` adjusts a bias on top of the real footstep model so you can simulate
+    // quieter/louder actions without losing the automatic tile/material integration.
+    soundPreviewVolBias = clampi(soundPreviewVolBias + delta, -30, 30);
+    refreshSoundPreview();
+}
+
+
+void Game::toggleThreatPreview() {
+    // This is a UI-only planning helper; it never consumes a turn.
+    if (!looking) {
+        beginLook();
+    }
+
+    // Keep LOOK helpers mutually exclusive for clarity.
+    if (!threatPreviewOpen) {
+        soundPreviewOpen = false;
+        soundPreviewDist.clear();
+    }
+
+    threatPreviewOpen = !threatPreviewOpen;
+    if (!threatPreviewOpen) {
+        threatPreviewSrcs.clear();
+        threatPreviewDist.clear();
+        return;
+    }
+
+    // Default horizon: show "soonest arrival" within a short tactical window.
+    threatPreviewMaxCost = std::clamp(threatPreviewMaxCost, 4, 60);
+
+    // Compute a conservative min-ETA field for currently visible hostiles.
+    // We compute a generous fixed window (60) so the horizon can be adjusted
+    // without recomputing.
+    ThreatFieldResult tf = buildVisibleHostileThreatField(*this, 60);
+    threatPreviewSrcs = std::move(tf.sources);
+    threatPreviewDist = std::move(tf.dist);
+}
+
+void Game::adjustThreatPreviewHorizon(int delta) {
+    if (!threatPreviewOpen) return;
+    threatPreviewMaxCost = std::clamp(threatPreviewMaxCost + delta, 2, 60);
 }
 
 std::string Game::describeAt(Vec2i p) const {
@@ -563,6 +659,21 @@ ss << baseDesc;
     int dist = std::abs(p.x - pp.x) + std::abs(p.y - pp.y);
     ss << " | DIST " << dist;
 
+    // Tactical helper: approximate "time-to-contact" from the nearest *visible* hostile.
+    // This is intentionally visibility-gated to avoid leaking information.
+    if (threatPreviewOpen) {
+        if (threatPreviewSrcs.empty()) {
+            ss << " | THREAT: NONE";
+        } else if (!threatPreviewDist.empty() && threatPreviewDist.size() == static_cast<size_t>(dung.width * dung.height)) {
+            const size_t ti = static_cast<size_t>(p.y * dung.width + p.x);
+            if (ti < threatPreviewDist.size()) {
+                const int eta = threatPreviewDist[ti];
+                if (eta < 0) ss << " | THREAT: BLOCKED";
+                else ss << " | THREAT ETA " << eta;
+            }
+        }
+    }
+
     // Context hint for tile-interactables.
     if (p == player().pos) {
         const TileType tt = dung.at(p.x, p.y).type;
@@ -580,7 +691,48 @@ std::string Game::lookInfoText() const {
     if (!looking) return std::string();
     std::string s = describeAt(lookPos);
     if (soundPreviewOpen) {
-        s += " | SOUND PREVIEW VOL " + std::to_string(soundPreviewVol) + "  ([ ] ADJUST)";
+        if (soundPreviewVol <= 0) {
+            s += " | SOUND PREVIEW SILENT";
+        } else {
+            s += " | SOUND PREVIEW VOL " + std::to_string(soundPreviewVol);
+        }
+
+        // Show the automatically-derived base step volume, plus any user bias.
+        std::string bb = "STEP " + std::to_string(soundPreviewVolBase);
+        if (soundPreviewVolBias > 0) bb += " +" + std::to_string(soundPreviewVolBias);
+        else if (soundPreviewVolBias < 0) bb += " " + std::to_string(soundPreviewVolBias);
+        s += " (" + bb + ")";
+
+        // Optional: count how many *visible* hostiles would hear this noise.
+        // This avoids revealing hidden monsters while still making the sound lens
+        // more actionable for stealth planning.
+        int heard = 0;
+        if (soundPreviewVol > 0 && !soundPreviewDist.empty()) {
+            const int W = dung.width;
+            auto idx = [&](int x, int y) { return y * W + x; };
+            for (const auto& m : ents) {
+                if (m.id == playerId_) continue;
+                if (m.hp <= 0) continue;
+                if (m.friendly) continue;
+                if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
+                if (!dung.inBounds(m.pos.x, m.pos.y)) continue;
+                if (!dung.at(m.pos.x, m.pos.y).visible) continue;
+
+                const int eff = soundPreviewVol + entityHearingDelta(m.kind);
+                if (eff <= 0) continue;
+
+                const int d = soundPreviewDist[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
+                if (d >= 0 && d <= eff) heard += 1;
+            }
+        }
+        if (heard > 0) {
+            s += " HEARD BY " + std::to_string(heard) + " VISIBLE";
+        }
+
+        s += "  ([ ] ADJUST)";
+    }
+    if (threatPreviewOpen) {
+        s += " | THREAT PREVIEW HORIZON " + std::to_string(threatPreviewMaxCost) + "  ([ ] ADJUST)";
     }
     return s;
 }

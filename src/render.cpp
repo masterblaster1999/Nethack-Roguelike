@@ -3,6 +3,7 @@
 #include "hallucination.hpp"
 #include "rng.hpp"
 #include "version.hpp"
+#include "action_info.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -7530,13 +7531,60 @@ void Renderer::drawKeybindsOverlay(const Game& game) {
         drawText5x7(renderer, x0 + 16, fy, 1, gray,
             fit("FILTER ACTIVE. PRESS / TO EDIT. CTRL+L CLEAR. CONFLICTS HIGHLIGHTED.", maxCharsScale1));
     } else {
+        // Context line: show a short description of the currently selected action.
+        std::string infoLine;
+        if (n > 0) {
+            const int ssel = std::clamp(sel, 0, n - 1);
+            const int idx = vis[ssel];
+            if (idx >= 0 && idx < total) {
+                const std::string tok = rows[idx].first;
+                if (auto act = actioninfo::parse(tok)) {
+                    const char* d = actioninfo::desc(*act);
+                    if (d && d[0] != '\0') {
+                        infoLine = std::string("INFO: ") + d;
+                    }
+                }
+            }
+        }
+
+        if (infoLine.empty()) infoLine = "CONFLICTS HIGHLIGHTED";
+        infoLine += ". TIP: EXT CMD #bind / #unbind / #binds.";
+
         drawText5x7(renderer, x0 + 16, fy, 1, gray,
-            fit("CONFLICTS HIGHLIGHTED. TIP: EXT CMD #bind / #unbind / #binds ALSO AVAILABLE.", maxCharsScale1));
+            fit(infoLine, maxCharsScale1));
     }
 }
 
 void Renderer::drawCommandOverlay(const Game& game) {
-    const int barH = 52;
+    // Base height for the prompt + hint row.
+    const int baseH = 52;
+
+    // If TAB completion produced a match set, show a small dropdown list.
+    const auto& matches = game.commandAutocompleteMatches();
+    const auto& hints = game.commandAutocompleteHints();
+    const auto& descs = game.commandAutocompleteDescs();
+    const int show = std::clamp(static_cast<int>(matches.size()), 0, 8);
+    const int sel = game.commandAutocompleteIndex();
+    int start = 0;
+    if (sel >= 0 && static_cast<int>(matches.size()) > show) {
+        start = std::clamp(sel - show / 2, 0, static_cast<int>(matches.size()) - show);
+    }
+    const bool above = (show > 0 && start > 0);
+    const bool below = (show > 0 && start + show < static_cast<int>(matches.size()));
+    const int lineH = 10; // 5x7 at scale1 + spacing
+
+    // Selected-item description line (drawn under the dropdown).
+    const int infoIdx = (sel >= 0) ? sel : ((show > 0) ? start : -1);
+    std::string info;
+    if (infoIdx >= 0 && infoIdx < static_cast<int>(descs.size())) {
+        info = descs[static_cast<size_t>(infoIdx)];
+    }
+    const bool showInfo = !info.empty();
+
+    const int extraLines = show + (above ? 1 : 0) + (below ? 1 : 0) + (showInfo ? 1 : 0);
+    const int extraH = (extraLines > 0) ? (6 + extraLines * lineH) : 0;
+
+    const int barH = baseH + extraH;
     int y0 = winH - hudH - barH - 10;
     if (y0 < 10) y0 = 10;
 
@@ -7555,19 +7603,114 @@ void Renderer::drawCommandOverlay(const Game& game) {
     const Color white{255, 255, 255, 255};
     const Color gray{180, 180, 180, 255};
 
-    // Fit the command string to the bar width.
-    const int maxChars = std::max(0, (bg.w - 2 * pad) / (6 * 2)); // 5x7 font: ~6px per char at scale1
-    auto fitTail = [&](const std::string& s) -> std::string {
-        if (static_cast<int>(s.size()) <= maxChars) return s;
-        if (maxChars <= 3) return s.substr(s.size() - maxChars);
-        return "..." + s.substr(s.size() - (maxChars - 3));
+    // Fit the command string to the bar width and keep the caret visible.
+    const int maxChars2 = std::max(0, (bg.w - 2 * pad) / (6 * 2)); // scale2
+    const int maxChars1 = std::max(0, (bg.w - 2 * pad) / 6);       // scale1
+
+    auto fitHead1 = [&](const std::string& s) -> std::string {
+        if (static_cast<int>(s.size()) <= maxChars1) return s;
+        if (maxChars1 <= 3) return s.substr(0, static_cast<size_t>(maxChars1));
+        return s.substr(0, static_cast<size_t>(maxChars1 - 3)) + "...";
     };
 
-    const std::string prompt = "EXT CMD: " + fitTail(game.commandBuffer());
-    drawText5x7(renderer, x, y, 2, white, prompt);
+    auto fitAroundCaret2 = [&](const std::string& s, size_t caretPos, int maxChars) -> std::string {
+        if (maxChars <= 0) return std::string();
+        if (static_cast<int>(s.size()) <= maxChars) return s;
+
+        size_t start = 0;
+        const size_t half = static_cast<size_t>(maxChars / 2);
+        if (caretPos > half) start = caretPos - half;
+        if (start + static_cast<size_t>(maxChars) > s.size()) start = s.size() - static_cast<size_t>(maxChars);
+
+        std::string out = s.substr(start, static_cast<size_t>(maxChars));
+        if (start > 0 && maxChars >= 3) {
+            out.replace(0, 3, "...");
+        }
+        if (start + static_cast<size_t>(maxChars) < s.size() && maxChars >= 3) {
+            out.replace(static_cast<size_t>(maxChars - 3), 3, "...");
+        }
+        return out;
+    };
+
+    const std::string prefix = "EXT CMD: ";
+    const std::string& rawBuf = game.commandBuffer();
+    const size_t cur = static_cast<size_t>(std::clamp(game.commandCursorByte(), 0, static_cast<int>(rawBuf.size())));
+
+    std::string withCaret = rawBuf;
+    withCaret.insert(cur, "|");
+    const size_t caretPos = cur;
+
+    const int bodyMax = std::max(0, maxChars2 - static_cast<int>(prefix.size()));
+    const std::string body = fitAroundCaret2(withCaret, caretPos, bodyMax);
+    drawText5x7(renderer, x, y, 2, white, prefix + body);
 
     y += 24;
-    drawText5x7(renderer, x, y, 1, gray, "ENTER RUN  ESC CANCEL  UP/DOWN HISTORY  TAB COMPLETE");
+    {
+        std::string hint = "ENTER RUN  ESC CANCEL  TAB COMPLETE (CMD/ARGS)";
+        if (game.commandAutocompleteFuzzy()) hint += " (FUZZY)";
+        hint += "  CTRL+B/F MOVE  CTRL+P/N HISTORY  LEFT/RIGHT EDIT  HOME/END  DEL/CTRL+D FWD  CTRL+W WORD  CTRL+U START  CTRL+K END  CTRL+L CLEAR";
+        drawText5x7(renderer, x, y, 1, gray, fitHead1(hint));
+    }
+
+    // Dropdown list for TAB completion matches.
+    if (show > 0) {
+        y += 12;
+        auto buildLine = [&](bool isSel, const std::string& cmd, const std::string& hintTok) -> std::string {
+            const std::string prefix = isSel ? "> " : "  ";
+            std::string hintStr;
+            if (!hintTok.empty()) hintStr = "[" + hintTok + "]";
+
+            const int lineMax = maxChars1;
+            const int avail = std::max(0, lineMax - static_cast<int>(prefix.size()));
+
+            int cmdMax = avail;
+            if (!hintStr.empty()) {
+                cmdMax = std::max(0, avail - 1 - static_cast<int>(hintStr.size()));
+            }
+
+            std::string cmdFit = fitToChars(cmd, cmdMax);
+            std::string out = prefix + cmdFit;
+
+            if (!hintStr.empty()) {
+                const int used = static_cast<int>(cmdFit.size()) + static_cast<int>(hintStr.size());
+                int spaces = avail - used;
+                if (spaces < 1) {
+                    out += " " + hintStr;
+                    out = fitToChars(out, lineMax);
+                } else {
+                    out += std::string(static_cast<size_t>(spaces), ' ') + hintStr;
+                }
+            }
+
+            return out;
+        };
+
+        if (above) {
+            drawText5x7(renderer, x, y, 1, gray, fitHead1("... (" + std::to_string(start) + " above)"));
+            y += lineH;
+        }
+
+        for (int i = 0; i < show; ++i) {
+            const int idx = start + i;
+            const bool isSel = (sel >= 0 && idx == sel);
+            const Color col = isSel ? white : gray;
+            const std::string& cmd = matches[static_cast<size_t>(idx)];
+            const std::string hintTok = (idx >= 0 && idx < static_cast<int>(hints.size())) ? hints[static_cast<size_t>(idx)] : std::string();
+            const std::string line = buildLine(isSel, cmd, hintTok);
+            drawText5x7(renderer, x, y, 1, col, fitHead1(line));
+            y += lineH;
+        }
+
+        if (below) {
+            const int remain = static_cast<int>(matches.size()) - (start + show);
+            drawText5x7(renderer, x, y, 1, gray, fitHead1("... (+" + std::to_string(remain) + ")"));
+            y += lineH;
+        }
+
+        if (showInfo) {
+            drawText5x7(renderer, x, y, 1, gray, fitHead1("INFO: " + info));
+        }
+    }
 }
 
 
@@ -7671,7 +7814,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     }
     add("O EXPLORE  P AUTOPICKUP  M MINIMAP  SHIFT+TAB STATS", gray);
     add("MINIMAP: MOVE CURSOR (ARROWS/WASD), [ ] ZOOM, ENTER TRAVEL, L/RMB LOOK, LMB TRAVEL", gray);
-    add("F2 OPTIONS  # EXTENDED COMMANDS  (TYPE + ENTER)", gray);
+    add("F2 OPTIONS  #/CTRL+P EXTENDED COMMANDS  (TAB COMPLETE CMD+ARGS, LEFT/RIGHT EDIT)", gray);
     add("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART", gray);
     add("F11 FULLSCREEN  F12 SCREENSHOT (BINDABLE)", gray);
     add("SHIFT+F10 PERF OVERLAY (BINDABLE)", gray);
@@ -9453,6 +9596,82 @@ void Renderer::drawLookOverlay(const Game& game) {
                     drawIsoDiamondOutline(renderer, r);
                 } else {
                     SDL_RenderDrawRect(renderer, &r);
+                }
+            }
+
+            // Highlight visible hostiles that would hear this sound (uses the
+            // same per-kind hearing stats as actual noise emission).
+            SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{220}, Uint8{120}, Uint8{200});
+            for (const auto& m : game.entities()) {
+                if (m.id == game.playerId()) continue;
+                if (m.hp <= 0) continue;
+                if (m.friendly) continue;
+                if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
+                if (!d.inBounds(m.pos.x, m.pos.y)) continue;
+
+                const Tile& mt = d.at(m.pos.x, m.pos.y);
+                if (!mt.visible) continue;
+
+                const int eff = vol + entityHearingDelta(m.kind);
+                if (eff <= 0) continue;
+
+                const int dd = dist[m.pos.y * d.width + m.pos.x];
+                if (dd < 0 || dd > eff) continue;
+
+                SDL_Rect r = mapTileDst(m.pos.x, m.pos.y);
+                if (iso) {
+                    drawIsoDiamondOutline(renderer, r);
+                } else {
+                    SDL_RenderDrawRect(renderer, &r);
+                }
+            }
+        }
+    }
+
+    // Threat preview heatmap (UI-only): visualize approximate "time-to-contact" from
+    // the nearest currently VISIBLE hostile. This is intentionally visibility-gated
+    // so it never leaks information about unseen enemies.
+    if (game.isThreatPreviewOpen()) {
+        const auto& dist = game.threatPreviewMap();
+        const int horizon = game.threatPreviewHorizon();
+
+        if (!dist.empty() && (int)dist.size() == d.width * d.height && horizon > 0) {
+            // Color choice: a warm tint reads as danger without clashing too hard with
+            // targeting lines. Alpha encodes urgency (closer threats are more opaque).
+            for (int y = 0; y < d.height; ++y) {
+                for (int x = 0; x < d.width; ++x) {
+                    const Tile& t = d.at(x, y);
+                    if (!t.explored) continue;
+
+                    const int idx = y * d.width + x;
+                    const int dd = dist[idx];
+                    if (dd < 0 || dd > horizon) continue;
+
+                    const int strength = horizon - dd;
+                    const int alpha = std::clamp(24 + strength * 12, 24, 205);
+                    SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{90}, Uint8{90}, clampToU8(alpha));
+                    SDL_Rect r = mapTileDst(x, y);
+                    if (iso) {
+                        fillIsoDiamond(renderer, r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2);
+                    } else {
+                        SDL_RenderFillRect(renderer, &r);
+                    }
+                }
+            }
+
+            // Accent visible hostile source tiles so the player can "read" the field at a glance.
+            const auto& srcs = game.threatPreviewSources();
+            if (!srcs.empty()) {
+                SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{70});
+                for (const Vec2i& s : srcs) {
+                    if (!d.inBounds(s.x, s.y)) continue;
+                    if (!d.at(s.x, s.y).visible) continue;
+                    SDL_Rect r = mapTileDst(s.x, s.y);
+                    if (iso) {
+                        drawIsoDiamondOutline(renderer, r);
+                    } else {
+                        SDL_RenderDrawRect(renderer, &r);
+                    }
                 }
             }
         }

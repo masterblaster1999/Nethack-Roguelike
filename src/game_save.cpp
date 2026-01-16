@@ -82,23 +82,44 @@ void Game::commandTextInput(const char* utf8) {
     if (!commandOpen) return;
     if (!utf8) return;
     // Basic length cap so the overlay stays sane.
-    if (commandBuf.size() > 120) return;
-    commandBuf += utf8;
+    const size_t addLen = std::strlen(utf8);
+    if (commandBuf.size() + addLen > 120) return;
+
+    // Insert at the current cursor (byte) position.
+    size_t cur = static_cast<size_t>(std::clamp(commandCursor_, 0, static_cast<int>(commandBuf.size())));
+    commandBuf.insert(cur, utf8);
+    commandCursor_ = static_cast<int>(cur + addLen);
 
     // Any manual edits cancel tab-completion cycling state.
     commandAutoBase.clear();
+    commandAutoPrefix.clear();
     commandAutoMatches.clear();
+    commandAutoHints.clear();
+    commandAutoDescs.clear();
     commandAutoIndex = -1;
+    commandAutoFuzzy = false;
 }
 
-static void utf8PopBack(std::string& s) {
-    if (s.empty()) return;
-    size_t i = s.size() - 1;
+static size_t utf8PrevIndex(const std::string& s, size_t i) {
+    if (i == 0 || s.empty()) return 0;
+    if (i > s.size()) i = s.size();
+    size_t j = i - 1;
     // Walk back over UTF-8 continuation bytes (10xxxxxx).
-    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0u) == 0x80u) {
-        --i;
+    while (j > 0 && (static_cast<unsigned char>(s[j]) & 0xC0u) == 0x80u) {
+        --j;
     }
-    s.erase(i);
+    return j;
+}
+
+static size_t utf8NextIndex(const std::string& s, size_t i) {
+    if (s.empty()) return 0;
+    if (i >= s.size()) return s.size();
+    size_t j = i + 1;
+    // Skip continuation bytes to land on the next codepoint boundary.
+    while (j < s.size() && (static_cast<unsigned char>(s[j]) & 0xC0u) == 0x80u) {
+        ++j;
+    }
+    return j;
 }
 
 static bool vecContains(const std::vector<std::string>& v, const std::string& s) {
@@ -121,43 +142,45 @@ static std::string longestCommonPrefix(const std::vector<std::string>& v) {
     return pref;
 }
 
-static std::string formatMatchesMessage(const std::vector<std::string>& matches) {
-    // Keep this short; the HUD will wrap if needed, but we want to avoid giant spam lines.
-    constexpr size_t kMaxShow = 10;
-
-    std::ostringstream ss;
-    ss << "MATCHES (" << matches.size() << "):";
-
-    const size_t show = std::min(matches.size(), kMaxShow);
-    for (size_t i = 0; i < show; ++i) {
-        ss << " " << matches[i];
-    }
-    if (matches.size() > kMaxShow) {
-        ss << " ... (+" << (matches.size() - kMaxShow) << ")";
-    }
-
-    ss << "  [TAB cycles]";
-    return ss.str();
-}
-
 void Game::commandBackspace() {
     if (!commandOpen) return;
-    utf8PopBack(commandBuf);
+    // Delete the codepoint immediately before the cursor.
+    size_t cur = static_cast<size_t>(std::clamp(commandCursor_, 0, static_cast<int>(commandBuf.size())));
+    if (cur == 0) return;
+    const size_t prev = utf8PrevIndex(commandBuf, cur);
+    commandBuf.erase(prev, cur - prev);
+    commandCursor_ = static_cast<int>(prev);
 
     // Any manual edits cancel tab-completion cycling state.
     commandAutoBase.clear();
+    commandAutoPrefix.clear();
     commandAutoMatches.clear();
+    commandAutoHints.clear();
+    commandAutoDescs.clear();
     commandAutoIndex = -1;
+    commandAutoFuzzy = false;
 }
 
 void Game::commandAutocomplete() {
     if (!commandOpen) return;
 
+    // Completion is only defined on the full line; if the user moved the cursor,
+    // snap it back to the end (shell-style behaviour).
+    if (commandCursor_ < static_cast<int>(commandBuf.size())) {
+        commandCursor_ = static_cast<int>(commandBuf.size());
+    }
+
+    // Preserve whether the user explicitly typed a trailing whitespace character.
+    // We use this to tell "complete the next argument" (e.g., "bind ") from
+    // "complete this token" (e.g., "bind inv").
+    bool trailingWS = false;
+    if (!commandBuf.empty()) {
+        const unsigned char last = static_cast<unsigned char>(commandBuf.back());
+        trailingWS = (std::isspace(last) != 0);
+    }
+
     std::string raw = trim(commandBuf);
     if (raw.empty()) return;
-
-    // Only complete the first token; once you add arguments we assume you know what you're doing.
-    if (raw.find_first_of(" 	") != std::string::npos) return;
 
     // Support pasted NetHack-style inputs like "#quit" even though we open the prompt separately.
     bool hadHash = false;
@@ -165,69 +188,418 @@ void Game::commandAutocomplete() {
         hadHash = true;
         raw = trim(raw.substr(1));
         if (raw.empty()) return;
-        if (raw.find_first_of(" 	") != std::string::npos) return;
     }
 
-    const std::string cur = toLower(raw);
+    // Split into whitespace tokens (command + args).
+    const std::vector<std::string> toks = splitWS(raw);
+    if (toks.empty()) return;
+
+    // Determine which token to complete.
+    // - If there's only one token and no trailing whitespace: complete the command itself.
+    // - Otherwise, complete the last token, or the next token if the user ended with whitespace.
+    int completeIdx = 0;
+    if (toks.size() == 1 && !trailingWS) {
+        completeIdx = 0;
+    } else {
+        completeIdx = trailingWS ? static_cast<int>(toks.size()) : static_cast<int>(toks.size()) - 1;
+    }
+
+    auto clearState = [&]() {
+        commandAutoBase.clear();
+        commandAutoPrefix.clear();
+        commandAutoMatches.clear();
+        commandAutoHints.clear();
+        commandAutoDescs.clear();
+        commandAutoIndex = -1;
+        commandAutoFuzzy = false;
+    };
+
+    auto firstChord = [&](std::string s) -> std::string {
+        s = trim(std::move(s));
+        const size_t comma = s.find(',');
+        if (comma != std::string::npos) s = trim(s.substr(0, comma));
+        return s;
+    };
+
+    auto prettyChord = [&](std::string s) -> std::string {
+        for (char& ch : s) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        return s;
+    };
+
+    auto keybindHintForActionToken = [&](const std::string& tok) -> std::string {
+        if (tok.empty()) return std::string();
+        for (const auto& kv : keybindsDesc_) {
+            if (kv.first == tok) {
+                const std::string fc = firstChord(kv.second);
+                if (fc.empty() || fc == "none") return std::string();
+                return prettyChord(fc);
+            }
+        }
+        return std::string();
+    };
+
+    // Subsequence fuzzy match with a cheap, stable score (lower is better).
+    auto fuzzyScore = [&](const std::string& pat, const std::string& word, int& outScore) -> bool {
+        size_t wi = 0;
+        int gaps = 0;
+        int first = -1;
+        int last = -1;
+
+        for (size_t pi = 0; pi < pat.size(); ++pi) {
+            const char pc = pat[pi];
+            const size_t found = word.find(pc, wi);
+            if (found == std::string::npos) return false;
+            if (first < 0) first = static_cast<int>(found);
+            last = static_cast<int>(found);
+            if (static_cast<int>(found) > static_cast<int>(wi)) gaps += static_cast<int>(found - wi);
+            wi = found + 1;
+        }
+
+        const int span = (first >= 0 && last >= 0) ? (last - first) : 0;
+        outScore = first * 2 + span + gaps;
+        return true;
+    };
+
+    // Helper that resolves a possibly-short/aliased first token to a unique extended command.
+    auto resolveCommand = [&]() -> std::string {
+        std::string cmdIn = normalizeExtendedCommandAlias(toLower(toks[0]));
+        const std::vector<std::string> cmds = extendedCommandList();
+
+        // Exact match first.
+        for (const auto& c : cmds) {
+            if (c == cmdIn) return c;
+        }
+
+        // Unique prefix match.
+        std::string match;
+        for (const auto& c : cmds) {
+            if (c.rfind(cmdIn, 0) == 0) {
+                if (!match.empty()) return std::string(); // ambiguous
+                match = c;
+            }
+        }
+
+        return match;
+    };
+
+    auto currentTokenLower = [&]() -> std::string {
+        if (completeIdx < 0) return std::string();
+        if (completeIdx >= static_cast<int>(toks.size())) return std::string();
+        return toLower(toks[static_cast<size_t>(completeIdx)]);
+    };
+
+    enum class Mode { CommandToken, ArgToken };
+    Mode mode = Mode::CommandToken;
+
+    // Prefix inserted before the completed candidate (does not include '#').
+    std::string prefix;
+
+    // Current (partial) token we're trying to complete.
+    std::string cur = currentTokenLower();
+
+    const std::string resolvedCmd = resolveCommand();
+
+    // If we intended to complete an argument but can't resolve the command uniquely, fall back to
+    // completing the command token itself (only when there are no other tokens that we'd destroy).
+    if (completeIdx > 0 && resolvedCmd.empty()) {
+        if (toks.size() > 1) {
+            clearState();
+            return;
+        }
+
+        mode = Mode::CommandToken;
+        prefix.clear();
+        cur = toLower(toks[0]);
+        completeIdx = 0;
+    } else if (completeIdx == 0) {
+        mode = Mode::CommandToken;
+        prefix.clear();
+    } else if (completeIdx == 1) {
+        // Context-sensitive argument completion (limited to a small set of commands).
+        if (resolvedCmd == "bind" || resolvedCmd == "unbind" || resolvedCmd == "preset" ||
+            resolvedCmd == "autopickup" || resolvedCmd == "identify" || resolvedCmd == "mortem") {
+            mode = Mode::ArgToken;
+            prefix = resolvedCmd + " ";
+        } else {
+            // Unsupported argument completion.
+            clearState();
+            return;
+        }
+    } else {
+        // We don't attempt to complete deeper arguments (too context-specific).
+        clearState();
+        return;
+    }
 
     // If we're already cycling completions (from a previous TAB), advance to the next match.
     if (commandAutoIndex >= 0 && !commandAutoMatches.empty() && !commandAutoBase.empty()) {
-        if (vecContains(commandAutoMatches, cur) && cur.rfind(commandAutoBase, 0) == 0) {
+        // Keep cycling as long as:
+        //  - we're completing the same token position (same prefix), and
+        //  - the current token is one of the candidates, and
+        //  - for prefix mode: the current token still starts with the original base.
+        if (commandAutoPrefix == prefix && vecContains(commandAutoMatches, cur) &&
+            (commandAutoFuzzy || cur.rfind(commandAutoBase, 0) == 0)) {
             commandAutoIndex = (commandAutoIndex + 1) % static_cast<int>(commandAutoMatches.size());
-            const std::string& out = commandAutoMatches[static_cast<size_t>(commandAutoIndex)];
-            commandBuf = hadHash ? ("#" + out) : out;
+            const std::string& cand = commandAutoMatches[static_cast<size_t>(commandAutoIndex)];
+            const std::string outLine = prefix + cand;
+            commandBuf = hadHash ? ("#" + outLine) : outLine;
+            commandCursor_ = static_cast<int>(commandBuf.size());
             return;
         }
 
         // Buffer changed (history/edit), so drop cycle state.
-        commandAutoBase.clear();
-        commandAutoMatches.clear();
-        commandAutoIndex = -1;
+        clearState();
     }
 
-    const std::vector<std::string> cmds = extendedCommandList();
-
+    // Build the completion universe and compute a match set.
+    std::vector<std::string> universe;
     std::vector<std::string> matches;
-    for (const auto& c : cmds) {
-        if (c.rfind(cur, 0) == 0) matches.push_back(c);
+    bool fuzzyUsed = false;
+
+    // Per-candidate UI extras (aligned 1:1 with matches)
+    std::vector<std::string> hints;
+    std::vector<std::string> descs;
+
+    if (mode == Mode::CommandToken) {
+        universe = extendedCommandList();
+
+        // 1) Prefix matches first (classic NetHack-like behaviour).
+        for (const auto& c : universe) {
+            if (c.rfind(cur, 0) == 0) matches.push_back(c);
+        }
+
+        // 2) Fuzzy fallback when there are no prefix matches.
+        if (matches.empty() && cur.size() >= 2) {
+            struct Cand { int score; std::string s; };
+
+            std::vector<Cand> cands;
+            cands.reserve(universe.size());
+
+            for (const auto& c : universe) {
+                int score = 0;
+                if (fuzzyScore(cur, c, score)) {
+                    cands.push_back(Cand{score, c});
+                }
+            }
+
+            std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+                if (a.score != b.score) return a.score < b.score;
+                return a.s < b.s;
+            });
+
+            const size_t keep = std::min<size_t>(cands.size(), 24);
+            for (size_t i = 0; i < keep; ++i) matches.push_back(cands[i].s);
+            fuzzyUsed = !matches.empty();
+        }
+
+        if (matches.empty()) {
+            clearState();
+            return;
+        }
+
+        hints.reserve(matches.size());
+        descs.reserve(matches.size());
+
+        for (const auto& m : matches) {
+            const char* tok = extendedCommandActionToken(m);
+            if (tok && tok[0] != '\0') hints.push_back(keybindHintForActionToken(tok));
+            else hints.push_back(std::string());
+
+            const char* d = extendedCommandShortDesc(m);
+            descs.push_back(d ? std::string(d) : std::string());
+        }
+
+        if (matches.size() == 1) {
+            const std::string outLine = matches[0] + " ";
+            commandBuf = hadHash ? ("#" + outLine) : outLine;
+            commandCursor_ = static_cast<int>(commandBuf.size());
+            clearState();
+            return;
+        }
+
+        // If all matches share a longer common *prefix*, extend to that.
+        // This is only meaningful for prefix-mode completions.
+        if (!fuzzyUsed) {
+            const std::string lcp = longestCommonPrefix(matches);
+            if (!lcp.empty() && lcp.size() > cur.size()) {
+                commandBuf = hadHash ? ("#" + lcp) : lcp;
+                commandCursor_ = static_cast<int>(commandBuf.size());
+
+                // Keep the match set around so a subsequent TAB can begin cycling from this new prefix.
+                commandAutoBase = lcp;
+                commandAutoPrefix.clear();
+                commandAutoMatches = matches;
+                commandAutoHints = hints;
+                commandAutoDescs = descs;
+                commandAutoIndex = -1;
+                commandAutoFuzzy = false;
+                return;
+            }
+        }
+
+        // Otherwise, start cycling through the available matches.
+        commandAutoBase = cur;
+        commandAutoPrefix.clear();
+        commandAutoMatches = matches;
+        commandAutoHints = hints;
+        commandAutoDescs = descs;
+        commandAutoFuzzy = fuzzyUsed;
+
+        int startIdx = -1;
+        for (size_t i = 0; i < matches.size(); ++i) {
+            if (matches[i] == cur) {
+                startIdx = static_cast<int>(i);
+                break;
+            }
+        }
+
+        if (startIdx >= 0) {
+            commandAutoIndex = startIdx;
+            commandBuf = hadHash ? ("#" + cur) : cur;
+        } else {
+            commandAutoIndex = 0;
+            commandBuf = hadHash ? ("#" + matches[0]) : matches[0];
+        }
+
+        commandCursor_ = static_cast<int>(commandBuf.size());
+        return;
+    }
+
+    // ArgToken mode: context-sensitive universe.
+    if (resolvedCmd == "bind" || resolvedCmd == "unbind") {
+        const size_t n = sizeof(actioninfo::kActionInfoTable) / sizeof(actioninfo::kActionInfoTable[0]);
+        universe.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            const auto& info = actioninfo::kActionInfoTable[i];
+            if (!info.token || info.token[0] == 0) continue;
+            std::string tok = info.token;
+            if (tok.rfind("bind_", 0) == 0) continue;
+            universe.push_back(tok);
+        }
+    } else if (resolvedCmd == "preset") {
+        universe = {"modern", "nethack"};
+    } else if (resolvedCmd == "autopickup") {
+        universe = {"off", "gold", "smart", "all"};
+    } else if (resolvedCmd == "identify") {
+        universe = {"on", "off"};
+    } else if (resolvedCmd == "mortem") {
+        universe = {"now", "on", "off"};
+    }
+
+    // Prefix matches first.
+    for (const auto& u : universe) {
+        if (u.rfind(cur, 0) == 0) matches.push_back(u);
+    }
+
+    // Fuzzy fallback (useful for action tokens with underscores).
+    if (matches.empty() && cur.size() >= 2) {
+        struct Cand { int score; std::string s; };
+        std::vector<Cand> cands;
+        cands.reserve(universe.size());
+
+        for (const auto& u : universe) {
+            int score = 0;
+            if (fuzzyScore(cur, u, score)) {
+                cands.push_back(Cand{score, u});
+            }
+        }
+
+        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+            if (a.score != b.score) return a.score < b.score;
+            return a.s < b.s;
+        });
+
+        const size_t keep = std::min<size_t>(cands.size(), 24);
+        for (size_t i = 0; i < keep; ++i) matches.push_back(cands[i].s);
+        fuzzyUsed = !matches.empty();
     }
 
     if (matches.empty()) {
-        commandAutoBase.clear();
-        commandAutoMatches.clear();
-        commandAutoIndex = -1;
+        clearState();
         return;
+    }
+
+    hints.reserve(matches.size());
+    descs.reserve(matches.size());
+
+    if (resolvedCmd == "bind" || resolvedCmd == "unbind") {
+        for (const auto& m : matches) {
+            hints.push_back(keybindHintForActionToken(m));
+
+            std::string d;
+            if (const auto* info = actioninfo::findByToken(m)) {
+                if (info->desc && info->desc[0] != '\0') d = info->desc;
+            }
+            descs.push_back(d);
+        }
+    } else if (resolvedCmd == "preset") {
+        for (const auto& m : matches) {
+            hints.push_back(std::string());
+            if (m == "modern") descs.push_back("WASD controls preset");
+            else if (m == "nethack") descs.push_back("VI-keys NetHack controls preset");
+            else descs.push_back(std::string());
+        }
+    } else if (resolvedCmd == "autopickup") {
+        for (const auto& m : matches) {
+            hints.push_back(std::string());
+            if (m == "off") descs.push_back("Disable auto-pickup");
+            else if (m == "gold") descs.push_back("Auto-pickup gold only");
+            else if (m == "smart") descs.push_back("Auto-pickup smart set");
+            else if (m == "all") descs.push_back("Auto-pickup everything");
+            else descs.push_back(std::string());
+        }
+    } else if (resolvedCmd == "identify") {
+        for (const auto& m : matches) {
+            hints.push_back(std::string());
+            if (m == "on") descs.push_back("Enable identification system");
+            else if (m == "off") descs.push_back("Disable identification system");
+            else descs.push_back(std::string());
+        }
+    } else if (resolvedCmd == "mortem") {
+        for (const auto& m : matches) {
+            hints.push_back(std::string());
+            if (m == "now") descs.push_back("Export a run mortem immediately");
+            else if (m == "on") descs.push_back("Enable auto-mortem on death");
+            else if (m == "off") descs.push_back("Disable auto-mortem on death");
+            else descs.push_back(std::string());
+        }
     }
 
     if (matches.size() == 1) {
-        const std::string out = matches[0] + " ";
-        commandBuf = hadHash ? ("#" + out) : out;
-        commandAutoBase.clear();
-        commandAutoMatches.clear();
-        commandAutoIndex = -1;
+        const std::string outLine = prefix + matches[0] + " ";
+        commandBuf = hadHash ? ("#" + outLine) : outLine;
+        commandCursor_ = static_cast<int>(commandBuf.size());
+        clearState();
         return;
     }
 
+    // If all matches share a longer common prefix, extend to that (prefix-mode only).
+    if (!fuzzyUsed) {
+        const std::string lcp = longestCommonPrefix(matches);
+        if (!lcp.empty() && lcp.size() > cur.size()) {
+            const std::string outLine = prefix + lcp;
+            commandBuf = hadHash ? ("#" + outLine) : outLine;
+            commandCursor_ = static_cast<int>(commandBuf.size());
 
-    // If all matches share a longer common prefix, extend to that.
-    const std::string lcp = longestCommonPrefix(matches);
-    if (!lcp.empty() && lcp.size() > cur.size()) {
-        commandBuf = hadHash ? ("#" + lcp) : lcp;
-
-        // Keep the match set around so a subsequent TAB can begin cycling from this new prefix.
-        commandAutoBase = lcp;
-        commandAutoMatches = matches;
-        commandAutoIndex = -1;
-        return;
+            commandAutoBase = lcp;
+            commandAutoPrefix = prefix;
+            commandAutoMatches = matches;
+            commandAutoHints = hints;
+            commandAutoDescs = descs;
+            commandAutoIndex = -1;
+            commandAutoFuzzy = false;
+            return;
+        }
     }
 
     // Otherwise, start cycling through the available matches.
     commandAutoBase = cur;
+    commandAutoPrefix = prefix;
     commandAutoMatches = matches;
+    commandAutoHints = hints;
+    commandAutoDescs = descs;
+    commandAutoFuzzy = fuzzyUsed;
 
-    // If the current buffer already exactly matches one of the candidates, keep it and
-    // cycle *from there* (so the next TAB advances to the next option instead of snapping
-    // to the first match).
     int startIdx = -1;
     for (size_t i = 0; i < matches.size(); ++i) {
         if (matches[i] == cur) {
@@ -238,14 +610,43 @@ void Game::commandAutocomplete() {
 
     if (startIdx >= 0) {
         commandAutoIndex = startIdx;
-        commandBuf = hadHash ? ("#" + cur) : cur;
+        const std::string outLine = prefix + cur;
+        commandBuf = hadHash ? ("#" + outLine) : outLine;
     } else {
         commandAutoIndex = 0;
-        commandBuf = hadHash ? ("#" + matches[0]) : matches[0];
+        const std::string outLine = prefix + matches[0];
+        commandBuf = hadHash ? ("#" + outLine) : outLine;
     }
 
-    // Print the match list once when we begin cycling.
-    pushSystemMessage(formatMatchesMessage(matches));
+    commandCursor_ = static_cast<int>(commandBuf.size());
+}
+
+
+void Game::commandCursorLeft() {
+    if (!commandOpen) return;
+    size_t cur = static_cast<size_t>(std::clamp(commandCursor_, 0, static_cast<int>(commandBuf.size())));
+    if (cur == 0) return;
+    commandCursor_ = static_cast<int>(utf8PrevIndex(commandBuf, cur));
+}
+
+void Game::commandCursorRight() {
+    if (!commandOpen) return;
+    size_t cur = static_cast<size_t>(std::clamp(commandCursor_, 0, static_cast<int>(commandBuf.size())));
+    if (cur >= commandBuf.size()) {
+        commandCursor_ = static_cast<int>(commandBuf.size());
+        return;
+    }
+    commandCursor_ = static_cast<int>(utf8NextIndex(commandBuf, cur));
+}
+
+void Game::commandCursorHome() {
+    if (!commandOpen) return;
+    commandCursor_ = 0;
+}
+
+void Game::commandCursorEnd() {
+    if (!commandOpen) return;
+    commandCursor_ = static_cast<int>(commandBuf.size());
 }
 
 
@@ -388,33 +789,7 @@ void Game::alertMonstersTo(Vec2i pos, int radius) {
     }
 }
 
-namespace {
-constexpr int BASE_HEARING = 8;
 
-// A small amount of per-monster flavor: some creatures are better/worse at hearing.
-// This value is used as a modifier against noise "volume" (both are in tile-cost units).
-int hearingFor(EntityKind k) {
-    switch (k) {
-        case EntityKind::Bat:            return 12;
-        case EntityKind::Wolf:           return 10;
-        case EntityKind::Snake:          return 9;
-        case EntityKind::Wizard:         return 9;
-        case EntityKind::Spider:         return 8;
-        case EntityKind::Goblin:         return 8;
-        case EntityKind::Leprechaun:     return 11;
-        case EntityKind::Nymph:          return 10;
-        case EntityKind::Orc:            return 8;
-        case EntityKind::KoboldSlinger:  return 8;
-        case EntityKind::SkeletonArcher: return 7;
-        case EntityKind::Troll:          return 7;
-        case EntityKind::Ogre:           return 7;
-        case EntityKind::Shopkeeper:     return 10;
-        case EntityKind::Slime:          return 6;
-        case EntityKind::Mimic:          return 5;
-        default:                         return BASE_HEARING;
-    }
-}
-} // namespace
 
 void Game::emitNoise(Vec2i pos, int volume) {
     if (volume <= 0) return;
@@ -428,7 +803,7 @@ void Game::emitNoise(Vec2i pos, int volume) {
         if (m.id == playerId_) continue;
         if (m.hp <= 0) continue;
         if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
-        const int eff = volume + (hearingFor(m.kind) - BASE_HEARING);
+        const int eff = volume + (entityHearing(m.kind) - BASE_HEARING);
         if (eff > maxEff) maxEff = eff;
     }
     maxEff = std::max(0, maxEff);
@@ -442,7 +817,7 @@ void Game::emitNoise(Vec2i pos, int volume) {
         if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
         if (!dung.inBounds(m.pos.x, m.pos.y)) continue;
 
-        const int eff = volume + (hearingFor(m.kind) - BASE_HEARING);
+        const int eff = volume + (entityHearing(m.kind) - BASE_HEARING);
         if (eff <= 0) continue;
 
         const int d = sound[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
@@ -2817,6 +3192,7 @@ if (ver >= 33u) {
         autoExploreSearchGoalPos = Vec2i{-1, -1};
         autoExploreSearchTurnsLeft = 0;
         autoExploreSearchAnnounced = false;
+        autoTravelCautionAnnounced = false;
         // Keep the bookkeeping array initialized for determinism and to avoid
         // out-of-bounds issues in optional secret-hunting logic.
         autoExploreSearchTriedTurns.clear();

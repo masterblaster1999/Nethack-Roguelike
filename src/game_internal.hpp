@@ -20,6 +20,7 @@
 // It is included by the various src/game_*.cpp files.
 
 #include "game.hpp"
+#include "action_info.hpp"
 #include "settings.hpp"
 #include "grid_utils.hpp"
 #include "pathfinding.hpp"
@@ -875,6 +876,7 @@ static std::vector<std::string> extendedCommandList() {
         "preset",
         "sprites3d",
         "isoraytrace",
+        "isocutaway",
         "binds",
         "bind",
         "unbind",
@@ -905,6 +907,7 @@ static std::vector<std::string> extendedCommandList() {
         "pos",
         "what",
         "mapstats",
+        "perf",
         "version",
         "name",
         "class",
@@ -935,7 +938,149 @@ static std::vector<std::string> extendedCommandList() {
         "donate",
         "sacrifice",
         "pay",
+        "debt",
+        "threat",
+        "evade",
     };
+}
+
+
+struct ExtendedCommandUiMeta {
+    const char* cmd;
+    Action action;     // keybind Action for UI hints (Action::None if none)
+    const char* desc;  // short UI description; optional
+};
+
+static const ExtendedCommandUiMeta* extendedCommandUiMetaFor(const std::string& cmd) {
+    // Keep this list small and focused: it powers UI hints (TAB completion dropdown)
+    // and avoids scattering "cmd -> action token" knowledge across files.
+    static const ExtendedCommandUiMeta kMeta[] = {
+        {"options", Action::Options, "Open options menu"},
+        {"help",    Action::Help,   "List extended commands"},
+
+        {"save",     Action::Save,      "Save game"},
+        {"load",     Action::Load,      "Load save"},
+        {"loadauto", Action::LoadAuto, "Load autosave"},
+        {"restart",  Action::Restart,   "Restart run"},
+        {"scores",   Action::Scores,    "Show high scores"},
+
+        {"messages", Action::MessageHistory, "Open message history"},
+
+        {"search", Action::Search, "Search nearby tiles"},
+        {"rest",   Action::Rest,   "Rest until healed / interrupted"},
+        {"dig",    Action::Dig,    "Dig (requires pickaxe)"},
+        {"sneak",  Action::ToggleSneak,  "Toggle sneak (stealth)"},
+
+        {"explore", Action::AutoExplore, "Auto-explore"},
+        {"threat",  Action::ToggleThreatPreview, "Toggle threat preview"},
+        {"evade",   Action::Evade, "Smart step away from visible threats"},
+
+        {"perf", Action::TogglePerfOverlay, "Toggle performance overlay"},
+
+        {"debt", Action::None, "Show shop debt ledger"},
+        {"isocutaway", Action::None, "Toggle isometric cutaway mode"},
+    };
+
+    for (const auto& m : kMeta) {
+        if (cmd == m.cmd) return &m;
+    }
+    return nullptr;
+}
+
+static const char* extendedCommandActionToken(const std::string& cmd) {
+    if (const auto* m = extendedCommandUiMetaFor(cmd)) {
+        if (m->action != Action::None) return actioninfo::token(m->action);
+    }
+    return nullptr;
+}
+
+static const char* extendedCommandShortDesc(const std::string& cmd) {
+    if (const auto* m = extendedCommandUiMetaFor(cmd)) return m->desc;
+    return nullptr;
+}
+
+static std::string normalizeExtendedCommandAlias(const std::string& in) {
+    std::string cmd = toLower(in);
+
+    struct Alias { const char* alias; const char* canonical; };
+    static const Alias kAliases[] = {
+        // NetHack-style shorthands.
+        {"?", "help"},
+        {"commands", "help"},
+
+        // Common synonyms / muscle-memory.
+        {"annotate", "mark"},
+        {"note", "mark"},
+        {"unannotate", "unmark"},
+        {"clearmark", "unmark"},
+        {"notes", "marks"},
+        {"markers", "marks"},
+
+        {"msghistory", "messages"},
+        {"message_history", "messages"},
+        {"msglog", "messages"},
+
+        {"controls", "preset"},
+        {"keyset", "preset"},
+
+        {"hear", "listen"},
+
+        {"vent", "throwvoice"},
+        {"ventriloquism", "throwvoice"},
+        {"voice", "throwvoice"},
+        {"decoy", "throwvoice"},
+
+        {"divine", "augury"},
+        {"divination", "augury"},
+        {"omen", "augury"},
+        {"prophecy", "augury"},
+
+        {"where", "pos"},
+        {"location", "pos"},
+        {"loc", "pos"},
+
+        {"label", "call"},
+
+        {"danger", "threat"},
+        {"threatpreview", "threat"},
+        {"threat_preview", "threat"},
+
+        {"flee", "evade"},
+        {"panic", "evade"},
+        {"run_away", "evade"},
+        {"escape", "evade"},
+
+        {"tile", "what"},
+        {"whatis", "what"},
+        {"describe", "what"},
+
+        // Hidden/legacy spellings for view modes.
+        {"iso_raytrace", "isoraytrace"},
+        {"iso_ray", "isoraytrace"},
+        {"isovoxelray", "isoraytrace"},
+
+        {"iso_cutaway", "isocutaway"},
+        {"cutaway", "isocutaway"},
+
+        // Quality-of-life shortcuts.
+        {"goto", "travel"},
+        {"go", "travel"},
+
+        {"ledger", "debt"},
+
+        // Perf overlay variants.
+        {"perf_overlay", "perf"},
+        {"perfui", "perf"},
+
+        // Back-compat / discoverability.
+        {"stealth", "sneak"},
+    };
+
+    for (const auto& a : kAliases) {
+        if (cmd == a.alias) return std::string(a.canonical);
+    }
+
+    return cmd;
 }
 
 
@@ -974,6 +1119,7 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
         ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash");
         // Sneak: avoid 'n' (movement down-right in vi keys).
         ok &= updateIniKey(settingsPath, "bind_sneak", "shift+n");
+        ok &= updateIniKey(settingsPath, "bind_evade", "ctrl+e");
     } else {
         // Modern (WASD)
         ok &= updateIniKey(settingsPath, "bind_up", "w, up, kp_8");
@@ -995,11 +1141,13 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
         ok &= updateIniKey(settingsPath, "bind_look", "l, v");
         ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash, h");
         ok &= updateIniKey(settingsPath, "bind_sneak", "n");
+        ok &= updateIniKey(settingsPath, "bind_evade", "ctrl+e");
     }
 
 
     // Acoustic preview helper (UI-only). Keep a consistent bind across presets.
     ok &= updateIniKey(settingsPath, "bind_sound_preview", "ctrl+n");
+    ok &= updateIniKey(settingsPath, "bind_threat_preview", "ctrl+t");
     game.setControlPreset(preset);
 
     if (ok) {
@@ -1028,20 +1176,9 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     std::string cmdIn = toLower(toks[0]);
 
-    if (cmdIn == "?" || cmdIn == "commands") cmdIn = "help";
-
-    // Common aliases (kept out of the completion list so it stays short/stable).
-    if (cmdIn == "annotate" || cmdIn == "note") cmdIn = "mark";
-    else if (cmdIn == "unannotate" || cmdIn == "clearmark") cmdIn = "unmark";
-    else if (cmdIn == "notes" || cmdIn == "markers") cmdIn = "marks";
-    else if (cmdIn == "msghistory" || cmdIn == "message_history" || cmdIn == "msglog") cmdIn = "messages";
-    else if (cmdIn == "controls" || cmdIn == "keyset") cmdIn = "preset";
-    else if (cmdIn == "hear") cmdIn = "listen";
-    else if (cmdIn == "vent" || cmdIn == "ventriloquism" || cmdIn == "voice" || cmdIn == "decoy") cmdIn = "throwvoice";
-    else if (cmdIn == "divine" || cmdIn == "divination" || cmdIn == "omen" || cmdIn == "prophecy") cmdIn = "augury";
-    else if (cmdIn == "where" || cmdIn == "location" || cmdIn == "loc") cmdIn = "pos";
-    else if (cmdIn == "label") cmdIn = "call";
-    else if (cmdIn == "tile" || cmdIn == "whatis" || cmdIn == "describe") cmdIn = "what";
+    // Normalize common aliases / legacy spellings before matching so prefix-matching
+    // stays stable and completion can remain short.
+    cmdIn = normalizeExtendedCommandAlias(cmdIn);
 
     std::vector<std::string> cmds = extendedCommandList();
 
@@ -1172,74 +1309,14 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         return false;
     };
 
-    // Map an action name to the canonical settings key (bind_<action>). Accepts a few aliases.
+    // Map an action name to the canonical settings key (bind_<token>). Uses the
+    // shared action token registry so #bind/#unbind stay in sync with keybind parsing.
     auto bindKeyForActionName = [&](const std::string& actionRaw, std::string& outKey) -> bool {
-        std::string a = toLower(trim(actionRaw));
-    
-        // Allow users to pass 'bind_<action>' too.
-        if (a.rfind("bind_", 0) == 0) a = a.substr(5);
-        // Normalize separators.
-        for (char& c : a) {
-            if (c == '-') c = '_';
-        }
+        const auto a = actioninfo::parse(actionRaw);
+        if (!a.has_value()) return false;
 
-        // Movement
-        if (a == "up") { outKey = "bind_up"; return true; }
-        if (a == "down") { outKey = "bind_down"; return true; }
-        if (a == "left") { outKey = "bind_left"; return true; }
-        if (a == "right") { outKey = "bind_right"; return true; }
-        if (a == "up_left" || a == "upleft") { outKey = "bind_up_left"; return true; }
-        if (a == "up_right" || a == "upright") { outKey = "bind_up_right"; return true; }
-        if (a == "down_left" || a == "downleft") { outKey = "bind_down_left"; return true; }
-        if (a == "down_right" || a == "downright") { outKey = "bind_down_right"; return true; }
-
-        // Actions
-        if (a == "confirm" || a == "ok") { outKey = "bind_confirm"; return true; }
-        if (a == "cancel" || a == "escape" || a == "esc") { outKey = "bind_cancel"; return true; }
-        if (a == "wait") { outKey = "bind_wait"; return true; }
-        if (a == "rest") { outKey = "bind_rest"; return true; }
-        if (a == "sneak" || a == "toggle_sneak" || a == "togglesneak") { outKey = "bind_sneak"; return true; }
-        if (a == "pickup" || a == "pick_up" || a == "pick") { outKey = "bind_pickup"; return true; }
-        if (a == "inventory" || a == "inv") { outKey = "bind_inventory"; return true; }
-        if (a == "fire") { outKey = "bind_fire"; return true; }
-        if (a == "search") { outKey = "bind_search"; return true; }
-        if (a == "disarm") { outKey = "bind_disarm"; return true; }
-        if (a == "close_door" || a == "closedoor" || a == "close") { outKey = "bind_close_door"; return true; }
-        if (a == "lock_door" || a == "lockdoor" || a == "lock") { outKey = "bind_lock_door"; return true; }
-        if (a == "kick") { outKey = "bind_kick"; return true; }
-        if (a == "dig" || a == "tunnel") { outKey = "bind_dig"; return true; }
-        if (a == "look") { outKey = "bind_look"; return true; }
-        if (a == "stairs_up" || a == "stairsup") { outKey = "bind_stairs_up"; return true; }
-        if (a == "stairs_down" || a == "stairsdown") { outKey = "bind_stairs_down"; return true; }
-        if (a == "auto_explore" || a == "autoexplore") { outKey = "bind_auto_explore"; return true; }
-        if (a == "toggle_auto_pickup" || a == "toggleautopickup" || a == "autopickup") { outKey = "bind_toggle_auto_pickup"; return true; }
-
-        // Inventory-specific
-        if (a == "equip") { outKey = "bind_equip"; return true; }
-        if (a == "use") { outKey = "bind_use"; return true; }
-        if (a == "drop") { outKey = "bind_drop"; return true; }
-        if (a == "drop_all" || a == "dropall") { outKey = "bind_drop_all"; return true; }
-        if (a == "sort_inventory" || a == "sortinventory") { outKey = "bind_sort_inventory"; return true; }
-
-        // UI / meta
-        if (a == "help") { outKey = "bind_help"; return true; }
-        if (a == "message_history" || a == "messagehistory" || a == "messages" || a == "msglog" || a == "msghistory") { outKey = "bind_message_history"; return true; }
-        if (a == "options") { outKey = "bind_options"; return true; }
-        if (a == "command" || a == "extcmd") { outKey = "bind_command"; return true; }
-        if (a == "toggle_minimap" || a == "minimap") { outKey = "bind_toggle_minimap"; return true; }
-        if (a == "toggle_stats" || a == "stats") { outKey = "bind_toggle_stats"; return true; }
-        if (a == "toggle_perf_overlay" || a == "toggle_perf" || a == "perf" || a == "perf_overlay") { outKey = "bind_toggle_perf_overlay"; return true; }
-        if (a == "sound_preview" || a == "toggle_sound_preview" || a == "soundpreview" || a == "acoustic" || a == "acoustic_preview") { outKey = "bind_sound_preview"; return true; }
-        if (a == "fullscreen" || a == "toggle_fullscreen" || a == "togglefullscreen") { outKey = "bind_fullscreen"; return true; }
-        if (a == "screenshot") { outKey = "bind_screenshot"; return true; }
-        if (a == "save") { outKey = "bind_save"; return true; }
-        if (a == "restart" || a == "newgame") { outKey = "bind_restart"; return true; }
-        if (a == "load") { outKey = "bind_load"; return true; }
-        if (a == "load_auto" || a == "loadauto") { outKey = "bind_load_auto"; return true; }
-        if (a == "log_up" || a == "logup") { outKey = "bind_log_up"; return true; }
-        if (a == "log_down" || a == "logdown") { outKey = "bind_log_down"; return true; }
-
-        return false;
+        outKey = actioninfo::bindKey(*a);
+        return !outKey.empty();
     };
 
     if (cmd == "help" || cmd == "?" || cmd == "commands") {
@@ -1261,6 +1338,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.pushSystemMessage("MARKS: mark [note|danger|loot] <label> | unmark | marks | travel <index|label>");
         game.pushSystemMessage("ENGRAVE: engrave <text> (costs a turn; try 'ELBERETH' for a ward)");
         game.pushSystemMessage("SOUND: shout | whistle | listen | throwvoice [x y] (TIP: LOOK cursor works)");
+        game.pushSystemMessage("TACTICS: evade (smart step away from visible threats; respects sneak/audibility)");
         game.pushSystemMessage("COMPANIONS: pet [follow|stay|fetch|guard] | tame (needs a FOOD RATION)");
         game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse|recharge] (costs PIETY + cooldown)");
         game.pushSystemMessage("         donate [amount] (convert gold->piety) | sacrifice (offer a corpse for piety)");
@@ -1274,6 +1352,16 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     if (cmd == "options") {
         game.handleAction(Action::Options);
+        return;
+    }
+
+    if (cmd == "threat") {
+        game.handleAction(Action::ToggleThreatPreview);
+        return;
+    }
+
+    if (cmd == "evade") {
+        game.handleAction(Action::Evade);
         return;
     }
 

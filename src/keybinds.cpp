@@ -1,4 +1,5 @@
 #include "keybinds.hpp"
+#include "action_info.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -205,76 +206,11 @@ std::vector<KeyChord> KeyBinds::parseChordList(const std::string& valueIn) {
 
 
 std::optional<Action> KeyBinds::parseActionName(const std::string& bindKeyIn) {
+    // Only parse keybind declarations from INI keys (bind_<action>).
+    // The shared registry still handles alias normalization *after* the prefix.
     std::string key = trim(toLower(bindKeyIn));
     if (key.rfind("bind_", 0) != 0) return std::nullopt;
-    std::string name = key.substr(5);
-
-    // Movement
-    if (name == "up") return Action::Up;
-    if (name == "down") return Action::Down;
-    if (name == "left") return Action::Left;
-    if (name == "right") return Action::Right;
-    if (name == "up_left" || name == "upleft") return Action::UpLeft;
-    if (name == "up_right" || name == "upright") return Action::UpRight;
-    if (name == "down_left" || name == "downleft") return Action::DownLeft;
-    if (name == "down_right" || name == "downright") return Action::DownRight;
-
-    // Core actions
-    if (name == "confirm" || name == "ok") return Action::Confirm;
-    if (name == "cancel" || name == "escape") return Action::Cancel;
-    if (name == "equip") return Action::Equip;
-    if (name == "use") return Action::Use;
-    if (name == "drop") return Action::Drop;
-    if (name == "drop_all" || name == "dropall") return Action::DropAll;
-    if (name == "sort_inventory" || name == "sortinventory") return Action::SortInventory;
-    if (name == "wait") return Action::Wait;
-    if (name == "rest") return Action::Rest;
-    if (name == "sneak" || name == "toggle_sneak" || name == "togglesneak") return Action::ToggleSneak;
-    if (name == "pickup" || name == "pick_up") return Action::Pickup;
-    if (name == "inventory" || name == "inv") return Action::Inventory;
-    if (name == "fire") return Action::Fire;
-    if (name == "search") return Action::Search;
-    if (name == "disarm" || name == "untrap") return Action::Disarm;
-    if (name == "close_door" || name == "closedoor" || name == "close") return Action::CloseDoor;
-    if (name == "lock_door" || name == "lockdoor") return Action::LockDoor;
-    if (name == "kick") return Action::Kick;
-    if (name == "dig" || name == "tunnel") return Action::Dig;
-    if (name == "look") return Action::Look;
-    if (name == "stairs_up" || name == "stairsup") return Action::StairsUp;
-    if (name == "stairs_down" || name == "stairsdown") return Action::StairsDown;
-    if (name == "auto_explore" || name == "autoexplore") return Action::AutoExplore;
-    if (name == "toggle_auto_pickup" || name == "toggleautopickup") return Action::ToggleAutoPickup;
-
-    // UI / meta
-    if (name == "toggle_minimap" || name == "minimap") return Action::ToggleMinimap;
-    if (name == "minimap_zoom_in" || name == "minimap_zoomin" || name == "zoom_minimap_in") return Action::MinimapZoomIn;
-    if (name == "minimap_zoom_out" || name == "minimap_zoomout" || name == "zoom_minimap_out") return Action::MinimapZoomOut;
-    if (name == "toggle_stats" || name == "stats") return Action::ToggleStats;
-    if (name == "toggle_perf_overlay" || name == "toggle_perf" || name == "perf" || name == "perf_overlay") return Action::TogglePerfOverlay;
-    if (name == "sound_preview" || name == "toggle_sound_preview" || name == "soundpreview" || name == "acoustic_preview" || name == "acoustic") return Action::ToggleSoundPreview;
-    if (name == "toggle_view_mode" || name == "view_mode" || name == "toggle_iso" || name == "isometric") return Action::ToggleViewMode;
-    if (name == "toggle_voxel_sprites" || name == "voxel_sprites" || name == "toggle_3d_sprites" || name == "sprites3d") return Action::ToggleVoxelSprites;
-    if (name == "toggle_fullscreen" || name == "fullscreen") return Action::ToggleFullscreen;
-    if (name == "screenshot" || name == "take_screenshot") return Action::Screenshot;
-    if (name == "help") return Action::Help;
-    if (name == "message_history" || name == "messagehistory" || name == "messages" || name == "msghistory" || name == "msglog") return Action::MessageHistory;
-    if (name == "codex" || name == "monster_codex" || name == "bestiary" || name == "monsters") return Action::Codex;
-    if (name == "discoveries" || name == "discovery" || name == "identify_list") return Action::Discoveries;
-    if (name == "spells" || name == "spellbook" || name == "cast") return Action::Spells;
-    if (name == "options") return Action::Options;
-    if (name == "command" || name == "extcmd") return Action::Command;
-
-    if (name == "save") return Action::Save;
-    if (name == "load") return Action::Load;
-    if (name == "load_auto" || name == "loadauto") return Action::LoadAuto;
-    if (name == "restart" || name == "newgame") return Action::Restart;
-    if (name == "scores" || name == "hall" || name == "halloffame") return Action::Scores;
-
-
-    if (name == "log_up" || name == "logup") return Action::LogUp;
-    if (name == "log_down" || name == "logdown") return Action::LogDown;
-
-    return std::nullopt;
+    return actioninfo::parse(key);
 }
 
 KeyBinds KeyBinds::defaults() {
@@ -332,6 +268,7 @@ KeyBinds KeyBinds::defaults() {
     add(Action::Wait, SDLK_PERIOD);
     add(Action::Rest, SDLK_r);
     add(Action::ToggleSneak, SDLK_n);
+    add(Action::Evade, SDLK_e, KMOD_CTRL);
 
     add(Action::Pickup, SDLK_g);
     add(Action::Pickup, SDLK_COMMA);
@@ -369,6 +306,8 @@ KeyBinds KeyBinds::defaults() {
 
     add(Action::Options, SDLK_F2);
     add(Action::Command, SDLK_3, KMOD_SHIFT);
+    // Convenience: open the extended command prompt on keyboards/layouts where '#' is awkward.
+    add(Action::Command, SDLK_p, KMOD_CTRL);
 
     add(Action::ToggleMinimap, SDLK_m);
     add(Action::MinimapZoomOut, SDLK_LEFTBRACKET);
@@ -382,6 +321,9 @@ KeyBinds KeyBinds::defaults() {
 
     // LOOK helper: show an acoustic "heatmap" of sound propagation from the cursor
     add(Action::ToggleSoundPreview, SDLK_n, KMOD_CTRL);
+
+    // LOOK helper: show a tactical "heatmap" of nearby monster threat/ETA
+    add(Action::ToggleThreatPreview, SDLK_t, KMOD_CTRL);
 
     add(Action::ToggleViewMode, SDLK_F7);
     add(Action::ToggleVoxelSprites, SDLK_F8);
@@ -515,6 +457,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::ToggleStats,
             Action::TogglePerfOverlay,
             Action::ToggleSoundPreview,
+            Action::ToggleThreatPreview,
             Action::ToggleViewMode,
             Action::ToggleVoxelSprites,
             Action::ToggleFullscreen,
@@ -548,6 +491,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::ToggleStats,
         Action::TogglePerfOverlay,
         Action::ToggleSoundPreview,
+        Action::ToggleThreatPreview,
         Action::ToggleViewMode,
         Action::ToggleVoxelSprites,
         Action::ToggleFullscreen,
@@ -568,6 +512,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::Pickup,
         Action::Rest,
         Action::ToggleSneak,
+        Action::Evade,
         Action::Wait,
 
         Action::Confirm,
@@ -590,77 +535,6 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
 }
 
 
-static const std::pair<Action, const char*> kActionNameTable[] = {
-    {Action::Up, "up"},
-    {Action::Down, "down"},
-    {Action::Left, "left"},
-    {Action::Right, "right"},
-    {Action::UpLeft, "up_left"},
-    {Action::UpRight, "up_right"},
-    {Action::DownLeft, "down_left"},
-    {Action::DownRight, "down_right"},
-
-    {Action::Confirm, "confirm"},
-    {Action::Cancel, "cancel"},
-    {Action::Wait, "wait"},
-    {Action::Rest, "rest"},
-    {Action::ToggleSneak, "sneak"},
-    {Action::Pickup, "pickup"},
-    {Action::Inventory, "inventory"},
-    {Action::Fire, "fire"},
-    {Action::Search, "search"},
-    {Action::Disarm, "disarm"},
-    {Action::CloseDoor, "close_door"},
-    {Action::LockDoor, "lock_door"},
-    {Action::Kick, "kick"},
-    {Action::Dig, "dig"},
-    {Action::Look, "look"},
-    {Action::StairsUp, "stairs_up"},
-    {Action::StairsDown, "stairs_down"},
-    {Action::AutoExplore, "auto_explore"},
-    {Action::ToggleAutoPickup, "toggle_auto_pickup"},
-
-    {Action::Equip, "equip"},
-    {Action::Use, "use"},
-    {Action::Drop, "drop"},
-    {Action::DropAll, "drop_all"},
-    {Action::SortInventory, "sort_inventory"},
-
-    {Action::Help, "help"},
-    {Action::MessageHistory, "message_history"},
-    {Action::Codex, "codex"},
-    {Action::Discoveries, "discoveries"},
-    {Action::Spells, "spells"},
-    {Action::Options, "options"},
-    {Action::Command, "command"},
-    {Action::ToggleMinimap, "toggle_minimap"},
-    {Action::MinimapZoomIn, "minimap_zoom_in"},
-    {Action::MinimapZoomOut, "minimap_zoom_out"},
-    {Action::ToggleStats, "toggle_stats"},
-    {Action::TogglePerfOverlay, "toggle_perf_overlay"},
-    {Action::ToggleSoundPreview, "sound_preview"},
-    {Action::ToggleViewMode, "toggle_view_mode"},
-    {Action::ToggleVoxelSprites, "toggle_voxel_sprites"},
-    {Action::ToggleFullscreen, "fullscreen"},
-    {Action::Screenshot, "screenshot"},
-
-    {Action::Save, "save"},
-    {Action::Load, "load"},
-    {Action::LoadAuto, "load_auto"},
-    {Action::Restart, "restart"},
-
-    {Action::Scores, "scores"},
-
-    {Action::LogUp, "log_up"},
-    {Action::LogDown, "log_down"},
-};
-
-static const char* actionName(Action a) {
-    for (const auto& kv : kActionNameTable) {
-        if (kv.first == a) return kv.second;
-    }
-    return "unknown";
-}
 
 static std::string keycodeToToken(SDL_Keycode key) {
     // Printable ASCII range: keep letters/digits as-is for copy/paste convenience.
@@ -787,9 +661,9 @@ std::string KeyBinds::describeAction(Action a) const {
 
 std::vector<std::pair<std::string, std::string>> KeyBinds::describeAll() const {
     std::vector<std::pair<std::string, std::string>> out;
-    out.reserve(sizeof(kActionNameTable) / sizeof(kActionNameTable[0]));
-    for (const auto& kv : kActionNameTable) {
-        out.emplace_back(std::string(actionName(kv.first)), describeAction(kv.first));
+    out.reserve(sizeof(actioninfo::kActionInfoTable) / sizeof(actioninfo::kActionInfoTable[0]));
+    for (const auto& info : actioninfo::kActionInfoTable) {
+        out.emplace_back(std::string(info.token), describeAction(info.action));
     }
     return out;
 }

@@ -1,5 +1,10 @@
 #include "game_internal.hpp"
 
+#include "threat_field.hpp"
+#include "hearing_field.hpp"
+
+#include <limits>
+
 namespace {
 const Trap* discoveredTrapAt(const std::vector<Trap>& traps, int x, int y) {
     for (const Trap& t : traps) {
@@ -45,6 +50,7 @@ void Game::stopAutoMove(bool silent) {
     autoExploreSearchGoalPos = Vec2i{-1, -1};
     autoExploreSearchTurnsLeft = 0;
     autoExploreSearchAnnounced = false;
+    autoTravelCautionAnnounced = false;
 
     if (!silent) {
         pushMsg("AUTO-MOVE: OFF.", MessageKind::System);
@@ -244,8 +250,12 @@ bool Game::stepAutoMove() {
     }
 
     // Safety stops.
-    if (anyVisibleHostiles()) {
-        pushMsg("AUTO-MOVE INTERRUPTED!", MessageKind::Warning);
+    //
+    // Auto-explore is intentionally conservative: if any hostile is visible, stop immediately.
+    // Auto-travel can keep going when hostiles are visible but still far away; a threat/ETA
+    // check is performed later once we know the next step.
+    if (autoMode == AutoMoveMode::Explore && anyVisibleHostiles()) {
+        pushMsg("AUTO-EXPLORE INTERRUPTED!", MessageKind::Warning);
         stopAutoMove(true);
         return false;
     }
@@ -522,6 +532,39 @@ bool Game::stepAutoMove() {
         }
     }
 
+
+
+    // Auto-travel: threat-aware safety stop.
+    // If a visible hostile could reach the player (or the next step tile) within a short
+    // ETA window, interrupt travel. Otherwise, keep going (and optionally warn once).
+    if (autoMode == AutoMoveMode::Travel) {
+        constexpr int kStopEta = 6;
+
+        ThreatFieldResult tf = buildVisibleHostileThreatField(*this, kStopEta);
+        if (!tf.sources.empty() && !tf.dist.empty()) {
+            const int W = std::max(1, dung.width);
+            auto idxOf = [W](int x, int y) -> size_t { return static_cast<size_t>(y * W + x); };
+
+            const size_t iHere = idxOf(p.pos.x, p.pos.y);
+            const size_t iNext = idxOf(next.x, next.y);
+
+            const int etaHere = (iHere < tf.dist.size()) ? tf.dist[iHere] : -1;
+            const int etaNext = (iNext < tf.dist.size()) ? tf.dist[iNext] : -1;
+
+            if ((etaHere >= 0 && etaHere <= kStopEta) || (etaNext >= 0 && etaNext <= kStopEta)) {
+                pushMsg("AUTO-TRAVEL INTERRUPTED (DANGER NEARBY).", MessageKind::Warning);
+                stopAutoMove(true);
+                return false;
+            }
+
+            if (!autoTravelCautionAnnounced) {
+                pushMsg("AUTO-TRAVEL: HOSTILES IN SIGHT (CAUTIOUS ROUTE).", MessageKind::Warning);
+                autoTravelCautionAnnounced = true;
+            }
+        } else {
+            autoTravelCautionAnnounced = false;
+        }
+    }
     if (discoveredTrapAt(trapsCur, next.x, next.y)) {
         const char* msg = (autoMode == AutoMoveMode::Travel)
             ? "AUTO-TRAVEL STOPPED (KNOWN TRAP AHEAD)."
@@ -1076,16 +1119,96 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
     const int W = std::max(1, dung.width);
     const int H = std::max(1, dung.height);
 
+    auto idxOf = [W](int x, int y) -> size_t { return static_cast<size_t>(y * W + x); };
+
     // Weighted pathing: doors and locks take extra turns to traverse.
     // This produces auto-travel paths that are closer to "minimum turns" rather
     // than "minimum tiles".
 
-    auto isKnownTrap = [&](int x, int y) -> bool {
+    // Build a per-tile discovered-trap penalty grid once (O(traps) instead of O(traps) per expanded node).
+    std::vector<int> trapPenalty;
+    if (!trapsCur.empty()) {
+        trapPenalty.assign(static_cast<size_t>(W * H), 0);
         for (const auto& t : trapsCur) {
             if (!t.discovered) continue;
-            if (t.pos.x == x && t.pos.y == y) return true;
+            if (!dung.inBounds(t.pos.x, t.pos.y)) continue;
+            const size_t i = idxOf(t.pos.x, t.pos.y);
+            const int p = autoMoveTrapPenalty(t.kind);
+            if (i < trapPenalty.size() && p > trapPenalty[i]) trapPenalty[i] = p;
         }
-        return false;
+    }
+
+    auto isKnownTrap = [&](int x, int y) -> bool {
+        if (trapPenalty.empty()) return false;
+        const size_t i = idxOf(x, y);
+        if (i >= trapPenalty.size()) return false;
+        return trapPenalty[i] > 0;
+    };
+
+    // Threat-aware auto-travel: when hostiles are visible, add a soft repulsion term
+    // based on the same monster pathing policy used by the AI and LOOK Threat Preview.
+    const ThreatFieldResult threat = buildVisibleHostileThreatField(*this, 60);
+    const std::vector<int>* threatDist = nullptr;
+    if (!threat.sources.empty() && threat.dist.size() == static_cast<size_t>(W * H)) {
+        threatDist = &threat.dist;
+    }
+
+    auto threatPenaltyFor = [&](int x, int y) -> int {
+        if (!threatDist) return 0;
+        const int eta = (*threatDist)[idxOf(x, y)];
+        if (eta < 0) return 0;
+
+        // Within this ETA window, increasingly discourage stepping closer.
+        // Numbers tuned so it biases route choice without permanently dead-ending corridors.
+        static constexpr int kAvoidEta = 12;
+        if (eta >= kAvoidEta) return 0;
+
+        int p = (kAvoidEta - eta) * 5;
+        if (eta <= 2) p += 60; // very close -> strong repulsion
+        return p;
+    };
+
+    // Noise-aware auto-travel (Sneak mode): when you are sneaking and hostiles are
+    // currently visible, bias pathing away from tiles where your *actual* footstep
+    // volume would be audible to any visible hostile.
+    //
+    // This is intentionally limited to currently visible hostiles so auto-move
+    // can't "cheat" by avoiding unseen monsters.
+    const std::vector<int>* minReqVol = nullptr;
+    std::vector<int> footstepVol; // cached per-tile footstep volume (only when needed)
+    HearingFieldResult hearing;
+    if (isSneaking()) {
+        // Max distance relevant for footsteps: maxFootstepVol(14) + maxHearingDelta(4) == 18.
+        hearing = buildVisibleHostileHearingField(*this, 18);
+        if (!hearing.listeners.empty() && hearing.minRequiredVolume.size() == static_cast<size_t>(W * H)) {
+            minReqVol = &hearing.minRequiredVolume;
+
+            // Cache the player's real footstep volume per tile so stepCost remains cheap.
+            footstepVol.assign(static_cast<size_t>(W * H), 0);
+            for (int y = 0; y < H; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    footstepVol[idxOf(x, y)] = playerFootstepNoiseVolumeAt({x, y});
+                }
+            }
+        }
+    }
+
+    auto noisePenaltyFor = [&](int x, int y) -> int {
+        if (!minReqVol) return 0;
+        const int req = (*minReqVol)[idxOf(x, y)];
+        if (req < 0) return 0;
+
+        const int vol = footstepVol[idxOf(x, y)];
+        if (vol <= 0) return 0; // silent step
+
+        const int margin = vol - req;
+        if (margin < 0) return 0; // not audible
+
+        // Penalize tiles that would be heard, scaling with how far above the
+        // minimum-heard threshold the footstep is.
+        int p = 6 + margin * 4;
+        if (req <= 1) p += 10; // very close listeners -> stronger discouragement
+        return p;
     };
 
     const bool hasKey = (keyCount() > 0);
@@ -1151,11 +1274,16 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
         if (cg > 0u) cost += 12 + static_cast<int>(cg) / 32;
         const uint8_t pg = poisonGasAt(x, y);
         if (pg > 0u) cost += 16 + static_cast<int>(pg) / 32;
-        if (allowKnownTraps) {
-            if (const Trap* t = discoveredTrapAt(trapsCur, x, y)) {
-                cost += autoMoveTrapPenalty(t->kind);
-            }
+
+        if (allowKnownTraps && !trapPenalty.empty()) {
+            cost += trapPenalty[idxOf(x, y)];
         }
+
+        // Threat-aware bias (only active when hostiles are visible).
+        cost += threatPenaltyFor(x, y);
+
+        // Sneak-aware noise bias (only active when hostiles are visible).
+        cost += noisePenaltyFor(x, y);
 
         return cost;
     };
@@ -1165,4 +1293,297 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
     };
 
     return dijkstraPath(W, H, start, goal, passable, stepCost, diagOk);
+}
+
+
+
+bool Game::evadeStep() {
+    // A single "smart step" away from visible hostiles.
+    //
+    // Design goals:
+    // - Reuse the same ETA threat field as LOOK Threat Preview + auto-travel.
+    // - Reuse the same hearing/audibility field used by sneak-aware auto-travel.
+    // - Keep it best-effort and conservative: avoid stepping onto known hazards/traps,
+    //   and prefer quieter moves when sneaking.
+
+    // Only meaningful in the main game state.
+    if (isFinished()) return false;
+
+    Entity& p = playerMut();
+    const Vec2i start = p.pos;
+    if (!dung.inBounds(start.x, start.y)) return false;
+
+    constexpr int kThreatMaxCost = 30;
+    ThreatFieldResult tf = buildVisibleHostileThreatField(*this, kThreatMaxCost);
+    if (tf.sources.empty() || tf.dist.empty()) {
+        pushMsg("EVADE: NO VISIBLE THREATS.", MessageKind::System);
+        return false;
+    }
+
+    // Compute the hearing field once so we can penalize steps that would be heard.
+    constexpr int kHearMaxCost = 20;
+    HearingFieldResult hf = buildVisibleHostileHearingField(*this, kHearMaxCost);
+    const bool haveHearing = (!hf.listeners.empty() && !hf.minRequiredVolume.empty());
+
+    const int W = std::max(1, dung.width);
+    const int H = std::max(1, dung.height);
+
+    auto idxOf = [&](int x, int y) -> size_t {
+        return static_cast<size_t>(y * W + x);
+    };
+
+    auto etaRawAt = [&](Vec2i pos) -> int {
+        if (!dung.inBounds(pos.x, pos.y)) return -1;
+        const size_t i = idxOf(pos.x, pos.y);
+        if (i >= tf.dist.size()) return -1;
+        return tf.dist[i];
+    };
+
+    // Normalize "not reachable within field budget" to a large safe ETA.
+    auto etaNorm = [&](int eta) -> int {
+        return (eta < 0) ? (kThreatMaxCost + 10) : eta;
+    };
+
+    auto reqVolAt = [&](Vec2i pos) -> int {
+        if (!haveHearing) return -1;
+        if (!dung.inBounds(pos.x, pos.y)) return -1;
+        const size_t i = idxOf(pos.x, pos.y);
+        if (i >= hf.minRequiredVolume.size()) return -1;
+        return hf.minRequiredVolume[i];
+    };
+
+    const int etaHere = etaNorm(etaRawAt(start));
+
+    const bool phasing = entityCanPhase(p.kind);
+    const bool levitating = (p.effects.levitationTurns > 0);
+
+    struct Opt {
+        int dx = 0;
+        int dy = 0;
+        bool isWait = false;
+        bool moves = false;
+        Vec2i resPos{0, 0};
+        Vec2i noisePos{0, 0};
+        int noiseVol = 0;
+        int eta = 0;
+        int score = std::numeric_limits<int>::min();
+    };
+
+    auto scoreOption = [&](Vec2i resPos, Vec2i noisePos, int noiseVol, bool moves, bool isWait) -> std::pair<int, int> {
+        const int eta = etaNorm(etaRawAt(resPos));
+        int score = 0;
+
+        // Primary: maximize safety (ETA). The *gain* term helps break ties
+        // when multiple options are "safe enough".
+        score += eta * 100;
+        score += (eta - etaHere) * 40;
+
+        // Strongly discourage spending turns without repositioning.
+        if (!moves) {
+            score -= isWait ? 220 : 140;
+        }
+
+        // Environmental hazards at the final position.
+        const uint8_t f = fireAt(resPos.x, resPos.y);
+        if (f > 0u) score -= 900 + static_cast<int>(f) * 3;
+
+        const uint8_t cg = confusionGasAt(resPos.x, resPos.y);
+        if (cg > 0u) score -= 320 + static_cast<int>(cg) * 4;
+
+        const uint8_t pg = poisonGasAt(resPos.x, resPos.y);
+        if (pg > 0u) score -= 380 + static_cast<int>(pg) * 4;
+
+        // Known traps: strongly avoided, but not hard-blocked.
+        if (moves) {
+            if (const Trap* t = discoveredTrapAt(trapsCur, resPos.x, resPos.y)) {
+                const int tp = autoMoveTrapPenalty(t->kind);
+                score -= 1800 + tp * 8;
+            }
+        }
+
+        // Audibility penalty (only when hostiles are visible).
+        if (haveHearing && noiseVol > 0) {
+            const int req = reqVolAt(noisePos);
+            if (req >= 0) {
+                if (noiseVol > req) {
+                    const int margin = noiseVol - req;
+                    const int w = isSneaking() ? 250 : 140;
+                    score -= 650 + margin * w;
+                } else {
+                    // Small bonus: quiet step that stays under the hearing threshold.
+                    if (isSneaking()) score += 40;
+                }
+            }
+        }
+
+        return {score, eta};
+    };
+
+    auto better = [&](const Opt& a, const Opt& b) -> bool {
+        if (a.score != b.score) return a.score > b.score;
+        if (a.eta != b.eta) return a.eta > b.eta;
+        if (a.moves != b.moves) return a.moves && !b.moves;
+        if (a.noiseVol != b.noiseVol) return a.noiseVol < b.noiseVol;
+        const int ad = std::abs(a.dx) + std::abs(a.dy);
+        const int bd = std::abs(b.dx) + std::abs(b.dy);
+        // Prefer cardinal over diagonal in ties (more controllable), but prefer moving over waiting.
+        if (ad != bd) return ad < bd;
+        return false;
+    };
+
+    Opt best;
+    bool haveBest = false;
+
+    auto consider = [&](Opt o) {
+        auto sc = scoreOption(o.resPos, o.noisePos, o.noiseVol, o.moves, o.isWait);
+        o.score = sc.first;
+        o.eta = sc.second;
+
+        if (!haveBest || better(o, best)) {
+            best = o;
+            haveBest = true;
+        }
+    };
+
+    // Wait is a legal fallback (silent) when boxed in.
+    {
+        Opt w;
+        w.isWait = true;
+        w.moves = false;
+        w.resPos = start;
+        w.noisePos = start;
+        w.noiseVol = 0;
+        consider(w);
+    }
+
+    static const int dirs[8][2] = {
+        { 0, -1}, { 0, 1}, {-1, 0}, { 1, 0},
+        {-1, -1}, { 1, -1}, {-1, 1}, { 1, 1},
+    };
+
+    for (const auto& dxy : dirs) {
+        const int dx = dxy[0];
+        const int dy = dxy[1];
+        const int nx = start.x + dx;
+        const int ny = start.y + dy;
+
+        if (!dung.inBounds(nx, ny)) continue;
+
+        // Mirror tryMove() corner-cutting rules.
+        if (!phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, start, dx, dy)) {
+            continue;
+        }
+
+        // Avoid intentionally attacking; this is an evasion helper.
+        if (const Entity* occ = entityAt(nx, ny)) {
+            if (occ->id == p.id) {
+                continue;
+            }
+            // Allow friendly swaps (helps retreat in corridors).
+            if (!occ->friendly) {
+                continue;
+            }
+            // If they're webbed, tryMove() will refuse the swap.
+            if (occ->effects.webTurns > 0) {
+                continue;
+            }
+        }
+
+        const TileType tt = dung.at(nx, ny).type;
+
+        Opt o;
+        o.dx = dx;
+        o.dy = dy;
+        o.isWait = false;
+
+        // Door interactions consume a turn without changing position.
+        if (!phasing && tt == TileType::DoorClosed) {
+            o.moves = false;
+            o.resPos = start;
+            o.noisePos = {nx, ny};
+            o.noiseVol = isSneaking() ? 8 : 12;
+            consider(o);
+            continue;
+        }
+
+        if (!phasing && tt == TileType::DoorLocked) {
+            // Predict the best available unlock path (keys preferred over picks).
+            if (keyCount() > 0) {
+                o.moves = false;
+                o.resPos = start;
+                o.noisePos = {nx, ny};
+                o.noiseVol = isSneaking() ? 9 : 12;
+                consider(o);
+                continue;
+            }
+            if (lockpickCount() > 0) {
+                o.moves = false;
+                o.resPos = start;
+                o.noisePos = {nx, ny};
+                o.noiseVol = isSneaking() ? 8 : 10;
+                consider(o);
+                continue;
+            }
+            // Can't unlock: skip.
+            continue;
+        }
+
+        // Pushable boulder: allow if the push is legal (orthogonal, empty destination).
+        if (!phasing && tt == TileType::Boulder) {
+            if (dx != 0 && dy != 0) continue;
+
+            const int bx = nx + dx;
+            const int by = ny + dy;
+            if (!dung.inBounds(bx, by)) continue;
+            if (entityAt(bx, by)) continue;
+
+            const TileType dest = dung.at(bx, by).type;
+            if (dest == TileType::Floor) {
+                o.moves = true;
+                o.resPos = {nx, ny};
+                o.noisePos = {nx, ny};
+                o.noiseVol = 13;
+                consider(o);
+                continue;
+            }
+            if (dest == TileType::Chasm) {
+                o.moves = true;
+                o.resPos = {nx, ny};
+                o.noisePos = {nx, ny};
+                o.noiseVol = 16;
+                consider(o);
+                continue;
+            }
+
+            continue;
+        }
+
+        // Standard movement.
+        bool canStep = true;
+        if (!phasing) {
+            canStep = dung.isWalkable(nx, ny) || (tt == TileType::Chasm && levitating);
+        }
+        if (!canStep) continue;
+
+        o.moves = true;
+        o.resPos = {nx, ny};
+        o.noisePos = o.resPos;
+        o.noiseVol = (p.kind == EntityKind::Player) ? playerFootstepNoiseVolumeAt(o.resPos) : 0;
+        consider(o);
+    }
+
+    if (!haveBest) {
+        pushMsg("EVADE: NO VALID MOVE.", MessageKind::Warning, true);
+        return false;
+    }
+
+    if (best.isWait || (best.dx == 0 && best.dy == 0)) {
+        pushMsg("YOU WAIT.", MessageKind::Info);
+        return true;
+    }
+
+    // Execute the chosen direction through the real movement system so all
+    // side effects (door open, lockpicking, boulder pushing, trap triggers, noise, ...)
+    // remain authoritative.
+    return tryMove(p, best.dx, best.dy);
 }

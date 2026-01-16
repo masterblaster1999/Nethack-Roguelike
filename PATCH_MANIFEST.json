@@ -1,16 +1,16 @@
 {
-  "patch_id": "round43_patch",
-  "previous_patch_id": "round42_patch",
-  "round": 43,
-  "date": "2026-01-15",
+  "patch_id": "round57_patch",
+  "previous_patch_id": "round56_patch",
+  "round": 57,
+  "date": "2026-01-16",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Fixed MSVC build errors in renderer procedural palette code: properly source depth/maxDepth from Game, remove undefined overlay helper usage, and keep overlay object tinting consistent.",
-    "Fixed remaining MSVC build breaks in sprite generation helpers (VTuber holo card borders) and added a subtle deterministic 'glint' modulation for altar/fountain/stairs overlay tiles (scaled by proc_palette strength) to improve readability without breaking pixel-art."
+    "Main dungeon level generation (depth 1\u201325) now uses a deterministic per-level seed derived from the run seed + level identity, so floors generate consistently and do not perturb the gameplay RNG stream (matching Infinite World behavior).",
+    "Augury preview now seeds its simulation from the same per-level seed, making the vision stable/accurate regardless of other RNG-consuming actions before descending.",
+    "The final Sanctum (depth 25) is now procedurally varied: randomized corner room assignments, sanctum dimensions/offset, door wall + moat bridges, and arena pillar scatter while preserving Treasure/Shrine room metadata for boss/objective spawning."
   ],
   "files_in_patch_zip": [
-    "CHANGELOG.md",
-    "PATCH_MANIFEST.json",
+    "src/action_info.hpp",
     "src/ai.cpp",
     "src/combat.cpp",
     "src/dungeon.cpp",
@@ -26,17 +26,24 @@
     "src/game_spawn.cpp",
     "src/game_targeting.cpp",
     "src/game_world.cpp",
+    "src/hearing_field.hpp",
+    "src/items.cpp",
+    "src/items.hpp",
     "src/keybinds.cpp",
     "src/main.cpp",
+    "src/monster_pathing.hpp",
+    "src/pathfinding.cpp",
+    "src/pathfinding.hpp",
     "src/render.cpp",
     "src/render.hpp",
     "src/settings.cpp",
     "src/settings.hpp",
+    "src/shop.cpp",
     "src/spritegen.cpp",
     "src/spritegen.hpp",
-    "src/items.cpp",
-    "src/items.hpp",
+    "src/threat_field.hpp",
     "src/vtuber_gen.hpp",
-    "src/shop.cpp"
+    "CHANGELOG.md",
+    "PATCH_MANIFEST.json"
   ]
 }

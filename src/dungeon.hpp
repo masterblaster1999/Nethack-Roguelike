@@ -416,6 +416,15 @@ int materialCellSize() const { return materialCacheCell; }
     // `maxCost` limits the search for efficiency; tiles beyond this cost remain -1.
     std::vector<int> computeSoundMap(int sx, int sy, int maxCost) const;
 
+    // Sound propagation helpers.
+    //
+    // These expose the same rules used by computeSoundMap() so other systems
+    // (e.g. stealth/hearing fields) can reuse the exact propagation model
+    // without re-implementing the tile logic.
+    bool soundPassable(int x, int y) const;
+    int soundTileCost(int x, int y) const;
+    bool soundDiagonalOk(int fromX, int fromY, int dx, int dy) const;
+
     Vec2i randomFloor(RNG& rng, bool avoidDoors = true) const;
 
 private:

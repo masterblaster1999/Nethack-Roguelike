@@ -3,6 +3,7 @@
 #include "combat_rules.hpp"
 
 #include "grid_utils.hpp"
+#include "monster_pathing.hpp"
 #include "pathfinding.hpp"
 
 #include <limits>
@@ -81,8 +82,8 @@ void Game::monsterTurn() {
     }
 
 
-    const int W = dung.width;
-    const int H = dung.height;
+    const int W = std::max(1, dung.width);
+    const int H = std::max(1, dung.height);
 
     auto idx = [&](int x, int y) { return y * W + x; };
 
@@ -99,168 +100,36 @@ void Game::monsterTurn() {
     };
 
     // Discovered traps are visible in the world; most creatures will try to route around them
-    // when possible. Build a per-tile penalty map so pathfinding can be trap-aware without
+    // when practical. Build a per-tile penalty map so pathfinding can be trap-aware without
     // doing an O(traps) lookup per tile expansion.
-    const size_t nTiles = static_cast<size_t>(W * H);
-    std::vector<int> discoveredTrapPenalty;
-    discoveredTrapPenalty.assign(nTiles, 0);
-
-    auto trapPenaltyForAi = [](TrapKind k) -> int {
-        switch (k) {
-            case TrapKind::TrapDoor:       return 18;
-            case TrapKind::RollingBoulder: return 17;
-            case TrapKind::PoisonDart:     return 14;
-            case TrapKind::Spike:          return 14;
-            case TrapKind::PoisonGas:      return 13;
-            case TrapKind::ConfusionGas:   return 12;
-            case TrapKind::Web:            return 10;
-            case TrapKind::LetheMist:      return 9;
-            case TrapKind::Alarm:          return 7;
-            case TrapKind::Teleport:       return 6;
-            default: return 12;
-        }
-    };
-
-    for (const auto& tr : trapsCur) {
-        if (!tr.discovered) continue;
-        if (!dung.inBounds(tr.pos.x, tr.pos.y)) continue;
-        const size_t i = static_cast<size_t>(idx(tr.pos.x, tr.pos.y));
-        if (i >= discoveredTrapPenalty.size()) continue;
-        const int penalty = trapPenaltyForAi(tr.kind);
-        if (penalty > discoveredTrapPenalty[i]) discoveredTrapPenalty[i] = penalty;
+    std::vector<int> discoveredTrapPenalty = buildDiscoveredTrapPenaltyGrid(*this);
+    if (discoveredTrapPenalty.size() != static_cast<size_t>(W * H)) {
+        discoveredTrapPenalty.assign(static_cast<size_t>(W * H), 0);
     }
 
-
-    // Some monsters can bash through locked doors while hunting.
-    // We model this in pathfinding by treating locked doors as passable
-    // with a steep movement cost (representing repeated smash attempts).
-    //
-    // In addition, a few special entities are ethereal and can phase through
-    // terrain entirely (e.g. bones ghosts).
-    enum PathMode : int {
-        Normal = 0,
-        SmashLockedDoors = 1,
-        Phasing = 2,
-        Levitate = 3,
-    };
-
-    auto monsterCanBashLockedDoor = [&](EntityKind k) -> bool {
-        // Keep conservative for balance: only heavy bruisers.
-        return (k == EntityKind::Ogre || k == EntityKind::Troll || k == EntityKind::Minotaur);
-    };
-
-    auto passableForMode = [&](int x, int y, int mode) -> bool {
-        if (!dung.inBounds(x, y)) return false;
-
-        // Ethereal entities ignore terrain restrictions (but still can't leave the map).
-        if (mode == PathMode::Phasing) return true;
-
-        if (dung.isPassable(x, y)) return true;
-        if (mode == PathMode::SmashLockedDoors && dung.isDoorLocked(x, y)) return true;
-        if (mode == PathMode::Levitate && dung.at(x, y).type == TileType::Chasm) return true;
-        return false;
-    };
-
-    auto stepCostForMode = [&](int x, int y, int mode) -> int {
-        if (!dung.inBounds(x, y)) return 0;
-
-        int cost = 1;
-
-        // Phasing movement still consumes time, but we bias the pathfinder
-        // to prefer open corridors over "living" inside solid walls.
-        if (mode == PathMode::Phasing) {
-            cost = dung.isWalkable(x, y) ? 1 : 2;
-        } else {
-            const TileType t = dung.at(x, y).type;
-            switch (t) {
-                case TileType::DoorClosed:
-                    // Monsters open doors as an action, then step through next.
-                    cost = 2;
-                    break;
-                case TileType::DoorLocked:
-                    // Smashing locks is much slower than opening an unlocked door.
-                    cost = (mode == PathMode::SmashLockedDoors) ? 4 : 0;
-                    break;
-                default:
-                    cost = 1;
-                    break;
-            }
-        }
-
-        if (cost <= 0) return cost;
-
-        // Environmental hazards:
-        // - Fire is an obvious hazard: monsters generally try to route around it.
-        // - Confusion gas is also undesirable (unless it is the only way through).
-        // This mirrors player auto-travel's strong preference to avoid fire.
-        const uint8_t f = this->fireAt(x, y);
-        if (f > 0u) {
-            // Strongly discourage stepping onto burning tiles, but don't hard-block.
-            cost += 10 + static_cast<int>(f) / 16; // +10..+25
-        }
-
-        const uint8_t g = this->confusionGasAt(x, y);
-        if (g > 0u) {
-            // Moderate penalty so monsters avoid lingering gas clouds when possible.
-            cost += 6 + static_cast<int>(g) / 32; // +6..+13
-        }
-
-        const uint8_t pg = this->poisonGasAt(x, y);
-        if (pg > 0u) {
-            // Poison gas is dangerous; prefer to route around it when possible.
-            cost += 7 + static_cast<int>(pg) / 32; // +7..+14
-        }
-
-        const size_t ti = static_cast<size_t>(idx(x, y));
-        if (ti < discoveredTrapPenalty.size()) {
-            const int tp = discoveredTrapPenalty[ti];
-            if (tp > 0) {
-                // Traps are a known hazard: monsters path around discovered traps if there is a reasonable alternative.
-                cost += tp;
-            }
-        }
-
-        return cost;
-    };
-
-    auto diagOkForMode = [&](int fromX, int fromY, int dx, int dy, int mode) -> bool {
-        // Cardinal moves never need special casing.
-        if (dx == 0 || dy == 0) return true;
-
-        if (mode == PathMode::Phasing) return true;
-
-        if (mode == PathMode::Levitate) {
-            // Allow diagonal movement as long as the two adjacent cardinal tiles
-            // are passable in this mode (including chasms).
-            return passableForMode(fromX + dx, fromY, mode) && passableForMode(fromX, fromY + dy, mode);
-        }
-
-        return diagonalPassable(dung, {fromX, fromY}, dx, dy);
-    };
-
     // Cache cost-to-target maps for this turn.
-    // Keyed by (target tile index, path mode) to keep caching correct.
+    // Keyed by (target tile index, capability mask) to keep caching correct.
     // These maps are "minimum turns" approximations (doors/locks cost extra).
     std::unordered_map<int, std::vector<int>> costCache;
     costCache.reserve(32);
 
-    auto getCostMap = [&](Vec2i target, int mode) -> const std::vector<int>& {
-        // Key by (target tile index, path mode). We pack the mode in the low bits.
-        // 2 bits are enough for our current modes.
-        const int key = (idx(target.x, target.y) << 2) | (mode & 3);
+    auto getCostMap = [&](Vec2i target, int caps) -> const std::vector<int>& {
+        // Key by (target tile index, capability mask). We pack caps in the low bits.
+        // We keep caps <= 3 bits (0..7) in monster_pathing.hpp.
+        const int key = (idx(target.x, target.y) << 3) | (caps & 7);
         auto it = costCache.find(key);
         if (it != costCache.end()) return it->second;
 
-        auto passable = [&, mode](int x, int y) -> bool { return passableForMode(x, y, mode); };
-        auto stepCost = [&, mode](int x, int y) -> int { return stepCostForMode(x, y, mode); };
-        auto diagOk = [&, mode](int fromX, int fromY, int dx, int dy) -> bool { return diagOkForMode(fromX, fromY, dx, dy, mode); };
+        PassableFn passable = monsterPassableFn(*this, caps);
+        StepCostFn stepCost = monsterStepCostFn(*this, caps, &discoveredTrapPenalty);
+        DiagonalOkFn diagOk = monsterDiagonalOkFn(*this, caps);
 
         auto [it2, inserted] = costCache.emplace(key, dijkstraCostToTarget(W, H, target, passable, stepCost, diagOk));
         (void)inserted;
         return it2->second;
     };
 
-    auto bestStepToward = [&](const Entity& m, const std::vector<int>& costMap, int mode) -> Vec2i {
+    auto bestStepToward = [&](const Entity& m, const std::vector<int>& costMap, int caps) -> Vec2i {
         Vec2i best = m.pos;
         int bestScore = std::numeric_limits<int>::max();
         for (auto& dv : dirs) {
@@ -268,14 +137,14 @@ void Game::monsterTurn() {
             const int nx = m.pos.x + dx;
             const int ny = m.pos.y + dy;
             if (!dung.inBounds(nx, ny)) continue;
-            if (dx != 0 && dy != 0 && !diagOkForMode(m.pos.x, m.pos.y, dx, dy, mode)) continue;
-            if (!passableForMode(nx, ny, mode)) continue;
+            if (dx != 0 && dy != 0 && !monsterDiagonalOkForCaps(*this, m.pos.x, m.pos.y, dx, dy, caps)) continue;
+            if (!monsterPassableForCaps(*this, nx, ny, caps)) continue;
             if (entityAt(nx, ny)) continue;
 
             const int cToTarget = costMap[static_cast<size_t>(idx(nx, ny))];
             if (cToTarget < 0) continue;
 
-            const int step = stepCostForMode(nx, ny, mode);
+            const int step = monsterStepCostForCaps(*this, nx, ny, caps, &discoveredTrapPenalty);
             if (step <= 0) continue;
 
             // Choose the move that minimizes "step + remaining" cost.
@@ -288,7 +157,7 @@ void Game::monsterTurn() {
         return best;
     };
 
-    auto bestStepAway = [&](const Entity& m, const std::vector<int>& costMap, int mode) -> Vec2i {
+    auto bestStepAway = [&](const Entity& m, const std::vector<int>& costMap, int caps) -> Vec2i {
         Vec2i best = m.pos;
         int bestD = -1;
         for (auto& dv : dirs) {
@@ -296,8 +165,8 @@ void Game::monsterTurn() {
             const int nx = m.pos.x + dx;
             const int ny = m.pos.y + dy;
             if (!dung.inBounds(nx, ny)) continue;
-            if (dx != 0 && dy != 0 && !diagOkForMode(m.pos.x, m.pos.y, dx, dy, mode)) continue;
-            if (!passableForMode(nx, ny, mode)) continue;
+            if (dx != 0 && dy != 0 && !monsterDiagonalOkForCaps(*this, m.pos.x, m.pos.y, dx, dy, caps)) continue;
+            if (!monsterPassableForCaps(*this, nx, ny, caps)) continue;
             if (entityAt(nx, ny)) continue;
 
             const int d0 = costMap[static_cast<size_t>(idx(nx, ny))];
@@ -590,6 +459,8 @@ void Game::monsterTurn() {
 
         // Ally AI: friendly companions (dog, tamed beasts, etc.).
         if (m.friendly) {
+            const int caps = monsterPathCapsForEntity(m);
+
             // Lazily initialize / clear home anchors based on current order.
             if (m.allyOrder == AllyOrder::Stay || m.allyOrder == AllyOrder::Guard) {
                 if (m.allyHomePos.x < 0) m.allyHomePos = m.pos;
@@ -650,8 +521,8 @@ void Game::monsterTurn() {
                     return;
                 }
 
-                const auto& costMap = getCostMap(best->pos, PathMode::Normal);
-                const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                const auto& costMap = getCostMap(best->pos, caps);
+                const Vec2i step = bestStepToward(m, costMap, caps);
                 if (step != m.pos) {
                     tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
                 }
@@ -662,8 +533,8 @@ void Game::monsterTurn() {
             if (m.allyOrder == AllyOrder::Stay) {
                 // Stay: return to the anchor tile if displaced.
                 if (m.allyHomePos.x >= 0 && m.pos != m.allyHomePos) {
-                    const auto& costMap = getCostMap(m.allyHomePos, PathMode::Normal);
-                    const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                    const auto& costMap = getCostMap(m.allyHomePos, caps);
+                    const Vec2i step = bestStepToward(m, costMap, caps);
                     if (step != m.pos) {
                         tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
                     }
@@ -678,8 +549,8 @@ void Game::monsterTurn() {
                 const int distHome = chebyshev(m.pos, home);
 
                 if (distHome > guardRadius) {
-                    const auto& costMap = getCostMap(home, PathMode::Normal);
-                    const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                    const auto& costMap = getCostMap(home, caps);
+                    const Vec2i step = bestStepToward(m, costMap, caps);
                     if (step != m.pos) {
                         tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
                     }
@@ -712,8 +583,8 @@ void Game::monsterTurn() {
                 // If carrying loot, head back to the player to deliver.
                 const bool carryingLoot = (m.stolenGold > 0) || (m.pocketConsumable.id != 0 && m.pocketConsumable.count > 0);
                 if (carryingLoot) {
-                    const auto& costMap = getCostMap(p.pos, PathMode::Normal);
-                    const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                    const auto& costMap = getCostMap(p.pos, caps);
+                    const Vec2i step = bestStepToward(m, costMap, caps);
                     if (step != m.pos) {
                         tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
                     }
@@ -728,8 +599,8 @@ void Game::monsterTurn() {
                         else (void)pickupItemAt(m);
                         return;
                     }
-                    const auto& costMap = getCostMap(tgt, PathMode::Normal);
-                    const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                    const auto& costMap = getCostMap(tgt, caps);
+                    const Vec2i step = bestStepToward(m, costMap, caps);
                     if (step != m.pos) {
                         tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
                         return;
@@ -741,8 +612,8 @@ void Game::monsterTurn() {
             // Default: stick close to the player.
             const int dist = chebyshev(m.pos, p.pos);
             if (dist > 2) {
-                const auto& costMap = getCostMap(p.pos, PathMode::Normal);
-                const Vec2i step = bestStepToward(m, costMap, PathMode::Normal);
+                const auto& costMap = getCostMap(p.pos, caps);
+                const Vec2i step = bestStepToward(m, costMap, caps);
                 if (step != m.pos) {
                     tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
                 }
@@ -961,17 +832,9 @@ void Game::monsterTurn() {
             return;
         }
 
-        // Path mode selection:
-        //  - Ethereal monsters (e.g. bones ghosts) can phase through terrain.
-        //  - Heavy bruisers can bash locked doors while hunting.
-        int pathMode = PathMode::Normal;
-        if (entityCanPhase(m.kind)) {
-            pathMode = PathMode::Phasing;
-        } else if (m.effects.levitationTurns > 0) {
-            pathMode = PathMode::Levitate;
-        } else if (monsterCanBashLockedDoor(m.kind)) {
-            pathMode = PathMode::SmashLockedDoors;
-        }
+        // Capability mask: correctly model combined traversal abilities.
+        // (e.g. levitating bruisers can still bash locked doors).
+        const int caps = monsterPathCapsForEntity(m);
 
         // Pack / group coordination: if a grouped monster just spotted you,
         // it alerts nearby groupmates so packs behave like packs.
@@ -995,7 +858,7 @@ void Game::monsterTurn() {
             }
         }
 
-        const std::vector<int>& costMap = getCostMap(target, pathMode);
+        const std::vector<int>& costMap = getCostMap(target, caps);
         const int d0 = costMap[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
 
         // Pocket consumables: a few intelligent monsters can carry a potion and
@@ -1075,7 +938,7 @@ void Game::monsterTurn() {
             // Tactical levitation: if the player is unreachable with normal pathing
             // (typically due to a chasm split), drink levitation to open a route.
             if (pk == ItemKind::PotionLevitation && m.effects.levitationTurns <= 0 && d0 < 0) {
-                const std::vector<int>& costLev = getCostMap(target, PathMode::Levitate);
+                const std::vector<int>& costLev = getCostMap(target, caps | MPC_Levitate);
                 const int dLev = costLev[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
                 if (dLev >= 0) {
                     drinkPocketPotion(pk);
@@ -1412,7 +1275,7 @@ void Game::monsterTurn() {
             // Fear: try to break contact instead of trading blows.
             // If no escape route exists, the monster will fall back to attacking.
             if (m.effects.fearTurns > 0 && d0 >= 0) {
-                Vec2i to = bestStepAway(m, costMap, pathMode);
+                Vec2i to = bestStepAway(m, costMap, caps);
                 if (to != m.pos) {
                     tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
                     return;
@@ -1477,7 +1340,7 @@ void Game::monsterTurn() {
                             }
 
                             if (d0 >= 0) {
-                                Vec2i to = bestStepAway(m, costMap, pathMode);
+                                Vec2i to = bestStepAway(m, costMap, caps);
                                 if (to != m.pos) {
                                     tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
                                     return;
@@ -1545,7 +1408,7 @@ void Game::monsterTurn() {
 
                         // Fallback: step away if teleport couldn't find a good spot.
                         if (d0 >= 0) {
-                            Vec2i to = bestStepAway(m, costMap, pathMode);
+                            Vec2i to = bestStepAway(m, costMap, caps);
                             if (to != m.pos) {
                                 tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
                                 return;
@@ -1584,7 +1447,7 @@ void Game::monsterTurn() {
 
                     // Fallback: step away if blinking couldn't find a good spot.
                     if (d0 >= 0) {
-                        Vec2i to = bestStepAway(m, costMap, pathMode);
+                        Vec2i to = bestStepAway(m, costMap, caps);
                         if (to != m.pos) {
                             tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
                             return;
@@ -1654,7 +1517,7 @@ void Game::monsterTurn() {
 
                     // Fallback: step away if blink couldn't find a good spot.
                     if (d0 >= 0) {
-                        Vec2i to = bestStepAway(m, costMap, pathMode);
+                        Vec2i to = bestStepAway(m, costMap, caps);
                         if (to != m.pos) {
                             tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
                             return;
@@ -1982,7 +1845,7 @@ void Game::monsterTurn() {
         const bool feared = (m.effects.fearTurns > 0);
         const bool lowHpFlee = (m.willFlee && m.hp <= std::max(1, m.hpMax / 3));
         if ((feared || fleeLoot || lowHpFlee) && d0 >= 0) {
-            Vec2i to = bestStepAway(m, costMap, pathMode);
+            Vec2i to = bestStepAway(m, costMap, caps);
             if (to != m.pos) {
                 tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
                 return;
@@ -1997,7 +1860,7 @@ void Game::monsterTurn() {
             } else {
                 // If too close, step back a bit.
                 if (man <= 2 && d0 >= 0) {
-                    Vec2i to = bestStepAway(m, costMap, pathMode);
+                    Vec2i to = bestStepAway(m, costMap, caps);
                     if (to != m.pos) {
                         tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
                         return;
@@ -2107,8 +1970,8 @@ void Game::monsterTurn() {
                         const int ny = m.pos.y + dy;
 
                         if (!dung.inBounds(nx, ny)) continue;
-                        if (dx != 0 && dy != 0 && !diagOkForMode(m.pos.x, m.pos.y, dx, dy, pathMode)) continue;
-                        if (!passableForMode(nx, ny, pathMode)) continue;
+                        if (dx != 0 && dy != 0 && !monsterDiagonalOkForCaps(*this, m.pos.x, m.pos.y, dx, dy, caps)) continue;
+                        if (!monsterPassableForCaps(*this, nx, ny, caps)) continue;
                         if (entityAt(nx, ny)) continue;
 
                         // Still need LoS and range after stepping.
@@ -2126,7 +1989,7 @@ void Game::monsterTurn() {
                         if (newMan <= 2) score += 400;
 
                         // Prefer "cheaper" tiles (includes hazards).
-                        const int stepC = stepCostForMode(nx, ny, pathMode);
+                        const int stepC = monsterStepCostForCaps(*this, nx, ny, caps, &discoveredTrapPenalty);
                         if (stepC > 0) score += stepC * 10;
 
                         if (!found || score < bestScore) {
@@ -2163,13 +2026,13 @@ void Game::monsterTurn() {
                 const int ax = p.pos.x + dv[0];
                 const int ay = p.pos.y + dv[1];
                 if (!dung.inBounds(ax, ay)) continue;
-                if (!passableForMode(ax, ay, pathMode)) continue;
+                if (!monsterPassableForCaps(*this, ax, ay, caps)) continue;
                 if (entityAt(ax, ay)) continue;
 
                 const int k = idx(ax, ay);
                 if (reservedAdj.find(k) != reservedAdj.end()) continue;
 
-                const std::vector<int>& cm = getCostMap({ax, ay}, pathMode);
+                const std::vector<int>& cm = getCostMap({ax, ay}, caps);
                 const int c = cm[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
                 if (c < 0) continue;
 
@@ -2182,8 +2045,8 @@ void Game::monsterTurn() {
 
             if (found) {
                 reservedAdj.insert(idx(bestAdj.x, bestAdj.y));
-                const std::vector<int>& cm = getCostMap(bestAdj, pathMode);
-                Vec2i to = bestStepToward(m, cm, pathMode);
+                const std::vector<int>& cm = getCostMap(bestAdj, caps);
+                Vec2i to = bestStepToward(m, cm, caps);
                 if (to != m.pos) {
                     tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
                     return;
@@ -2203,7 +2066,7 @@ void Game::monsterTurn() {
 
         // Default: step toward the hunt target using a cost-to-target map.
         if (d0 >= 0) {
-            Vec2i to = bestStepToward(m, costMap, pathMode);
+            Vec2i to = bestStepToward(m, costMap, caps);
             if (to != m.pos) {
                 tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
             }

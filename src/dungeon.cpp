@@ -2,6 +2,7 @@
 #include "game.hpp"
 #include "corridor_braid.hpp"
 #include "terrain_sculpt.hpp"
+#include "pathfinding.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -10662,36 +10663,109 @@ void generateSokoban(Dungeon& d, RNG& rng, int depth) {
 
 
 void generateSanctum(Dungeon& d, RNG& rng, int depth) {
-    (void)rng;
     (void)depth; // reserved for future per-depth theming
     fillWalls(d);
 
-    // Open the interior: the final floor is an arena-like layout with a central locked sanctum.
+    // Arena-like final floor with a central locked sanctum and a chasm moat.
     carveRect(d, 1, 1, d.width - 2, d.height - 2, TileType::Floor);
 
-    const int cx = d.width / 2;
-    const int cy = d.height / 2;
+    // Choose three distinct corners for: start, shrine, guard staging.
+    enum Corner { TL = 0, TR = 1, BL = 2, BR = 3 };
 
-    // Central sanctum (walled chamber) with a locked door and a chasm moat.
-    const int wallW = 13;
-    const int wallH = 9;
+    int corners[4] = {0, 1, 2, 3};
+    for (int i = 0; i < 4; ++i) {
+        const int j = rng.range(i, 3);
+        std::swap(corners[i], corners[j]);
+    }
+    const Corner startCorner = static_cast<Corner>(corners[0]);
+    const Corner shrineCorner = static_cast<Corner>(corners[1]);
+    const Corner guardCorner = static_cast<Corner>(corners[2]);
+
+    auto cornerRoom = [&](Corner c, int w, int h, RoomType type) -> Room {
+        int x = 2;
+        int y = 2;
+        switch (c) {
+            case TL: x = 2; y = 2; break;
+            case TR: x = d.width - w - 2; y = 2; break;
+            case BL: x = 2; y = d.height - h - 2; break;
+            case BR: x = d.width - w - 2; y = d.height - h - 2; break;
+        }
+
+        // Small jitter (inward) so corners aren't identical every run.
+        const int jx = rng.range(0, 1);
+        const int jy = rng.range(0, 1);
+        if (c == TR || c == BR) x -= jx; else x += jx;
+        if (c == BL || c == BR) y -= jy; else y += jy;
+        x = clampi(x, 2, d.width - w - 2);
+        y = clampi(y, 2, d.height - h - 2);
+        return Room{x, y, w, h, type};
+    };
+
+    // Corner room sizes.
+    const int sw = rng.range(7, 10);
+    const int sh = rng.range(5, 7);
+    const int rw = rng.range(7, 10);
+    const int rh = rng.range(5, 7);
+    const int gw = rng.range(7, 10);
+    const int gh = rng.range(5, 7);
+
+    Room startR = cornerRoom(startCorner, sw, sh, RoomType::Normal);
+    Room shrineR = cornerRoom(shrineCorner, rw, rh, RoomType::Shrine);
+    Room guardR = cornerRoom(guardCorner, gw, gh, RoomType::Normal);
+
+    // Stairs.
+    d.stairsUp = {startR.x + startR.w / 2, startR.y + startR.h / 2};
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
+    if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+
+    // No downstairs on the final floor (Infinite World adds one later if enabled).
+    d.stairsDown = {-1, -1};
+
+    const int baseCx = d.width / 2;
+    const int baseCy = d.height / 2;
+    const int cx = clampi(baseCx + rng.range(-2, 2), 4, d.width - 5);
+    const int cy = clampi(baseCy + rng.range(-2, 2), 4, d.height - 5);
+
+    auto makeOdd = [&](int v) { return (v % 2 == 0) ? (v + 1) : v; };
+
+    // Central sanctum size (odd for symmetry).
+    int wallW = makeOdd(rng.range(11, 17));
+    int wallH = makeOdd(rng.range(7, 11));
+
+    int maxWallW = d.width - 10;
+    int maxWallH = d.height - 10;
+    if (maxWallW < 11) maxWallW = 11;
+    if (maxWallH < 7) maxWallH = 7;
+    if (maxWallW % 2 == 0) maxWallW -= 1;
+    if (maxWallH % 2 == 0) maxWallH -= 1;
+    wallW = clampi(wallW, 11, maxWallW);
+    wallH = clampi(wallH, 7, maxWallH);
+
     int wallX = clampi(cx - wallW / 2, 4, d.width - wallW - 4);
     int wallY = clampi(cy - wallH / 2, 4, d.height - wallH - 4);
 
+    // Walled chamber.
     for (int y = wallY; y < wallY + wallH; ++y) {
         for (int x = wallX; x < wallX + wallW; ++x) {
             if (d.inBounds(x, y)) d.at(x, y).type = TileType::Wall;
         }
     }
-
     carveRect(d, wallX + 1, wallY + 1, wallW - 2, wallH - 2, TileType::Floor);
 
-    // Locked door on the north wall.
-    const int doorX = wallX + wallW / 2;
-    const int doorY = wallY;
+    // Locked door on a random wall.
+    const int doorSide = rng.range(0, 3); // 0=N,1=E,2=S,3=W
+    int doorX = wallX + wallW / 2;
+    int doorY = wallY;
+    switch (doorSide) {
+        case 0: doorX = wallX + wallW / 2; doorY = wallY; break;
+        case 1: doorX = wallX + wallW - 1; doorY = wallY + wallH / 2; break;
+        case 2: doorX = wallX + wallW / 2; doorY = wallY + wallH - 1; break;
+        case 3: doorX = wallX; doorY = wallY + wallH / 2; break;
+        default: break;
+    }
     if (d.inBounds(doorX, doorY)) d.at(doorX, doorY).type = TileType::DoorLocked;
 
-    // Moat ring (1 tile away from the sanctum wall).
+    // Chasm moat ring (1 tile away from the sanctum wall).
     const int moatX = wallX - 1;
     const int moatY = wallY - 1;
     const int moatW = wallW + 2;
@@ -10699,8 +10773,7 @@ void generateSanctum(Dungeon& d, RNG& rng, int depth) {
 
     auto setChasm = [&](int x, int y) {
         if (!d.inBounds(x, y)) return;
-        // Don't overwrite the sanctum walls or the upstairs.
-        TileType t = d.at(x, y).type;
+        const TileType t = d.at(x, y).type;
         if (t == TileType::Wall || t == TileType::StairsUp) return;
         d.at(x, y).type = TileType::Chasm;
     };
@@ -10714,71 +10787,91 @@ void generateSanctum(Dungeon& d, RNG& rng, int depth) {
         setChasm(moatX + moatW - 1, y);
     }
 
-    // Bridges across the moat (keep the entrance obvious, with extra flank bridges).
-    if (d.inBounds(doorX, doorY - 1)) d.at(doorX, doorY - 1).type = TileType::Floor;
-    if (d.inBounds(doorX, doorY + wallH)) d.at(doorX, doorY + wallH).type = TileType::Floor;
-    if (d.inBounds(wallX - 1, cy)) d.at(wallX - 1, cy).type = TileType::Floor;
-    if (d.inBounds(wallX + wallW, cy)) d.at(wallX + wallW, cy).type = TileType::Floor;
+    auto carveBridgeAtSide = [&](int side) {
+        int bx = wallX + wallW / 2;
+        int by = wallY - 1;
+        switch (side) {
+            case 0: bx = wallX + wallW / 2; by = wallY - 1; break;
+            case 1: bx = wallX + wallW;     by = wallY + wallH / 2; break;
+            case 2: bx = wallX + wallW / 2; by = wallY + wallH; break;
+            case 3: bx = wallX - 1;         by = wallY + wallH / 2; break;
+            default: break;
+        }
+        if (!d.inBounds(bx, by)) return;
+        if (d.at(bx, by).type == TileType::StairsUp) return;
+        d.at(bx, by).type = TileType::Floor;
+    };
 
-    // Pillars inside the sanctum for cover and to make knockback fights more interesting.
+    // Always carve the main bridge aligned with the locked door.
+    carveBridgeAtSide(doorSide);
+
+    // Add 1-2 extra bridges on other sides to reduce chokepoint frustration.
+    int sides[3];
+    int n = 0;
+    for (int s = 0; s < 4; ++s) {
+        if (s == doorSide) continue;
+        sides[n++] = s;
+    }
+    for (int i = 0; i < n; ++i) {
+        const int j = rng.range(i, n - 1);
+        std::swap(sides[i], sides[j]);
+    }
+    const int extra = rng.range(1, 2);
+    for (int i = 0; i < extra && i < n; ++i) {
+        carveBridgeAtSide(sides[i]);
+    }
+
+    // Pillars inside the sanctum for cover.
     const int ix0 = wallX + 2;
     const int ix1 = wallX + wallW - 3;
     const int iy0 = wallY + 2;
     const int iy1 = wallY + wallH - 3;
-    const Vec2i sanctumPillars[] = {
-        {ix0, iy0}, {ix1, iy0},
-        {ix0, iy1}, {ix1, iy1},
-        {cx - 1, cy}, {cx + 1, cy},
-    };
-    for (const auto& p : sanctumPillars) {
+    const Vec2i innerCorners[] = {{ix0, iy0}, {ix1, iy0}, {ix0, iy1}, {ix1, iy1}};
+    for (const auto& p : innerCorners) {
         if (!d.inBounds(p.x, p.y)) continue;
         if (d.at(p.x, p.y).type == TileType::Floor) d.at(p.x, p.y).type = TileType::Pillar;
     }
 
-    // A few arena pillars outside the moat (symmetrical-ish).
-    const Vec2i hallPillars[] = {
-        {cx - 10, cy - 4}, {cx + 10, cy - 4},
-        {cx - 10, cy + 4}, {cx + 10, cy + 4},
-        {cx - 12, cy}, {cx + 12, cy},
-    };
-    for (const auto& p : hallPillars) {
-        if (!d.inBounds(p.x, p.y)) continue;
-        if (d.at(p.x, p.y).type == TileType::Floor) d.at(p.x, p.y).type = TileType::Pillar;
+    // Optional inner pair (horizontal or vertical) to vary fight geometry.
+    const int icx = wallX + wallW / 2;
+    const int icy = wallY + wallH / 2;
+    if (rng.chance(0.50f)) {
+        const bool horiz = rng.chance(0.50f);
+        const Vec2i pair[] = {horiz ? Vec2i{icx - 2, icy} : Vec2i{icx, icy - 1},
+                              horiz ? Vec2i{icx + 2, icy} : Vec2i{icx, icy + 1}};
+        for (const auto& p : pair) {
+            if (!d.inBounds(p.x, p.y)) continue;
+            if (d.at(p.x, p.y).type == TileType::Floor) d.at(p.x, p.y).type = TileType::Pillar;
+        }
+    }
+
+    // Scatter some arena pillars outside the moat (avoid the moat + stairs).
+    int wantOuter = rng.range(5, 9);
+    int placedOuter = 0;
+    int tries = 0;
+    while (placedOuter < wantOuter && tries < wantOuter * 60) {
+        ++tries;
+        const int x = rng.range(2, d.width - 3);
+        const int y = rng.range(2, d.height - 3);
+        if (!d.inBounds(x, y)) continue;
+        if (d.at(x, y).type != TileType::Floor) continue;
+        if (Vec2i{x, y} == d.stairsUp) continue;
+
+        // Keep the moat perimeter readable.
+        if (x >= moatX - 1 && x <= moatX + moatW && y >= moatY - 1 && y <= moatY + moatH) continue;
+
+        d.at(x, y).type = TileType::Pillar;
+        placedOuter++;
     }
 
     // Define rooms (for spawns and room-type mechanics).
     d.rooms.clear();
+    d.rooms.push_back(startR);
+    d.rooms.push_back(shrineR);
+    d.rooms.push_back(guardR);
 
-    // Start room around the upstairs.
-    const int sx = 2;
-    const int sy = 2;
-    const int sw = 8;
-    const int sh = 6;
-    d.rooms.push_back({sx, sy, sw, sh, RoomType::Normal});
-
-    // A "last chance" shrine alcove (extra healing/utility before the sanctum).
-    const int rx = d.width - 10;
-    const int ry = 2;
-    const int rw = 8;
-    const int rh = 6;
-    d.rooms.push_back({rx, ry, rw, rh, RoomType::Shrine});
-
-    // A guard staging area (more monsters can spawn here).
-    const int gx = 2;
-    const int gy = d.height - 8;
-    const int gw = 8;
-    const int gh = 6;
-    d.rooms.push_back({gx, gy, gw, gh, RoomType::Normal});
-
-    // The sanctum interior is the treasure room.
+    // Sanctum interior is the treasure room.
     d.rooms.push_back({wallX + 1, wallY + 1, wallW - 2, wallH - 2, RoomType::Treasure});
-
-    // Stairs.
-    d.stairsUp = {sx + sw / 2, sy + sh / 2};
-    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
-
-    // No downstairs on the final floor.
-    d.stairsDown = {-1, -1};
 }
 
 } // namespace
@@ -13097,92 +13190,53 @@ bool Dungeon::hasLineOfSight(int x0, int y0, int x1, int y1) const {
     return lineOfSight(x0, y0, x1, y1);
 }
 
+bool Dungeon::soundPassable(int x, int y) const {
+    if (!inBounds(x, y)) return false;
+    const TileType t = at(x, y).type;
+    // Walls, pillars, and secret doors completely block sound propagation.
+    return (t != TileType::Wall && t != TileType::Pillar && t != TileType::DoorSecret);
+}
+
+int Dungeon::soundTileCost(int x, int y) const {
+    if (!inBounds(x, y)) return 1000000000;
+    const TileType t = at(x, y).type;
+    // Closed/locked doors muffle sound more than open spaces.
+    switch (t) {
+        case TileType::DoorClosed: return 2;
+        case TileType::DoorLocked: return 3;
+        default: return 1;
+    }
+}
+
+bool Dungeon::soundDiagonalOk(int fromX, int fromY, int dx, int dy) const {
+    if (dx == 0 || dy == 0) return true;
+    const int ax = fromX + dx;
+    const int ay = fromY;
+    const int bx = fromX;
+    const int by = fromY + dy;
+    // For sound, we use soundPassable (not walkable) because closed doors still transmit sound.
+    return soundPassable(ax, ay) || soundPassable(bx, by);
+}
+
 std::vector<int> Dungeon::computeSoundMap(int sx, int sy, int maxCost) const {
     std::vector<int> dist(static_cast<size_t>(width * height), -1);
     if (maxCost < 0) return dist;
     if (!inBounds(sx, sy)) return dist;
 
-    auto soundPassable = [&](int x, int y) -> bool {
-        if (!inBounds(x, y)) return false;
-        const TileType t = at(x, y).type;
-        // Walls, pillars, and secret doors completely block sound propagation.
-        return (t != TileType::Wall && t != TileType::Pillar && t != TileType::DoorSecret);
+    auto soundPassableFn = [&](int x, int y) -> bool { return soundPassable(x, y); };
+    auto tileCostFn = [&](int x, int y) -> int { return soundTileCost(x, y); };
+
+    if (!soundPassableFn(sx, sy)) return dist;
+
+    // Prevent diagonal "corner cutting" through two blocking tiles.
+    DiagonalOkFn diagOk = [&](int fromX, int fromY, int dx, int dy) -> bool {
+        return soundDiagonalOk(fromX, fromY, dx, dy);
     };
 
-    auto tileCost = [&](int x, int y) -> int {
-        if (!inBounds(x, y)) return 1000000000;
-        const TileType t = at(x, y).type;
-        // Closed/locked doors muffle sound more than open spaces.
-        switch (t) {
-            case TileType::DoorClosed: return 2;
-            case TileType::DoorLocked: return 3;
-            default: return 1;
-        }
-    };
-
-    if (!soundPassable(sx, sy)) return dist;
-
-    auto idx = [&](int x, int y) -> int { return y * width + x; };
-
-    using Node = std::pair<int, int>; // (cost, index)
-    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> pq;
-
-    const int startI = idx(sx, sy);
-    dist[static_cast<size_t>(startI)] = 0;
-    pq.push({0, startI});
-
-    static const int DIRS8[8][2] = {
-        {1,0},{-1,0},{0,1},{0,-1},
-        {1,1},{1,-1},{-1,1},{-1,-1}
-    };
-
-    while (!pq.empty()) {
-        const Node cur = pq.top();
-        pq.pop();
-
-        const int costHere = cur.first;
-        const int i = cur.second;
-        if (costHere < 0) continue;
-        if (costHere > maxCost) continue;
-        if (dist[static_cast<size_t>(i)] != costHere) continue;
-
-        const int x = i % width;
-        const int y = i / width;
-
-        for (const auto& dv : DIRS8) {
-            const int nx = x + dv[0];
-            const int ny = y + dv[1];
-            if (!inBounds(nx, ny)) continue;
-            if (!soundPassable(nx, ny)) continue;
-
-            // Prevent diagonal "corner cutting" through two blocking tiles.
-            if (dv[0] != 0 && dv[1] != 0) {
-                const int ax = x + dv[0];
-                const int ay = y;
-                const int bx = x;
-                const int by = y + dv[1];
-                // For sound, use soundPassable (not walkable) because closed doors still transmit sound.
-                const bool aPass = soundPassable(ax, ay);
-                const bool bPass = soundPassable(bx, by);
-                if (!aPass && !bPass) continue;
-            }
-
-            const int step = tileCost(nx, ny);
-            if (step <= 0) continue;
-            const int ncost = costHere + step;
-            if (ncost > maxCost) continue;
-
-            const int ni = idx(nx, ny);
-            int& slot = dist[static_cast<size_t>(ni)];
-            if (slot < 0 || ncost < slot) {
-                slot = ncost;
-                pq.push({ncost, ni});
-            }
-        }
-    }
-
-    return dist;
+    const std::vector<Vec2i> sources = {Vec2i{sx, sy}};
+    return dijkstraCostFromSources(width, height, sources, soundPassableFn, tileCostFn, diagOk, maxCost);
 }
+
 
 
 void Dungeon::computeFov(int px, int py, int radius, bool markExplored) {

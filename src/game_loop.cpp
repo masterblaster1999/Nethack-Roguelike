@@ -1494,8 +1494,10 @@ if (optionsSel == 19) {
         }
 
         if (dx != 0 || dy != 0) {
-            minimapCursorPos_.x = clampi(minimapCursorPos_.x + dx, 0, MAP_W - 1);
-            minimapCursorPos_.y = clampi(minimapCursorPos_.y + dy, 0, MAP_H - 1);
+            const int maxX = std::max(0, dung.width - 1);
+            const int maxY = std::max(0, dung.height - 1);
+            minimapCursorPos_.x = clampi(minimapCursorPos_.x + dx, 0, maxX);
+            minimapCursorPos_.y = clampi(minimapCursorPos_.y + dy, 0, maxY);
             return;
         }
 

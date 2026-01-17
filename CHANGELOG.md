@@ -7,6 +7,7 @@
 - Procedural terrain palette: per-run/per-floor HSL tints with room-style accents; configurable via settings and the new `#palette` command.
 - Procedural terrain materials: deterministic, depth-aware cellular-noise substrate (STONE/BRICK/BASALT/...) used for subtle tinting (scaled by proc_palette strength) and LOOK descriptions.
 - Material acoustics + scent absorption: substrate materials now modulate **footstep/dig noise** and **scent trail decay/spread** (moss/dirt dampen; metal/crystal ring out).
+- **Procedural monster ecology (spawn theming)**: dungeon **terrain materials** and **room types** now apply mild, deterministic biases to the monster spawn tables — and certain affinity spawns can roll 1–2 nearby **nestmates** (shared groupId) — creating emergent ecology (spiders/snakes in dirt & moss, undead in marble/brick, kobolds in metal seams) without overriding content-mod spawn weights.
 - **Procedural monster variants**: rare monsters now roll a persistent **rank** (Elite/Champion/Mythic) plus 1-3 **affixes** at spawn.
 - **Procedural monster abilities**: Elite+ monsters can roll 1–2 active abilities (pounce, toxic miasma, cinder nova, arcane ward, summoning, screech) with cooldowns, saved/loaded per-entity.
   - Affixes implemented this round: **Swift**, **Stonehide**, **Savage**, **Blinking** (panic blink reposition), and **Gilded** (bonus gold + higher key/drop odds).
@@ -16,6 +17,19 @@
   - Rolls are deterministic per monster (seeded from its sprite seed + depth + room type) and are **saved/loaded** so variants survive reloads.
 - Game-driven procedural particle FX events (spells + digging) via `FXParticleEvent` queue.
 - **Procedural sprite animation**: entities, items, and projectiles now use smooth, renderer-side procedural motion (move tween + hop/squash, idle bob, and hit recoil) to reduce "teleporty" feel in both top-down and isometric views.
+- **High-resolution voxel sprite detail (64x64/128x128)**: voxel sprites now automatically increase their internal voxel-model resolution (nearest-neighbor voxel upscaling) before rendering, so large tile sizes produce smoother 3D voxel meshes in both perspective and isometric modes (isometric raytracing caps detail to stay performant).
+- **Expanded procedural surface camp (depth 0)**: the camp hub now generates a variable palisade yard with 2–4 packed tents/huts, an optional well + fire ring, clustered wilderness dressing, and a guaranteed walkable spine between EXIT and DUNGEON (with adaptive brush-clearing if trees/rocks block the route).
+  - **Camp map size now varies per run** (compact/standard/sprawling) within the same safe bounds used by the dungeon generators, so the hub itself scales naturally with its palisade and wilderness dressing.
+  - Camp gates now face the EXIT side, and the EXIT position varies per run for more distinct surface layouts.
+  - Optional side sallyport gate + shallow ditch/moat (chasm ring) around the palisade (bridges preserved at gates).
+  - Larger yards can generate 1–2 corner watchtowers, plus an internal reserved footpath network so later clutter doesn't block common routes.
+  - Optional sacred grove POI outside the walls: standing stones around an altar, connected by a protected trail.
+  - Camp landmarks now add extra map markers (WELL, FIRE, ALTAR, SIDEGATE).
+- **Procedural rift cache pockets**: some floors now generate tiny optional wall pockets gated by a pushable **boulder** and a 1-tile **chasm** gap; pushing the boulder into the gap creates a rough bridge into a guaranteed **bonus chest** cache (via `bonusLootSpots`).
+- **Symmetric room furnishing (new procgen pass)**: on some floors, 1–2 non-shop/non-shrine rooms get mirrored pillar/boulder (rarely chasm) "furniture" patterns with a reserved doorway-to-center navigation spine, so rooms stay traversable while looking more intentional. (#mapstats: FURNISH | SYMROOMS / SYMOBS)
+- **Perimeter service tunnels (new procgen pass)**: on some room-based floors, the generator carves partial *inner-border* maintenance tunnels (offset=1 from the solid boundary) and punches 2–4 short door "hatches" back into the interior to create macro alternate routes (flanking / reduced backtracking), with an optional bonus cache chest. (#mapstats: PERIM TUNNELS | HATCHES)
+- **Burrow crosscuts (new procgen pass)**: on some room-based floors, the generator uses an A* search biased toward **digging through wall mass** to carve 1–2 long crosscut tunnels between two far-apart corridor points, gated by doors (often locked/secret on one end). This creates dramatic optional shortcuts without tunneling through rooms or touching the stairs core route. (#mapstats: CROSSCUTS | CARVED | LOCKED | SECRET)
+- **Secret crawlspace networks (new procgen pass)**: on some room-based floors, the generator carves a small hidden 1-tile-wide tunnel network entirely within wall mass, then connects it back to the corridor graph through 2–3 **secret doors**. Often contains an optional bonus cache chest deep inside. (#mapstats: CRAWLSPACES | CARVED | DOORS)
 - **Procedural VFX custom animation (4-frame)**: the renderer now samples **4 animation frames** for procedural hazard tiles (gas + fire), and cross-fades between frames with per-tile phase offsets so large fields don’t flicker in sync.
 - Fountain ripples now animate across all 4 frames, and item sprites (ground + UI icons) also get a small per-item phase offset to avoid synchronized blinking.
 - **Procedural room ambiance decals (4-frame)**: lair floors now get an animated **biofilm shimmer** decal, and shrine rooms now get **rotating rune** decals (top-down + isometric).
@@ -34,6 +48,8 @@
   - `#mapstats`: prints quick floor stats (exploration %, rooms, monsters, items, traps, marks, engravings).
 - **Stairs-path weaving (procgen)**: a new late-generation pass analyzes bridge (cut-edge) chokepoints on the shortest path between stairs and conservatively carves tiny 2x2 bypass loops to encourage alternate routes.
   - Surfaced in `#mapstats` as **BRIDGES** (remaining cut-edges on the shortest stairs path) and **BYPASSES** (loops carved this floor).
+- **Global anti-chokepoint weaving (procgen)**: after stairs-path weaving, a second late pass now scans *all* bridge (cut-edge) chokepoints in the passable tile graph, ranks them by approximate cut-size (2-edge-connected component contraction), and carves a small number of conservative 2x2 bypass loops to reduce major chokepoints anywhere on the floor.
+  - Surfaced in `#mapstats` as **GRAPH BRIDGES** (bridge count after weaving, with a WAS baseline) and **WEAVES** (loops carved this floor).
 - **Generate-and-test floor picking (procgen)**: standard floors now generate **2–3 candidate layouts** (same generator kind) and pick the best by a deterministic quality score (stairs redundancy, path length pacing, density, and dead-end ratio).
   - Surfaced in `#mapstats` as **GEN PICK** (chosen attempt/score/seed).
 - **Procedural VTuber figurines**: a rare treasure collectible with a deterministic stage name + archetype (from its sprite seed) and a new chibi portrait item sprite that blinks/animates subtly.
@@ -59,6 +75,10 @@
   - **Endless rift continuity**: endless depths can now spawn a run-seeded, stratum-aligned **faultline rift** (a curved chasm seam) that **drifts smoothly** across floors to create large-scale geological continuity.
     - Always preserves the guaranteed stairs path by adding natural **stone bridges** (rolls back if it can’t keep connectivity).
     - Surfaced in `#mapstats` as **RIFT** (ON/OFF, intensity, chasm tiles, bridges, and seed).
+
+- **Finite campaign fault band continuity**: the fixed-length Main branch can now roll a run-seeded, multi-floor **FAULT** band (typically 3–6 floors) that carves a drifting chasm seam across those floors for cross-floor geological continuity.
+  - Preserves the guaranteed stairs path by adding natural **stone bridges** (repairs with explicit bridges or rolls back if connectivity can’t be kept).
+  - Surfaced in `#mapstats` as **FAULT** (ON/SKIP, band range/pos, intensity, chasm tiles, bridges, boulders, seed).
 
 - **Biome zones (procgen)**: a new macro-structure post-pass partitions the *passable* map into **2–4 contiguous regions** (a Voronoi diagram over the passable graph) and applies coherent region styles:
   - **Pillar fields** (colonnaded ruins), **rubble gardens** (boulder clusters), and rare **cracked zones** (short chasm seams).
@@ -180,6 +200,9 @@
 - **Locked shortcut gates**: some procedural floors now add a small number of **visible locked doors** in corridor walls that connect two adjacent corridor regions already connected elsewhere.
   - These create optional **key/lockpick-powered shortcuts** without ever blocking stairs progression.
 
+- **Inter-room doorways (procgen)**: some room-based floors now carve 1–3 direct doors through single-wall separations between *adjacent rooms*, but only when the existing route between the two rooms is long enough to make the new doorway a meaningful shortcut.
+  - Doors can be **closed**, **open**, or (deeper) rarely **secret/locked**. (#mapstats: INTERROOM DOORS)
+
 - **Corridor hubs & great halls**: a late procedural pass that widens some hallway junctions and long corridor runs into broader spaces (junction hubs + 2-wide halls, with rare 3-wide flares).
   - Adds tactical variety outside formal room rectangles, without creating door-less openings into rooms.
 
@@ -245,6 +268,7 @@
 
 - **Trap setpieces**: some floors now generate small **corridor gauntlets** (short strips of traps in long straight corridors).
   - **Bonus loot caches** requested by the dungeon generator may also be guarded by one or more nearby floor traps.
+  - **Traffic traps**: some floors now place 1-2 traps on *high-traffic* corridor junctions (estimated by sampling shortest paths between stairs and special rooms).
 
 - **Monsters can drink potions:** Wizards may now spawn with a pocket potion and will sometimes drink it mid-fight (heal, regen, shielding, invisibility, levitation). Levitation now also enables monster pathing across chasms.
 

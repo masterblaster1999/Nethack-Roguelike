@@ -687,6 +687,163 @@ Entity& Game::spawnMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear)
     return ents.back();
 }
 
+namespace {
+
+inline void mulWeight(std::vector<SpawnEntry>& table, EntityKind k, int num, int den = 1) {
+    if (num <= 0 || den <= 0) return;
+    for (auto& e : table) {
+        if (e.kind != k) continue;
+        if (e.weight <= 0) return;
+        const int w = e.weight;
+        e.weight = std::max(1, (w * num + den / 2) / den);
+        return;
+    }
+}
+
+inline EntityKind rollFromTable(RNG& rng, const std::vector<SpawnEntry>& table) {
+    int total = 0;
+    for (const auto& e : table) {
+        if (e.weight > 0) total += e.weight;
+    }
+    if (total <= 0) return EntityKind::Goblin;
+
+    int roll = rng.range(0, total - 1);
+    for (const auto& e : table) {
+        if (e.weight <= 0) continue;
+        roll -= e.weight;
+        if (roll < 0) return e.kind;
+    }
+    return table.empty() ? EntityKind::Goblin : table.back().kind;
+}
+
+inline void applyRoomBias(std::vector<SpawnEntry>& table, SpawnCategory category, RoomType rt, int depth) {
+    (void)depth;
+
+    switch (rt) {
+        case RoomType::Shrine: {
+            mulWeight(table, EntityKind::Ghost, 3, 2);
+            mulWeight(table, EntityKind::Zombie, 3, 2);
+            mulWeight(table, EntityKind::SkeletonArcher, 3, 2);
+            if (category == SpawnCategory::Guardian) {
+                mulWeight(table, EntityKind::Guard, 3, 2);
+            }
+        } break;
+        case RoomType::Library: {
+            mulWeight(table, EntityKind::Wizard, 3, 2);
+            mulWeight(table, EntityKind::SkeletonArcher, 3, 2);
+            mulWeight(table, EntityKind::Bat, 3, 2);
+        } break;
+        case RoomType::Laboratory: {
+            mulWeight(table, EntityKind::Slime, 2, 1);
+            mulWeight(table, EntityKind::Wizard, 3, 2);
+            mulWeight(table, EntityKind::Spider, 3, 2);
+        } break;
+        case RoomType::Armory: {
+            mulWeight(table, EntityKind::Orc, 3, 2);
+            mulWeight(table, EntityKind::Ogre, 3, 2);
+            if (category == SpawnCategory::Guardian) {
+                mulWeight(table, EntityKind::Guard, 2, 1);
+            }
+        } break;
+        case RoomType::Vault:
+        case RoomType::Treasure:
+        case RoomType::Secret: {
+            mulWeight(table, EntityKind::Mimic, 2, 1);
+            mulWeight(table, EntityKind::Leprechaun, 3, 2);
+            mulWeight(table, EntityKind::Nymph, 3, 2);
+            if (category == SpawnCategory::Guardian) {
+                mulWeight(table, EntityKind::Guard, 2, 1);
+                mulWeight(table, EntityKind::Ogre, 3, 2);
+            }
+        } break;
+        case RoomType::Lair: {
+            mulWeight(table, EntityKind::Wolf, 2, 1);
+            mulWeight(table, EntityKind::Spider, 3, 2);
+        } break;
+        default:
+            break;
+    }
+}
+
+inline void applyMaterialBias(std::vector<SpawnEntry>& table, SpawnCategory category, TerrainMaterial mat, int depth) {
+    // Mild, deterministic ecology: materials subtly bias spawns without overriding spawn-table mods.
+    // Deeper floors get slightly stronger biases.
+    const int d = std::clamp(depth, 1, 12);
+    const bool deep = (d >= 7);
+
+    auto bump15 = [&](EntityKind k) { mulWeight(table, k, 3, 2); };
+    auto bump20 = [&](EntityKind k) { mulWeight(table, k, 2, 1); };
+
+    switch (mat) {
+        case TerrainMaterial::Dirt: {
+            bump15(EntityKind::Snake);
+            bump20(EntityKind::Spider);
+            bump15(EntityKind::Wolf);
+        } break;
+        case TerrainMaterial::Moss: {
+            bump20(EntityKind::Slime);
+            bump15(EntityKind::Bat);
+            bump15(EntityKind::Spider);
+        } break;
+        case TerrainMaterial::Crystal: {
+            bump20(EntityKind::Slime);
+            bump15(EntityKind::Wizard);
+            bump15(EntityKind::Mimic);
+            bump15(EntityKind::Nymph);
+        } break;
+        case TerrainMaterial::Marble: {
+            bump20(EntityKind::SkeletonArcher);
+            bump15(EntityKind::Zombie);
+            bump15(EntityKind::Ghost);
+            if (category == SpawnCategory::Guardian) {
+                bump15(EntityKind::Guard);
+            }
+        } break;
+        case TerrainMaterial::Brick: {
+            bump15(EntityKind::Orc);
+            bump15(EntityKind::SkeletonArcher);
+            bump15(EntityKind::Zombie);
+            if (category == SpawnCategory::Guardian) {
+                bump15(EntityKind::Guard);
+            }
+        } break;
+        case TerrainMaterial::Basalt:
+        case TerrainMaterial::Obsidian: {
+            bump15(EntityKind::Orc);
+            bump15(EntityKind::Troll);
+            bump15(EntityKind::Ogre);
+            if (deep) bump15(EntityKind::Wizard);
+        } break;
+        case TerrainMaterial::Metal: {
+            bump20(EntityKind::KoboldSlinger);
+            bump15(EntityKind::Mimic);
+            if (category == SpawnCategory::Guardian) {
+                bump20(EntityKind::Guard);
+            }
+        } break;
+        case TerrainMaterial::Stone:
+        default:
+            break;
+    }
+}
+
+inline EntityKind pickSpawnMonsterEcology(SpawnCategory category, RNG& rng, int depth, RoomType rt, TerrainMaterial mat) {
+    std::vector<SpawnEntry> table = effectiveSpawnTable(category, depth);
+
+    applyRoomBias(table, category, rt, depth);
+    applyMaterialBias(table, category, mat, depth);
+
+    // Synergy nudges: shrines in dressed stone feel more "haunted".
+    if (rt == RoomType::Shrine && (mat == TerrainMaterial::Marble || mat == TerrainMaterial::Brick)) {
+        mulWeight(table, EntityKind::Ghost, 2, 1);
+        mulWeight(table, EntityKind::Zombie, 3, 2);
+    }
+
+    return rollFromTable(rng, table);
+}
+
+} // namespace
+
 void Game::spawnMonsters() {
     if (branch_ == DungeonBranch::Camp) return;
 
@@ -694,6 +851,91 @@ void Game::spawnMonsters() {
     if (rooms.empty()) return;
 
     int nextGroup = 1000;
+
+    // Spawn ecology consults the deterministic terrain-material field.
+    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
+    // Find a nearby free tile inside the room interior (keeps clusters feeling like nests).
+    auto freeTileNearInRoom = [&](Vec2i center, const Room& room, int radius) -> Vec2i {
+        std::vector<Vec2i> candidates;
+        candidates.reserve(static_cast<size_t>((radius * 2 + 1) * (radius * 2 + 1)));
+
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                const int x = center.x + dx;
+                const int y = center.y + dy;
+
+                // Stay in the room *interior* so we don't place spawns inside walls.
+                if (x <= room.x || y <= room.y || x >= room.x2() - 1 || y >= room.y2() - 1) continue;
+                if (!dung.inBounds(x, y)) continue;
+                if (!dung.isWalkable(x, y)) continue;
+                if (entityAt(x, y)) continue;
+
+                candidates.push_back({x, y});
+            }
+        }
+
+        if (candidates.empty()) return {-1, -1};
+        return candidates[static_cast<size_t>(rng.range(0, static_cast<int>(candidates.size()) - 1))];
+    };
+
+    auto maybeSpawnEcologyCluster = [&](Entity& leader, EntityKind kind, const Room& room, TerrainMaterial mat, bool isStartRoom) {
+        // Keep the start room calmer so the player isn't immediately nested by a pack.
+        if (isStartRoom) return;
+
+        int extra = 0;
+        float chance = 0.0f;
+
+        auto isMat = [&](TerrainMaterial a, TerrainMaterial b) { return mat == a || mat == b; };
+
+        switch (kind) {
+            case EntityKind::Spider: {
+                if (isMat(TerrainMaterial::Dirt, TerrainMaterial::Moss)) {
+                    chance = 0.38f;
+                    extra = rng.chance(chance) ? 1 : 0;
+                    if (depth_ >= 6 && rng.chance(0.12f)) extra += 1;
+                }
+            } break;
+            case EntityKind::Snake: {
+                if (mat == TerrainMaterial::Dirt) {
+                    chance = 0.28f;
+                    extra = rng.chance(chance) ? 1 : 0;
+                }
+            } break;
+            case EntityKind::Slime: {
+                if (isMat(TerrainMaterial::Moss, TerrainMaterial::Crystal)) {
+                    chance = 0.22f;
+                    extra = rng.chance(chance) ? 1 : 0;
+                }
+            } break;
+            case EntityKind::Bat: {
+                if (isMat(TerrainMaterial::Moss, TerrainMaterial::Stone) && depth_ >= 2) {
+                    chance = 0.18f;
+                    extra = rng.chance(chance) ? 1 : 0;
+                }
+            } break;
+            default:
+                break;
+        }
+
+        if (extra <= 0) return;
+
+        // Give the cluster a shared groupId so one wake-up can alert nearby nestmates.
+        const int gid = nextGroup++;
+        leader.groupId = gid;
+
+        for (int i = 0; i < extra; ++i) {
+            Vec2i q = freeTileNearInRoom(leader.pos, room, 3);
+            if (!dung.inBounds(q.x, q.y) || !dung.isWalkable(q.x, q.y) || entityAt(q.x, q.y)) {
+                // Fallback: any free interior tile in the room.
+                q = randomFreeTileInRoom(room);
+            }
+
+            if (!dung.inBounds(q.x, q.y) || !dung.isWalkable(q.x, q.y) || entityAt(q.x, q.y)) break;
+            spawnMonster(kind, q, gid);
+        }
+    };
 
     for (const Room& r : rooms) {
         // Shops: spawn a single shopkeeper and keep the shop otherwise free of hostiles.
@@ -727,12 +969,14 @@ void Game::spawnMonsters() {
         for (int i = 0; i < n; ++i) {
             Vec2i p = randomFreeTileInRoom(r);
 
-            EntityKind k = pickSpawnMonster(SpawnCategory::Room, rng, depth_);
+            const TerrainMaterial mat = dung.materialAtCached(p.x, p.y);
+            EntityKind k = pickSpawnMonsterEcology(SpawnCategory::Room, rng, depth_, r.type, mat);
 
             if (k == EntityKind::Wolf) {
                 spawnMonster(k, p, nextGroup++);
             } else {
-                spawnMonster(k, p, 0);
+                Entity& m0 = spawnMonster(k, p, 0);
+                maybeSpawnEcologyCluster(m0, k, r, mat, isStart);
             }
         }
 
@@ -745,7 +989,8 @@ void Game::spawnMonsters() {
             else guardians = rng.range(0, 2);
             for (int i = 0; i < guardians; ++i) {
                 Vec2i p = randomFreeTileInRoom(r);
-                EntityKind k = pickSpawnMonster(SpawnCategory::Guardian, rng, depth_);
+                const TerrainMaterial mat = dung.materialAtCached(p.x, p.y);
+                EntityKind k = pickSpawnMonsterEcology(SpawnCategory::Guardian, rng, depth_, r.type, mat);
 
                 spawnMonster(k, p, 0);
             }
@@ -1849,6 +2094,11 @@ void Game::spawnTraps() {
     std::vector<Vec2i> chokepoints;
     chokepoints.reserve(512);
 
+    // Corridor junctions (degree >= 3) are distinct from chokepoints and make
+    // good candidates for "high-traffic" trap placement.
+    std::vector<Vec2i> junctions;
+    junctions.reserve(512);
+
     auto walk4 = [&](int x, int y) -> bool {
         return dung.inBounds(x, y) && dung.isWalkable(x, y);
     };
@@ -1873,6 +2123,9 @@ void Game::spawnTraps() {
 
                 // Corridor chokepoints are good trap candidates.
                 if (deg <= 2) chokepoints.push_back(p);
+
+                // Corridor junctions (3-way/4-way) tend to be high-traffic spaces.
+                if (deg >= 3) junctions.push_back(p);
 
                 // Identify straight 1-wide corridor segments for trap strips.
                 if (deg == 2) {
@@ -1960,6 +2213,202 @@ void Game::spawnTraps() {
             }
         }
     }
+
+
+    // ------------------------------------------------------------
+    // Traffic traps: place 1-2 traps in corridor junctions that lie on many
+    // sampled shortest paths between important points (stairs + special rooms).
+    // This approximates a "betweenness"/centrality signal and makes trap
+    // placement feel less uniform than pure random scatter.
+    // ------------------------------------------------------------
+    auto pickTrafficTrap = [&]() -> TrapKind {
+        int r = rng.range(0, 99);
+        if (depth_ <= 2) {
+            return (r < 65) ? TrapKind::Alarm : TrapKind::PoisonDart;
+        }
+        if (depth_ <= 5) {
+            if (r < 32) return TrapKind::Alarm;
+            if (r < 56) return TrapKind::Web;
+            if (r < 76) return TrapKind::PoisonDart;
+            if (r < 90) return TrapKind::ConfusionGas;
+            return TrapKind::Teleport;
+        }
+        if (r < 24) return TrapKind::Alarm;
+        if (r < 44) return TrapKind::Web;
+        if (r < 60) return TrapKind::ConfusionGas;
+        if (r < 72) return TrapKind::PoisonDart;
+        if (r < 80) return TrapKind::PoisonGas;
+        if (r < 86) return TrapKind::LetheMist;
+        if (r < 90) return TrapKind::Teleport;
+        return TrapKind::RollingBoulder;
+    };
+
+    int trafficTrapsWanted = 0;
+    if (depth_ >= 3 && rng.chance(0.28f)) trafficTrapsWanted = 1;
+    if (depth_ >= 7 && rng.chance(0.18f)) trafficTrapsWanted += 1;
+
+    if (trafficTrapsWanted > 0 && (!junctions.empty() || !chokepoints.empty()) && !candidatesAll.empty()) {
+        auto pickFrom = [&](const std::vector<Vec2i>& v) -> Vec2i {
+            if (v.empty()) return Vec2i{-1, -1};
+            const int i = rng.range(0, static_cast<int>(v.size()) - 1);
+            return v[static_cast<size_t>(i)];
+        };
+
+        // Build a small set of "hub" points: stairs + special rooms + a few random tiles.
+        std::vector<Vec2i> hubs;
+        hubs.reserve(32);
+
+        hubs.push_back(player().pos);
+        if (dung.inBounds(dung.stairsDown.x, dung.stairsDown.y)) hubs.push_back(dung.stairsDown);
+
+        auto addHub = [&](Vec2i p) {
+            if (!dung.inBounds(p.x, p.y)) return;
+            if (!dung.isPassable(p.x, p.y)) return;
+            hubs.push_back(p);
+        };
+
+        for (const Room& r : dung.rooms) {
+            switch (r.type) {
+                case RoomType::Treasure:
+                case RoomType::Lair:
+                case RoomType::Vault:
+                case RoomType::Secret:
+                case RoomType::Shop:
+                case RoomType::Shrine:
+                case RoomType::Armory:
+                case RoomType::Library:
+                case RoomType::Laboratory:
+                    addHub(Vec2i{r.cx(), r.cy()});
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        // Add a few random hubs to capture generic movement patterns.
+        const int extraHubs = std::min(8, std::max(3, static_cast<int>(candidatesAll.size() / 250)));
+        for (int i = 0; i < extraHubs && !candidatesAll.empty(); ++i) {
+            addHub(pickFrom(candidatesAll));
+        }
+
+        // If we still have too few hubs, bail (not enough structure).
+        if (hubs.size() >= 4) {
+            const int N = W * H;
+            std::vector<int> traffic(static_cast<size_t>(N), 0);
+            std::vector<int> prev(static_cast<size_t>(N), -1);
+            std::vector<int> q;
+            q.reserve(static_cast<size_t>(N));
+
+            auto passable = [&](int x, int y) -> bool {
+                return dung.inBounds(x, y) && dung.isPassable(x, y);
+            };
+
+            auto bfsAccumulate = [&](Vec2i src, Vec2i dst) -> bool {
+                if (!passable(src.x, src.y)) return false;
+                if (!passable(dst.x, dst.y)) return false;
+
+                const int s = src.y * W + src.x;
+                const int t = dst.y * W + dst.x;
+                if (s == t) return false;
+
+                std::fill(prev.begin(), prev.end(), -1);
+                q.clear();
+
+                prev[static_cast<size_t>(s)] = s;
+                q.push_back(s);
+                size_t qi = 0;
+
+                while (qi < q.size()) {
+                    const int cur = q[qi++];
+                    if (cur == t) break;
+                    const int cx = cur % W;
+                    const int cy = cur / W;
+
+                    const int nx[4] = {cx + 1, cx - 1, cx, cx};
+                    const int ny[4] = {cy, cy, cy + 1, cy - 1};
+
+                    for (int k = 0; k < 4; ++k) {
+                        const int x = nx[k];
+                        const int y = ny[k];
+                        if (!passable(x, y)) continue;
+                        const int ni = y * W + x;
+                        if (ni < 0 || ni >= N) continue;
+                        if (prev[static_cast<size_t>(ni)] != -1) continue;
+                        prev[static_cast<size_t>(ni)] = cur;
+                        q.push_back(ni);
+                    }
+                }
+
+                if (prev[static_cast<size_t>(t)] == -1) return false;
+
+                // Reconstruct and accumulate. (Don't bother counting endpoints twice.)
+                int cur = t;
+                int safety = 0;
+                while (cur != s && safety < N + 8) {
+                    traffic[static_cast<size_t>(cur)] += 1;
+                    cur = prev[static_cast<size_t>(cur)];
+                    if (cur < 0) break;
+                    safety += 1;
+                }
+                traffic[static_cast<size_t>(s)] += 1;
+                return true;
+            };
+
+            // Sample a handful of hub-to-hub paths.
+            const int wantSamples = std::min(26, 10 + static_cast<int>(hubs.size()));
+            int attempts = 0;
+            int successes = 0;
+            while (successes < wantSamples && attempts < wantSamples * 5) {
+                attempts += 1;
+                const Vec2i a = hubs[static_cast<size_t>(rng.range(0, static_cast<int>(hubs.size()) - 1))];
+                const Vec2i b = hubs[static_cast<size_t>(rng.range(0, static_cast<int>(hubs.size()) - 1))];
+                if (a == b) continue;
+                if (bfsAccumulate(a, b)) successes += 1;
+            }
+
+            if (successes >= 6) {
+                struct TCand { Vec2i p; int score; };
+                std::vector<TCand> tcands;
+                tcands.reserve(256);
+
+                const std::vector<Vec2i>& base = !junctions.empty() ? junctions : chokepoints;
+                for (const Vec2i& p : base) {
+                    if (!dung.inBounds(p.x, p.y)) continue;
+                    if (!dung.isWalkable(p.x, p.y)) continue;
+                    if (manhattan(p, player().pos) <= 7) continue;
+                    if (manhattan(p, dung.stairsUp) <= 5) continue;
+                    if (manhattan(p, dung.stairsDown) <= 5) continue;
+                    const int ii = p.y * W + p.x;
+                    if (ii < 0 || ii >= N) continue;
+                    const int score = traffic[static_cast<size_t>(ii)];
+                    if (score <= 0) continue;
+                    tcands.push_back(TCand{p, score});
+                }
+
+                if (!tcands.empty()) {
+                    std::sort(tcands.begin(), tcands.end(), [](const TCand& a, const TCand& b) {
+                        return a.score > b.score;
+                    });
+
+                    int placed = 0;
+                    int tries = 0;
+                    int window = std::min(12, static_cast<int>(tcands.size()));
+                    while (placed < trafficTrapsWanted && tries < trafficTrapsWanted * 8 && !tcands.empty()) {
+                        window = std::min(window, static_cast<int>(tcands.size()));
+                        if (window <= 0) break;
+                        const int pick = rng.range(0, window - 1);
+                        const Vec2i p = tcands[static_cast<size_t>(pick)].p;
+                        if (addFloorTrap(p, pickTrafficTrap(), false, false)) {
+                            placed += 1;
+                        }
+                        tcands.erase(tcands.begin() + pick);
+                        tries += 1;
+                    }
+                }
+            }
+        }
+    }
+
 
 
     // ------------------------------------------------------------

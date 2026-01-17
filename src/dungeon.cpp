@@ -14,6 +14,10 @@
 
 namespace {
 
+// Forward declaration: some late procgen passes live earlier in this file
+// than the generator-kind enumeration definition.
+enum class GenKind : uint8_t;
+
 struct Leaf {
     int x = 0;
     int y = 0;
@@ -52,6 +56,9 @@ void fillWalls(Dungeon& d) {
     d.corridorHubCount = 0;
     d.corridorHallCount = 0;
     d.sinkholeCount = 0;
+    d.riftCacheCount = 0;
+    d.riftCacheBoulderCount = 0;
+    d.riftCacheChasmCount = 0;
     d.vaultSuiteCount = 0;
     d.vaultPrefabCount = 0;
     d.terrainSculptCount = 0;
@@ -61,6 +68,9 @@ void fillWalls(Dungeon& d) {
     d.stairsBypassLoopCount = 0;
     d.stairsBridgeCount = 0;
     d.stairsRedundancyOk = false;
+    d.globalBypassLoopCount = 0;
+    d.globalBridgeCountBefore = 0;
+    d.globalBridgeCountAfter = 0;
     d.genPickAttempts = 1;
     d.genPickChosenIndex = 0;
     d.genPickScore = 0;
@@ -81,9 +91,27 @@ void fillWalls(Dungeon& d) {
     d.openSpacePillarCount = 0;
     d.openSpaceBoulderCount = 0;
 
+    d.perimTunnelCarvedTiles = 0;
+    d.perimTunnelHatchCount = 0;
+    d.perimTunnelLockedCount = 0;
+    d.perimTunnelCacheCount = 0;
+
+    d.crosscutTunnelCount = 0;
+    d.crosscutCarvedTiles = 0;
+    d.crosscutDoorLockedCount = 0;
+    d.crosscutDoorSecretCount = 0;
+
+    d.crawlspaceNetworkCount = 0;
+    d.crawlspaceCarvedTiles = 0;
+    d.crawlspaceDoorCount = 0;
+    d.crawlspaceCacheCount = 0;
+
     d.moatedRoomCount = 0;
     d.moatedRoomBridgeCount = 0;
     d.moatedRoomChasmCount = 0;
+
+    d.symmetryRoomCount = 0;
+    d.symmetryObstacleCount = 0;
 
     d.spineRoomCount = 0;
     d.specialRoomMinSep = 0;
@@ -1996,6 +2024,305 @@ void weaveStairsConnectivity(Dungeon& d, RNG& rng, int depth) {
 }
 
 
+// ------------------------------------------------------------
+// Global connectivity weaving / anti-chokepoint pass
+//
+// The stairs weaving pass focuses specifically on making the *critical* route
+// between stairsUp and stairsDown less tree-like. However, many floors still end
+// up with other major chokepoints (bridge edges) that aren't on the current
+// shortest stairs path:
+//   - long side branches that dead-end behind a single 1-tile corridor edge
+//   - entire "wings" of the level gated by a single cut-edge
+//
+// This pass analyzes the full passable-tile graph, computes bridge edges, then
+// estimates which bridges are most impactful by contracting the graph into
+// 2-edge-connected components (non-bridge edges unioned into components). The
+// bridge edges become a forest over these components; we compute the component
+// cut-size for each bridge and then carve a small number of conservative 2x2
+// bypass loops around the best candidates.
+//
+// Constraints (same philosophy as stairs weaving):
+//  - only dig through plain wall tiles
+//  - never carve inside defined rooms (keeps room layouts readable)
+//  - never carve too close to stairs landings
+//  - cap the number of bypasses per floor (scaled by depth)
+// ------------------------------------------------------------
+void weaveGlobalConnectivity(Dungeon& d, RNG& rng, int depth) {
+    d.globalBypassLoopCount = 0;
+    d.globalBridgeCountBefore = 0;
+    d.globalBridgeCountAfter = 0;
+
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) return;
+    if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) return;
+    if (!stairsConnected(d)) return;
+
+    std::vector<EdgeKey> bridges;
+    computePassableBridges(d, bridges);
+    d.globalBridgeCountBefore = static_cast<int>(bridges.size());
+    d.globalBridgeCountAfter = d.globalBridgeCountBefore;
+
+    // No bridges -> already richly loopy.
+    if (bridges.empty()) return;
+
+    // Make this a deeper-dungeon flavor: early floors stay a bit more readable.
+    float pAny = 0.12f + 0.035f * static_cast<float>(std::min(depth, 12));
+    pAny = std::min(0.70f, pAny);
+
+    // If the floor is already pretty loopy, reduce the chance even more.
+    if (d.globalBridgeCountBefore < 10) pAny *= 0.20f;
+    else if (d.globalBridgeCountBefore < 18) pAny *= 0.55f;
+
+    if (!rng.chance(pAny)) return;
+
+    int maxWeaves = 0;
+    if (depth >= 3) maxWeaves = 1;
+    if (depth >= 6) maxWeaves = 2;
+    if (depth >= 10) maxWeaves = 3;
+    if (depth >= 16) maxWeaves = 4;
+
+    if (maxWeaves <= 0) return;
+
+    // Also cap by available bridge count so tiny layouts don't over-weave.
+    maxWeaves = std::min(maxWeaves, 1 + d.globalBridgeCountBefore / 35);
+
+    const int W = d.width;
+    const int H = d.height;
+    const int N = W * H;
+
+    auto idx = [&](int x, int y) { return y * W + x; };
+
+    auto isNode = [&](int i) -> bool {
+        const int x = i % W;
+        const int y = i / W;
+        return d.isPassable(x, y);
+    };
+
+    struct DSU {
+        std::vector<int> p;
+        std::vector<int> sz;
+        explicit DSU(int n) : p(static_cast<size_t>(std::max(0, n))), sz(static_cast<size_t>(std::max(0, n)), 1) {
+            for (int i = 0; i < n; ++i) p[static_cast<size_t>(i)] = i;
+        }
+        int find(int a) {
+            int x = a;
+            while (p[static_cast<size_t>(x)] != x) x = p[static_cast<size_t>(x)];
+            while (p[static_cast<size_t>(a)] != a) {
+                const int parent = p[static_cast<size_t>(a)];
+                p[static_cast<size_t>(a)] = x;
+                a = parent;
+            }
+            return x;
+        }
+        void unite(int a, int b) {
+            a = find(a);
+            b = find(b);
+            if (a == b) return;
+            if (sz[static_cast<size_t>(a)] < sz[static_cast<size_t>(b)]) std::swap(a, b);
+            p[static_cast<size_t>(b)] = a;
+            sz[static_cast<size_t>(a)] += sz[static_cast<size_t>(b)];
+        }
+    };
+
+    struct Adj {
+        int to = -1;
+        int edgeIdx = -1;
+    };
+
+    struct BridgeInfo {
+        int u = -1;
+        int v = -1;
+        int cu = -1;
+        int cv = -1;
+        int importance = 0; // approx cut-size (smaller side tile count)
+    };
+
+    // Iteratively carve a few bypasses (bridges change after each carve).
+    for (int pass = 0; pass < maxWeaves; ++pass) {
+        computePassableBridges(d, bridges);
+        if (bridges.empty()) break;
+
+        // Build 2-edge-connected components by unioning all non-bridge edges.
+        DSU dsu(N);
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                if (!d.isPassable(x, y)) continue;
+                const int u = idx(x, y);
+
+                if (x + 1 < W && d.isPassable(x + 1, y)) {
+                    const int v = idx(x + 1, y);
+                    if (!isBridgeEdge(bridges, u, v)) dsu.unite(u, v);
+                }
+                if (y + 1 < H && d.isPassable(x, y + 1)) {
+                    const int v = idx(x, y + 1);
+                    if (!isBridgeEdge(bridges, u, v)) dsu.unite(u, v);
+                }
+            }
+        }
+
+        // Map DSU roots -> compact component ids.
+        std::vector<int> rootToComp(static_cast<size_t>(N), -1);
+        std::vector<int> compId(static_cast<size_t>(N), -1);
+        std::vector<int> compSize;
+        compSize.reserve(static_cast<size_t>(std::max(8, N / 32)));
+
+        for (int i = 0; i < N; ++i) {
+            if (!isNode(i)) continue;
+            const int r = dsu.find(i);
+            int& cid = rootToComp[static_cast<size_t>(r)];
+            if (cid < 0) {
+                cid = static_cast<int>(compSize.size());
+                compSize.push_back(0);
+            }
+            compId[static_cast<size_t>(i)] = cid;
+            compSize[static_cast<size_t>(cid)] += 1;
+        }
+
+        const int C = static_cast<int>(compSize.size());
+        if (C <= 1) break;
+
+        // Build component bridge forest.
+        std::vector<BridgeInfo> bedges;
+        bedges.reserve(bridges.size());
+
+        std::vector<std::vector<Adj>> adj(static_cast<size_t>(C));
+
+        for (const EdgeKey k : bridges) {
+            const int u = static_cast<int>(static_cast<uint32_t>(k >> 32));
+            const int v = static_cast<int>(static_cast<uint32_t>(k & 0xFFFFFFFFu));
+            if (u < 0 || v < 0 || u >= N || v >= N) continue;
+
+            const int cu = compId[static_cast<size_t>(u)];
+            const int cv = compId[static_cast<size_t>(v)];
+            if (cu < 0 || cv < 0 || cu == cv) continue;
+
+            const int ei = static_cast<int>(bedges.size());
+            bedges.push_back({u, v, cu, cv, 0});
+
+            adj[static_cast<size_t>(cu)].push_back({cv, ei});
+            adj[static_cast<size_t>(cv)].push_back({cu, ei});
+        }
+
+        if (bedges.empty()) break;
+
+        // Compute bridge importance via subtree sizes on the component forest.
+        std::vector<int> parent(static_cast<size_t>(C), -1);
+        std::vector<int> parentEdge(static_cast<size_t>(C), -1);
+        std::vector<int> subtree(static_cast<size_t>(C), 0);
+        std::vector<uint8_t> seen(static_cast<size_t>(C), 0);
+
+        for (int root = 0; root < C; ++root) {
+            if (seen[static_cast<size_t>(root)] != 0) continue;
+
+            std::vector<int> order;
+            order.reserve(64);
+
+            std::vector<int> stack;
+            stack.reserve(64);
+
+            seen[static_cast<size_t>(root)] = 1;
+            parent[static_cast<size_t>(root)] = -1;
+            parentEdge[static_cast<size_t>(root)] = -1;
+            stack.push_back(root);
+
+            while (!stack.empty()) {
+                const int c = stack.back();
+                stack.pop_back();
+                order.push_back(c);
+
+                for (const Adj& e : adj[static_cast<size_t>(c)]) {
+                    if (e.to < 0 || e.to >= C) continue;
+                    if (seen[static_cast<size_t>(e.to)] != 0) continue;
+
+                    seen[static_cast<size_t>(e.to)] = 1;
+                    parent[static_cast<size_t>(e.to)] = c;
+                    parentEdge[static_cast<size_t>(e.to)] = e.edgeIdx;
+                    stack.push_back(e.to);
+                }
+            }
+
+            // Subtree sizes (reverse order).
+            for (int oi = static_cast<int>(order.size()) - 1; oi >= 0; --oi) {
+                const int c = order[static_cast<size_t>(oi)];
+                int sum = compSize[static_cast<size_t>(c)];
+                for (const Adj& e : adj[static_cast<size_t>(c)]) {
+                    if (e.to < 0 || e.to >= C) continue;
+                    if (parent[static_cast<size_t>(e.to)] == c) {
+                        sum += subtree[static_cast<size_t>(e.to)];
+                    }
+                }
+                subtree[static_cast<size_t>(c)] = sum;
+            }
+
+            const int total = subtree[static_cast<size_t>(root)];
+
+            // Edge importance from child subtree sizes.
+            for (const int c : order) {
+                const int p = parent[static_cast<size_t>(c)];
+                if (p < 0) continue;
+                const int ei = parentEdge[static_cast<size_t>(c)];
+                if (ei < 0 || ei >= static_cast<int>(bedges.size())) continue;
+                const int sub = subtree[static_cast<size_t>(c)];
+                const int smallSide = std::min(sub, total - sub);
+                bedges[static_cast<size_t>(ei)].importance = smallSide;
+            }
+        }
+
+        struct Cand {
+            int u = -1;
+            int v = -1;
+            int score = 0;
+        };
+
+        std::vector<Cand> cands;
+        cands.reserve(32);
+
+        for (const BridgeInfo& be : bedges) {
+            const int opts = bypassOptionsForEdge(d, be.u, be.v);
+            if (opts <= 0) continue;
+
+            // Score: prioritize big "cuts" and edges with multiple bypass options.
+            // Cap importance so huge maps don't overpower everything.
+            const int imp = std::min(260, be.importance);
+            int score = imp * 5 + opts * 140;
+
+            // Light deterministic jitter for variety.
+            score += rng.range(-8, 8);
+
+            cands.push_back({be.u, be.v, score});
+        }
+
+        if (cands.empty()) break;
+
+        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+            return a.score > b.score;
+        });
+
+        const int topN = std::min(4, static_cast<int>(cands.size()));
+        const Cand pick = cands[static_cast<size_t>(rng.range(0, topN - 1))];
+
+        if (tryCarveBridgeBypassLoop(d, rng, pick.u, pick.v)) {
+            d.globalBypassLoopCount++;
+        } else {
+            break;
+        }
+    }
+
+    // Final bridge stats after global weaving.
+    {
+        computePassableBridges(d, bridges);
+        d.globalBridgeCountAfter = static_cast<int>(bridges.size());
+
+        // Recompute stairs-path stats so #mapstats reflects the final graph state.
+        std::vector<int> path;
+        if (buildShortestPassablePath(d, d.stairsUp, d.stairsDown, path)) {
+            d.stairsBridgeCount = countBridgesOnPath(path, bridges);
+            d.stairsRedundancyOk = reachableAvoidingBridgeEdges(d, d.stairsUp, d.stairsDown, bridges);
+        }
+    }
+}
+
+
+
 
 // ------------------------------------------------------------
 // Secret shortcut doors
@@ -2186,6 +2513,163 @@ bool maybePlaceLockedShortcuts(Dungeon& d, RNG& rng, int depth, bool eligible) {
     }
 
     return d.lockedShortcutCount > 0;
+}
+
+
+
+// ------------------------------------------------------------
+// Inter-room doorways
+//
+// A late procgen pass that adds a small number of direct doors between
+// *adjacent rooms* that are separated by a single wall tile.
+//
+// This creates optional loops/flanking routes inside the room graph
+// (complementing corridor braids/tunnels) without rewriting the whole layout.
+//
+// Safety:
+// - Only places doors in wall tiles whose two opposite neighbors are passable
+//   and belong to *different* room rectangles.
+// - Never targets treasure/vault/secret/shrine/shop/camp rooms.
+// - Avoids stairs vicinity and existing doors.
+// - Requires the current shortest path between the two sides to be long enough
+//   so the new door is a meaningful shortcut rather than noise.
+// ------------------------------------------------------------
+bool applyInterRoomDoorways(Dungeon& d, RNG& rng, int depth) {
+    d.interRoomDoorCount = 0;
+    d.interRoomDoorLockedCount = 0;
+    d.interRoomDoorSecretCount = 0;
+
+    if (d.rooms.empty()) return false;
+    // Keep the very first floor simple/readable.
+    if (depth <= 1) return false;
+
+    float pAny = 0.28f + 0.03f * static_cast<float>(std::clamp(depth - 2, 0, 10));
+    pAny = std::min(0.62f, pAny);
+
+    // Bigger maps can afford more internal connectivity.
+    const int area = d.width * d.height;
+    if (area >= 105 * 66) pAny += 0.05f;
+    if (area >= 120 * 74) pAny += 0.05f;
+
+    pAny = std::min(0.70f, pAny);
+    if (!rng.chance(pAny)) return false;
+
+    int want = 1;
+    if (depth >= 4) want += 1;
+    if (depth >= 7 && rng.chance(0.35f)) want += 1;
+    want = std::min(3, want);
+
+    auto tooCloseToStairs = [&](int tx, int ty) {
+        const int du = (d.inBounds(d.stairsUp.x, d.stairsUp.y))
+            ? (std::abs(tx - d.stairsUp.x) + std::abs(ty - d.stairsUp.y))
+            : 9999;
+        const int dd = (d.inBounds(d.stairsDown.x, d.stairsDown.y))
+            ? (std::abs(tx - d.stairsDown.x) + std::abs(ty - d.stairsDown.y))
+            : 9999;
+        return du <= 4 || dd <= 4;
+    };
+
+    auto disallowedRoom = [&](const Room* r) -> bool {
+        if (!r) return true;
+        switch (r->type) {
+            case RoomType::Treasure:
+            case RoomType::Secret:
+            case RoomType::Vault:
+            case RoomType::Shrine:
+            case RoomType::Shop:
+            case RoomType::Camp:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    auto packPair = [&](int a, int b) -> uint64_t {
+        const uint32_t u = static_cast<uint32_t>(std::min(a, b));
+        const uint32_t v = static_cast<uint32_t>(std::max(a, b));
+        return (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
+    };
+
+    std::vector<uint64_t> usedPairs;
+    usedPairs.reserve(static_cast<size_t>(want));
+
+    const int maxTries = 1300;
+
+    for (int tries = 0; tries < maxTries && d.interRoomDoorCount < want; ++tries) {
+        const int x = rng.range(2, d.width - 3);
+        const int y = rng.range(2, d.height - 3);
+
+        if (!d.inBounds(x, y)) continue;
+        if (d.at(x, y).type != TileType::Wall) continue;
+
+        if (tooCloseToStairs(x, y)) continue;
+        if (anyDoorInRadius(d, x, y, 2)) continue;
+
+        Vec2i a{-1, -1};
+        Vec2i b{-1, -1};
+
+        // Candidate must separate two *room interior* passable tiles in a straight line.
+        if (d.isPassable(x - 1, y) && d.isPassable(x + 1, y) && !d.isPassable(x, y - 1) && !d.isPassable(x, y + 1)) {
+            a = {x - 1, y};
+            b = {x + 1, y};
+        } else if (d.isPassable(x, y - 1) && d.isPassable(x, y + 1) && !d.isPassable(x - 1, y) && !d.isPassable(x + 1, y)) {
+            a = {x, y - 1};
+            b = {x, y + 1};
+        } else {
+            continue;
+        }
+
+        if (tooCloseToStairs(a.x, a.y) || tooCloseToStairs(b.x, b.y)) continue;
+
+        const Room* ra = findRoomContaining(d, a.x, a.y);
+        const Room* rb = findRoomContaining(d, b.x, b.y);
+        if (!ra || !rb) continue;
+        if (ra == rb) continue;
+        if (disallowedRoom(ra) || disallowedRoom(rb)) continue;
+
+        // Sanity: ensure both sides are actually walkable (avoid connecting into chasm/pillar partitions).
+        if (!d.isWalkable(a.x, a.y) || !d.isWalkable(b.x, b.y)) continue;
+
+        const int ia = static_cast<int>(ra - d.rooms.data());
+        const int ib = static_cast<int>(rb - d.rooms.data());
+        const uint64_t pk = packPair(ia, ib);
+        bool already = false;
+        for (uint64_t u : usedPairs) {
+            if (u == pk) { already = true; break; }
+        }
+        if (already) continue;
+
+        // Require that the existing route between the two room sides is meaningfully long,
+        // so this door creates a real shortcut rather than just noise.
+        const auto dist = bfsDistanceMap(d, a);
+        const size_t ii = static_cast<size_t>(b.y * d.width + b.x);
+        if (ii >= dist.size()) continue;
+        const int cur = dist[ii];
+        if (cur < 0) continue;
+
+        const int minDist = std::clamp(10 + depth / 2, 12, 22);
+        if (cur < minDist) continue;
+
+        // Choose door style.
+        TileType dt = TileType::DoorClosed;
+        if (rng.chance(0.20f)) dt = TileType::DoorOpen;
+
+        if (depth >= 4 && rng.chance(0.10f)) {
+            dt = TileType::DoorLocked;
+        } else if (depth >= 3 && rng.chance(0.08f)) {
+            dt = TileType::DoorSecret;
+        }
+
+        d.at(x, y).type = dt;
+
+        d.interRoomDoorCount += 1;
+        if (dt == TileType::DoorLocked) d.interRoomDoorLockedCount += 1;
+        if (dt == TileType::DoorSecret) d.interRoomDoorSecretCount += 1;
+
+        usedPairs.push_back(pk);
+    }
+
+    return d.interRoomDoorCount > 0;
 }
 
 struct TileChange {
@@ -2573,6 +3057,1248 @@ bool maybeCarveCorridorHubsAndHalls(Dungeon& d, RNG& rng, int depth, bool eligib
     }
 
     return (d.corridorHubCount + d.corridorHallCount) > 0;
+}
+
+
+
+// ------------------------------------------------------------
+// Perimeter service tunnels
+//
+// A late procgen pass that carves partial walkable tunnels along the inner
+// border of the map (offset=1 from the solid boundary), then punches a few
+// short connecting hatches back into the interior.
+//
+// Goals:
+// - Add macro-level alternate routes (flanking / reduced backtracking) on
+//   larger room-based floors without rewriting the core generator.
+// - Keep the feature optional and conservative: only adds floor by digging
+//   walls (never removes connectivity).
+// - Avoid cluttering the start/end areas and avoid door spam near existing doors.
+//
+// Notes:
+// - Intentionally keys off d.rooms.size() so cavern/maze layouts (no rooms) are
+//   not affected.
+// - Can optionally request a bonus cache chest (via bonusLootSpots) to reward
+//   exploring the tunnels.
+// ------------------------------------------------------------
+static Vec2i innerRingInteriorDir(const Dungeon& d, const Vec2i& p) {
+    // Prefer the axis that clearly indicates which side of the ring we're on.
+    if (p.x <= 1) return {1, 0};
+    if (p.x >= d.width - 2) return {-1, 0};
+    if (p.y <= 1) return {0, 1};
+    return {0, -1};
+}
+
+static void buildInnerPerimeterRing(const Dungeon& d, std::vector<Vec2i>& out) {
+    out.clear();
+    const int x0 = 1;
+    const int y0 = 1;
+    const int x1 = d.width - 2;
+    const int y1 = d.height - 2;
+    if (x1 <= x0 || y1 <= y0) return;
+
+    const int perim = (x1 - x0 + 1) * 2 + (y1 - y0 - 1) * 2;
+    out.reserve(static_cast<size_t>(std::max(0, perim)));
+
+    for (int x = x0; x <= x1; ++x) out.push_back({x, y0});
+    for (int y = y0 + 1; y <= y1; ++y) out.push_back({x1, y});
+    for (int x = x1 - 1; x >= x0; --x) out.push_back({x, y1});
+    for (int y = y1 - 1; y >= y0 + 1; --y) out.push_back({x0, y});
+}
+
+static bool applyPerimeterServiceTunnels(Dungeon& d, RNG& rng, DungeonBranch branch, int depth) {
+    d.perimTunnelCarvedTiles = 0;
+    d.perimTunnelHatchCount = 0;
+    d.perimTunnelLockedCount = 0;
+    d.perimTunnelCacheCount = 0;
+
+    if (branch != DungeonBranch::Main) return false;
+    // Room-based floors only: avoids cavern/maze layouts that do not use d.rooms.
+    if (d.rooms.size() < 6) return false;
+    if (d.width < 40 || d.height < 28) return false;
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) return false;
+
+    // Chance scales mildly with depth and map size (larger maps benefit more).
+    float p = 0.16f + 0.02f * static_cast<float>(std::min(8, std::max(0, depth)));
+    const int area = d.width * d.height;
+    const int baseArea = Dungeon::DEFAULT_W * Dungeon::DEFAULT_H;
+    if (area >= baseArea + baseArea / 6) p += 0.05f;
+    p = std::clamp(p, 0.14f, 0.45f);
+    if (!rng.chance(p)) return false;
+
+    std::vector<Vec2i> ring;
+    buildInnerPerimeterRing(d, ring);
+    const int N = static_cast<int>(ring.size());
+    if (N < 24) return false;
+
+    auto carveRingArc = [&](int start, int len, float gapChance) {
+        int carved = 0;
+        for (int i = 0; i < len; ++i) {
+            const Vec2i p = ring[static_cast<size_t>((start + i) % N)];
+            if (!d.inBounds(p.x, p.y)) continue;
+            Tile& t = d.at(p.x, p.y);
+            if (t.type != TileType::Wall) continue;
+            if (rng.chance(gapChance)) continue;
+            t.type = TileType::Floor;
+            carved += 1;
+        }
+        return carved;
+    };
+
+    // Carve a long primary arc (often looks like a broken ring), plus an optional secondary arc.
+    float cover = 0.60f + 0.03f * static_cast<float>(std::min(8, std::max(0, depth)));
+    cover += static_cast<float>(rng.range(-6, 6)) * 0.01f;
+    cover = std::clamp(cover, 0.55f, 0.92f);
+
+    const int start1 = rng.range(0, N - 1);
+    const int len1 = std::clamp(static_cast<int>(std::round(cover * static_cast<float>(N))), N / 3, N);
+    d.perimTunnelCarvedTiles += carveRingArc(start1, len1, 0.09f);
+
+    if (rng.chance(0.35f) && N > 60) {
+        const int jitter = rng.range(-N / 10, N / 10);
+        const int start2 = (start1 + N / 2 + jitter + N) % N;
+        const int len2 = std::clamp(N / 4 + rng.range(-N / 12, N / 12), N / 6, N / 2);
+        d.perimTunnelCarvedTiles += carveRingArc(start2, len2, 0.11f);
+    }
+
+    // If we didn't carve anything new, don't claim the feature triggered.
+    if (d.perimTunnelCarvedTiles <= 0) return false;
+
+    const auto distFromUp = bfsDistanceMap(d, d.stairsUp);
+    auto distAt = [&](const Vec2i& p) -> int {
+        if (!d.inBounds(p.x, p.y)) return -1;
+        const size_t ii = static_cast<size_t>(p.y * d.width + p.x);
+        if (ii >= distFromUp.size()) return -1;
+        return distFromUp[ii];
+    };
+
+    auto farFromStairs = [&](const Vec2i& p) {
+        const int du = std::abs(p.x - d.stairsUp.x) + std::abs(p.y - d.stairsUp.y);
+        const int dd = d.inBounds(d.stairsDown.x, d.stairsDown.y)
+            ? (std::abs(p.x - d.stairsDown.x) + std::abs(p.y - d.stairsDown.y))
+            : 999;
+        return du >= 8 && dd >= 8;
+    };
+
+    // How many hatches do we want? (Large maps + deep floors get more.)
+    int wantHatches = 2;
+    if (area >= baseArea + baseArea / 5) wantHatches += 1;
+    if (depth >= 6) wantHatches += 1;
+    wantHatches = std::clamp(wantHatches, 2, 4);
+
+    struct HatchCand {
+        Vec2i p;
+        Vec2i dir;
+        int score = 0;
+    };
+
+    std::vector<HatchCand> cands;
+    cands.reserve(ring.size());
+
+    for (const Vec2i& p : ring) {
+        if (!d.inBounds(p.x, p.y)) continue;
+        const TileType tt = d.at(p.x, p.y).type;
+        if (tt == TileType::Chasm || tt == TileType::Pillar || tt == TileType::Boulder) continue;
+        if (!farFromStairs(p)) continue;
+        if (anyDoorInRadius(d, p.x, p.y, 2)) continue;
+
+        const Vec2i dir = innerRingInteriorDir(d, p);
+        const Vec2i first{p.x + dir.x, p.y + dir.y};
+        if (!d.inBounds(first.x, first.y)) continue;
+        if (d.at(first.x, first.y).type != TileType::Wall) continue;
+
+        const int sc = std::abs(p.x - d.stairsUp.x) + std::abs(p.y - d.stairsUp.y);
+        cands.push_back({p, dir, sc});
+    }
+
+    // Prefer hatches far from stairs so the tunnels tend to create meaningful alternative routes.
+    std::sort(cands.begin(), cands.end(), [&](const HatchCand& a, const HatchCand& b) {
+        if (a.score != b.score) return a.score > b.score;
+        // Deterministic tie-break.
+        const uint32_t ha = hash32(static_cast<uint32_t>(a.p.x * 73856093u) ^ static_cast<uint32_t>(a.p.y * 19349663u) ^ rng.state);
+        const uint32_t hb = hash32(static_cast<uint32_t>(b.p.x * 73856093u) ^ static_cast<uint32_t>(b.p.y * 19349663u) ^ rng.state);
+        return ha > hb;
+    });
+
+    std::vector<Vec2i> placed;
+    placed.reserve(4);
+
+    bool placedPassableHatch = false;
+
+    auto tryPlaceHatch = [&](const HatchCand& hc, bool allowLocked) -> bool {
+        const Vec2i p = hc.p;
+        const Vec2i dir = hc.dir;
+        const Vec2i first{p.x + dir.x, p.y + dir.y};
+        if (!d.inBounds(first.x, first.y)) return false;
+        if (d.at(first.x, first.y).type != TileType::Wall) return false;
+        if (!farFromStairs(p) || !farFromStairs(first)) return false;
+        if (anyDoorInRadius(d, first.x, first.y, 2)) return false;
+
+        std::vector<TileChange> changes;
+        int localCarved = 0;
+
+        auto recordSet = [&](int x, int y, TileType nt) {
+            if (!d.inBounds(x, y)) return;
+            if (isStairsTile(d, x, y)) return;
+            Tile& t = d.at(x, y);
+            if (t.type == nt) return;
+            changes.push_back({x, y, t.type});
+            t.type = nt;
+        };
+
+        // Ensure the ring entry tile is walkable too (in case the ring arc skipped it).
+        if (d.at(p.x, p.y).type == TileType::Wall) {
+            recordSet(p.x, p.y, TileType::Floor);
+            localCarved += 1;
+        }
+
+        const int maxLen = std::clamp(12 + depth * 2, 12, 24);
+        Vec2i cur = first;
+        bool success = false;
+        for (int step = 0; step < maxLen; ++step) {
+            if (!d.inBounds(cur.x, cur.y)) break;
+            const TileType tt = d.at(cur.x, cur.y).type;
+
+            if (d.isPassable(cur.x, cur.y)) {
+                // Only connect to the main component (reachable from stairs before we dig).
+                if (distAt(cur) >= 0) success = true;
+                break;
+            }
+
+            if (tt != TileType::Wall) break; // don't dig through features/doors
+            recordSet(cur.x, cur.y, TileType::Floor);
+            localCarved += 1;
+            cur.x += dir.x;
+            cur.y += dir.y;
+        }
+
+        if (!success || localCarved <= 0) {
+            undoChanges(d, changes);
+            return false;
+        }
+
+        d.perimTunnelCarvedTiles += localCarved;
+
+        // Door on the first interior tile: reads as a small maintenance hatch.
+        TileType doorType = TileType::DoorClosed;
+        if (allowLocked && placedPassableHatch && depth >= 4 && rng.chance(0.18f)) {
+            doorType = TileType::DoorLocked;
+        }
+        d.at(first.x, first.y).type = doorType;
+        d.perimTunnelHatchCount += 1;
+        if (doorType == TileType::DoorLocked) d.perimTunnelLockedCount += 1;
+        if (doorType != TileType::DoorLocked) placedPassableHatch = true;
+
+        placed.push_back(p);
+        return true;
+    };
+
+    for (const HatchCand& hc : cands) {
+        if (d.perimTunnelHatchCount >= wantHatches) break;
+
+        bool tooClose = false;
+        for (const Vec2i& pp : placed) {
+            if (std::abs(pp.x - hc.p.x) + std::abs(pp.y - hc.p.y) < 18) {
+                tooClose = true;
+                break;
+            }
+        }
+        if (tooClose) continue;
+
+        const bool allowLocked = (d.perimTunnelHatchCount > 0);
+        (void)tryPlaceHatch(hc, allowLocked);
+    }
+
+    // Rare safety: ensure at least one passable hatch exists if we placed any hatches at all.
+    if (!placedPassableHatch && d.perimTunnelHatchCount > 0) {
+        for (const HatchCand& hc : cands) {
+            const Vec2i first{hc.p.x + hc.dir.x, hc.p.y + hc.dir.y};
+            if (!d.inBounds(first.x, first.y)) continue;
+            if (d.at(first.x, first.y).type == TileType::DoorLocked) {
+                d.at(first.x, first.y).type = TileType::DoorClosed;
+                d.perimTunnelLockedCount = std::max(0, d.perimTunnelLockedCount - 1);
+                placedPassableHatch = true;
+                break;
+            }
+        }
+    }
+
+    // Optional exploration reward: request a bonus chest somewhere in the tunnels.
+    if (depth >= 2 && rng.chance(0.35f)) {
+        const auto distAfter = bfsDistanceMap(d, d.stairsUp);
+        auto distAfterAt = [&](const Vec2i& p) -> int {
+            if (!d.inBounds(p.x, p.y)) return -1;
+            const size_t ii = static_cast<size_t>(p.y * d.width + p.x);
+            if (ii >= distAfter.size()) return -1;
+            return distAfter[ii];
+        };
+
+        Vec2i best{-1, -1};
+        int bestD = -1;
+        for (const Vec2i& p : ring) {
+            if (!d.inBounds(p.x, p.y)) continue;
+            if (d.at(p.x, p.y).type != TileType::Floor) continue;
+            if (anyDoorInRadius(d, p.x, p.y, 1)) continue;
+            const int dd = distAfterAt(p);
+            if (dd < 0) continue;
+            if (dd < 22) continue;
+            if (dd > bestD) {
+                bestD = dd;
+                best = p;
+            }
+        }
+
+        if (d.inBounds(best.x, best.y)) {
+            bool dup = false;
+            for (const Vec2i& q : d.bonusLootSpots) {
+                if (q.x == best.x && q.y == best.y) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                d.bonusLootSpots.push_back(best);
+                d.perimTunnelCacheCount += 1;
+            }
+        }
+    }
+
+    return (d.perimTunnelCarvedTiles > 0);
+}
+
+
+
+// ------------------------------------------------------------
+// Burrow crosscuts (A*-dug wall tunnels)
+//
+// A late procgen pass that carves 1-2 long tunnels *through solid wall mass*
+// between two far-apart corridor points (outside any room rectangles), gated
+// by doors (often locked/secret on one end). This creates dramatic optional
+// shortcuts that are fundamentally different from adjacent-wall shortcut doors
+// (which only bridge across a single wall tile).
+//
+// Safety:
+// - Only applies to room-based floors with a healthy room count.
+// - Never tunnels through any room rectangle (A* forbidden mask).
+// - Avoids stairs vicinity and existing doors.
+// - Only converts walls to floor (never reduces connectivity).
+// ------------------------------------------------------------
+
+inline bool crosscutTileOk(TileType t) {
+    return (t == TileType::Wall || t == TileType::Floor);
+}
+
+inline int crosscutStepCost(TileType t) {
+    // Strongly prefer digging new tunnel through wall mass.
+    if (t == TileType::Wall) return 8;
+    // Existing floor is allowed but expensive; prevents the A* from simply walking
+    // the already-carved corridor network.
+    return 34;
+}
+
+static bool findCrosscutAStarPath(const Dungeon& d, RNG& rng, Vec2i start, Vec2i goal,
+                                 const std::vector<uint8_t>& roomMask,
+                                 std::vector<Vec2i>& outPath) {
+    outPath.clear();
+
+    const int W = d.width;
+    const int H = d.height;
+
+    auto inside = [&](int x, int y) {
+        return x >= 1 && y >= 1 && x < W - 1 && y < H - 1;
+    };
+
+    if (!inside(start.x, start.y) || !inside(goal.x, goal.y)) return false;
+
+    auto idx = [&](int x, int y) { return y * W + x; };
+
+    const int DIR_NONE = 4;
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    // Shuffle direction order once per tunnel so shapes vary without excessive RNG usage.
+    int order[4] = {0, 1, 2, 3};
+    for (int i = 3; i > 0; --i) {
+        int j = rng.range(0, i);
+        std::swap(order[i], order[j]);
+    }
+
+    auto inRoom = [&](int x, int y) -> bool {
+        if (roomMask.empty()) return false;
+        const size_t ii = static_cast<size_t>(idx(x, y));
+        if (ii >= roomMask.size()) return false;
+        return roomMask[ii] != 0;
+    };
+
+    auto nearRoomPenalty = [&](int x, int y) -> int {
+        // Higher penalty than corridor routing: crosscuts should not skim rooms.
+        if (roomMask.empty()) return 0;
+        for (int k = 0; k < 4; ++k) {
+            int nx = x + dirs[k][0];
+            int ny = y + dirs[k][1];
+            if (!inside(nx, ny)) continue;
+            if (inRoom(nx, ny)) return 4;
+        }
+        return 0;
+    };
+
+    auto nearBorderPenalty = [&](int x, int y) -> int {
+        // Keep tunnels away from the outer wall for readability and to avoid fighting
+        // the perimeter service tunnel pass.
+        const int m = std::min(std::min(x, y), std::min(W - 1 - x, H - 1 - y));
+        if (m <= 2) return 6;
+        if (m <= 3) return 3;
+        return 0;
+    };
+
+    auto heuristic = [&](int x, int y) {
+        // Manhattan distance; admissible because each step costs >= 8.
+        return (std::abs(x - goal.x) + std::abs(y - goal.y)) * 8;
+    };
+
+    auto stateOf = [&](int x, int y, int dir) {
+        return (idx(x, y) * 5 + dir);
+    };
+
+    const int N = W * H;
+    const int S = N * 5;
+    const int INF = 1'000'000'000;
+
+    std::vector<int> gCost(static_cast<size_t>(S), INF);
+    std::vector<int> parent(static_cast<size_t>(S), -1);
+    std::vector<uint8_t> closed(static_cast<size_t>(S), 0);
+
+    const int startState = stateOf(start.x, start.y, DIR_NONE);
+    gCost[static_cast<size_t>(startState)] = 0;
+
+    std::priority_queue<AStarEntry, std::vector<AStarEntry>, AStarEntryCmp> open;
+    open.push({heuristic(start.x, start.y), 0, startState});
+
+    int goalStateFound = -1;
+
+    while (!open.empty()) {
+        AStarEntry cur = open.top();
+        open.pop();
+
+        const int state = cur.state;
+        if (state < 0 || state >= S) continue;
+        if (closed[static_cast<size_t>(state)] != 0) continue;
+        closed[static_cast<size_t>(state)] = 1;
+
+        const int cell = state / 5;
+        const int prevDir = state % 5;
+        const int cx = cell % W;
+        const int cy = cell / W;
+
+        if (cx == goal.x && cy == goal.y) {
+            goalStateFound = state;
+            break;
+        }
+
+        const int gHere = gCost[static_cast<size_t>(state)];
+        if (gHere >= INF) continue;
+
+        for (int oi = 0; oi < 4; ++oi) {
+            const int nd = order[oi];
+            const int nx = cx + dirs[nd][0];
+            const int ny = cy + dirs[nd][1];
+            if (!inside(nx, ny)) continue;
+
+            // Never tunnel through rooms (endpoints are corridor-wall tiles outside rooms).
+            if (!(nx == goal.x && ny == goal.y) && inRoom(nx, ny)) continue;
+
+            const TileType tt = d.at(nx, ny).type;
+            if (!crosscutTileOk(tt)) continue;
+
+            const int step = crosscutStepCost(tt);
+            const int turnPenalty = (prevDir != DIR_NONE && nd != prevDir) ? 7 : 0;
+
+            const int g2 = gHere + step + turnPenalty + nearRoomPenalty(nx, ny) + nearBorderPenalty(nx, ny);
+            const int ns = stateOf(nx, ny, nd);
+
+            if (g2 < gCost[static_cast<size_t>(ns)]) {
+                gCost[static_cast<size_t>(ns)] = g2;
+                parent[static_cast<size_t>(ns)] = state;
+
+                // Deterministic 0/1 tie-breaker.
+                const int jitter = (nx * 17 + ny * 31 + nd * 7) & 1;
+                const int f2 = g2 + heuristic(nx, ny) + jitter;
+                open.push({f2, g2, ns});
+            }
+        }
+    }
+
+    if (goalStateFound < 0) return false;
+
+    // Reconstruct path.
+    std::vector<Vec2i> path;
+    path.reserve(256);
+
+    int st = goalStateFound;
+    while (st >= 0) {
+        const int cell = st / 5;
+        const int px = cell % W;
+        const int py = cell / W;
+        path.push_back({px, py});
+        if (st == startState) break;
+        st = parent[static_cast<size_t>(st)];
+    }
+
+    if (path.empty()) return false;
+    if (path.back().x != start.x || path.back().y != start.y) return false;
+
+    std::reverse(path.begin(), path.end());
+    outPath.swap(path);
+    return true;
+}
+
+static bool applyBurrowCrosscuts(Dungeon& d, RNG& rng, DungeonBranch branch, int depth) {
+    d.crosscutTunnelCount = 0;
+    d.crosscutCarvedTiles = 0;
+    d.crosscutDoorLockedCount = 0;
+    d.crosscutDoorSecretCount = 0;
+
+    if (branch != DungeonBranch::Main) return false;
+    // Keep early floors readable; let the player learn baseline doors/shortcuts first.
+    if (depth <= 2) return false;
+    // Only apply on room-based floors (corridor network exists, and roomMask is meaningful).
+    if (d.rooms.size() < 6) return false;
+    if (d.width < 40 || d.height < 28) return false;
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) return false;
+
+    float p = 0.10f + 0.02f * static_cast<float>(std::min(10, std::max(0, depth)));
+    const int area = d.width * d.height;
+    const int baseArea = Dungeon::DEFAULT_W * Dungeon::DEFAULT_H;
+    if (area >= baseArea + baseArea / 5) p += 0.05f;
+    if (area >= baseArea + baseArea / 2) p += 0.05f;
+    p = std::clamp(p, 0.10f, 0.55f);
+    if (!rng.chance(p)) return false;
+
+    int want = 1;
+    if (depth >= 7 && rng.chance(0.35f)) want += 1;
+    if (area >= baseArea + baseArea / 3 && rng.chance(0.25f)) want += 1;
+    want = std::clamp(want, 1, 2);
+
+    // Build an in-room mask so crosscuts never tunnel through room rectangles.
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    for (const auto& r : d.rooms) {
+        for (int y = r.y; y < r.y2(); ++y) {
+            for (int x = r.x; x < r.x2(); ++x) {
+                if (!d.inBounds(x, y)) continue;
+                inRoom[static_cast<size_t>(y * d.width + x)] = 1;
+            }
+        }
+    }
+
+    const auto distFromUp = bfsDistanceMap(d, d.stairsUp);
+    auto distUpAt = [&](int x, int y) -> int {
+        if (!d.inBounds(x, y)) return -1;
+        const size_t ii = static_cast<size_t>(y * d.width + x);
+        if (ii >= distFromUp.size()) return -1;
+        return distFromUp[ii];
+    };
+
+    auto farFromStairs = [&](int x, int y) {
+        const int du = std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y);
+        const int dd = d.inBounds(d.stairsDown.x, d.stairsDown.y)
+            ? (std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y))
+            : 9999;
+        return du >= 9 && dd >= 9;
+    };
+
+    struct EndCand {
+        Vec2i floor;
+        Vec2i doors[4];
+        int doorCount = 0;
+        int score = 0;
+    };
+
+    std::vector<EndCand> cands;
+    cands.reserve(static_cast<size_t>(d.width * d.height / 8));
+
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    auto inRoomAt = [&](int x, int y) -> bool {
+        if (!d.inBounds(x, y)) return true;
+        return inRoom[static_cast<size_t>(y * d.width + x)] != 0;
+    };
+
+    for (int y = 2; y < d.height - 2; ++y) {
+        for (int x = 2; x < d.width - 2; ++x) {
+            if (d.at(x, y).type != TileType::Floor) continue;
+            if (inRoomAt(x, y)) continue;
+            if (!farFromStairs(x, y)) continue;
+            if (anyDoorInRadius(d, x, y, 2)) continue;
+
+            EndCand ec;
+            ec.floor = {x, y};
+            ec.doorCount = 0;
+
+            for (int k = 0; k < 4; ++k) {
+                const int wx = x + dirs[k][0];
+                const int wy = y + dirs[k][1];
+                const int bx = wx + dirs[k][0];
+                const int by = wy + dirs[k][1];
+
+                if (!d.inBounds(wx, wy) || !d.inBounds(bx, by)) continue;
+                if (!farFromStairs(wx, wy) || !farFromStairs(bx, by)) continue;
+
+                if (d.at(wx, wy).type != TileType::Wall) continue;
+                if (d.at(bx, by).type != TileType::Wall) continue;
+                if (inRoomAt(wx, wy) || inRoomAt(bx, by)) continue;
+
+                // Keep entrances readable and avoid door clutter.
+                if (anyDoorInRadius(d, wx, wy, 2)) continue;
+
+                ec.doors[ec.doorCount] = {wx, wy};
+                ec.doorCount += 1;
+                if (ec.doorCount >= 4) break;
+            }
+
+            if (ec.doorCount <= 0) continue;
+
+            const int du = distUpAt(x, y);
+            ec.score = (du >= 0) ? du : (std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y));
+            cands.push_back(ec);
+        }
+    }
+
+    if (cands.size() < 8) return false;
+
+    // Prefer endpoints farther from the up stairs so crosscuts tend to impact mid/late traversal.
+    std::sort(cands.begin(), cands.end(), [&](const EndCand& a, const EndCand& b) {
+        return a.score > b.score;
+    });
+
+    std::vector<Vec2i> usedDoors;
+    usedDoors.reserve(static_cast<size_t>(want) * 2);
+
+    auto doorTooClose = [&](const Vec2i& p) {
+        for (const Vec2i& q : usedDoors) {
+            if (std::abs(p.x - q.x) + std::abs(p.y - q.y) < 18) return true;
+        }
+        return false;
+    };
+
+    auto pickDoorToward = [&](const EndCand& ec, const Vec2i& toward) -> Vec2i {
+        Vec2i best = ec.doors[0];
+        int bestScore = 1'000'000;
+        for (int i = 0; i < ec.doorCount; ++i) {
+            const Vec2i p = ec.doors[i];
+            int sc = std::abs(p.x - toward.x) + std::abs(p.y - toward.y);
+            // Favor doors that "point" into thicker wall mass (more wall neighbors).
+            int wallN = 0;
+            for (int k = 0; k < 4; ++k) {
+                const int nx = p.x + dirs[k][0];
+                const int ny = p.y + dirs[k][1];
+                if (!d.inBounds(nx, ny)) continue;
+                if (d.at(nx, ny).type == TileType::Wall) wallN += 1;
+            }
+            sc -= wallN * 2;
+            sc += rng.range(0, 2); // tiny jitter
+
+            if (sc < bestScore) {
+                bestScore = sc;
+                best = p;
+            }
+        }
+        return best;
+    };
+
+    auto recordSet = [&](int x, int y, TileType nt, std::vector<TileChange>& changes) {
+        if (!d.inBounds(x, y)) return;
+        if (isStairsTile(d, x, y)) return;
+        Tile& t = d.at(x, y);
+        if (t.type == nt) return;
+        changes.push_back({x, y, t.type});
+        t.type = nt;
+    };
+
+    const int maxAttempts = 40 + 25 * want;
+
+    for (int attempt = 0; attempt < maxAttempts && d.crosscutTunnelCount < want; ++attempt) {
+        // Pick a start endpoint among the top slice (far from stairs).
+        const int slice = std::max(10, static_cast<int>(cands.size()) / 5);
+        const int ia = rng.range(0, slice - 1);
+        const EndCand& A = cands[static_cast<size_t>(ia)];
+
+        // Compute BFS distance to measure how meaningful the shortcut would be.
+        const auto distA = bfsDistanceMap(d, A.floor);
+
+        const int minDist = std::clamp(26 + depth * 2, 32, 64);
+
+        int bestI = -1;
+        int bestD = -1;
+
+        // Scan a subset of candidates for speed, with a bias toward far endpoints.
+        const int scan = std::min(static_cast<int>(cands.size()), 220);
+        for (int si = 0; si < scan; ++si) {
+            const int ib = rng.range(0, static_cast<int>(cands.size()) - 1);
+            if (ib == ia) continue;
+            const EndCand& B = cands[static_cast<size_t>(ib)];
+
+            const size_t ii = static_cast<size_t>(B.floor.y * d.width + B.floor.x);
+            if (ii >= distA.size()) continue;
+            const int dd = distA[ii];
+            if (dd < minDist) continue;
+
+            // Endpoints should not be too close in raw space either (avoid micro bypasses).
+            const int man = std::abs(A.floor.x - B.floor.x) + std::abs(A.floor.y - B.floor.y);
+            if (man < 18) continue;
+
+            if (dd > bestD) {
+                bestD = dd;
+                bestI = ib;
+            }
+        }
+
+        if (bestI < 0) continue;
+        const EndCand& B = cands[static_cast<size_t>(bestI)];
+
+        // Choose door tiles that point roughly toward the other endpoint.
+        const Vec2i doorA = pickDoorToward(A, B.floor);
+        const Vec2i doorB = pickDoorToward(B, A.floor);
+
+        if (doorTooClose(doorA) || doorTooClose(doorB)) continue;
+        if (anyDoorInRadius(d, doorA.x, doorA.y, 2) || anyDoorInRadius(d, doorB.x, doorB.y, 2)) continue;
+
+        std::vector<Vec2i> path;
+        if (!findCrosscutAStarPath(d, rng, doorA, doorB, inRoom, path)) continue;
+
+        // Reject absurdly long tunnels.
+        const int maxLen = std::clamp(72 + depth * 5, 78, 140);
+        if (static_cast<int>(path.size()) > maxLen) continue;
+
+        // Require the tunnel to actually dig through wall mass (not mostly reuse existing floors).
+        int wallTiles = 0;
+        for (const Vec2i& p : path) {
+            if (!d.inBounds(p.x, p.y)) continue;
+            if (d.at(p.x, p.y).type == TileType::Wall) wallTiles += 1;
+        }
+
+        // Door endpoints are walls by construction.
+        const int carvedFloors = std::max(0, wallTiles - 2);
+        const int minCarve = std::clamp(10 + depth, 12, 26);
+        if (carvedFloors < minCarve) continue;
+        if (carvedFloors * 2 < static_cast<int>(path.size())) continue;
+
+        // Apply changes with rollback support.
+        std::vector<TileChange> changes;
+        changes.reserve(static_cast<size_t>(wallTiles) + 8);
+
+        // Carve interior.
+        for (size_t i = 0; i < path.size(); ++i) {
+            const Vec2i p = path[i];
+            if (!d.inBounds(p.x, p.y)) continue;
+
+            // Keep endpoints reserved for doors.
+            if (p.x == doorA.x && p.y == doorA.y) continue;
+            if (p.x == doorB.x && p.y == doorB.y) continue;
+
+            if (d.at(p.x, p.y).type == TileType::Wall) {
+                recordSet(p.x, p.y, TileType::Floor, changes);
+            }
+        }
+
+        // Gate doors. Always keep at least one passable entrance.
+        TileType doorTypeA = TileType::DoorClosed;
+        TileType doorTypeB = TileType::DoorClosed;
+
+        if (depth >= 5 && rng.chance(0.30f)) {
+            doorTypeB = TileType::DoorLocked;
+        } else if (depth >= 4 && rng.chance(0.22f)) {
+            doorTypeB = TileType::DoorSecret;
+        } else if (rng.chance(0.12f)) {
+            // Rare: both ends visible, creating a very readable macro shortcut.
+            doorTypeB = TileType::DoorOpen;
+        }
+
+        recordSet(doorA.x, doorA.y, doorTypeA, changes);
+        recordSet(doorB.x, doorB.y, doorTypeB, changes);
+
+        // Sanity: ensure the corridor-side neighbors are still floors (we didn't dig into a room).
+        // If something is off, roll back.
+        if (findRoomContaining(d, doorA.x, doorA.y) != nullptr || findRoomContaining(d, doorB.x, doorB.y) != nullptr) {
+            undoChanges(d, changes);
+            continue;
+        }
+
+        // Success.
+        d.crosscutTunnelCount += 1;
+        d.crosscutCarvedTiles += carvedFloors;
+        if (doorTypeA == TileType::DoorLocked) d.crosscutDoorLockedCount += 1;
+        if (doorTypeA == TileType::DoorSecret) d.crosscutDoorSecretCount += 1;
+        if (doorTypeB == TileType::DoorLocked) d.crosscutDoorLockedCount += 1;
+        if (doorTypeB == TileType::DoorSecret) d.crosscutDoorSecretCount += 1;
+
+        usedDoors.push_back(doorA);
+        usedDoors.push_back(doorB);
+    }
+
+    return (d.crosscutTunnelCount > 0);
+}
+
+
+
+// ------------------------------------------------------------
+// Secret crawlspace networks (hidden wall passages)
+//
+// A late procgen pass that carves a small, 1-tile-wide network of tunnels
+// entirely inside solid wall mass, then connects it back to the main corridor
+// graph through 2-3 secret doors.
+//
+// Design goals:
+// - Create "castle vibes" hidden bypass routes without turning the whole level
+//   into Swiss cheese.
+// - Keep the feature fully optional and conservative: it only digs *new* floor
+//   inside walls and never alters existing critical connectivity.
+// - Avoid accidental open connections: the crawlspace is kept at least 1 wall
+//   tile away from existing passable space except at the deliberate secret-door
+//   entrances.
+// - Optionally request a bonus cache chest deep inside the crawlspace.
+// ------------------------------------------------------------
+static bool applySecretCrawlspaceNetwork(Dungeon& d, RNG& rng, DungeonBranch branch, int depth, GenKind g) {
+    d.crawlspaceNetworkCount = 0;
+    d.crawlspaceCarvedTiles = 0;
+    d.crawlspaceDoorCount = 0;
+    d.crawlspaceCacheCount = 0;
+
+    if (branch != DungeonBranch::Main) return false;
+    // Keep early floors readable; let the player learn baseline doors/shortcuts first.
+    if (depth <= 2) return false;
+    (void)g; // heuristic-gated by room count / wall mass instead of generator kind.
+
+    // Only apply on room-based floors with meaningful wall mass.
+    if (d.rooms.size() < 6) return false;
+    if (d.width < 40 || d.height < 28) return false;
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) return false;
+
+    // Chance scales mildly with depth and map size.
+    float p = 0.10f + 0.018f * static_cast<float>(std::min(12, std::max(0, depth)));
+    const int area = d.width * d.height;
+    const int baseArea = Dungeon::DEFAULT_W * Dungeon::DEFAULT_H;
+    if (area >= baseArea + baseArea / 6) p += 0.04f;
+    if (area >= baseArea + baseArea / 3) p += 0.04f;
+    p = std::clamp(p, 0.10f, 0.42f);
+    if (!rng.chance(p)) return false;
+
+    const int W = d.width;
+    const int H = d.height;
+    auto idx = [&](int x, int y) -> int { return y * W + x; };
+
+    // Build an in-room mask so we never dig through room rectangles.
+    std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), 0);
+    for (const Room& r : d.rooms) {
+        for (int y = r.y; y < r.y2(); ++y) {
+            for (int x = r.x; x < r.x2(); ++x) {
+                if (!d.inBounds(x, y)) continue;
+                inRoom[static_cast<size_t>(idx(x, y))] = 1;
+            }
+        }
+    }
+
+    auto inRoomAt = [&](int x, int y) -> bool {
+        if (!d.inBounds(x, y)) return true;
+        return inRoom[static_cast<size_t>(idx(x, y))] != 0;
+    };
+
+    auto farFromStairs = [&](int x, int y) {
+        const int du = std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y);
+        const int dd = d.inBounds(d.stairsDown.x, d.stairsDown.y)
+            ? (std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y))
+            : 9999;
+        return du >= 9 && dd >= 9;
+    };
+
+    auto nearAnyPassable = [&](int x, int y, int r) -> bool {
+        for (int oy = -r; oy <= r; ++oy) {
+            for (int ox = -r; ox <= r; ++ox) {
+                const int nx = x + ox;
+                const int ny = y + oy;
+                if (!d.inBounds(nx, ny)) continue;
+                if (d.isPassable(nx, ny)) return true;
+            }
+        }
+        return false;
+    };
+
+    auto looksLikeWallPocket = [&](int x, int y) -> bool {
+        // Require substantial wall mass in a 5x5 window.
+        int walls = 0;
+        int cells = 0;
+        for (int oy = -2; oy <= 2; ++oy) {
+            for (int ox = -2; ox <= 2; ++ox) {
+                const int nx = x + ox;
+                const int ny = y + oy;
+                if (!d.inBounds(nx, ny)) continue;
+                cells += 1;
+                if (inRoomAt(nx, ny)) continue;
+                if (d.at(nx, ny).type == TileType::Wall) walls += 1;
+            }
+        }
+        if (cells <= 0) return false;
+        return walls >= 18;
+    };
+
+    auto tooNearBorder = [&](int x, int y) {
+        const int m = std::min(std::min(x, y), std::min(W - 1 - x, H - 1 - y));
+        return m <= 2;
+    };
+
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    // Attempt to build a network a few times; if we can't place entrances, roll back.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        std::vector<TileChange> changes;
+        changes.reserve(512);
+
+        auto recordSet = [&](int x, int y, TileType nt) {
+            if (!d.inBounds(x, y)) return;
+            if (isStairsTile(d, x, y)) return;
+            Tile& t = d.at(x, y);
+            if (t.type == nt) return;
+            changes.push_back({x, y, t.type});
+            t.type = nt;
+        };
+
+        // Pick a seed wall tile inside wall mass but not *too* far from existing corridors.
+        Vec2i seed{-1, -1};
+        for (int tries = 0; tries < 420; ++tries) {
+            const int x = rng.range(3, W - 4);
+            const int y = rng.range(3, H - 4);
+            if (d.at(x, y).type != TileType::Wall) continue;
+            if (inRoomAt(x, y)) continue;
+            if (tooNearBorder(x, y)) continue;
+            if (!farFromStairs(x, y)) continue;
+            if (anyDoorInRadius(d, x, y, 3)) continue;
+            // Ensure there is *some* nearby open space so entrances are plausible.
+            if (!nearAnyPassable(x, y, 12)) continue;
+            if (!looksLikeWallPocket(x, y)) continue;
+            seed = {x, y};
+            break;
+        }
+
+        if (!d.inBounds(seed.x, seed.y)) {
+            // Couldn't find a suitable wall pocket.
+            return false;
+        }
+
+        // Carve a narrow tunnel network by "branchy" random walks.
+        const int targetTiles = std::clamp(70 + depth * 6 + rng.range(-10, 18), 70, 160);
+        std::vector<uint8_t> carved(static_cast<size_t>(W * H), 0);
+        std::vector<Vec2i> frontier;
+        frontier.reserve(12);
+
+        auto markCarved = [&](int x, int y) {
+            const int ii = idx(x, y);
+            if (ii < 0) return;
+            carved[static_cast<size_t>(ii)] = 1;
+        };
+
+        auto isCarved = [&](int x, int y) -> bool {
+            if (!d.inBounds(x, y)) return false;
+            return carved[static_cast<size_t>(idx(x, y))] != 0;
+        };
+
+        auto adjacentToNonCrawlspacePassable = [&](int x, int y) -> bool {
+            // Prevent accidentally opening the crawlspace to the main layout without a door.
+            for (int k = 0; k < 4; ++k) {
+                const int nx = x + dirs[k][0];
+                const int ny = y + dirs[k][1];
+                if (!d.inBounds(nx, ny)) continue;
+                if (d.isPassable(nx, ny) && !isCarved(nx, ny)) return true;
+            }
+            return false;
+        };
+
+        auto canCarve = [&](int x, int y) -> bool {
+            if (!d.inBounds(x, y)) return false;
+            if (tooNearBorder(x, y)) return false;
+            if (inRoomAt(x, y)) return false;
+            if (d.at(x, y).type != TileType::Wall) return false;
+            if (anyDoorInRadius(d, x, y, 2)) return false;
+            if (adjacentToNonCrawlspacePassable(x, y)) return false;
+
+            // Keep the crawlspace embedded in wall mass (avoid carving adjacent to open air
+            // via diagonals as well, which can make secret doors visually "obvious").
+            for (int oy = -1; oy <= 1; ++oy) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    if (ox == 0 && oy == 0) continue;
+                    const int nx = x + ox;
+                    const int ny = y + oy;
+                    if (!d.inBounds(nx, ny)) continue;
+                    if (d.isPassable(nx, ny) && !isCarved(nx, ny)) return false;
+                }
+            }
+            return true;
+        };
+
+        // Seed.
+        recordSet(seed.x, seed.y, TileType::Floor);
+        markCarved(seed.x, seed.y);
+        d.crawlspaceCarvedTiles += 1;
+        frontier.push_back(seed);
+
+        int guard = 0;
+        const int guardMax = targetTiles * 12;
+        while (d.crawlspaceCarvedTiles < targetTiles && !frontier.empty() && guard < guardMax) {
+            guard += 1;
+
+            const int fi = rng.range(0, static_cast<int>(frontier.size()) - 1);
+            const Vec2i cur = frontier[static_cast<size_t>(fi)];
+
+            // Shuffle directions.
+            int order[4] = {0, 1, 2, 3};
+            for (int i = 3; i > 0; --i) {
+                const int j = rng.range(0, i);
+                std::swap(order[i], order[j]);
+            }
+
+            bool moved = false;
+            for (int oi = 0; oi < 4; ++oi) {
+                const int k = order[oi];
+                const int nx = cur.x + dirs[k][0];
+                const int ny = cur.y + dirs[k][1];
+                if (!canCarve(nx, ny)) continue;
+
+                recordSet(nx, ny, TileType::Floor);
+                markCarved(nx, ny);
+                d.crawlspaceCarvedTiles += 1;
+
+                // Branching: sometimes keep the old frontier node and add a new one.
+                if (rng.chance(0.22f) && frontier.size() < 10) {
+                    frontier.push_back({nx, ny});
+                } else {
+                    frontier[static_cast<size_t>(fi)] = {nx, ny};
+                }
+
+                // Rarely punch a tiny 2x2 nook (still embedded) to create little "nodes".
+                if (rng.chance(0.08f) && d.crawlspaceCarvedTiles + 2 < targetTiles) {
+                    const int px = nx + dirs[(k + 1) & 3][0];
+                    const int py = ny + dirs[(k + 1) & 3][1];
+                    const int qx = nx + dirs[(k + 2) & 3][0];
+                    const int qy = ny + dirs[(k + 2) & 3][1];
+                    if (canCarve(px, py)) {
+                        recordSet(px, py, TileType::Floor);
+                        markCarved(px, py);
+                        d.crawlspaceCarvedTiles += 1;
+                    }
+                    if (canCarve(qx, qy)) {
+                        recordSet(qx, qy, TileType::Floor);
+                        markCarved(qx, qy);
+                        d.crawlspaceCarvedTiles += 1;
+                    }
+                }
+
+                moved = true;
+                break;
+            }
+
+            if (!moved) {
+                // Dead-end: remove this frontier tip.
+                frontier[static_cast<size_t>(fi)] = frontier.back();
+                frontier.pop_back();
+            }
+        }
+
+        if (d.crawlspaceCarvedTiles < 30) {
+            // Too small to matter; roll back and try a new seed.
+            undoChanges(d, changes);
+            d.crawlspaceCarvedTiles = 0;
+            continue;
+        }
+
+        // Identify secret-door entrance candidates.
+        const auto distFromUp = bfsDistanceMap(d, d.stairsUp);
+        auto distUpAt = [&](int x, int y) -> int {
+            if (!d.inBounds(x, y)) return -1;
+            const size_t ii = static_cast<size_t>(idx(x, y));
+            if (ii >= distFromUp.size()) return -1;
+            return distFromUp[ii];
+        };
+
+        struct EntryCand {
+            Vec2i door;    // wall tile to become DoorSecret
+            Vec2i hall;    // corridor-side floor tile
+            Vec2i inside;  // crawlspace-side floor tile
+            int dist = 0;  // distance from stairsUp to hall
+        };
+
+        std::vector<EntryCand> entries;
+        entries.reserve(static_cast<size_t>(d.crawlspaceCarvedTiles));
+
+        for (int y = 2; y < H - 2; ++y) {
+            for (int x = 2; x < W - 2; ++x) {
+                if (!isCarved(x, y)) continue;
+
+                for (int k = 0; k < 4; ++k) {
+                    const int dx = dirs[k][0];
+                    const int dy = dirs[k][1];
+
+                    const int doorX = x + dx;
+                    const int doorY = y + dy;
+                    const int hallX = doorX + dx;
+                    const int hallY = doorY + dy;
+
+                    if (!d.inBounds(doorX, doorY) || !d.inBounds(hallX, hallY)) continue;
+                    if (d.at(doorX, doorY).type != TileType::Wall) continue;
+                    if (inRoomAt(doorX, doorY) || inRoomAt(hallX, hallY)) continue;
+                    if (isStairsTile(d, hallX, hallY)) continue;
+
+                    // Corridor side must be plain floor for readability.
+                    if (d.at(hallX, hallY).type != TileType::Floor) continue;
+                    if (!d.isPassable(hallX, hallY)) continue;
+
+                    // Keep entrances away from existing doors and stairs.
+                    if (!farFromStairs(doorX, doorY)) continue;
+                    if (!farFromStairs(hallX, hallY)) continue;
+                    if (anyDoorInRadius(d, doorX, doorY, 2)) continue;
+
+                    const int dd = distUpAt(hallX, hallY);
+                    if (dd < 0) continue;
+                    if (dd < 14) continue; // don't clutter the immediate spawn zone
+
+                    entries.push_back({{doorX, doorY}, {hallX, hallY}, {x, y}, dd});
+                }
+            }
+        }
+
+        if (entries.size() < 6) {
+            // Can't connect cleanly; roll back and try a new seed.
+            undoChanges(d, changes);
+            d.crawlspaceCarvedTiles = 0;
+            continue;
+        }
+
+        std::sort(entries.begin(), entries.end(), [&](const EntryCand& a, const EntryCand& b) {
+            return a.dist < b.dist;
+        });
+
+        const int wantDoors = std::clamp(2 + ((depth >= 6 && rng.chance(0.25f)) ? 1 : 0), 2, 3);
+        std::vector<EntryCand> chosen;
+        chosen.reserve(static_cast<size_t>(wantDoors));
+
+        auto farFromChosen = [&](const EntryCand& e) {
+            for (const EntryCand& c : chosen) {
+                if (std::abs(c.door.x - e.door.x) + std::abs(c.door.y - e.door.y) < 18) return false;
+            }
+            return true;
+        };
+
+        // Pick one far and one mid/near to encourage meaningful bypass routes.
+        {
+            const int n = static_cast<int>(entries.size());
+            const int hi0 = std::max(0, n - std::max(6, n / 5));
+            const int hiPick = rng.range(hi0, n - 1);
+            chosen.push_back(entries[static_cast<size_t>(hiPick)]);
+
+            // Prefer a lower-distance entry for the second door.
+            const int lo1 = std::max(0, std::min(n - 1, n / 3));
+            for (int tries = 0; tries < 60 && static_cast<int>(chosen.size()) < 2; ++tries) {
+                const int cand = rng.range(0, lo1);
+                if (!farFromChosen(entries[static_cast<size_t>(cand)])) continue;
+                chosen.push_back(entries[static_cast<size_t>(cand)]);
+            }
+        }
+
+        // Fill any remaining desired entrances.
+        for (int tries = 0; tries < 120 && static_cast<int>(chosen.size()) < wantDoors; ++tries) {
+            const EntryCand& e = entries[static_cast<size_t>(rng.range(0, static_cast<int>(entries.size()) - 1))];
+            if (!farFromChosen(e)) continue;
+            chosen.push_back(e);
+        }
+
+        if (chosen.size() < 2) {
+            undoChanges(d, changes);
+            d.crawlspaceCarvedTiles = 0;
+            continue;
+        }
+
+        // Place doors.
+        for (const EntryCand& e : chosen) {
+            recordSet(e.door.x, e.door.y, TileType::DoorSecret);
+            d.crawlspaceDoorCount += 1;
+        }
+
+        // Optional cache chest deep inside the crawlspace.
+        if (depth >= 3 && rng.chance(0.55f)) {
+            std::vector<int> dist(static_cast<size_t>(W * H), -1);
+            std::deque<Vec2i> q;
+
+            for (const EntryCand& e : chosen) {
+                const int ii = idx(e.inside.x, e.inside.y);
+                if (ii < 0) continue;
+                dist[static_cast<size_t>(ii)] = 0;
+                q.push_back(e.inside);
+            }
+
+            while (!q.empty()) {
+                const Vec2i p0 = q.front();
+                q.pop_front();
+                const int d0 = dist[static_cast<size_t>(idx(p0.x, p0.y))];
+                for (int k = 0; k < 4; ++k) {
+                    const int nx = p0.x + dirs[k][0];
+                    const int ny = p0.y + dirs[k][1];
+                    if (!d.inBounds(nx, ny)) continue;
+                    if (!isCarved(nx, ny)) continue;
+                    const int ii = idx(nx, ny);
+                    if (ii < 0) continue;
+                    if (dist[static_cast<size_t>(ii)] >= 0) continue;
+                    dist[static_cast<size_t>(ii)] = d0 + 1;
+                    q.push_back({nx, ny});
+                }
+            }
+
+            Vec2i best{-1, -1};
+            int bestD = -1;
+            for (int y = 2; y < H - 2; ++y) {
+                for (int x = 2; x < W - 2; ++x) {
+                    if (!isCarved(x, y)) continue;
+                    const int ii = idx(x, y);
+                    const int dd = dist[static_cast<size_t>(ii)];
+                    if (dd < 0) continue;
+                    if (dd < 8) continue;
+                    // Avoid placing a cache directly adjacent to an entrance.
+                    bool nearDoor = false;
+                    for (const EntryCand& e : chosen) {
+                        if (std::abs(e.inside.x - x) + std::abs(e.inside.y - y) <= 2) {
+                            nearDoor = true;
+                            break;
+                        }
+                    }
+                    if (nearDoor) continue;
+
+                    if (dd > bestD) {
+                        bestD = dd;
+                        best = {x, y};
+                    }
+                }
+            }
+
+            if (d.inBounds(best.x, best.y)) {
+                bool dup = false;
+                for (const Vec2i& q0 : d.bonusLootSpots) {
+                    if (q0 == best) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup) {
+                    d.bonusLootSpots.push_back(best);
+                    d.crawlspaceCacheCount += 1;
+                }
+            }
+        }
+
+        d.crawlspaceNetworkCount = 1;
+        return true;
+    }
+
+    // Failed all attempts.
+    d.crawlspaceCarvedTiles = 0;
+    d.crawlspaceDoorCount = 0;
+    d.crawlspaceCacheCount = 0;
+    d.crawlspaceNetworkCount = 0;
+    return false;
 }
 
 
@@ -4603,6 +6329,340 @@ void decorateThemedRooms(Dungeon& d, RNG& rng, int depth) {
         }
     }
 }
+
+
+// ------------------------------------------------------------
+// Symmetric room furnishing (mirrored "furniture" patterns)
+//
+// A mid/late procgen pass that picks a few rooms and lays down mirrored
+// pillar/boulder patterns. Symmetry makes spaces readable and memorable, but
+// the biggest risk is accidentally cluttering a critical connection between
+// corridors (rooms are sometimes used as through-paths).
+//
+// We address that by reserving a small "navigation spine" inside the room:
+// for each doorway, we keep a short L-shaped corridor from the interior door
+// tile to an interior anchor near the room center. Furnishing is then applied
+// only off that reserved spine. As with other decoration passes, we validate
+// global stair connectivity and roll back if anything goes wrong.
+// ------------------------------------------------------------
+
+enum class SymFurnishMode : uint8_t {
+    Vertical = 0,
+    Horizontal,
+    Both,
+};
+
+static Vec2i pickRoomInteriorAnchor(const Dungeon& d, const Room& r) {
+    // Prefer a passable tile near center (keeps the reserved paths short).
+    const int cx = r.cx();
+    const int cy = r.cy();
+
+    auto interior = [&](int x, int y) {
+        return x > r.x && x < (r.x2() - 1) && y > r.y && y < (r.y2() - 1);
+    };
+
+    const int maxRad = std::max(r.w, r.h);
+    for (int rad = 0; rad <= maxRad; ++rad) {
+        for (int dy = -rad; dy <= rad; ++dy) {
+            for (int dx = -rad; dx <= rad; ++dx) {
+                const int x = cx + dx;
+                const int y = cy + dy;
+                if (!d.inBounds(x, y)) continue;
+                if (!interior(x, y)) continue;
+                if (!d.isPassable(x, y)) continue;
+                if (d.at(x, y).type != TileType::Floor) continue;
+                return {x, y};
+            }
+        }
+    }
+
+    return {cx, cy};
+}
+
+static void appendKeepPoint(std::vector<Vec2i>& keepPts, const Dungeon& d, const Room& r, Vec2i p, int rad) {
+    if (!d.inBounds(p.x, p.y)) return;
+    // Keep within room bounds (including boundary) so we don't reserve outside space.
+    if (!r.contains(p.x, p.y)) return;
+
+    const int rr = std::max(0, rad);
+    for (int oy = -rr; oy <= rr; ++oy) {
+        for (int ox = -rr; ox <= rr; ++ox) {
+            const int x = p.x + ox;
+            const int y = p.y + oy;
+            if (!d.inBounds(x, y)) continue;
+            if (!r.contains(x, y)) continue;
+            if (std::abs(ox) + std::abs(oy) > rr) continue;
+            keepPts.push_back({x, y});
+        }
+    }
+}
+
+static void appendKeepLPath(std::vector<Vec2i>& keepPts, const Dungeon& d, const Room& r, Vec2i a, Vec2i b, bool horizFirst) {
+    // Clamp to room interior-ish region.
+    auto clampRoom = [&](Vec2i p) {
+        p.x = std::clamp(p.x, r.x + 1, r.x2() - 2);
+        p.y = std::clamp(p.y, r.y + 1, r.y2() - 2);
+        return p;
+    };
+
+    a = clampRoom(a);
+    b = clampRoom(b);
+
+    auto stepTo = [&](int& v, int target) {
+        if (v < target) v++;
+        else if (v > target) v--;
+    };
+
+    int x = a.x;
+    int y = a.y;
+
+    // Always keep a small radius around the path so it doesn't become a single-tile choke.
+    appendKeepPoint(keepPts, d, r, {x, y}, 1);
+
+    if (horizFirst) {
+        while (x != b.x) {
+            stepTo(x, b.x);
+            appendKeepPoint(keepPts, d, r, {x, y}, 1);
+        }
+        while (y != b.y) {
+            stepTo(y, b.y);
+            appendKeepPoint(keepPts, d, r, {x, y}, 1);
+        }
+    } else {
+        while (y != b.y) {
+            stepTo(y, b.y);
+            appendKeepPoint(keepPts, d, r, {x, y}, 1);
+        }
+        while (x != b.x) {
+            stepTo(x, b.x);
+            appendKeepPoint(keepPts, d, r, {x, y}, 1);
+        }
+    }
+}
+
+static bool trySymmetricFurnishRoom(Dungeon& d, const Room& r, RNG& rng, int depth, int& outPlaced) {
+    outPlaced = 0;
+
+    if (r.w < 9 || r.h < 8) return false;
+
+    // Skip rooms with stairs (critical flow + readability).
+    if (r.contains(d.stairsUp.x, d.stairsUp.y)) return false;
+    if (r.contains(d.stairsDown.x, d.stairsDown.y)) return false;
+
+    // Gather doors + interior door tiles.
+    std::vector<Vec2i> doors;
+    std::vector<Vec2i> doorInside;
+    buildRoomDoorInfo(d, r, doors, doorInside);
+    if (doors.empty()) return false;
+
+    // Prefer not to double-decorate heavily cluttered rooms.
+    int interior = 0;
+    int blocked = 0;
+    for (int y = r.y + 1; y < r.y2() - 1; ++y) {
+        for (int x = r.x + 1; x < r.x2() - 1; ++x) {
+            if (!d.inBounds(x, y)) continue;
+            const TileType tt = d.at(x, y).type;
+            if (tt == TileType::Wall) continue;
+            ++interior;
+            if (tt == TileType::Pillar || tt == TileType::Boulder || tt == TileType::Chasm) ++blocked;
+        }
+    }
+
+    // If more than ~10% of interior is already blocked, skip.
+    if (interior > 0 && (blocked * 100) / interior > 10) return false;
+
+    // Choose symmetry mode.
+    SymFurnishMode mode = SymFurnishMode::Vertical;
+    if (r.w >= 10 && r.h >= 10 && rng.chance(0.25f)) {
+        mode = SymFurnishMode::Both;
+    } else if (rng.chance(0.5f)) {
+        mode = SymFurnishMode::Horizontal;
+    }
+
+    // Anchor for reserved door-to-door movement inside the room.
+    const Vec2i anchor = pickRoomInteriorAnchor(d, r);
+
+    // Build keep points: doors + a short corridor from each interior door tile to the anchor.
+    std::vector<Vec2i> keepPts;
+    keepPts.reserve(64);
+    for (const Vec2i& p : doors) appendKeepPoint(keepPts, d, r, p, 0);
+    for (const Vec2i& p : doorInside) appendKeepPoint(keepPts, d, r, p, 1);
+
+    // Door-to-anchor spines.
+    for (const Vec2i& p : doorInside) {
+        if (!d.inBounds(p.x, p.y)) continue;
+        if (!r.contains(p.x, p.y)) continue;
+        if (!d.isPassable(p.x, p.y)) continue;
+        appendKeepLPath(keepPts, d, r, p, anchor, rng.chance(0.5f));
+    }
+
+    std::vector<uint8_t> keep;
+    buildRoomKeepMask(d, keepPts, keep);
+
+    // Placement region (avoid hugging walls).
+    const int minX = r.x + 2;
+    const int maxX = r.x2() - 3;
+    const int minY = r.y + 2;
+    const int maxY = r.y2() - 3;
+    if (minX > maxX || minY > maxY) return false;
+
+    auto reflectX = [&](int x) { return (r.x + r.w - 1) - x; };
+    auto reflectY = [&](int y) { return (r.y + r.h - 1) - y; };
+
+    auto isPlaceable = [&](int x, int y) {
+        if (x < minX || x > maxX || y < minY || y > maxY) return false;
+        if (!d.inBounds(x, y)) return false;
+        if (!r.contains(x, y)) return false;
+        if (!keep.empty() && keep[static_cast<size_t>(y * d.width + x)] != 0) return false;
+        return d.at(x, y).type == TileType::Floor;
+    };
+
+    std::vector<TileChange> changes;
+    changes.reserve(static_cast<size_t>((r.w * r.h) / 6));
+
+    // Target obstacle density: small and readable.
+    const int area = std::max(1, (maxX - minX + 1) * (maxY - minY + 1));
+    int target = std::clamp(area / 16, 4, 16);
+    // Deeper floors can be slightly more cluttered.
+    target = std::min(18, target + std::max(0, depth - 4) / 2);
+
+    int placed = 0;
+
+    auto placeSet = [&](const std::vector<Vec2i>& pts, TileType tt) {
+        for (const Vec2i& p : pts) {
+            trySetTile(d, p.x, p.y, tt, changes);
+        }
+    };
+
+    // Place mirrored obstacles with retries.
+    for (int tries = 0; tries < 220 && placed < target; ++tries) {
+        const int x = rng.range(minX, maxX);
+        const int y = rng.range(minY, maxY);
+
+        std::vector<Vec2i> pts;
+        pts.reserve(4);
+        pts.push_back({x, y});
+
+        if (mode == SymFurnishMode::Vertical || mode == SymFurnishMode::Both) {
+            pts.push_back({reflectX(x), y});
+        }
+        if (mode == SymFurnishMode::Horizontal || mode == SymFurnishMode::Both) {
+            pts.push_back({x, reflectY(y)});
+        }
+        if (mode == SymFurnishMode::Both) {
+            pts.push_back({reflectX(x), reflectY(y)});
+        }
+
+        // Unique points only.
+        {
+            std::vector<Vec2i> uniq;
+            uniq.reserve(pts.size());
+            for (const Vec2i& p : pts) {
+                bool seen = false;
+                for (const Vec2i& q : uniq) {
+                    if (p.x == q.x && p.y == q.y) { seen = true; break; }
+                }
+                if (!seen) uniq.push_back(p);
+            }
+            pts.swap(uniq);
+        }
+
+        bool ok = true;
+        for (const Vec2i& p : pts) {
+            if (!isPlaceable(p.x, p.y)) { ok = false; break; }
+        }
+        if (!ok) continue;
+
+        // Choose obstacle type. Early floors: pillars read cleaner; deeper: more boulders.
+        float pBoulder = 0.22f + 0.03f * std::clamp(depth - 1, 0, 10);
+        pBoulder = std::clamp(pBoulder, 0.18f, 0.55f);
+
+        TileType tt = rng.chance(pBoulder) ? TileType::Boulder : TileType::Pillar;
+
+        // Rarely introduce a tiny symmetric chasm "pool" on deeper floors.
+        if (depth >= 6 && rng.chance(0.06f)) {
+            tt = TileType::Chasm;
+        }
+
+        placeSet(pts, tt);
+        placed += static_cast<int>(pts.size());
+    }
+
+    if (changes.empty()) return false;
+
+    // Safety: never break global connectivity.
+    if (!stairsConnected(d)) {
+        undoChanges(d, changes);
+        return false;
+    }
+
+    outPlaced = placed;
+    return true;
+}
+
+static void applySymmetricRoomFurnishings(Dungeon& d, RNG& rng, int depth) {
+    d.symmetryRoomCount = 0;
+    d.symmetryObstacleCount = 0;
+
+    if (d.rooms.empty()) return;
+
+    // Chance ramps up slightly with depth (deeper floors benefit from more visual variety).
+    float chance = 0.45f + 0.04f * std::min(depth, 10);
+    chance = std::clamp(chance, 0.40f, 0.85f);
+    if (!rng.chance(chance)) return;
+
+    std::vector<int> candidates;
+    candidates.reserve(d.rooms.size());
+
+    for (size_t i = 0; i < d.rooms.size(); ++i) {
+        const Room& r = d.rooms[i];
+
+        // Keep high-impact special rooms clean/readable.
+        if (r.type == RoomType::Shop) continue;
+        if (r.type == RoomType::Shrine) continue;
+        if (r.type == RoomType::Secret) continue;
+        if (r.type == RoomType::Vault) continue;
+
+        // Themed rooms have their own furniture.
+        if (isThemedRoom(r.type)) continue;
+
+        if (r.contains(d.stairsUp.x, d.stairsUp.y)) continue;
+        if (r.contains(d.stairsDown.x, d.stairsDown.y)) continue;
+
+        if (r.w < 9 || r.h < 8) continue;
+
+        candidates.push_back(static_cast<int>(i));
+    }
+
+    if (candidates.empty()) return;
+
+    // Shuffle candidates deterministically.
+    for (int i = static_cast<int>(candidates.size()) - 1; i > 0; --i) {
+        const int j = rng.range(0, i);
+        std::swap(candidates[static_cast<size_t>(i)], candidates[static_cast<size_t>(j)]);
+    }
+
+    const int maxRooms = std::clamp(1 + depth / 6, 1, 2);
+    int targetRooms = std::min(maxRooms, static_cast<int>(candidates.size()));
+    if (targetRooms > 1) targetRooms = rng.range(1, targetRooms);
+
+    int furnished = 0;
+    int obstacles = 0;
+
+    for (int ri : candidates) {
+        if (furnished >= targetRooms) break;
+        if (ri < 0 || ri >= static_cast<int>(d.rooms.size())) continue;
+
+        int placed = 0;
+        if (trySymmetricFurnishRoom(d, d.rooms[static_cast<size_t>(ri)], rng, depth, placed)) {
+            furnished += 1;
+            obstacles += placed;
+        }
+    }
+
+    d.symmetryRoomCount = furnished;
+    d.symmetryObstacleCount = obstacles;
+}
 // ------------------------------------------------------------
 // Global fissure / ravine feature
 //
@@ -5946,6 +8006,372 @@ enum class GenKind : uint8_t {
     Mines,
     Catacombs,
 };
+
+// ------------------------------------------------------------
+// Run Faultline (finite campaign macro terrain continuity)
+//
+// Infinite World has endless strata + a persistent rift that drifts across depth.
+// The fixed-length main campaign (depth <= maxDepth) can still feel "episodic":
+// ravines/sinkholes are interesting, but they are typically single-floor RNG events.
+//
+// This feature adds a run-seeded "fault band" across the Main branch: a small
+// contiguous range of depths (usually 3-6 floors) shares a drifting chasm seam
+// with deterministic parameters. It preserves the same safety constraints as
+// other global terrain features:
+//   - Never overwrite doors or stairs
+//   - Always preserve stairs connectivity (repair with bridges or rollback)
+//   - Deterministic per run/depth (seeded from worldSeed + depth; independent
+//     of candidate-generation RNG)
+//
+// Compared to maybeCarveGlobalRavine (single-floor), this creates cross-floor
+// geological continuity without requiring infinite descent.
+// ------------------------------------------------------------
+
+struct RunFaultBandInfo {
+    bool active = false;      // true if this depth is within the band
+    int startDepth = -1;      // absolute depth where the band begins
+    int len = 0;              // number of floors in the band
+    int local = 0;            // 0..len-1 index within the band
+    float intensity = 0.0f;   // 0..1 strength (peaks mid-band)
+    uint32_t seed = 0u;       // stable run seed for the band
+};
+
+struct RunFaultKnot {
+    float uStart = 0.5f;
+    float uEnd = 0.5f;
+    float uCtrl = 0.5f;
+    float rough = 0.5f;
+    float width = 0.5f;
+    uint32_t seed = 0u;
+};
+
+static RunFaultBandInfo computeRunFaultBand(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) {
+    RunFaultBandInfo out;
+    if (worldSeed == 0u) return out;
+    if (branch != DungeonBranch::Main) return out;
+    if (depth < 1 || depth > maxDepth) return out;
+
+    // Keep early-game onboarding stable; the early depths already contain bespoke floors.
+    const int minStart = 7;
+
+    // Standard floor generation never runs on (maxDepth-1) and maxDepth.
+    const int maxEnd = std::max(1, maxDepth - 2);
+    if (maxEnd - minStart + 1 < 3) return out;
+
+    const uint32_t base = hashCombine(worldSeed, 0xF17A17EDu);
+
+    // Run-level chance that the campaign features a fault band at all.
+    const float p = 0.62f;
+    if (hash01u(hashCombine(base, 0x01u)) > p) return out;
+
+    int len = 3 + static_cast<int>(hash32(hashCombine(base, 0x02u)) % 3u); // 3..5
+    // Longer campaigns can occasionally get a slightly longer band.
+    if (maxDepth >= 18 && ((hash32(hashCombine(base, 0x02u)) & 0x10u) != 0u)) len += 1;
+    len = std::clamp(len, 3, 6);
+
+    const int maxStart = maxEnd - len + 1;
+    if (maxStart < minStart) return out;
+
+    const int start = minStart + static_cast<int>(hash32(hashCombine(base, 0x03u)) % static_cast<uint32_t>(maxStart - minStart + 1));
+
+    out.startDepth = start;
+    out.len = len;
+
+    if (depth < start || depth >= start + len) return out;
+
+    out.active = true;
+    out.local = depth - start;
+
+    const float t = (len > 1) ? (static_cast<float>(out.local) / static_cast<float>(len - 1)) : 0.0f;
+
+    // Triangular band profile (peaks mid-band). Keep a non-zero baseline at the edges
+    // so the seam feels continuous across the whole band.
+    const float tri = 1.0f - std::abs(2.0f * t - 1.0f);
+    const float s = smoothstep01(tri);
+    out.intensity = std::clamp(0.28f + 0.60f * s, 0.0f, 1.0f);
+
+    out.seed = hashCombine(hashCombine(base, 0x0BADC0DEu), static_cast<uint32_t>(start));
+    if (out.seed == 0u) out.seed = 1u;
+
+    return out;
+}
+
+static RunFaultKnot computeRunFaultKnot(uint32_t worldSeed, int bandStart, int bandLen, int which) {
+    RunFaultKnot k;
+    if (worldSeed == 0u) return k;
+
+    const uint32_t base = hashCombine(worldSeed, 0xA5F0C0DEu);
+    const uint32_t mix = hashCombine(static_cast<uint32_t>(bandStart), static_cast<uint32_t>(bandLen));
+    const uint32_t s = hash32(hashCombine(base, mix) ^ static_cast<uint32_t>(which));
+    k.seed = s;
+
+    auto h = [&](uint32_t salt) -> float {
+        return hash01u(hashCombine(s, salt));
+    };
+
+    // Keep offsets away from extreme edges for readability.
+    k.uStart = 0.12f + 0.76f * h(0x10u);
+    k.uEnd   = 0.12f + 0.76f * h(0x11u);
+
+    const float mid = 0.5f * (k.uStart + k.uEnd);
+    const float bend = (h(0x12u) * 2.0f - 1.0f) * 0.22f; // [-0.22, +0.22]
+    k.uCtrl = std::clamp(mid + bend, 0.06f, 0.94f);
+
+    k.rough = h(0x13u);
+    k.width = h(0x14u);
+
+    return k;
+}
+
+static bool maybeCarveRunFaultline(Dungeon& d, DungeonBranch branch, int depth, int maxDepth, uint32_t worldSeed, GenKind g) {
+    // Reset debug fields (per-floor).
+    d.runFaultActive = false;
+    d.runFaultBandStartDepth = -1;
+    d.runFaultBandLen = 0;
+    d.runFaultBandLocal = 0;
+    d.runFaultIntensityPct = 0;
+    d.runFaultChasmCount = 0;
+    d.runFaultBridgeCount = 0;
+    d.runFaultBoulderCount = 0;
+    d.runFaultSeed = 0u;
+
+    const RunFaultBandInfo band = computeRunFaultBand(worldSeed, branch, depth, maxDepth);
+    if (!band.active) return false;
+
+    d.runFaultBandStartDepth = band.startDepth;
+    d.runFaultBandLen = band.len;
+    d.runFaultBandLocal = band.local;
+    d.runFaultIntensityPct = static_cast<int>(std::lround(band.intensity * 100.0f));
+
+    // Skip tiny maps (feature becomes too dominant).
+    if (d.width < 22 || d.height < 16) return false;
+
+    const RunFaultKnot a = computeRunFaultKnot(worldSeed, band.startDepth, band.len, 0);
+    const RunFaultKnot b = computeRunFaultKnot(worldSeed, band.startDepth, band.len, 1);
+
+    const float t = (band.len > 1) ? (static_cast<float>(band.local) / static_cast<float>(band.len - 1)) : 0.0f;
+    const float s = smoothstep01(t);
+
+    const float u0 = std::clamp(lerpf(a.uStart, b.uStart, s), 0.0f, 1.0f);
+    const float u1 = std::clamp(lerpf(a.uEnd,   b.uEnd,   s), 0.0f, 1.0f);
+    const float uc = std::clamp(lerpf(a.uCtrl,  b.uCtrl,  s), 0.0f, 1.0f);
+    const float rough = std::clamp(lerpf(a.rough, b.rough, s), 0.0f, 1.0f);
+    const float widthDriver = std::clamp(lerpf(a.width, b.width, s), 0.0f, 1.0f);
+
+    // Deterministic per-run/per-depth RNG, independent of candidate RNG.
+    uint32_t rSeed = hashCombine(hashCombine(worldSeed, 0xD00DFEEDu), static_cast<uint32_t>(depth));
+    rSeed = hashCombine(rSeed, static_cast<uint32_t>(band.startDepth));
+    if (rSeed == 0u) rSeed = 1u;
+    d.runFaultSeed = rSeed;
+
+    RNG rr(rSeed);
+
+    // Orientation is per-run so the faultline reads as a global world feature.
+    const bool horizontal = ((hash32(hashCombine(worldSeed, 0xC001D00Du)) & 1u) != 0u);
+
+    const auto path = buildEndlessRiftBezierPath(d, horizontal, u0, uc, u1);
+    if (path.size() < 10) return false;
+
+    std::vector<TileChange> changes;
+    changes.reserve(path.size() * 2);
+
+    float intensity = band.intensity;
+
+    // Gen-kind modulation (keeps some layouts from feeling over-chasmed).
+    if (g == GenKind::Maze) intensity *= 0.72f;
+    if (g == GenKind::Warrens) intensity *= 0.92f;
+    if (g == GenKind::Cavern) intensity *= 1.08f;
+    if (g == GenKind::Mines) intensity *= 1.10f;
+    if (g == GenKind::Catacombs) intensity *= 1.05f;
+    intensity = std::clamp(intensity, 0.0f, 1.0f);
+
+    d.runFaultIntensityPct = static_cast<int>(std::lround(intensity * 100.0f));
+
+    // Width/thickness mapping: 1..2 (rarely 3 on peak intensity).
+    int thick = 1 + static_cast<int>(std::lround(widthDriver * 1.2f));
+    if (intensity > 0.82f && rr.chance(0.33f)) thick += 1;
+    thick = std::clamp(thick, 1, 3);
+
+    float widen = 0.14f + 0.28f * intensity;
+    float splinter = 0.012f + 0.055f * intensity * (0.35f + 0.65f * rough);
+
+    if (g == GenKind::Cavern) { widen *= 1.12f; splinter *= 1.20f; }
+    if (g == GenKind::Mines)  { widen *= 0.98f; splinter *= 1.10f; }
+    if (g == GenKind::Maze)   { widen *= 0.88f; splinter *= 0.75f; }
+
+    widen = std::clamp(widen, 0.05f, 0.65f);
+    splinter = std::clamp(splinter, 0.0f, 0.16f);
+
+    int carved = 0;
+
+    auto carveChasmAt = [&](int x, int y) {
+        if (!d.inBounds(x, y)) return;
+        if (nearStairs(d, x, y, 4)) return;
+        const TileType before = d.at(x, y).type;
+        forceSetTileFeature(d, x, y, TileType::Chasm, changes);
+        if (before != TileType::Chasm && d.at(x, y).type == TileType::Chasm) carved += 1;
+    };
+
+    for (size_t i = 0; i < path.size(); ++i) {
+        const Vec2i p0 = path[i];
+        carveChasmAt(p0.x, p0.y);
+
+        // Thicken via a small Manhattan disk around the centerline.
+        if (thick >= 2) {
+            carveChasmAt(p0.x + 1, p0.y);
+            carveChasmAt(p0.x - 1, p0.y);
+            carveChasmAt(p0.x, p0.y + 1);
+            carveChasmAt(p0.x, p0.y - 1);
+        }
+        if (thick >= 3) {
+            // Diamond corners.
+            carveChasmAt(p0.x + 1, p0.y + 1);
+            carveChasmAt(p0.x - 1, p0.y + 1);
+            carveChasmAt(p0.x + 1, p0.y - 1);
+            carveChasmAt(p0.x - 1, p0.y - 1);
+        }
+
+        Vec2i dir{0, 0};
+        if (i > 0) {
+            dir = { path[i].x - path[i - 1].x, path[i].y - path[i - 1].y };
+            if (dir.x != 0) dir.x = (dir.x > 0) ? 1 : -1;
+            if (dir.y != 0) dir.y = (dir.y > 0) ? 1 : -1;
+        }
+
+        if (dir.x != 0 || dir.y != 0) {
+            Vec2i perp{ dir.y, -dir.x };
+
+            if (rr.chance(widen)) carveChasmAt(p0.x + perp.x, p0.y + perp.y);
+            if (rr.chance(widen * 0.38f)) carveChasmAt(p0.x - perp.x, p0.y - perp.y);
+
+            // Occasional splinter cracks.
+            if (rr.chance(splinter)) {
+                static const Vec2i dirs[4] = {{1,0},{-1,0},{0,1},{0,-1}};
+                const Vec2i dv = dirs[rr.range(0, 3)];
+                carveChasmAt(p0.x + dv.x, p0.y + dv.y);
+            }
+        }
+    }
+
+    // If we barely carved anything (degenerate), skip.
+    if (carved < std::max(10, (d.width + d.height) / 2)) {
+        undoChanges(d, changes);
+        return false;
+    }
+
+    // Ensure the seam has at least one natural bridge (two on peak intensity or mines).
+    int wantBridges = 1;
+    if (g == GenKind::Mines || g == GenKind::Catacombs) wantBridges = 2;
+    if (intensity > 0.78f && rr.chance(0.40f)) wantBridges += 1;
+    wantBridges = std::clamp(wantBridges, 1, 3);
+
+    int bridges = 0;
+    for (int i = 0; i < wantBridges; ++i) {
+        if (placeRavineBridge(d, rr, changes)) bridges += 1;
+        else break;
+    }
+
+    // Repair: if we severed stairs connectivity, add explicit bridges or rollback.
+    if (!stairsConnected(d)) {
+        for (int tries = 0; tries < 10 && !stairsConnected(d); ++tries) {
+            int compCount = 0;
+            auto comp = computePassableComponents(d, compCount);
+            if (compCount <= 1) break;
+
+            auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * d.width + x); };
+            const int compUp = (d.inBounds(d.stairsUp.x, d.stairsUp.y)) ? comp[idx(d.stairsUp.x, d.stairsUp.y)] : -1;
+            const int compDown = (d.inBounds(d.stairsDown.x, d.stairsDown.y)) ? comp[idx(d.stairsDown.x, d.stairsDown.y)] : -1;
+            if (compUp < 0 || compDown < 0) break;
+            if (compUp == compDown) break;
+
+            if (placeRavineBridge(d, rr, changes, &comp, compUp, compDown)) {
+                bridges += 1;
+            } else {
+                bool placed = false;
+                for (int c = 0; c < compCount; ++c) {
+                    if (c == compUp) continue;
+                    if (placeRavineBridge(d, rr, changes, &comp, compUp, c)) { placed = true; bridges += 1; break; }
+                }
+                if (!placed) break;
+            }
+        }
+
+        if (!stairsConnected(d)) {
+            undoChanges(d, changes);
+            return false;
+        }
+    }
+
+    // Optional: boulders near the fault edge (for player-made crossings).
+    int bouldersPlaced = 0;
+    {
+        float pb = 0.18f + 0.32f * intensity;
+        if (g == GenKind::Mines) pb *= 1.20f;
+        if (g == GenKind::Maze) pb *= 0.70f;
+
+        if (rr.chance(std::clamp(pb, 0.0f, 0.80f))) {
+            std::vector<TileChange> bchanges;
+            bchanges.reserve(24);
+
+            const int want = (g == GenKind::Mines) ? rr.range(2, 5) : rr.range(1, 3);
+            int placed = 0;
+            int attempts = want * 70;
+
+            static const int dirs4[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+            auto adjChasm = [&](int x, int y) {
+                for (auto& dv : dirs4) {
+                    const int nx = x + dv[0];
+                    const int ny = y + dv[1];
+                    if (!d.inBounds(nx, ny)) continue;
+                    if (d.at(nx, ny).type == TileType::Chasm) return true;
+                }
+                return false;
+            };
+
+            auto passableDeg = [&](int x, int y) {
+                int c = 0;
+                for (auto& dv : dirs4) {
+                    const int nx = x + dv[0];
+                    const int ny = y + dv[1];
+                    if (!d.inBounds(nx, ny)) continue;
+                    if (d.isPassable(nx, ny)) c++;
+                }
+                return c;
+            };
+
+            while (placed < want && attempts-- > 0) {
+                const int x = rr.range(2, d.width - 3);
+                const int y = rr.range(2, d.height - 3);
+                if (!d.inBounds(x, y)) continue;
+                if (isStairsTile(d, x, y)) continue;
+                if (nearStairs(d, x, y, 4)) continue;
+                if (d.at(x, y).type != TileType::Floor) continue;
+                if (!adjChasm(x, y)) continue;
+                if (passableDeg(x, y) <= 1) continue;
+                if (anyDoorInRadius(d, x, y, 1)) continue;
+
+                bchanges.push_back({x, y, d.at(x, y).type});
+                d.at(x, y).type = TileType::Boulder;
+                placed++;
+            }
+
+            if (!stairsConnected(d)) {
+                undoChanges(d, bchanges);
+            } else {
+                bouldersPlaced = placed;
+            }
+        }
+    }
+
+    d.runFaultActive = true;
+    d.runFaultChasmCount = carved;
+    d.runFaultBridgeCount = bridges;
+    d.runFaultBoulderCount = bouldersPlaced;
+
+    return true;
+}
+
 
 GenKind chooseGenKind(int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
     // The default run now spans ~20 floors, so we pace variety in two arcs:
@@ -10330,8 +12756,16 @@ void generateRogueLevel(Dungeon& d, RNG& rng, int depth) {
 }
 
 
-// Surface camp (depth 0): an above-ground hub with a simple palisade + tent layout.
-// This acts as a "safe-ish" staging area above the dungeon entrance.
+
+// Surface camp (depth 0): an above-ground hub with a palisade, tents, and a little
+// surrounding wilderness. This acts as a "safe-ish" staging area above the dungeon
+// entrance.
+//
+// Design goals:
+// - Much more per-run variety than the old static rectangle.
+// - Always readable: a clear walkable route from EXIT (<) to DUNGEON (>) without
+//   requiring door interaction.
+// - Still cheap: this is generated often (start + hub returns).
 void generateSurfaceCamp(Dungeon& d, RNG& rng) {
     fillWalls(d);
     d.rooms.clear();
@@ -10343,32 +12777,131 @@ void generateSurfaceCamp(Dungeon& d, RNG& rng) {
     d.corridorHubCount = 0;
     d.corridorHallCount = 0;
     d.sinkholeCount = 0;
+    d.riftCacheCount = 0;
+    d.riftCacheBoulderCount = 0;
+    d.riftCacheChasmCount = 0;
     d.vaultSuiteCount = 0;
     d.deadEndClosetCount = 0;
     d.campStashSpot = {-1, -1};
+    d.campGateIn = {-1, -1};
+    d.campGateOut = {-1, -1};
+    d.campSideGateIn = {-1, -1};
+    d.campSideGateOut = {-1, -1};
+    d.campWellSpot = {-1, -1};
+    d.campFireSpot = {-1, -1};
+    d.campAltarSpot = {-1, -1};
 
     // Start with an open outdoor field (floor) with border walls.
     if (d.width >= 3 && d.height >= 3) {
         carveRect(d, 1, 1, d.width - 2, d.height - 2, TileType::Floor);
     }
 
-    // ------------------------------------------------------------
-    // Camp geometry: a centered palisade "yard" with a single open gate.
-    // ------------------------------------------------------------
-    int campW = std::max(12, d.width / 3);
-    int campH = std::max(10, d.height / 3);
+    enum class Side : uint8_t { North = 0, South, West, East };
 
-    campW = std::min(campW, std::max(8, d.width - 6));
-    campH = std::min(campH, std::max(6, d.height - 6));
+    auto oppositeSide = [&](Side s) {
+        switch (s) {
+            case Side::North: return Side::South;
+            case Side::South: return Side::North;
+            case Side::West:  return Side::East;
+            case Side::East:  return Side::West;
+        }
+        return Side::South;
+    };
+
+    auto sideInward = [&](Side s) -> Vec2i {
+        switch (s) {
+            case Side::North: return {0, 1};
+            case Side::South: return {0, -1};
+            case Side::West:  return {1, 0};
+            case Side::East:  return {-1, 0};
+        }
+        return {0, 0};
+    };
+
+    auto sideOutward = [&](Side s) -> Vec2i {
+        Vec2i in = sideInward(s);
+        return {-in.x, -in.y};
+    };
+
+    auto idx = [&](int x, int y) -> size_t {
+        return static_cast<size_t>(y * d.width + x);
+    };
+
+    // ------------------------------------------------------------
+    // Exit placement (stairs up): pick a map edge so it feels like an exterior trail.
+    // ------------------------------------------------------------
+    Side exitSide = static_cast<Side>(rng.range(0, 3));
+    Vec2i exit{-1, -1};
+
+    auto pickEdgePos = [&](Side s) -> Vec2i {
+        // Place on the *inner* edge of the border wall (y==1, y==h-2, etc).
+        // Keep away from corners for readability.
+
+        switch (s) {
+            case Side::North: return { rng.range(2, d.width - 3), 1 };
+            case Side::South: return { rng.range(2, d.width - 3), d.height - 2 };
+            case Side::West:  return { 1, rng.range(2, d.height - 3) };
+            case Side::East:  return { d.width - 2, rng.range(2, d.height - 3) };
+        }
+        return {2, 2};
+    };
+
+    // Defensive fallback for tiny maps.
+    if (d.width <= 6 || d.height <= 6) {
+        exitSide = Side::North;
+        exit = {2, 1};
+    } else {
+        exit = pickEdgePos(exitSide);
+    }
+
+    d.stairsUp = exit;
+    if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) {
+        d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
+    }
+
+    // ------------------------------------------------------------
+    // Palisade yard: sized and shifted away from the exit to create a convincing
+    // wilderness approach, with the gate facing the exit.
+    // ------------------------------------------------------------
+    const int minOuter = 6; // minimum ring of wilderness around the palisade
+
+    const int maxCampW = std::max(18, d.width - 2 * minOuter);
+    const int maxCampH = std::max(14, d.height - 2 * minOuter);
+
+    int campW = clampi(d.width / 2 + rng.range(-8, 8), 18, maxCampW);
+    int campH = clampi(d.height / 2 + rng.range(-6, 6), 14, maxCampH);
 
     int campX = (d.width - campW) / 2;
     int campY = (d.height - campH) / 2;
 
-    campX = clampi(campX, 2, std::max(2, d.width - campW - 2));
-    campY = clampi(campY, 2, std::max(2, d.height - campH - 2));
+    // Shift the camp away from the exit side so the approach space varies.
+    const int roomX = std::max(0, (d.width - campW) / 2 - 2);
+    const int roomY = std::max(0, (d.height - campH) / 2 - 2);
+    int shiftX = 0;
+    int shiftY = 0;
+
+    auto randShift = [&](int mag) {
+        if (mag <= 0) return 0;
+        if (mag == 1) return 1;
+        return rng.range(1, mag);
+    };
+
+    switch (exitSide) {
+        case Side::North: shiftY += randShift(std::min(8, roomY)); break;
+        case Side::South: shiftY -= randShift(std::min(8, roomY)); break;
+        case Side::West:  shiftX += randShift(std::min(12, roomX)); break;
+        case Side::East:  shiftX -= randShift(std::min(12, roomX)); break;
+    }
+
+    campX = clampi(campX + shiftX, 2, std::max(2, d.width - campW - 2));
+    campY = clampi(campY + shiftY, 2, std::max(2, d.height - campH - 2));
 
     const int campX2 = campX + campW - 1;
     const int campY2 = campY + campH - 1;
+
+    auto isInCampBounds = [&](Vec2i p) {
+        return p.x >= campX && p.x <= campX2 && p.y >= campY && p.y <= campY2;
+    };
 
     // Palisade walls.
     for (int x = campX; x <= campX2; ++x) {
@@ -10380,117 +12913,1051 @@ void generateSurfaceCamp(Dungeon& d, RNG& rng) {
         if (d.inBounds(campX2, y)) d.at(campX2, y).type = TileType::Wall;
     }
 
-    // Gate: open door on the south wall so the camp is reachable without interaction.
-    const int gateX = campX + campW / 2;
-    const Vec2i gate{gateX, campY2};
+    // Gate: always faces the exit (open, so hub traversal never requires interaction).
+    const Side gateSide = exitSide;
+    Vec2i gate{-1, -1};
+
+    switch (gateSide) {
+        case Side::North: gate = { clampi(exit.x, campX + 2, campX2 - 2), campY }; break;
+        case Side::South: gate = { clampi(exit.x, campX + 2, campX2 - 2), campY2 }; break;
+        case Side::West:  gate = { campX, clampi(exit.y, campY + 2, campY2 - 2) }; break;
+        case Side::East:  gate = { campX2, clampi(exit.y, campY + 2, campY2 - 2) }; break;
+    }
+
+    const Vec2i gateInStep  = sideInward(gateSide);
+    const Vec2i gateOutStep = sideOutward(gateSide);
+    const Vec2i gateIn{gate.x + gateInStep.x, gate.y + gateInStep.y};
+    const Vec2i gateOut{gate.x + gateOutStep.x, gate.y + gateOutStep.y};
+
+    d.campGateIn = gateIn;
+    d.campGateOut = gateOut;
+
     if (d.inBounds(gate.x, gate.y)) {
         d.at(gate.x, gate.y).type = TileType::DoorOpen;
-        carveFloor(d, gate.x, gate.y - 1);
-        carveFloor(d, gate.x, gate.y + 1);
+        carveFloor(d, gateIn.x, gateIn.y);
+        carveFloor(d, gateOut.x, gateOut.y);
+
+        // A tiny threshold pad so the gate reads clearly.
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                carveFloor(d, gateIn.x + dx, gateIn.y + dy);
+                carveFloor(d, gateOut.x + dx, gateOut.y + dy);
+            }
+        }
     }
 
-    // ------------------------------------------------------------
-    // Tent / hut: a small room inside the yard (closed door for flavor).
-    // ------------------------------------------------------------
-    int tentW = std::min(11, campW - 4);
-    int tentH = std::min(8, campH - 5);
 
-    tentW = std::max(8, tentW);
-    tentH = std::max(6, tentH);
+    // Optional side sallyport: a second open gate on a perpendicular wall.
+    // This gives the outside wilderness more purpose (trails/POIs) without
+    // compromising the main EXIT->GATE->DUNGEON readability.
+    bool haveSideGate = false;
+    Side sideGateSide = gateSide;
+    Vec2i sideGate{-1, -1};
 
-    tentW = std::min(tentW, std::max(6, campW - 4));
-    tentH = std::min(tentH, std::max(5, campH - 4));
+    if (d.width >= 26 && d.height >= 20 && rng.chance(0.70f)) {
+        std::array<Side, 2> cand;
+        if (gateSide == Side::North || gateSide == Side::South) {
+            cand = {Side::West, Side::East};
+        } else {
+            cand = {Side::North, Side::South};
+        }
+        sideGateSide = cand[static_cast<size_t>(rng.range(0, 1))];
 
-    const int tentX = campX + 2;
-    const int tentY = campY + 2;
-    const int tentX2 = tentX + tentW - 1;
-    const int tentY2 = tentY + tentH - 1;
+        const int scx = campX + campW / 2;
+        const int scy = campY + campH / 2;
+        const int sjx = std::max(1, campW / 6);
+        const int sjy = std::max(1, campH / 6);
 
-    carveRect(d, tentX, tentY, tentW, tentH, TileType::Floor);
+        // Place near the camp midline with a little jitter so it doesn't look perfectly symmetric.
+        switch (sideGateSide) {
+            case Side::North: sideGate = { clampi(scx + rng.range(-sjx, sjx), campX + 3, campX2 - 3), campY }; break;
+            case Side::South: sideGate = { clampi(scx + rng.range(-sjx, sjx), campX + 3, campX2 - 3), campY2 }; break;
+            case Side::West:  sideGate = { campX, clampi(scy + rng.range(-sjy, sjy), campY + 3, campY2 - 3) }; break;
+            case Side::East:  sideGate = { campX2, clampi(scy + rng.range(-sjy, sjy), campY + 3, campY2 - 3) }; break;
+        }
 
-    for (int x = tentX; x <= tentX2; ++x) {
-        if (d.inBounds(x, tentY)) d.at(x, tentY).type = TileType::Wall;
-        if (d.inBounds(x, tentY2)) d.at(x, tentY2).type = TileType::Wall;
+        // Avoid duplicating the main gate if something degenerates.
+        if (sideGate != gate) {
+            const Vec2i sgInStep  = sideInward(sideGateSide);
+            const Vec2i sgOutStep = sideOutward(sideGateSide);
+            const Vec2i sgIn{sideGate.x + sgInStep.x, sideGate.y + sgInStep.y};
+            const Vec2i sgOut{sideGate.x + sgOutStep.x, sideGate.y + sgOutStep.y};
+
+            if (d.inBounds(sideGate.x, sideGate.y) && d.inBounds(sgIn.x, sgIn.y) && d.inBounds(sgOut.x, sgOut.y)) {
+                d.at(sideGate.x, sideGate.y).type = TileType::DoorOpen;
+                carveFloor(d, sgIn.x, sgIn.y);
+                carveFloor(d, sgOut.x, sgOut.y);
+
+                // Smaller pad than the main gate (a side path).
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        carveFloor(d, sgIn.x + dx, sgIn.y + dy);
+                        carveFloor(d, sgOut.x + dx, sgOut.y + dy);
+                    }
+                }
+
+                d.campSideGateIn = sgIn;
+                d.campSideGateOut = sgOut;
+                haveSideGate = true;
+            }
+        }
     }
-    for (int y = tentY; y <= tentY2; ++y) {
-        if (d.inBounds(tentX, y)) d.at(tentX, y).type = TileType::Wall;
-        if (d.inBounds(tentX2, y)) d.at(tentX2, y).type = TileType::Wall;
+
+    // Dungeon entrance (stairs down): bias toward the opposite side of the yard.
+    const Side downSide = oppositeSide(gateSide);
+    Vec2i down{-1, -1};
+
+    auto interiorClampX = [&](int x) { return clampi(x, campX + 2, campX2 - 2); };
+    auto interiorClampY = [&](int y) { return clampi(y, campY + 2, campY2 - 2); };
+
+    const int cx = campX + campW / 2;
+    const int cy = campY + campH / 2;
+
+    const int jitterX = std::max(1, campW / 6);
+    const int jitterY = std::max(1, campH / 6);
+
+    switch (downSide) {
+        case Side::North: down = { interiorClampX(cx + rng.range(-jitterX, jitterX)), campY + 2 }; break;
+        case Side::South: down = { interiorClampX(cx + rng.range(-jitterX, jitterX)), campY2 - 2 }; break;
+        case Side::West:  down = { campX + 2, interiorClampY(cy + rng.range(-jitterY, jitterY)) }; break;
+        case Side::East:  down = { campX2 - 2, interiorClampY(cy + rng.range(-jitterY, jitterY)) }; break;
     }
 
-    // Door: center of the south wall.
-    Vec2i tentDoor{tentX + tentW / 2, tentY2};
-    if (d.inBounds(tentDoor.x, tentDoor.y)) {
-        d.at(tentDoor.x, tentDoor.y).type = TileType::DoorClosed;
-        carveFloor(d, tentDoor.x, tentDoor.y + 1);
-    }
-
-    // Stash anchor in the tent interior (used by Game to place a persistent open chest).
-    d.campStashSpot = {tentX + tentW / 2, tentY + tentH / 2};
-
-    // ------------------------------------------------------------
-    // Stairs: camp exit (<) and dungeon entrance (>) inside the yard.
-    // ------------------------------------------------------------
-    d.stairsUp = {2, 2};
-    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y) || (d.stairsUp.x >= campX && d.stairsUp.x <= campX2 && d.stairsUp.y >= campY && d.stairsUp.y <= campY2)) {
-        // Fallback: left edge above the camp.
-        d.stairsUp = {2, std::max(2, campY - 2)};
-    }
-
-    if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) {
-        carveFloor(d, d.stairsUp.x, d.stairsUp.y);
-        d.at(d.stairsUp.x, d.stairsUp.y).type = TileType::StairsUp;
-    }
-
-    d.stairsDown = {campX2 - 2, campY + campH / 2};
-    d.stairsDown.x = clampi(d.stairsDown.x, campX + 1, campX2 - 1);
-    d.stairsDown.y = clampi(d.stairsDown.y, campY + 1, campY2 - 1);
-
+    d.stairsDown = down;
     if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) {
         carveFloor(d, d.stairsDown.x, d.stairsDown.y);
         d.at(d.stairsDown.x, d.stairsDown.y).type = TileType::StairsDown;
     }
 
     // ------------------------------------------------------------
-    // Decoration: sparse "trees" (pillars) outside the palisade to suggest wilderness.
-    // Keep density low and validate connectivity between stairs.
+    // Protection mask: we reserve a clear "spine" so travel between stairs is
+    // guaranteed to be walkable even before opening any doors.
     // ------------------------------------------------------------
-    auto isInCampBounds = [&](Vec2i p) {
-        return p.x >= campX && p.x <= campX2 && p.y >= campY && p.y <= campY2;
+    std::vector<uint8_t> protect(static_cast<size_t>(d.width * d.height), 0);
+
+    auto markProtect = [&](int x, int y) {
+        if (!d.inBounds(x, y)) return;
+        protect[idx(x, y)] = 1;
     };
 
-    const int interior = std::max(0, (d.width - 2) * (d.height - 2));
-    const int targetTrees = std::min(120, std::max(8, interior / 80)); // ~1.25% of tiles, capped.
-    std::vector<Vec2i> trees;
-    trees.reserve(static_cast<size_t>(targetTrees));
+    auto markProtectRadius = [&](Vec2i p, int r) {
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                markProtect(p.x + dx, p.y + dy);
+            }
+        }
+    };
 
-    auto canPlaceTree = [&](Vec2i p) {
+    auto isProtected = [&](int x, int y) {
+        if (!d.inBounds(x, y)) return true;
+        return protect[idx(x, y)] != 0;
+    };
+
+    // Stairs clarity.
+    markProtectRadius(d.stairsUp, 3);
+    markProtectRadius(d.stairsDown, 3);
+
+    // Keep the palisade interior immediately around the gate clear.
+    markProtectRadius(gateIn, 2);
+    // Also keep the outer bridge tile open so later terrain dressing does not block entry.
+    markProtectRadius(gateOut, 2);
+
+    if (haveSideGate) {
+        markProtectRadius(d.campSideGateIn, 2);
+        markProtectRadius(d.campSideGateOut, 2);
+    }
+
+    // Build a simple "keepout" spine between the gate and the dungeon stairs.
+    auto markLPath = [&](Vec2i a, Vec2i b, int r) {
+        // Randomize whether we go horiz->vert or vert->horiz for subtle layout variety.
+        const bool hv = rng.chance(0.5f);
+
+        Vec2i mid1{b.x, a.y};
+        Vec2i mid2{a.x, b.y};
+        Vec2i m = hv ? mid1 : mid2;
+
+        auto markSeg = [&](Vec2i s, Vec2i t) {
+            Vec2i p = s;
+            markProtectRadius(p, r);
+
+            int guard = 0;
+            while (p != t && guard++ < 5000) {
+                if (p.x < t.x) p.x++;
+                else if (p.x > t.x) p.x--;
+                else if (p.y < t.y) p.y++;
+                else if (p.y > t.y) p.y--;
+                markProtectRadius(p, r);
+            }
+        };
+
+        markSeg(a, m);
+        markSeg(m, b);
+    };
+
+    // Inside-camp spine.
+    markLPath(gateIn, d.stairsDown, 1);
+
+    // Optional palisade ditch/trench: a thin chasm ring just outside the walls.
+    // This strengthens the surface hub silhouette and makes the bridges read clearly.
+    const bool wantDitch = (d.width >= 40 && d.height >= 28) ? rng.chance(0.75f) : rng.chance(0.55f);
+    if (wantDitch) {
+        const int x0 = campX - 1;
+        const int y0 = campY - 1;
+        const int x1 = campX2 + 1;
+        const int y1 = campY2 + 1;
+
+        std::array<Vec2i, 2> gapCenters = {{ gateOut, d.campSideGateOut }};
+        const int gapCount = haveSideGate ? 2 : 1;
+
+        auto nearGap = [&](Vec2i p) {
+            for (int i = 0; i < gapCount; ++i) {
+                if (chebyshev(p, gapCenters[static_cast<size_t>(i)]) <= 2) return true;
+            }
+            return false;
+        };
+
+        auto maybeChasm = [&](int x, int y, float p) {
+            if (!d.inBounds(x, y)) return;
+            Vec2i v{x, y};
+            if (isInCampBounds(v)) return;
+            if (isProtected(x, y)) return;
+            if (nearGap(v)) return;
+            if (d.at(x, y).type != TileType::Floor) return;
+            if (!rng.chance(p)) return;
+            d.at(x, y).type = TileType::Chasm;
+        };
+
+        // Border ring.
+        for (int x = x0; x <= x1; ++x) {
+            maybeChasm(x, y0, 0.92f);
+            maybeChasm(x, y1, 0.92f);
+        }
+        for (int y = y0; y <= y1; ++y) {
+            maybeChasm(x0, y, 0.92f);
+            maybeChasm(x1, y, 0.92f);
+        }
+
+        // A few stray cuts extending outward so it looks less like a perfect rectangle.
+        const int tendrils = rng.range(4, 8);
+        for (int i = 0; i < tendrils; ++i) {
+            Vec2i s{-1, -1};
+            if (rng.chance(0.5f)) {
+                const int x = rng.range(x0, x1);
+                s = rng.chance(0.5f) ? Vec2i{x, y0} : Vec2i{x, y1};
+            } else {
+                const int y = rng.range(y0, y1);
+                s = rng.chance(0.5f) ? Vec2i{x0, y} : Vec2i{x1, y};
+            }
+            if (!d.inBounds(s.x, s.y)) continue;
+            if (nearGap(s)) continue;
+
+            Vec2i dir{0, 0};
+            if (s.x == x0) dir = {-1, 0};
+            else if (s.x == x1) dir = {1, 0};
+            else if (s.y == y0) dir = {0, -1};
+            else if (s.y == y1) dir = {0, 1};
+
+            Vec2i p = s;
+            const int len = rng.range(2, 6);
+            for (int k = 0; k < len; ++k) {
+                p = {p.x + dir.x, p.y + dir.y};
+                if (!d.inBounds(p.x, p.y)) break;
+                if (isInCampBounds(p)) break;
+                if (isProtected(p.x, p.y)) break;
+                if (d.at(p.x, p.y).type != TileType::Floor) break;
+                if (rng.chance(0.85f)) d.at(p.x, p.y).type = TileType::Chasm;
+            }
+        }
+    }
+
+    // Outside approach path: a light, biased meander so the approach isn't always a straight line.
+    // This only matters for obstacle placement (we keep it clear); visually it's still just floor.
+    auto markMeanderPath = [&](Vec2i a, Vec2i b, int r) {
+        Vec2i p = a;
+        markProtectRadius(p, r);
+
+        int guard = 0;
+        while (p != b && guard++ < 12000) {
+            // Candidate steps.
+            std::array<Vec2i, 4> cand = {{ {p.x + 1, p.y}, {p.x - 1, p.y}, {p.x, p.y + 1}, {p.x, p.y - 1} }};
+
+            // Bias toward the target, but allow lateral wobble.
+            Vec2i best = p;
+            int bestScore = 1 << 30;
+
+            for (const Vec2i& q : cand) {
+                if (!d.inBounds(q.x, q.y)) continue;
+                if (isInCampBounds(q)) continue; // don't wander through the palisade
+                if (!d.isWalkable(q.x, q.y)) continue; // avoid chasms/walls so the path stays usable
+
+                // Prefer tiles that reduce Manhattan distance, but add a tiny stable noise term.
+                const int md = std::abs(q.x - b.x) + std::abs(q.y - b.y);
+                const uint32_t h = hash32(static_cast<uint32_t>(q.x * 73856093u) ^ static_cast<uint32_t>(q.y * 19349663u) ^ rng.state);
+                const int n = static_cast<int>(h & 3u);
+
+                // 0..3 noise breaks ties and creates gentle curvature.
+                const int score = md * 6 + n;
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = q;
+                }
+            }
+
+            // Occasionally take a non-best step to keep it organic.
+            if (rng.chance(0.18f)) {
+                const Vec2i q = cand[rng.range(0, 3)];
+                if (d.inBounds(q.x, q.y) && !isInCampBounds(q) && d.isWalkable(q.x, q.y)) best = q;
+            }
+
+            p = best;
+            markProtectRadius(p, r);
+
+            // Safety: if we get stuck (shouldn't happen in open field), break.
+            if (guard > 2000 && manhattan(p, b) > manhattan(a, b) + 20) break;
+        }
+    };
+
+    if (d.inBounds(gateOut.x, gateOut.y)) {
+        markMeanderPath(d.stairsUp, gateOut, 2);
+    }
+
+    // ------------------------------------------------------------
+    // Camp structures: a small set of tents/huts packed around the spine.
+    // ------------------------------------------------------------
+    struct RectI {
+        int x = 0;
+        int y = 0;
+        int w = 0;
+        int h = 0;
+        int x2() const { return x + w - 1; }
+        int y2() const { return y + h - 1; }
+        int cx() const { return x + w / 2; }
+        int cy() const { return y + h / 2; }
+    };
+
+    auto rectInflate = [&](const RectI& r, int m) {
+        RectI o = r;
+        o.x -= m;
+        o.y -= m;
+        o.w += 2 * m;
+        o.h += 2 * m;
+        return o;
+    };
+
+    auto rectOverlaps = [&](const RectI& a, const RectI& b) {
+        return !(a.x2() < b.x || b.x2() < a.x || a.y2() < b.y || b.y2() < a.y);
+    };
+
+    auto rectInCampInterior = [&](const RectI& r, int marginToPalisade) {
+        return r.x >= campX + 1 + marginToPalisade && r.y >= campY + 1 + marginToPalisade &&
+               r.x2() <= campX2 - 1 - marginToPalisade && r.y2() <= campY2 - 1 - marginToPalisade;
+    };
+
+    auto rectTouchesProtected = [&](const RectI& r) {
+        for (int yy = r.y; yy <= r.y2(); ++yy) {
+            for (int xx = r.x; xx <= r.x2(); ++xx) {
+                if (!d.inBounds(xx, yy)) return true;
+                if (isProtected(xx, yy)) return true;
+                if (d.at(xx, yy).type != TileType::Floor) return true;
+            }
+        }
+        return false;
+    };
+
+    auto chooseDoorSideToward = [&](const RectI& r, Vec2i toward) -> Side {
+        const int dx = toward.x - r.cx();
+        const int dy = toward.y - r.cy();
+        if (std::abs(dx) > std::abs(dy)) {
+            return (dx >= 0) ? Side::East : Side::West;
+        }
+        return (dy >= 0) ? Side::South : Side::North;
+    };
+
+    struct DoorInfo {
+        Vec2i door{-1, -1};
+        Vec2i outside{-1, -1};
+    };
+
+    auto stampBuilding = [&](const RectI& r, Side doorSide, TileType doorType) -> DoorInfo {
+        carveRect(d, r.x, r.y, r.w, r.h, TileType::Floor);
+
+        for (int x = r.x; x <= r.x2(); ++x) {
+            if (d.inBounds(x, r.y)) d.at(x, r.y).type = TileType::Wall;
+            if (d.inBounds(x, r.y2())) d.at(x, r.y2()).type = TileType::Wall;
+        }
+        for (int y = r.y; y <= r.y2(); ++y) {
+            if (d.inBounds(r.x, y)) d.at(r.x, y).type = TileType::Wall;
+            if (d.inBounds(r.x2(), y)) d.at(r.x2(), y).type = TileType::Wall;
+        }
+
+        Vec2i door{-1, -1};
+        Vec2i doorOutside{-1, -1};
+        switch (doorSide) {
+            case Side::North:
+                door = {r.x + r.w / 2, r.y};
+                doorOutside = {door.x, door.y - 1};
+                break;
+            case Side::South:
+                door = {r.x + r.w / 2, r.y2()};
+                doorOutside = {door.x, door.y + 1};
+                break;
+            case Side::West:
+                door = {r.x, r.y + r.h / 2};
+                doorOutside = {door.x - 1, door.y};
+                break;
+            case Side::East:
+                door = {r.x2(), r.y + r.h / 2};
+                doorOutside = {door.x + 1, door.y};
+                break;
+        }
+
+        DoorInfo out;
+        out.door = door;
+        out.outside = doorOutside;
+
+        if (d.inBounds(door.x, door.y)) {
+            d.at(door.x, door.y).type = doorType;
+            carveFloor(d, doorOutside.x, doorOutside.y);
+        }
+        return out;
+    };
+
+    // Decide how many structures fit.
+    const int yardArea = campW * campH;
+    int wantBuildings = 2;
+    if (yardArea > 680) wantBuildings = 3;
+    if (yardArea > 900) wantBuildings = 4;
+
+    // Corner watchtowers: small defensive sheds near palisade corners.
+    // These are fixed-placed structures that give the hub a stronger silhouette
+    // and more "lived-in" geometry, without relying on the building packing RNG.
+    std::vector<Vec2i> fixedEntrances;
+    fixedEntrances.reserve(4);
+
+    auto markProtectRect = [&](const RectI& r) {
+        for (int yy = r.y; yy <= r.y2(); ++yy) {
+            for (int xx = r.x; xx <= r.x2(); ++xx) {
+                markProtect(xx, yy);
+            }
+        }
+    };
+
+    auto tryPlaceTowerAt = [&](int x, int y, int tw, int th) {
+        RectI tr;
+        tr.x = x;
+        tr.y = y;
+        tr.w = tw;
+        tr.h = th;
+
+        if (!rectInCampInterior(tr, /*marginToPalisade=*/0)) return;
+        if (rectTouchesProtected(tr)) return;
+
+        // Avoid crowding the main spine endpoints.
+        if (chebyshev({tr.cx(), tr.cy()}, gateIn) <= 4) return;
+        if (chebyshev({tr.cx(), tr.cy()}, d.stairsDown) <= 3) return;
+
+        Side ds = chooseDoorSideToward(tr, {cx, cy});
+        const DoorInfo di = stampBuilding(tr, ds, TileType::DoorOpen);
+
+        // Protect the whole tower (and its immediate surroundings) from later clutter.
+        markProtectRect(rectInflate(tr, 1));
+
+        if (d.inBounds(di.outside.x, di.outside.y)) {
+            fixedEntrances.push_back(di.outside);
+            markProtectRadius(di.outside, 1);
+        }
+    };
+
+    if (yardArea >= 850 && rng.chance(0.75f)) {
+        const int tw = clampi(6 + rng.range(0, 2), 6, 8);
+        const int th = clampi(6 + rng.range(0, 2), 6, 8);
+
+        std::array<Vec2i, 4> corners = {{
+            {campX + 1, campY + 1},
+            {campX2 - tw, campY + 1},
+            {campX + 1, campY2 - th},
+            {campX2 - tw, campY2 - th}
+        }};
+
+        // Shuffle order with a few swaps (stable enough, no heavy utilities required).
+        for (int s = 0; s < 8; ++s) {
+            int a = rng.range(0, 3);
+            int b = rng.range(0, 3);
+            Vec2i tmp = corners[a];
+            corners[a] = corners[b];
+            corners[b] = tmp;
+        }
+
+        int placedTowers = 0;
+        for (int i = 0; i < 4 && placedTowers < 2; ++i) {
+            const size_t before = fixedEntrances.size();
+            tryPlaceTowerAt(corners[i].x, corners[i].y, tw, th);
+            if (fixedEntrances.size() > before) placedTowers++;
+        }
+    }
+
+
+    // Always include the stash hut.
+    struct BuildingSpec {
+        int w0, w1;
+        int h0, h1;
+        bool isStash = false;
+        bool doorOpen = false;
+        const char* name = "";
+    };
+
+    std::vector<BuildingSpec> specs;
+    specs.reserve(4);
+
+    specs.push_back({10, 14, 7, 10, true,  false, "STASH"});
+    if (wantBuildings >= 2) specs.push_back({7,  10, 6,  8, false, true,  "BUNKS"});
+    if (wantBuildings >= 3) specs.push_back({7,  11, 6,  9, false, true,  "WORK"});
+    if (wantBuildings >= 4) specs.push_back({6,  9,  5,  7, false, true,  "MESS"});
+
+    std::vector<RectI> placed;
+    placed.reserve(specs.size());
+
+    std::vector<Vec2i> buildingEntrances;
+    buildingEntrances.reserve(specs.size());
+    Vec2i stashDoorOutside{-1, -1};
+
+    // Place buildings with a light packing algorithm.
+    for (size_t si = 0; si < specs.size(); ++si) {
+        const BuildingSpec& sp = specs[si];
+
+        int bw = clampi(rng.range(sp.w0, sp.w1), 6, std::max(6, campW - 6));
+        int bh = clampi(rng.range(sp.h0, sp.h1), 5, std::max(5, campH - 6));
+
+        // Ensure the building fits in the interior with a small margin.
+        bw = std::min(bw, std::max(6, campW - 6));
+        bh = std::min(bh, std::max(5, campH - 6));
+
+        RectI best;
+        int bestScore = -1;
+
+        const int tries = sp.isStash ? 320 : 180;
+        for (int t = 0; t < tries; ++t) {
+            RectI r;
+            r.w = bw;
+            r.h = bh;
+            r.x = rng.range(campX + 2, std::max(campX + 2, campX2 - 2 - r.w));
+            r.y = rng.range(campY + 2, std::max(campY + 2, campY2 - 2 - r.h));
+
+            if (!rectInCampInterior(r, /*marginToPalisade=*/1)) continue;
+
+            // Keep a one-tile moat between buildings for readability.
+            RectI rInfl = rectInflate(r, 1);
+
+            bool bad = rectTouchesProtected(rInfl);
+            if (bad) continue;
+
+            for (const RectI& o : placed) {
+                if (rectOverlaps(rInfl, rectInflate(o, 1))) { bad = true; break; }
+            }
+            if (bad) continue;
+
+            // Score: stash tries to be far from the gate spine; others mildly prefer edges.
+            int score = 0;
+            if (sp.isStash) {
+                score += std::abs(r.cx() - gateIn.x) + std::abs(r.cy() - gateIn.y);
+            } else {
+                const int edgeDist = std::min({r.x - (campX + 1), (campX2 - 1) - r.x2(), r.y - (campY + 1), (campY2 - 1) - r.y2()});
+                score += 4 * (6 - std::min(6, edgeDist));
+                score += rng.range(0, 6);
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = r;
+            }
+        }
+
+        if (bestScore < 0) {
+            // If we fail to place, just skip the non-essential buildings.
+            if (sp.isStash) {
+                // Last-resort stash fallback: a small hut near the camp center.
+                best = {cx - bw / 2, cy - bh / 2, bw, bh};
+                best.x = clampi(best.x, campX + 2, campX2 - 2 - best.w);
+                best.y = clampi(best.y, campY + 2, campY2 - 2 - best.h);
+            } else {
+                continue;
+            }
+        }
+
+        // Door faces toward the camp center/spine.
+        Side doorSide = chooseDoorSideToward(best, {cx, cy});
+        TileType doorType = sp.doorOpen ? TileType::DoorOpen : TileType::DoorClosed;
+        const DoorInfo di = stampBuilding(best, doorSide, doorType);
+
+        placed.push_back(best);
+
+        // Record entrance so we can lay down protected footpaths/roads later.
+        if (d.inBounds(di.outside.x, di.outside.y)) {
+            buildingEntrances.push_back(di.outside);
+        }
+
+        if (sp.isStash) {
+            // Stash anchor in the interior.
+            d.campStashSpot = {best.cx(), best.cy()};
+            if (d.inBounds(di.outside.x, di.outside.y)) stashDoorOutside = di.outside;
+        }
+
+        // Protect around building doorways a bit so the approach stays clear.
+        markProtectRadius({best.cx(), best.cy()}, 1);
+        if (d.inBounds(di.door.x, di.door.y)) markProtectRadius(di.door, 1);
+        if (d.inBounds(di.outside.x, di.outside.y)) markProtectRadius(di.outside, 1);
+    }
+
+    // If the stash somehow didn't place, keep the old behavior of anchoring to stairsDown.
+    if (!d.inBounds(d.campStashSpot.x, d.campStashSpot.y)) {
+        d.campStashSpot = d.stairsDown;
+    }
+
+    // ------------------------------------------------------------
+    // Camp props: a well and a small fire-ring (boulders), plus sparse supplies.
+    // ------------------------------------------------------------
+    auto canPlaceProp = [&](Vec2i p) {
         if (!d.inBounds(p.x, p.y)) return false;
         if (p == d.stairsUp || p == d.stairsDown) return false;
-        if (chebyshev(p, d.stairsUp) <= 3) return false;
-        if (chebyshev(p, d.stairsDown) <= 3) return false;
-        if (isInCampBounds(p)) return false; // keep the yard clear
+        if (chebyshev(p, d.stairsDown) <= 2) return false;
+        if (chebyshev(p, gateIn) <= 2) return false;
         if (d.at(p.x, p.y).type != TileType::Floor) return false;
         return true;
     };
 
-    for (int tries = 0; tries < targetTrees * 6 && static_cast<int>(trees.size()) < targetTrees; ++tries) {
-        Vec2i p{rng.range(1, d.width - 2), rng.range(1, d.height - 2)};
-        if (!canPlaceTree(p)) continue;
-        d.at(p.x, p.y).type = TileType::Pillar;
-        trees.push_back(p);
+    // Well (fountain) near the camp center.
+    if (rng.chance(0.70f)) {
+        Vec2i well{-1, -1};
+        int best = 1 << 30;
+        for (int t = 0; t < 180; ++t) {
+            Vec2i p{ rng.range(campX + 2, campX2 - 2), rng.range(campY + 2, campY2 - 2) };
+            if (!canPlaceProp(p)) continue;
+            // Prefer central but not on the main spine.
+            const int sc = std::abs(p.x - cx) + std::abs(p.y - cy) + 4 * (isProtected(p.x, p.y) ? 1 : 0);
+            if (sc < best) {
+                best = sc;
+                well = p;
+            }
+        }
+        if (d.inBounds(well.x, well.y)) {
+            d.at(well.x, well.y).type = TileType::Fountain;
+            d.campWellSpot = well;
+            markProtectRadius(well, 1);
+        }
     }
 
-    // Connectivity check: ensure a walkable path from the surface exit to the dungeon entrance.
-    auto dist = bfsDistanceMap(d, d.stairsUp);
-    auto idx = static_cast<size_t>(d.stairsDown.y * d.width + d.stairsDown.x);
-    if (idx >= dist.size() || dist[idx] < 0) {
-        // Too many trees in a small map can block; clear them (cheap + deterministic fallback).
-        for (const auto& p : trees) {
-            if (d.inBounds(p.x, p.y) && d.at(p.x, p.y).type == TileType::Pillar) {
-                d.at(p.x, p.y).type = TileType::Floor;
+    // Fire ring: 4 boulders around a center tile (decorative, but doesn't seal the area).
+    if (rng.chance(0.65f)) {
+        Vec2i fire{-1, -1};
+        for (int t = 0; t < 160; ++t) {
+            Vec2i p{ rng.range(campX + 3, campX2 - 3), rng.range(campY + 3, campY2 - 3) };
+            if (!canPlaceProp(p)) continue;
+            if (isProtected(p.x, p.y)) continue;
+            // Avoid blocking the stash.
+            if (chebyshev(p, d.campStashSpot) <= 3) continue;
+            fire = p;
+            break;
+        }
+        if (d.inBounds(fire.x, fire.y)) {
+            d.campFireSpot = fire;
+            markProtectRadius(fire, 1);
+            const std::array<Vec2i, 4> ring = {{ {fire.x + 1, fire.y}, {fire.x - 1, fire.y}, {fire.x, fire.y + 1}, {fire.x, fire.y - 1} }};
+            for (const auto& q : ring) {
+                if (!canPlaceProp(q)) continue;
+                d.at(q.x, q.y).type = TileType::Boulder;
             }
         }
     }
+
+    // Optional sacred grove outside the palisade: a small stone circle with an altar,
+    // connected to the camp by a protected footpath.
+    if (rng.chance(0.55f)) {
+        const int R = 4;
+        const int m = R + 2;
+
+        std::vector<Side> eligible;
+        eligible.reserve(4);
+        if (campX - m - 1 >= m) eligible.push_back(Side::West);
+        if (campX2 + m + 1 <= d.width - m - 1) eligible.push_back(Side::East);
+        if (campY - m - 1 >= m) eligible.push_back(Side::North);
+        if (campY2 + m + 1 <= d.height - m - 1) eligible.push_back(Side::South);
+
+        auto isPerpToGate = [&](Side s) {
+            if (gateSide == Side::North || gateSide == Side::South) return (s == Side::West || s == Side::East);
+            return (s == Side::North || s == Side::South);
+        };
+
+        Side groveSide = gateSide;
+        bool haveGroveSide = false;
+
+        // If we have a side gate, prefer placing the grove on that side.
+        if (haveSideGate) {
+            for (Side s : eligible) {
+                if (s == sideGateSide) { groveSide = s; haveGroveSide = true; break; }
+            }
+        }
+
+        if (!haveGroveSide) {
+            // Prefer perpendicular-to-main-gate sides (keeps the approach spine clean).
+            std::vector<Side> pref;
+            for (Side s : eligible) if (isPerpToGate(s)) pref.push_back(s);
+            if (!pref.empty()) {
+                groveSide = pref[static_cast<size_t>(rng.range(0, (int)pref.size() - 1))];
+                haveGroveSide = true;
+            } else if (!eligible.empty()) {
+                groveSide = eligible[static_cast<size_t>(rng.range(0, (int)eligible.size() - 1))];
+                haveGroveSide = true;
+            }
+        }
+
+        if (haveGroveSide) {
+            // Choose trail start: side gate if it lines up, otherwise main gate.
+            Vec2i trailStart = gateOut;
+            if (haveSideGate && groveSide == sideGateSide && d.inBounds(d.campSideGateOut.x, d.campSideGateOut.y)) {
+                trailStart = d.campSideGateOut;
+            }
+
+            auto canPlaceGroveCenter = [&](Vec2i c) {
+                if (!d.inBounds(c.x, c.y)) return false;
+                if (isInCampBounds(c)) return false;
+                if (isProtected(c.x, c.y)) return false;
+                if (d.at(c.x, c.y).type != TileType::Floor) return false;
+                if (chebyshev(c, d.stairsUp) <= 7) return false;
+                if (chebyshev(c, gateOut) <= 5) return false;
+                if (haveSideGate && chebyshev(c, d.campSideGateOut) <= 4) return false;
+
+                for (int dy = -R; dy <= R; ++dy) {
+                    for (int dx = -R; dx <= R; ++dx) {
+                        const int x = c.x + dx;
+                        const int y = c.y + dy;
+                        if (!d.inBounds(x, y)) return false;
+                        if (isInCampBounds({x, y})) return false;
+                        // Don't overwrite the moat with the grove.
+                        if (d.at(x, y).type == TileType::Chasm) return false;
+                    }
+                }
+                return true;
+            };
+
+            auto pickBiased = [&](Side s) -> Vec2i {
+                const int xLo = m;
+                const int xHi = d.width - m - 1;
+                const int yLo = m;
+                const int yHi = d.height - m - 1;
+
+                int x = rng.range(xLo, xHi);
+                int y = rng.range(yLo, yHi);
+
+                switch (s) {
+                    case Side::West:
+                        x = rng.range(xLo, std::max(xLo, campX - m - 1));
+                        break;
+                    case Side::East:
+                        x = rng.range(std::min(xHi, campX2 + m + 1), xHi);
+                        break;
+                    case Side::North:
+                        y = rng.range(yLo, std::max(yLo, campY - m - 1));
+                        break;
+                    case Side::South:
+                        y = rng.range(std::min(yHi, campY2 + m + 1), yHi);
+                        break;
+                }
+                return {x, y};
+            };
+
+            Vec2i grove{-1, -1};
+            int bestScore = -1;
+
+            for (int t = 0; t < 260; ++t) {
+                Vec2i p = pickBiased(groveSide);
+                if (!canPlaceGroveCenter(p)) continue;
+
+                const int dist = std::abs(p.x - cx) + std::abs(p.y - cy);
+                // Encourage "not too close, not too far".
+                int score = dist;
+                if (dist < 14) score -= (14 - dist) * 3;
+                if (dist > 38) score -= (dist - 38) * 2;
+
+                // Prefer points that are roughly in line with the chosen gate, so the trail reads naturally.
+                const int align = std::abs((p.x - trailStart.x)) + std::abs((p.y - trailStart.y));
+                score += std::max(0, 20 - std::min(20, align)) / 2;
+
+                score += rng.range(0, 4);
+                if (score > bestScore) {
+                    bestScore = score;
+                    grove = p;
+                }
+            }
+
+            if (d.inBounds(grove.x, grove.y)) {
+                // Carve the clearing.
+                for (int dy = -R; dy <= R; ++dy) {
+                    for (int dx = -R; dx <= R; ++dx) {
+                        carveFloor(d, grove.x + dx, grove.y + dy);
+                    }
+                }
+
+                // Determine the entrance gap toward the trail start (toward camp).
+                Vec2i v{trailStart.x - grove.x, trailStart.y - grove.y};
+                Vec2i entrance = grove;
+                if (std::abs(v.x) > std::abs(v.y)) {
+                    entrance = {grove.x + (v.x >= 0 ? R : -R), grove.y};
+                } else {
+                    entrance = {grove.x, grove.y + (v.y >= 0 ? R : -R)};
+                }
+
+                // Standing stones (pillars) around the border, leaving an entrance gap.
+                for (int dy = -R; dy <= R; ++dy) {
+                    for (int dx = -R; dx <= R; ++dx) {
+                        if (std::max(std::abs(dx), std::abs(dy)) != R) continue;
+                        Vec2i q{grove.x + dx, grove.y + dy};
+                        if (!d.inBounds(q.x, q.y)) continue;
+
+                        // Leave a 3-wide gap at the entrance.
+                        if (chebyshev(q, entrance) <= 1) continue;
+
+                        // Sparse pattern for readability.
+                        if (((dx + dy) & 1) != 0) continue;
+
+                        if (d.at(q.x, q.y).type == TileType::Floor) {
+                            d.at(q.x, q.y).type = TileType::Pillar;
+                        }
+                    }
+                }
+
+                // Altar at the center.
+                d.at(grove.x, grove.y).type = TileType::Altar;
+                d.campAltarSpot = grove;
+
+                // Keep the grove and trail clear of later wilderness clutter.
+                markProtectRadius(grove, R + 2);
+                markMeanderPath(trailStart, grove, 2);
+            }
+        }
+    }
+
+    // Protected camp footpaths: mark walkable routes so later clutter doesn't block them.
+    // This is purely procedural: we don't add a special tile type, we just reserve space.
+    auto protectCampPath = [&](Vec2i a, Vec2i b, int radius) {
+        if (!d.inBounds(a.x, a.y) || !d.inBounds(b.x, b.y)) return;
+        if (!isInCampBounds(a) || !isInCampBounds(b)) return;
+
+        PassableFn passable = [&](int x, int y) {
+            return isInCampBounds({x, y}) && d.isWalkable(x, y);
+        };
+        StepCostFn stepCost = [&](int, int) { return 1; };
+        DiagonalOkFn diag = [&](int, int, int, int) { return false; };
+
+        std::vector<Vec2i> path = dijkstraPath(d.width, d.height, a, b, passable, stepCost, diag);
+        if (path.empty()) {
+            // Fallback: protect an L path (should be rare with open yard).
+            markLPath(a, b, radius);
+            return;
+        }
+
+        for (const Vec2i& p : path) {
+            markProtectRadius(p, radius);
+        }
+    };
+
+    auto addUnique = [&](std::vector<Vec2i>& v, Vec2i p) {
+        if (!d.inBounds(p.x, p.y)) return;
+        for (const auto& q : v) {
+            if (q == p) return;
+        }
+        v.push_back(p);
+    };
+
+    // Targets for internal footpaths.
+    std::vector<Vec2i> roadTargets;
+    roadTargets.reserve(16);
+
+    addUnique(roadTargets, d.stairsDown);
+    if (haveSideGate) addUnique(roadTargets, d.campSideGateIn);
+    if (d.inBounds(d.campWellSpot.x, d.campWellSpot.y)) addUnique(roadTargets, d.campWellSpot);
+    if (d.inBounds(d.campFireSpot.x, d.campFireSpot.y)) addUnique(roadTargets, d.campFireSpot);
+    if (d.inBounds(stashDoorOutside.x, stashDoorOutside.y)) addUnique(roadTargets, stashDoorOutside);
+
+    for (const Vec2i& e : fixedEntrances) addUnique(roadTargets, e);
+    for (const Vec2i& e : buildingEntrances) addUnique(roadTargets, e);
+
+    for (const Vec2i& t : roadTargets) {
+        protectCampPath(gateIn, t, 1);
+    }
+
+
+    // Sparse supplies inside the palisade.
+    const int supplyCount = clampi((campW * campH) / 180, 2, 10);
+    for (int i = 0; i < supplyCount; ++i) {
+        for (int t = 0; t < 80; ++t) {
+            Vec2i p{ rng.range(campX + 2, campX2 - 2), rng.range(campY + 2, campY2 - 2) };
+            if (!canPlaceProp(p)) continue;
+            if (isProtected(p.x, p.y)) continue;
+            if (rng.chance(0.60f)) d.at(p.x, p.y).type = TileType::Boulder; // crates/logs
+            else d.at(p.x, p.y).type = TileType::Pillar; // totems
+            break;
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Wilderness dressing: clustered trees/rocks outside the palisade.
+    // ------------------------------------------------------------
+    struct ObstacleUndo {
+        Vec2i p;
+        TileType prev;
+    };
+
+    std::vector<ObstacleUndo> placedObs;
+    placedObs.reserve(256);
+
+    auto canPlaceOutside = [&](Vec2i p) {
+        if (!d.inBounds(p.x, p.y)) return false;
+        if (isInCampBounds(p)) return false;
+        if (p == d.stairsUp || p == d.stairsDown) return false;
+        if (chebyshev(p, d.stairsUp) <= 3) return false;
+        if (chebyshev(p, gateOut) <= 2) return false;
+        if (isProtected(p.x, p.y)) return false;
+        if (d.at(p.x, p.y).type != TileType::Floor) return false;
+        return true;
+    };
+
+    const int outsideArea = (d.width - 2) * (d.height - 2) - (campW * campH);
+    int clusterCount = 3 + std::min(5, std::max(0, outsideArea / 1200));
+    clusterCount = clampi(clusterCount, 3, 8);
+
+    for (int ci = 0; ci < clusterCount; ++ci) {
+        // Pick a center outside the palisade.
+        Vec2i c{-1, -1};
+        for (int t = 0; t < 220; ++t) {
+            Vec2i p{ rng.range(1, d.width - 2), rng.range(1, d.height - 2) };
+            if (!canPlaceOutside(p)) continue;
+            // Prefer tiles further from the camp gate and stairs.
+            const int dg = chebyshev(p, gateOut);
+            const int du = chebyshev(p, d.stairsUp);
+            if (dg < 6 || du < 6) continue;
+            c = p;
+            break;
+        }
+        if (!d.inBounds(c.x, c.y)) continue;
+
+        const bool rocky = rng.chance(0.35f);
+        const int radius = rocky ? rng.range(4, 9) : rng.range(5, 11);
+        const int placements = rocky ? radius * radius * 2 : radius * radius * 3;
+
+        for (int k = 0; k < placements; ++k) {
+            const int ox = rng.range(-radius, radius);
+            const int oy = rng.range(-radius, radius);
+            if (ox * ox + oy * oy > radius * radius) continue;
+
+            Vec2i p{c.x + ox, c.y + oy};
+            if (!canPlaceOutside(p)) continue;
+
+            TileType tt = TileType::Pillar;
+            if (rocky) {
+                // Mostly boulders with some scrub.
+                tt = rng.chance(0.65f) ? TileType::Boulder : TileType::Pillar;
+            } else {
+                // Mostly trees.
+                if (rng.chance(0.15f)) tt = TileType::Boulder;
+            }
+
+            placedObs.push_back({p, d.at(p.x, p.y).type});
+            d.at(p.x, p.y).type = tt;
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Connectivity guarantee: ensure a walkable path from EXIT to DUNGEON.
+    // If wilderness clutter blocks it, we clear only the obstacles along the
+    // cheapest "brush-clearing" path.
+    // ------------------------------------------------------------
+    auto walkableDist = [&]() {
+        std::vector<int> dist(static_cast<size_t>(d.width * d.height), -1);
+        if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) return dist;
+        std::deque<Vec2i> q;
+        dist[idx(d.stairsUp.x, d.stairsUp.y)] = 0;
+        q.push_back(d.stairsUp);
+        static const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+        while (!q.empty()) {
+            Vec2i p = q.front();
+            q.pop_front();
+            const int cd = dist[idx(p.x, p.y)];
+            for (const auto& dv : dirs) {
+                const int nx = p.x + dv[0];
+                const int ny = p.y + dv[1];
+                if (!d.inBounds(nx, ny)) continue;
+                if (!d.isWalkable(nx, ny)) continue;
+                const size_t ii = idx(nx, ny);
+                if (dist[ii] != -1) continue;
+                dist[ii] = cd + 1;
+                q.push_back({nx, ny});
+            }
+        }
+        return dist;
+    };
+
+    auto ensureWalkableConnectivity = [&]() {
+        const auto dist = walkableDist();
+        const size_t ii = idx(d.stairsDown.x, d.stairsDown.y);
+        if (ii < dist.size() && dist[ii] >= 0) return;
+
+        // Pathfind allowing us to "clear" pillars/boulders (but never walls).
+        auto passable = [&](int x, int y) {
+            if (!d.inBounds(x, y)) return false;
+            const TileType t = d.at(x, y).type;
+            if (t == TileType::Wall || t == TileType::Chasm || t == TileType::DoorLocked || t == TileType::DoorSecret) return false;
+            if (t == TileType::DoorClosed) return false; // keep the main spine door-free
+            return true;
+        };
+
+        auto stepCost = [&](int x, int y) {
+            if (!d.inBounds(x, y)) return 0;
+            const TileType t = d.at(x, y).type;
+            if (t == TileType::Floor || t == TileType::DoorOpen || t == TileType::StairsUp || t == TileType::StairsDown || t == TileType::Fountain || t == TileType::Altar) return 1;
+            if (t == TileType::Boulder) return 9;
+            if (t == TileType::Pillar) return 13;
+            return 0;
+        };
+
+        auto diagonalOk = [&](int /*fromX*/, int /*fromY*/, int /*dx*/, int /*dy*/) {
+            return false; // 4-way only for carving
+        };
+
+        std::vector<Vec2i> path = dijkstraPath(d.width, d.height, d.stairsUp, d.stairsDown, passable, stepCost, diagonalOk);
+        if (path.empty()) {
+            // Last-resort: clear all outside obstacles.
+            for (const auto& u : placedObs) {
+                if (!d.inBounds(u.p.x, u.p.y)) continue;
+                if (d.at(u.p.x, u.p.y).type == TileType::Pillar || d.at(u.p.x, u.p.y).type == TileType::Boulder) {
+                    d.at(u.p.x, u.p.y).type = TileType::Floor;
+                }
+            }
+            return;
+        }
+
+        // Clear along the path (and a tiny shoulder) so it's definitely walkable.
+        for (const Vec2i& p : path) {
+            if (!d.inBounds(p.x, p.y)) continue;
+            Tile& t = d.at(p.x, p.y);
+            if (t.type == TileType::Pillar || t.type == TileType::Boulder) {
+                t.type = TileType::Floor;
+            }
+            // Shoulder.
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int nx = p.x + dx;
+                    const int ny = p.y + dy;
+                    if (!d.inBounds(nx, ny)) continue;
+                    Tile& tt = d.at(nx, ny);
+                    if (tt.type == TileType::Pillar || tt.type == TileType::Boulder) {
+                        tt.type = TileType::Floor;
+                    }
+                }
+            }
+        }
+    };
+
+    ensureWalkableConnectivity();
 
     // One big "camp" room so the renderer can theme the floor as a natural surface.
     Room camp;
@@ -12413,6 +15880,253 @@ static bool applyMoatedRoomSetpieces(Dungeon& d, RNG& rng, int depth) {
 }
 
 
+
+
+// ------------------------------------------------------------
+// Rift cache pockets (boulder-bridge micro puzzles)
+//
+// Carves a small wall pocket off an ordinary room, gated by:
+//   - a pushable BOULDER placed on a 1-tile "approach lane" outside the room
+//   - a 1-tile CHASM gap immediately beyond the boulder
+//
+// Pushing the boulder into the gap creates a rough bridge, revealing a
+// guaranteed bonus chest spawn requested via Dungeon::bonusLootSpots.
+//
+// This yields tiny, readable "physics puzzles" that are always optional side
+// objectives (never required for stair connectivity).
+// ------------------------------------------------------------
+static bool maybeCarveRiftCachePockets(Dungeon& d, RNG& rng, int depth, GenKind g) {
+    d.riftCacheCount = 0;
+    d.riftCacheBoulderCount = 0;
+    d.riftCacheChasmCount = 0;
+
+    if (d.rooms.empty()) return false;
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) return false;
+
+    // Base chance: shallow floors rarely get them; deeper floors get a bit more spice.
+    float p = 0.10f + 0.02f * static_cast<float>(std::min(depth, 10));
+    if (g == GenKind::Cavern) p *= 0.55f;
+    else if (g == GenKind::Maze) p *= 0.60f;
+    else if (g == GenKind::Warrens) p *= 0.75f;
+    p = std::clamp(p, 0.0f, 0.35f);
+
+    int target = 0;
+    if (rng.chance(p)) target = 1;
+    if (depth >= 6 && rng.chance(p * 0.33f)) target += 1;
+    if (target <= 0) return false;
+
+    // Candidate rooms: plain, medium+ sized, and not containing stairs.
+    std::vector<int> rooms;
+    rooms.reserve(d.rooms.size());
+    for (int i = 0; i < static_cast<int>(d.rooms.size()); ++i) {
+        const Room& r = d.rooms[static_cast<size_t>(i)];
+        if (r.type != RoomType::Normal) continue;
+        if (r.w < 7 || r.h < 7) continue;
+        if (r.contains(d.stairsUp.x, d.stairsUp.y)) continue;
+        if (r.contains(d.stairsDown.x, d.stairsDown.y)) continue;
+        rooms.push_back(i);
+    }
+    if (rooms.empty()) return false;
+
+    const auto dist = bfsDistanceMap(d, d.stairsUp);
+    auto distAt = [&](Vec2i p) -> int {
+        if (!d.inBounds(p.x, p.y)) return -1;
+        const size_t ii = static_cast<size_t>(p.y * d.width + p.x);
+        if (ii >= dist.size()) return -1;
+        return dist[ii];
+    };
+
+    auto isPlainFloor = [&](int x, int y) -> bool {
+        if (!d.inBounds(x, y)) return false;
+        if (isStairsTile(d, x, y)) return false;
+        return d.at(x, y).type == TileType::Floor;
+    };
+
+    auto doorNear = [&](Vec2i p, int cheb) -> bool {
+        for (int dy = -cheb; dy <= cheb; ++dy) {
+            for (int dx = -cheb; dx <= cheb; ++dx) {
+                const int x = p.x + dx;
+                const int y = p.y + dy;
+                if (!d.inBounds(x, y)) continue;
+                if (isDoorTileType(d.at(x, y).type)) return true;
+            }
+        }
+        return false;
+    };
+
+    auto rectAllWall = [&](int x0, int y0, int w, int h) -> bool {
+        if (w <= 0 || h <= 0) return false;
+        for (int y = y0; y < y0 + h; ++y) {
+            for (int x = x0; x < x0 + w; ++x) {
+                if (!d.inBounds(x, y)) return false;
+                if (d.at(x, y).type != TileType::Wall) return false;
+            }
+        }
+        return true;
+    };
+
+    auto carvePocketFloor = [&](int x0, int y0, int w, int h) {
+        for (int y = y0; y < y0 + h; ++y) {
+            for (int x = x0; x < x0 + w; ++x) {
+                if (!d.inBounds(x, y)) continue;
+                d.at(x, y).type = TileType::Floor;
+            }
+        }
+    };
+
+    auto pickPocketLoot = [&](int x0, int y0, int w, int h, Vec2i entryFar) -> Vec2i {
+        // Prefer an inner-corner away from the entry (keeps chest out of the approach).
+        const int ix0 = x0 + 1;
+        const int iy0 = y0 + 1;
+        const int ix1 = x0 + w - 2;
+        const int iy1 = y0 + h - 2;
+
+        Vec2i cands[4] = {
+            {ix0, iy0},
+            {ix1, iy0},
+            {ix0, iy1},
+            {ix1, iy1},
+        };
+
+        int bestD = -1;
+        Vec2i best = cands[0];
+
+        // Pick a farthest corner; break ties randomly for variety.
+        for (int i = 0; i < 4; ++i) {
+            const Vec2i p = cands[i];
+            if (!d.inBounds(p.x, p.y)) continue;
+            if (d.at(p.x, p.y).type != TileType::Floor) continue;
+            const int md = manhattan2(p, entryFar);
+            if (md > bestD || (md == bestD && rng.chance(0.5f))) {
+                bestD = md;
+                best = p;
+            }
+        }
+        return best;
+    };
+
+    struct Side { int dx; int dy; };
+    static const Side kSides[4] = {{+1,0},{-1,0},{0,+1},{0,-1}};
+
+    int placed = 0;
+    const int maxAttempts = target * 220;
+
+    for (int attempt = 0; attempt < maxAttempts && placed < target; ++attempt) {
+        const Room& r = d.rooms[static_cast<size_t>(rooms[static_cast<size_t>(rng.range(0, static_cast<int>(rooms.size()) - 1))])];
+
+        const Side s = kSides[rng.range(0, 3)];
+        const int dx = s.dx;
+        const int dy = s.dy;
+
+        // Pick a room-edge floor tile (avoids corners).
+        Vec2i roomEdge{-1, -1};
+        if (dx > 0) {
+            roomEdge.x = r.x2() - 1;
+            roomEdge.y = rng.range(r.y + 1, r.y2() - 2);
+        } else if (dx < 0) {
+            roomEdge.x = r.x;
+            roomEdge.y = rng.range(r.y + 1, r.y2() - 2);
+        } else if (dy > 0) {
+            roomEdge.y = r.y2() - 1;
+            roomEdge.x = rng.range(r.x + 1, r.x2() - 2);
+        } else {
+            roomEdge.y = r.y;
+            roomEdge.x = rng.range(r.x + 1, r.x2() - 2);
+        }
+
+        if (!isPlainFloor(roomEdge.x, roomEdge.y)) continue;
+        if (doorNear(roomEdge, 1)) continue;
+
+        // Ensure the approach tile is reachable from the start.
+        if (distAt(roomEdge) < 0) continue;
+
+        // Keep these away from the immediate start area so they read as "optional detours".
+        if (manhattan2(roomEdge, d.stairsUp) <= 8) continue;
+
+        // The micro-puzzle geometry (from the room outward):
+        //   roomEdge (floor) -> lane (boulder) -> gap (chasm) -> pocket (floor)
+        const Vec2i lane{roomEdge.x + dx, roomEdge.y + dy};
+        const Vec2i gap{roomEdge.x + 2 * dx, roomEdge.y + 2 * dy};
+        const Vec2i entryFar{roomEdge.x + 3 * dx, roomEdge.y + 3 * dy};
+
+        if (!d.inBounds(lane.x, lane.y) || !d.inBounds(gap.x, gap.y) || !d.inBounds(entryFar.x, entryFar.y)) continue;
+
+        // Must be solid rock outside the room so we aren't cutting into existing corridors.
+        if (d.at(lane.x, lane.y).type != TileType::Wall) continue;
+        if (d.at(gap.x, gap.y).type != TileType::Wall) continue;
+
+        // Pocket size (kept small so it doesn't distort overall density/scoring).
+        const int pw = rng.range(4, 6);
+        const int ph = rng.range(4, 6);
+
+        int x0 = 0, y0 = 0;
+        if (dx != 0) {
+            // Horizontal pocket: extend outward in X, center in Y around entryFar.
+            y0 = entryFar.y - ph / 2;
+            if (dx > 0) {
+                x0 = entryFar.x;
+            } else {
+                x0 = entryFar.x - pw + 1;
+            }
+        } else {
+            // Vertical pocket: extend outward in Y, center in X around entryFar.
+            x0 = entryFar.x - pw / 2;
+            if (dy > 0) {
+                y0 = entryFar.y;
+            } else {
+                y0 = entryFar.y - ph + 1;
+            }
+        }
+
+        // Keep a small safety margin from outer borders so ensureBorders() doesn't overwrite.
+        if (x0 < 2 || y0 < 2) continue;
+        if (x0 + pw >= d.width - 2) continue;
+        if (y0 + ph >= d.height - 2) continue;
+
+        // The pocket must be carved entirely from solid wall.
+        if (!rectAllWall(x0, y0, pw, ph)) continue;
+
+        // Ensure our entry tile is inside the pocket (should always be, but be defensive).
+        if (!(entryFar.x >= x0 && entryFar.x < x0 + pw && entryFar.y >= y0 && entryFar.y < y0 + ph)) continue;
+
+        // Carve the pocket and place the puzzle pieces.
+        carvePocketFloor(x0, y0, pw, ph);
+        d.at(gap.x, gap.y).type = TileType::Chasm;
+        d.at(lane.x, lane.y).type = TileType::Boulder;
+
+        // Request a bonus chest inside the pocket.
+        const Vec2i loot = pickPocketLoot(x0, y0, pw, ph, entryFar);
+        if (d.inBounds(loot.x, loot.y) && d.at(loot.x, loot.y).type == TileType::Floor) {
+            d.bonusLootSpots.push_back(loot);
+        }
+
+        // Rare deeper-floor variant: a second cache (keeps risk/reward spicy).
+        if (depth >= 8 && rng.chance(0.18f)) {
+            Vec2i loot2{-1, -1};
+            // Try a few times to find a different floor tile far from the first.
+            for (int t = 0; t < 24; ++t) {
+                Vec2i p{rng.range(x0 + 1, x0 + pw - 2), rng.range(y0 + 1, y0 + ph - 2)};
+                if (!d.inBounds(p.x, p.y)) continue;
+                if (d.at(p.x, p.y).type != TileType::Floor) continue;
+                if (manhattan2(p, loot) < 4) continue;
+                loot2 = p;
+                break;
+            }
+            if (d.inBounds(loot2.x, loot2.y) && d.at(loot2.x, loot2.y).type == TileType::Floor) {
+                d.bonusLootSpots.push_back(loot2);
+            }
+        }
+
+        d.riftCacheCount += 1;
+        d.riftCacheBoulderCount += 1;
+        d.riftCacheChasmCount += 1;
+
+        placed += 1;
+    }
+
+    return d.riftCacheCount > 0;
+}
+
 static int countDeadEnds(const Dungeon& d) {
     int dead = 0;
     static const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
@@ -12436,7 +16150,7 @@ static int countDeadEnds(const Dungeon& d) {
     return dead;
 }
 
-static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, int depth, int maxDepth, GenKind g, uint32_t worldSeed, const EndlessStratumInfo& stratum) {
+static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, DungeonBranch branch, int depth, int maxDepth, GenKind g, uint32_t worldSeed, const EndlessStratumInfo& stratum) {
     [[maybe_unused]] const EndlessStratumTheme theme = stratum.theme;
     d.bonusLootSpots.clear();
     fillWalls(d);
@@ -12459,6 +16173,12 @@ static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, int depth, int m
     // across floors to create large-scale geological continuity.
     if (worldSeed != 0u && depth > maxDepth && stratum.index >= 0) {
         (void)maybeCarveEndlessRift(d, depth, maxDepth, worldSeed, stratum);
+    } else if (worldSeed != 0u && depth <= maxDepth) {
+        // Finite campaign: optionally apply the run-seeded fault band.
+        // If inactive on this depth, fall back to the standard per-floor ravine.
+        if (!maybeCarveRunFaultline(d, branch, depth, maxDepth, worldSeed, g)) {
+            (void)maybeCarveGlobalRavine(d, rng, depth);
+        }
     } else {
         (void)maybeCarveGlobalRavine(d, rng, depth);
     }
@@ -12491,6 +16211,10 @@ static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, int depth, int m
     // Themed rooms (armory/library/lab) get bespoke interior prefabs too.
     decorateThemedRooms(d, rng, depth);
 
+    // Symmetric furnishings: mirrored pillar/boulder patterns in select rooms,
+    // with a reserved navigation spine between doorways. (Always safe: rolls back on failure.)
+    applySymmetricRoomFurnishings(d, rng, depth);
+
     // Corridor polish pass: widen a few hallway junctions/segments into small hubs/great halls.
     (void)maybeCarveCorridorHubsAndHalls(d, rng, depth, (g == GenKind::RoomsBsp || g == GenKind::RoomsGraph || g == GenKind::Mines));
 
@@ -12507,6 +16231,10 @@ static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, int depth, int m
 
     // Sinkholes: carve small chasm clusters in corridors to create local navigation puzzles.
     (void)maybeCarveSinkholes(d, rng, depth, (g == GenKind::RoomsBsp || g == GenKind::RoomsGraph || g == GenKind::Warrens || g == GenKind::Mines || g == GenKind::Catacombs));
+
+    // Inter-room doorways: carve a few direct doors between adjacent rooms (single-wall separation)
+    // to create internal loops/flanking routes without changing the core layout.
+    (void)applyInterRoomDoorways(d, rng, depth);
 
     // Corridor braiding: reduce corridor dead-ends by carving short wall tunnels that
     // connect back into the corridor network, creating extra loops and alternate routes.
@@ -12559,6 +16287,17 @@ static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, int depth, int m
     // Vault prefabs: carve small handcrafted set-pieces into wall pockets off corridors.
     (void)maybePlaceVaultPrefabs(d, rng, depth, g);
 
+    // Perimeter service tunnels: carve partial inner-border maintenance corridors
+    // and punch 2-4 short hatches back into the interior for macro alternate routes.
+    (void)applyPerimeterServiceTunnels(d, rng, branch, depth);
+
+    // Burrow crosscuts: A*-dug tunnels through wall mass that create dramatic optional shortcuts.
+    (void)applyBurrowCrosscuts(d, rng, branch, depth);
+
+    // Secret crawlspace networks: carve a small hidden network of 1-tile wall passages
+    // connected back to the main corridor graph via 2-3 secret doors.
+    (void)applySecretCrawlspaceNetwork(d, rng, branch, depth, g);
+
     // Biome zones: partition the walkable map into a few contiguous regions and apply
     // coherent obstacle/hazard styles per-region (without ever blocking stairs).
     (void)applyBiomeZones(d, rng, depth, g, theme);
@@ -12582,9 +16321,13 @@ static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, int depth, int m
     // Stairs path weaving: reduce single-edge chokepoints by carving a few tiny
     // bypass loops around bridge edges on the shortest stairs path (when safe).
     weaveStairsConnectivity(d, rng, depth);
+    weaveGlobalConnectivity(d, rng, depth);
 
     // Moated room setpieces: carve chasm-ring "islands" inside select special rooms.
     (void)applyMoatedRoomSetpieces(d, rng, depth);
+
+    // Rift cache pockets: tiny optional boulder-bridge micro-puzzles off normal rooms.
+    (void)maybeCarveRiftCachePockets(d, rng, depth, g);
 
     ensureBorders(d);
 
@@ -12631,6 +16374,11 @@ static int scoreFloorCandidate(const Dungeon& d, int depth, int maxDepth, uint32
     score -= d.stairsBridgeCount * 1800;
     score -= d.stairsBypassLoopCount * 250;
 
+    // Prefer globally loopy connectivity (reduce major chokepoints across the whole floor).
+    // This is a softer preference than the stairs-only redundancy metric.
+    score -= std::min(220, d.globalBridgeCountAfter) * 14;
+    score -= d.globalBypassLoopCount * 120;
+
     // Prefer a medium-length critical path (too short = trivial, too long = slog).
     const int targetLen = std::clamp(60 + depth * 6, 60, 180);
     score += 2800 - std::abs(stairsLen - targetLen) * 20;
@@ -12669,9 +16417,18 @@ static int scoreFloorCandidate(const Dungeon& d, int depth, int maxDepth, uint32
     // Small bonuses for optional side content (these are additive, not required).
     score += d.secretShortcutCount * 200;
     score += d.lockedShortcutCount * 120;
+    score += d.interRoomDoorCount * 110;
+    score += d.riftCacheCount * 90;
     score += d.annexCount * 250;
     score += d.vaultPrefabCount * 80;
     score += d.deadEndClosetCount * 60;
+    score += d.perimTunnelHatchCount * 70;
+    score += d.perimTunnelCacheCount * 60;
+    score += d.crosscutTunnelCount * 170;
+    score += std::min(80, d.crosscutCarvedTiles) * 1;
+    score += d.crawlspaceNetworkCount * 140;
+    score += d.crawlspaceDoorCount * 50;
+    score += d.crawlspaceCacheCount * 60;
 
     // Slight room-count preference (keeps room-based floors from collapsing into corridor spaghetti).
     score += std::min(20, static_cast<int>(d.rooms.size())) * 30;
@@ -12703,9 +16460,15 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
 
     secretShortcutCount = 0;
     lockedShortcutCount = 0;
+    interRoomDoorCount = 0;
+    interRoomDoorLockedCount = 0;
+    interRoomDoorSecretCount = 0;
     corridorHubCount = 0;
     corridorHallCount = 0;
     sinkholeCount = 0;
+    riftCacheCount = 0;
+    riftCacheBoulderCount = 0;
+    riftCacheChasmCount = 0;
     vaultSuiteCount = 0;
     vaultPrefabCount = 0;
     deadEndClosetCount = 0;
@@ -12738,9 +16501,27 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     openSpacePillarCount = 0;
     openSpaceBoulderCount = 0;
 
+    perimTunnelCarvedTiles = 0;
+    perimTunnelHatchCount = 0;
+    perimTunnelLockedCount = 0;
+    perimTunnelCacheCount = 0;
+
+    crosscutTunnelCount = 0;
+    crosscutCarvedTiles = 0;
+    crosscutDoorLockedCount = 0;
+    crosscutDoorSecretCount = 0;
+
+    crawlspaceNetworkCount = 0;
+    crawlspaceCarvedTiles = 0;
+    crawlspaceDoorCount = 0;
+    crawlspaceCacheCount = 0;
+
     moatedRoomCount = 0;
     moatedRoomBridgeCount = 0;
     moatedRoomChasmCount = 0;
+
+    symmetryRoomCount = 0;
+    symmetryObstacleCount = 0;
 
     spineRoomCount = 0;
     specialRoomMinSep = 0;
@@ -12760,6 +16541,17 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     endlessRiftBridgeCount = 0;
     endlessRiftBoulderCount = 0;
     endlessRiftSeed = 0u;
+
+    // Run faultline debug info (finite main-campaign macro terrain; not serialized).
+    runFaultActive = false;
+    runFaultBandStartDepth = -1;
+    runFaultBandLen = 0;
+    runFaultBandLocal = 0;
+    runFaultIntensityPct = 0;
+    runFaultChasmCount = 0;
+    runFaultBridgeCount = 0;
+    runFaultBoulderCount = 0;
+    runFaultSeed = 0u;
 
     // Sanity clamp.
     if (maxDepth < 1) maxDepth = 1;
@@ -12857,7 +16649,7 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
         RNG rr(attemptSeeds[static_cast<size_t>(i)]);
         Dungeon cand(width, height);
 
-        generateStandardFloorWithKind(cand, rr, depth, maxDepth, g, worldSeed, stratum);
+        generateStandardFloorWithKind(cand, rr, branch, depth, maxDepth, g, worldSeed, stratum);
         const int score = scoreFloorCandidate(cand, depth, maxDepth, attemptSeeds[static_cast<size_t>(i)]);
 
         if (i == 0 || score > bestScore) {

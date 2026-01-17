@@ -241,11 +241,19 @@ mutable std::vector<uint8_t> materialCache;
     int secretShortcutCount = 0;
     // Not serialized: visible locked shortcut doors (DoorLocked) connecting adjacent corridors.
     int lockedShortcutCount = 0;
+    // Not serialized: direct room-to-room doors carved between adjacent rooms (a late shortcut/loop pass).
+    int interRoomDoorCount = 0;
+    int interRoomDoorLockedCount = 0;
+    int interRoomDoorSecretCount = 0;
     // Not serialized: corridor polish pass that widens some hallway junctions/segments.
     int corridorHubCount = 0;
     int corridorHallCount = 0;
     // Not serialized: micro-terrain hazards (sinkholes) carved as small chasm clusters.
     int sinkholeCount = 0;
+    // Not serialized: optional "rift cache" pockets gated by a boulder-bridge micro-puzzle.
+    int riftCacheCount = 0;
+    int riftCacheBoulderCount = 0;
+    int riftCacheChasmCount = 0;
     // Not serialized: multi-chamber "vault suite" prefab count (vaults with internal walls/doors).
     int vaultSuiteCount = 0;
     // Not serialized: small stash closets carved into dead-end corridors.
@@ -269,6 +277,15 @@ mutable std::vector<uint8_t> materialCache;
     // Not serialized: true if stairsUp and stairsDown are in the same 2-edge-connected
     // component (i.e., there exist at least two edge-disjoint paths between them).
     bool stairsRedundancyOk = false;
+
+    // Not serialized: global connectivity weaving.
+    // Similar in spirit to the stairs-only weaving above, but applied to the *entire* passable
+    // tile graph. This reduces major single-edge chokepoints anywhere on the floor by carving a
+    // few tiny 2x2 bypass loops around the most impactful bridge edges (by component cut-size),
+    // while still being conservative about where we dig (never inside rooms, never near stairs).
+    int globalBypassLoopCount = 0;
+    int globalBridgeCountBefore = 0;
+    int globalBridgeCountAfter = 0;
     // Not serialized: meta-procgen selection stats (generate multiple candidates and pick the best).
     // This is a "generate-and-test" style pass that improves floor quality without changing gameplay rules.
     int genPickAttempts = 1;
@@ -305,6 +322,41 @@ mutable std::vector<uint8_t> materialCache;
     int openSpacePillarCount = 0;
     int openSpaceBoulderCount = 0;
 
+    // Not serialized: perimeter service tunnels (inner-border maintenance corridors).
+    //
+    // A late procgen pass can carve partial tunnels along the map's inner border
+    // (offset=1 from the solid wall boundary) and punch a few "maintenance hatches"
+    // back into the interior. This creates alternate flanking routes on larger maps
+    // without changing the critical stairs-to-stairs connectivity.
+    int perimTunnelCarvedTiles = 0;   // Total Wall->Floor conversions performed by the pass.
+    int perimTunnelHatchCount = 0;    // Number of hatches (doors) punched into the interior.
+    int perimTunnelLockedCount = 0;   // Subset of hatches that are locked (DoorLocked).
+    int perimTunnelCacheCount = 0;    // Bonus cache spots requested (bonusLootSpots).
+
+    // Not serialized: burrow crosscuts (A*-dug wall tunnels)
+    //
+    // A late procgen pass can carve 1-2 long tunnels *through solid wall mass*
+    // between two far-apart corridor points (outside any room rectangles), gated
+    // by secret/locked doors. This creates dramatic optional shortcuts that are
+    // fundamentally different from adjacent-wall shortcut doors (which only
+    // bridge across a single wall tile).
+    int crosscutTunnelCount = 0;       // Number of crosscut tunnels successfully carved.
+    int crosscutCarvedTiles = 0;       // Total Wall->Floor conversions performed by the pass (excluding door tiles).
+    int crosscutDoorLockedCount = 0;   // Number of locked doors used as tunnel gates.
+    int crosscutDoorSecretCount = 0;   // Number of secret doors used as tunnel gates.
+
+    // Not serialized: secret crawlspace networks (hidden wall passages).
+    //
+    // A late procgen pass can carve a small, 1-tile-wide network of tunnels
+    // entirely inside solid wall mass, then connect it back to the main corridor
+    // graph through 2-3 secret doors. This adds hidden alternate routes and
+    // optional cache rewards without altering critical stair connectivity.
+    int crawlspaceNetworkCount = 0;  // Number of crawlspace networks carved (0..1).
+    int crawlspaceCarvedTiles = 0;   // Total Wall->Floor conversions performed by the pass.
+    int crawlspaceDoorCount = 0;     // Number of secret doors (DoorSecret) used as entrances.
+    int crawlspaceCacheCount = 0;    // Bonus cache spots requested (bonusLootSpots).
+
+
     // Not serialized: endless-depth macro theming ("strata") for Infinite World.
     // Derived from the run's worldSeed and the depth; used to create coherent regions of
     // generator bias across infinite descent (so deep floors feel like they belong to
@@ -326,12 +378,31 @@ mutable std::vector<uint8_t> materialCache;
     int endlessRiftBoulderCount = 0;
     uint32_t endlessRiftSeed = 0u;
 
+    // Not serialized: finite-run macro terrain continuity (Main branch, depth <= maxDepth).
+    // A run-seeded "fault band" spans a small contiguous range of depths and carves
+    // a drifting chasm seam with deterministic parameters, adding cross-floor
+    // geological continuity to the fixed-length campaign without making every floor
+    // feel like it must have a ravine.
+    bool runFaultActive = false;
+    int runFaultBandStartDepth = -1;
+    int runFaultBandLen = 0;
+    int runFaultBandLocal = 0;
+    int runFaultIntensityPct = 0; // 0..100
+    int runFaultChasmCount = 0;
+    int runFaultBridgeCount = 0;
+    int runFaultBoulderCount = 0;
+    uint32_t runFaultSeed = 0u;
+
     // Not serialized: special-room setpieces (moated islands).
     // These carve a chasm ring inside select special rooms, leaving a central "island" reached
     // via 1-2 narrow bridges for tactical variety.
     int moatedRoomCount = 0;
     int moatedRoomBridgeCount = 0;
     int moatedRoomChasmCount = 0;
+
+    // Not serialized: symmetric room furnishing pass (mirrored obstacle patterns).
+    int symmetryRoomCount = 0;
+    int symmetryObstacleCount = 0;
 
     // Not serialized: special-room placement analytics.
     // We classify rooms as being on the stairs critical path ("spine") or off it, then
@@ -342,6 +413,18 @@ mutable std::vector<uint8_t> materialCache;
 
     // Not serialized: surface camp stash anchor (depth 0).
     Vec2i campStashSpot{ -1, -1 };
+
+    // Not serialized: surface camp landmarks (depth 0).
+    // These are generation hints consumed by Game::setupSurfaceCampInstallations()
+    // to add helpful map markers without expensive scanning.
+    Vec2i campGateIn{ -1, -1 };
+    Vec2i campGateOut{ -1, -1 };
+    Vec2i campSideGateIn{ -1, -1 };
+    Vec2i campSideGateOut{ -1, -1 };
+    Vec2i campWellSpot{ -1, -1 };
+    Vec2i campFireSpot{ -1, -1 };
+    Vec2i campAltarSpot{ -1, -1 };
+
     Vec2i stairsUp{ -1, -1 };
     Vec2i stairsDown{ -1, -1 };
 

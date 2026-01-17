@@ -218,6 +218,61 @@ static EndlessBandInfo computeEndlessBand(uint32_t worldSeed, DungeonBranch bran
 static MapSizeWH pickProceduralMapSize(RNG& rng, DungeonBranch branch, int depth, int maxDepth, bool infiniteWorldEnabled, uint32_t worldSeed) {
     MapSizeWH out{Dungeon::DEFAULT_W, Dungeon::DEFAULT_H};
 
+    // ------------------------------------------------------------
+    // Surface camp (branch=Camp, depth=0): procedurally sized hub.
+    // The main dungeon already varies its size as depth increases, but the
+    // surface camp used to be locked to the canonical dimensions. This
+    // makes the hub feel more distinct per run and allows the camp
+    // generator to scale its palisade + wilderness dressing naturally.
+    //
+    // Constraints:
+    // - Keep within the same hard bounds used by the dungeon generators.
+    // - Avoid extreme sizes that make hub traversal tedious.
+    // ------------------------------------------------------------
+    if (branch == DungeonBranch::Camp && depth == 0) {
+        // 3 size tiers: compact / standard / sprawling.
+        int wMin = 96, wMax = 124;
+        int hMin = 60, hMax = 78;
+
+        const int tierRoll = rng.range(0, 99);
+        if (tierRoll < 22) {
+            // Compact camp: still roomy enough for a palisade + a few POIs.
+            wMin = 84; wMax = 112;
+            hMin = 52; hMax = 70;
+        } else if (tierRoll >= 86) {
+            // Sprawling camp: more wilderness canvas for trails + outer POIs.
+            wMin = 110; wMax = 132;
+            hMin = 70;  hMax = 86;
+        }
+
+        int w = rng.range(wMin, wMax);
+        int h = rng.range(hMin, hMax);
+
+        // Mild aspect drift (keeps camps from all feeling like the same rectangle).
+        if (rng.chance(0.45f)) {
+            const int a = rng.range(3, 10);
+            if (rng.chance(0.5f)) {
+                w += a;
+                h -= a / 2;
+            } else {
+                w -= a;
+                h += a / 2;
+            }
+        }
+
+        // Tiny jitter so the tier bounds don't create obvious buckets.
+        w += rng.range(-2, 2);
+        h += rng.range(-1, 1);
+
+        // Clamp to safe bounds for generators (same bounds as the main branch sizing).
+        w = std::clamp(w, 80, 132);
+        h = std::clamp(h, 50, 86);
+
+        out.w = w;
+        out.h = h;
+        return out;
+    }
+
     // Keep bespoke/special layouts at the canonical size (they were authored/tuned for it).
     if (depth <= 0) return out;
     if (depth == Dungeon::SOKOBAN_DEPTH) return out;
@@ -2497,6 +2552,40 @@ void Game::setupSurfaceCampInstallations() {
     addMarker(stash, MarkerKind::Loot, "STASH");
     addMarker(dung.stairsDown, MarkerKind::Note, "DUNGEON");
     addMarker(dung.stairsUp, MarkerKind::Note, "EXIT");
+
+    // Optional: mark camp landmarks placed by the surface-camp generator.
+    if (dung.inBounds(dung.campSideGateIn.x, dung.campSideGateIn.y)) {
+        addMarker(dung.campSideGateIn, MarkerKind::Note, "SIDEGATE");
+    }
+    if (dung.inBounds(dung.campFireSpot.x, dung.campFireSpot.y)) {
+        addMarker(dung.campFireSpot, MarkerKind::Note, "FIRE");
+    }
+    if (dung.inBounds(dung.campAltarSpot.x, dung.campAltarSpot.y)) {
+        addMarker(dung.campAltarSpot, MarkerKind::Note, "ALTAR");
+    }
+
+    // Optional: mark any camp well placed by the generator (TileType::Fountain).
+    // This is useful because camp fountains are *not* spawned by the standard dungeon fountain pass.
+    Vec2i well = dung.campWellSpot;
+    if (!dung.inBounds(well.x, well.y)) {
+        // Fallback: scan for the closest fountain (older saves / legacy generators).
+        well = {-1, -1};
+        int best = 1 << 30;
+        for (int y = 0; y < dung.height; ++y) {
+            for (int x = 0; x < dung.width; ++x) {
+                if (dung.at(x, y).type != TileType::Fountain) continue;
+                const int sc = manhattan({x, y}, stash);
+                if (sc < best) {
+                    best = sc;
+                    well = {x, y};
+                }
+            }
+        }
+    }
+    if (dung.inBounds(well.x, well.y)) {
+        addMarker(well, MarkerKind::Note, "WELL");
+    }
+
 }
 
 

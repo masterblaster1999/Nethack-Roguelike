@@ -2382,6 +2382,16 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             ss << " | CHASMS " << chasm;
             game.pushSystemMessage(ss.str());
         }
+
+        {
+            std::ostringstream ss;
+            ss << "INTERROOM DOORS " << d.interRoomDoorCount;
+            if (d.interRoomDoorCount > 0) {
+                ss << " | LOCKED " << d.interRoomDoorLockedCount;
+                ss << " | SECRET " << d.interRoomDoorSecretCount;
+            }
+            game.pushSystemMessage(ss.str());
+        }
         {
             std::ostringstream ss;
             const bool haveUp = d.inBounds(d.stairsUp.x, d.stairsUp.y);
@@ -2398,6 +2408,17 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
         {
             std::ostringstream ss;
+            // Global bridgeiness (whole-map chokepoints) and how much we "weaved" it away.
+            ss << "GRAPH BRIDGES " << d.globalBridgeCountAfter;
+            if (d.globalBridgeCountBefore != d.globalBridgeCountAfter) {
+                ss << " (WAS " << d.globalBridgeCountBefore << ")";
+            }
+            ss << " | WEAVES " << d.globalBypassLoopCount;
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
             if (d.biomeZoneCount > 0) {
                 ss << "BIOMES " << d.biomeZoneCount;
                 ss << " | PILLARZ " << d.biomePillarZoneCount;
@@ -2407,6 +2428,14 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             } else {
                 ss << "BIOMES 0";
             }
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            ss << "FURNISH";
+            ss << " | SYMROOMS " << d.symmetryRoomCount;
+            ss << " | SYMOBS " << d.symmetryObstacleCount;
             game.pushSystemMessage(ss.str());
         }
 
@@ -2502,6 +2531,35 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             game.pushSystemMessage(ss.str());
         }
 
+        // Finite campaign macro terrain: run-seeded fault band (depth <= maxDepth).
+        // Only emits a line when this floor is within the band (or if the band was skipped).
+        if (game.branch() == DungeonBranch::Main && game.depth() <= Game::DUNGEON_MAX_DEPTH &&
+            (d.runFaultBandLen > 0 || d.runFaultIntensityPct > 0)) {
+            std::ostringstream ss;
+            if (d.runFaultActive) {
+                ss << "FAULT ON";
+            } else {
+                ss << "FAULT SKIP";
+            }
+            if (d.runFaultBandStartDepth > 0 && d.runFaultBandLen > 0) {
+                ss << " | BAND " << d.runFaultBandStartDepth << "-"
+                   << (d.runFaultBandStartDepth + d.runFaultBandLen - 1);
+                ss << " | POS " << (d.runFaultBandLocal + 1) << "/" << d.runFaultBandLen;
+            }
+            if (d.runFaultIntensityPct > 0) {
+                ss << " | INT " << d.runFaultIntensityPct << "%";
+            }
+            if (d.runFaultActive) {
+                ss << " | CHASM " << d.runFaultChasmCount;
+                ss << " | BRIDGES " << d.runFaultBridgeCount;
+                ss << " | BOULDERS " << d.runFaultBoulderCount;
+            }
+            if (d.runFaultSeed != 0u) {
+                ss << " | SEED 0x" << std::hex << std::uppercase << d.runFaultSeed << std::dec;
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
         {
             std::ostringstream ss;
             if (d.fireLaneMaxAfter > 0) {
@@ -2541,6 +2599,58 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             }
             game.pushSystemMessage(ss.str());
         }
+
+        {
+            std::ostringstream ss;
+            if (d.riftCacheCount > 0) {
+                ss << "POCKET CACHES " << d.riftCacheCount;
+                ss << " | BOULDERS " << d.riftCacheBoulderCount;
+                ss << " | CHASM " << d.riftCacheChasmCount;
+            } else {
+                ss << "POCKET CACHES 0";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            if (d.perimTunnelCarvedTiles > 0 || d.perimTunnelHatchCount > 0) {
+                ss << "PERIM TUNNELS " << d.perimTunnelCarvedTiles;
+                ss << " | HATCHES " << d.perimTunnelHatchCount;
+                if (d.perimTunnelLockedCount > 0) ss << " | LOCKED " << d.perimTunnelLockedCount;
+                if (d.perimTunnelCacheCount > 0) ss << " | CACHES " << d.perimTunnelCacheCount;
+            } else {
+                ss << "PERIM TUNNELS 0";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            if (d.crawlspaceNetworkCount > 0 || d.crawlspaceDoorCount > 0) {
+                ss << "CRAWLSPACES " << d.crawlspaceNetworkCount;
+                ss << " | CARVED " << d.crawlspaceCarvedTiles;
+                ss << " | DOORS " << d.crawlspaceDoorCount;
+                if (d.crawlspaceCacheCount > 0) ss << " | CACHES " << d.crawlspaceCacheCount;
+            } else {
+                ss << "CRAWLSPACES 0";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            if (d.crosscutTunnelCount > 0 || d.crosscutCarvedTiles > 0) {
+                ss << "CROSSCUTS " << d.crosscutTunnelCount;
+                ss << " | CARVED " << d.crosscutCarvedTiles;
+                if (d.crosscutDoorLockedCount > 0) ss << " | LOCKED " << d.crosscutDoorLockedCount;
+                if (d.crosscutDoorSecretCount > 0) ss << " | SECRET " << d.crosscutDoorSecretCount;
+            } else {
+                ss << "CROSSCUTS 0";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
         {
             std::ostringstream ss;
             const int atts = std::max(1, d.genPickAttempts);

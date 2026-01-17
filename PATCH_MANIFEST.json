@@ -1,14 +1,10 @@
 {
-  "patch_id": "round57_patch",
-  "previous_patch_id": "round56_patch",
-  "round": 57,
-  "date": "2026-01-16",
+  "patch_id": "round71_patch",
+  "previous_patch_id": "round70_patch",
+  "round": 71,
+  "date": "2026-01-17",
   "project": "Nethack-Roguelike",
-  "summary": [
-    "Main dungeon level generation (depth 1\u201325) now uses a deterministic per-level seed derived from the run seed + level identity, so floors generate consistently and do not perturb the gameplay RNG stream (matching Infinite World behavior).",
-    "Augury preview now seeds its simulation from the same per-level seed, making the vision stable/accurate regardless of other RNG-consuming actions before descending.",
-    "The final Sanctum (depth 25) is now procedurally varied: randomized corner room assignments, sanctum dimensions/offset, door wall + moat bridges, and arena pillar scatter while preserving Treasure/Shrine room metadata for boss/objective spawning."
-  ],
+  "summary": "Add secret crawlspace networks procgen pass: carve a small hidden 1-tile-wide tunnel network entirely within wall mass, connect it back to the corridor graph via 2\u20133 secret doors, and optionally seed a bonus cache chest deep inside. Surfaced via #mapstats as CRAWLSPACES.",
   "files_in_patch_zip": [
     "src/action_info.hpp",
     "src/ai.cpp",
@@ -41,9 +37,11 @@
     "src/shop.cpp",
     "src/spritegen.cpp",
     "src/spritegen.hpp",
+    "src/spritegen3d.cpp",
     "src/threat_field.hpp",
     "src/vtuber_gen.hpp",
     "CHANGELOG.md",
     "PATCH_MANIFEST.json"
-  ]
+  ],
+  "timestamp_utc": "2026-01-17T09:24:40Z"
 }

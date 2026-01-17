@@ -90,6 +90,50 @@ struct VoxelModel {
     }
 };
 
+// Nearest-neighbor voxel upscaling.
+//
+// This is intentionally "blocky": it preserves the original model's voxel-art
+// silhouette while increasing geometric resolution so high-resolution sprite
+// outputs (64x64, 128x128) don't look like gigantic cubes.
+//
+// We replicate filled voxels into an s×s×s block. Empty voxels are omitted (the
+// destination grid is initialized as empty), keeping the operation reasonably
+// fast for sparse models.
+VoxelModel scaleVoxelModelNearest(const VoxelModel& src, int s) {
+    if (s <= 1) return src;
+    if (src.w <= 0 || src.h <= 0 || src.d <= 0) return src;
+
+    VoxelModel dst;
+    dst.w = src.w * s;
+    dst.h = src.h * s;
+    dst.d = src.d * s;
+    dst.vox.assign(static_cast<size_t>(dst.w * dst.h * dst.d), {0, 0, 0, 0});
+
+    for (int z = 0; z < src.d; ++z) {
+        for (int y = 0; y < src.h; ++y) {
+            const size_t srcRow = static_cast<size_t>((z * src.h + y) * src.w);
+            for (int x = 0; x < src.w; ++x) {
+                const Color c = src.vox[srcRow + static_cast<size_t>(x)];
+                if (c.a == 0) continue;
+
+                const int x0 = x * s;
+                const int y0 = y * s;
+                const int z0 = z * s;
+
+                for (int zz = 0; zz < s; ++zz) {
+                    for (int yy = 0; yy < s; ++yy) {
+                        const size_t dstRow = static_cast<size_t>(((z0 + zz) * dst.h + (y0 + yy)) * dst.w + x0);
+                        for (int xx = 0; xx < s; ++xx) {
+                            dst.vox[dstRow + static_cast<size_t>(xx)] = c;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return dst;
+}
+
 struct Palette {
     Color primary{180,180,180,255};
     Color secondary{120,120,120,255};
@@ -1468,6 +1512,26 @@ inline int clampOutPx(int outPx) {
     return std::clamp(outPx, 16, 256);
 }
 
+// Pick a voxel-model upscaling factor based on the requested output size.
+//
+// The procedural voxel models are authored at a small canonical resolution
+// (typically 16×16×8). Rendering those directly into large outputs (64×64,
+// 128×128) makes each voxel span many screen pixels, producing a "chunky"
+// look. We fix that by upscaling the *voxel model* (nearest-neighbor), keeping
+// the same overall silhouette while increasing face density for smoother
+// isometric rasterization.
+//
+// NOTE: Isometric raytracing is significantly more expensive than the mesh
+// rasterizer, so we cap the detail factor there to keep runtime costs sane.
+inline int voxelDetailScaleForOutPx(int outPx, bool isoRaytrace) {
+    outPx = clampOutPx(outPx);
+    int s = 1;
+    if (outPx >= 128) s = 4;
+    else if (outPx >= 64) s = 2;
+    if (isoRaytrace && s > 2) s = 2;
+    return s;
+}
+
 SpritePixels renderModelToSprite(const VoxelModel& model, int frame, float yawScale, int outPx) {
     outPx = clampOutPx(outPx);
 
@@ -2326,8 +2390,11 @@ SpritePixels renderSprite3DExtruded(const SpritePixels& base2d, uint32_t seed, i
     outPx = clampOutPx(outPx);
     if (base2d.w <= 0 || base2d.h <= 0) return base2d;
 
+    const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
+
     constexpr int maxDepth = 6;
-    const VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
+    VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
+    if (detailScale > 1) vox = scaleVoxelModelNearest(vox, detailScale);
 
     const int hiW = (outPx <= 32) ? outPx * 2 : outPx;
     const int hiH = hiW;
@@ -2341,16 +2408,20 @@ SpritePixels renderSprite3DExtruded(const SpritePixels& base2d, uint32_t seed, i
 SpritePixels renderSprite3DEntity(EntityKind kind, const SpritePixels& base2d, uint32_t seed, int frame, int outPx) {
     // Some entities look much better when generated as true 3D blobs (slimes/ghosts).
     // Everything else falls back to the faithful 2D->3D extrusion.
-    const VoxelModel m = buildEntityModel(kind, seed, frame, base2d);
+    const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
+    VoxelModel m = buildEntityModel(kind, seed, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
+        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
         return renderModelToSprite(m, frame, /*yawScale=*/0.65f, outPx);
     }
     return renderSprite3DExtruded(base2d, seed, frame, outPx);
 }
 
 SpritePixels renderSprite3DItem(ItemKind kind, const SpritePixels& base2d, uint32_t seed, int frame, int outPx) {
-    const VoxelModel m = buildItemModel(kind, seed, frame, base2d);
+    const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
+    VoxelModel m = buildItemModel(kind, seed, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
+        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
         return renderModelToSprite(m, frame, /*yawScale=*/0.95f, outPx);
     }
     return renderSprite3DExtruded(base2d, seed, frame, outPx);
@@ -2358,8 +2429,10 @@ SpritePixels renderSprite3DItem(ItemKind kind, const SpritePixels& base2d, uint3
 
 SpritePixels renderSprite3DProjectile(ProjectileKind kind, const SpritePixels& base2d, uint32_t seed, int frame, int outPx) {
     (void)seed;
-    const VoxelModel m = buildProjectileModel(kind, frame, base2d);
+    const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
+    VoxelModel m = buildProjectileModel(kind, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
+        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
         return renderModelToSprite(m, frame, /*yawScale=*/1.35f, outPx);
     }
     return renderSprite3DExtruded(base2d, seed, frame, outPx);
@@ -2369,33 +2442,42 @@ SpritePixels renderSprite3DExtrudedIso(const SpritePixels& base2d, uint32_t seed
     outPx = clampOutPx(outPx);
     if (base2d.w <= 0 || base2d.h <= 0) return base2d;
 
+    const int detailScale = voxelDetailScaleForOutPx(outPx, isoRaytrace);
+
     constexpr int maxDepth = 6;
-    const VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
+    VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
+    if (detailScale > 1) vox = scaleVoxelModelNearest(vox, detailScale);
 
     return renderModelToSpriteIsometric(vox, frame, outPx, isoRaytrace);
 }
 
 SpritePixels renderSprite3DEntityIso(EntityKind kind, const SpritePixels& base2d, uint32_t seed, int frame, int outPx, bool isoRaytrace) {
-    const VoxelModel m = buildEntityModel(kind, seed, frame, base2d);
+    const int detailScale = voxelDetailScaleForOutPx(outPx, isoRaytrace);
+    VoxelModel m = buildEntityModel(kind, seed, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
+        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
         return renderModelToSpriteIsometric(m, frame, outPx, isoRaytrace);
     }
-    return renderSprite3DExtrudedIso(base2d, seed, frame, outPx);
+    return renderSprite3DExtrudedIso(base2d, seed, frame, outPx, isoRaytrace);
 }
 
 SpritePixels renderSprite3DItemIso(ItemKind kind, const SpritePixels& base2d, uint32_t seed, int frame, int outPx, bool isoRaytrace) {
-    const VoxelModel m = buildItemModel(kind, seed, frame, base2d);
+    const int detailScale = voxelDetailScaleForOutPx(outPx, isoRaytrace);
+    VoxelModel m = buildItemModel(kind, seed, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
+        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
         return renderModelToSpriteIsometric(m, frame, outPx, isoRaytrace);
     }
-    return renderSprite3DExtrudedIso(base2d, seed, frame, outPx);
+    return renderSprite3DExtrudedIso(base2d, seed, frame, outPx, isoRaytrace);
 }
 
 SpritePixels renderSprite3DProjectileIso(ProjectileKind kind, const SpritePixels& base2d, uint32_t seed, int frame, int outPx, bool isoRaytrace) {
     (void)seed;
-    const VoxelModel m = buildProjectileModel(kind, frame, base2d);
+    const int detailScale = voxelDetailScaleForOutPx(outPx, isoRaytrace);
+    VoxelModel m = buildProjectileModel(kind, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
+        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
         return renderModelToSpriteIsometric(m, frame, outPx, isoRaytrace);
     }
-    return renderSprite3DExtrudedIso(base2d, seed, frame, outPx);
+    return renderSprite3DExtrudedIso(base2d, seed, frame, outPx, isoRaytrace);
 }

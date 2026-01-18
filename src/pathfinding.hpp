@@ -39,6 +39,21 @@ struct DijkstraSeed {
     int initialCost = 0;
 };
 
+// Result for multi-source reverse Dijkstra with provenance.
+//
+// cost[i] is the minimum cost to reach the nearest seed from tile i
+// (excluding the starting tile cost), or -1 if unreachable.
+//
+// nearestSeedIndex[i] is the index into the `seeds` array that achieved
+// the best cost for tile i, or -1 if unreachable.
+//
+// Tie-break: when multiple seeds yield the same best cost, the smallest
+// seed index is chosen for determinism.
+struct DijkstraNearestSeededResult {
+    std::vector<int> cost;
+    std::vector<int> nearestSeedIndex;
+};
+
 // Returns a path including {start, ..., goal}. Empty on failure.
 std::vector<Vec2i> dijkstraPath(
     int width,
@@ -107,6 +122,17 @@ std::vector<int> dijkstraCostFromSources(
 // dijkstraCostToNearestSeeded(): returns a "cost-to-nearest-seed" map
 // (reverse expansion), matching dijkstraCostToNearestSource semantics.
 std::vector<int> dijkstraCostToNearestSeeded(
+    int width,
+    int height,
+    const std::vector<DijkstraSeed>& seeds,
+    const PassableFn& passable,
+    const StepCostFn& stepCost,
+    const DiagonalOkFn& diagonalOk,
+    int maxCost = -1);
+
+// Variant of dijkstraCostToNearestSeeded() that also returns which seed was
+// responsible for the best cost at each tile.
+DijkstraNearestSeededResult dijkstraCostToNearestSeededWithProvenance(
     int width,
     int height,
     const std::vector<DijkstraSeed>& seeds,

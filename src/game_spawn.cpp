@@ -2371,8 +2371,8 @@ void Game::spawnTraps() {
                 std::vector<TCand> tcands;
                 tcands.reserve(256);
 
-                const std::vector<Vec2i>& base = !junctions.empty() ? junctions : chokepoints;
-                for (const Vec2i& p : base) {
+	            	const std::vector<Vec2i>& trafficBase = !junctions.empty() ? junctions : chokepoints;
+	            	for (const Vec2i& p : trafficBase) {
                     if (!dung.inBounds(p.x, p.y)) continue;
                     if (!dung.isWalkable(p.x, p.y)) continue;
                     if (manhattan(p, player().pos) <= 7) continue;

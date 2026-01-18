@@ -10720,6 +10720,26 @@ void Renderer::drawLookOverlay(const Game& game) {
                         SDL_RenderDrawRect(renderer, &rct);
                     }
                 }
+
+	                // Emphasize the "dominant" listener for the current cursor tile (the one that
+	                // minimizes required volume), making it easy to tell *who* is most likely to
+	                // hear you without leaking unseen info.
+	                const int dom = game.hearingPreviewDominantListenerIndexAt(cursor);
+	                if (dom >= 0 && dom < (int)listeners.size()) {
+	                    const Vec2i s = listeners[static_cast<size_t>(dom)];
+	                    if (d.inBounds(s.x, s.y) && d.at(s.x, s.y).visible) {
+	                        SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{165});
+	                        SDL_Rect rr = mapTileDst(s.x, s.y);
+	                        if (iso) {
+	                            drawIsoDiamondOutline(renderer, rr);
+	                            drawIsoDiamondCross(renderer, rr);
+	                        } else {
+	                            SDL_RenderDrawRect(renderer, &rr);
+	                            SDL_RenderDrawLine(renderer, rr.x, rr.y, rr.x + rr.w, rr.y + rr.h);
+	                            SDL_RenderDrawLine(renderer, rr.x + rr.w, rr.y, rr.x, rr.y + rr.h);
+	                        }
+	                    }
+	                }
             }
         }
     }

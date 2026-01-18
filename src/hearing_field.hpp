@@ -24,6 +24,14 @@ struct HearingFieldResult {
     //
     // Volumes are in the same "tile-cost" units as Dungeon::computeSoundMap.
     std::vector<int> minRequiredVolume;
+
+    // For each tile, the index into `listeners` that achieved minRequiredVolume.
+    //
+    // -1 means unreachable / no audible listener within maxCost.
+    //
+    // NOTE: This is a UI/analysis affordance. It must never be used to reason about
+    // unseen monsters (buildVisibleHostileHearingField() only includes visible hostiles).
+    std::vector<int> dominantListenerIndex;
 };
 
 inline HearingFieldResult buildVisibleHostileHearingField(const Game& g, int maxCost) {
@@ -63,6 +71,7 @@ inline HearingFieldResult buildVisibleHostileHearingField(const Game& g, int max
     const size_t n = static_cast<size_t>(W * H);
 
     out.minRequiredVolume.assign(n, -1);
+    out.dominantListenerIndex.assign(n, -1);
 
     // We want, for each tile t:
     //   minRequiredVolume[t] = min_listener max(0, dist(t -> listener) - hearingDelta(listener))
@@ -96,17 +105,20 @@ inline HearingFieldResult buildVisibleHostileHearingField(const Game& g, int max
     };
 
     const int seededMaxCost = (maxCost < 0) ? -1 : (maxCost + offset);
-    const std::vector<int> best = dijkstraCostToNearestSeeded(W, H, seeds, passable, stepCost, diagOk, seededMaxCost);
-    if (best.size() != n) return out;
+    const DijkstraNearestSeededResult best = dijkstraCostToNearestSeededWithProvenance(W, H, seeds, passable, stepCost, diagOk, seededMaxCost);
+    if (best.cost.size() != n || best.nearestSeedIndex.size() != n) return out;
 
     for (size_t i = 0; i < n; ++i) {
-        const int v = best[i];
+        const int v = best.cost[i];
         if (v < 0) continue;
+	    const int src = best.nearestSeedIndex[i];
+	    if (src < 0) continue;
 
         int req = v - offset;
         if (req < 0) req = 0;
         if (maxCost >= 0 && req > maxCost) continue;
         out.minRequiredVolume[i] = req;
+        out.dominantListenerIndex[i] = src;
     }
 
     return out;

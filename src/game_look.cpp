@@ -226,7 +226,8 @@ void Game::beginLook() {
     // UI-only helper: hearing preview is scoped to LOOK mode.
     hearingPreviewOpen = false;
     hearingPreviewVolBias = 0;
-    hearingPreviewListeners.clear();
+	hearingPreviewListeners_.clear();
+	hearingPreviewDominantListenerIndex_.clear();
     hearingPreviewMinReq.clear();
     hearingPreviewFootstepVol.clear();
 
@@ -246,7 +247,8 @@ void Game::endLook() {
     threatPreviewDist.clear();
     hearingPreviewOpen = false;
     hearingPreviewVolBias = 0;
-    hearingPreviewListeners.clear();
+	hearingPreviewListeners_.clear();
+	hearingPreviewDominantListenerIndex_.clear();
     hearingPreviewMinReq.clear();
     hearingPreviewFootstepVol.clear();
 }
@@ -340,7 +342,8 @@ void Game::toggleSoundPreview() {
         threatPreviewDist.clear();
 
         hearingPreviewOpen = false;
-        hearingPreviewListeners.clear();
+	        hearingPreviewListeners_.clear();
+	        hearingPreviewDominantListenerIndex_.clear();
         hearingPreviewMinReq.clear();
         hearingPreviewFootstepVol.clear();
     }
@@ -372,8 +375,9 @@ void Game::refreshHearingPreview() {
     // We use a fixed generous window so the user can adjust a volume bias without recomputing.
     const int maxCost = 30;
     HearingFieldResult hf = buildVisibleHostileHearingField(*this, maxCost);
-    hearingPreviewListeners = std::move(hf.listeners);
-    hearingPreviewMinReq = std::move(hf.minRequiredVolume);
+	hearingPreviewListeners_ = std::move(hf.listeners);
+	hearingPreviewDominantListenerIndex_ = std::move(hf.dominantListenerIndex);
+	hearingPreviewMinReq = std::move(hf.minRequiredVolume);
 
     hearingPreviewFootstepVol.clear();
 
@@ -468,7 +472,8 @@ void Game::toggleHearingPreview() {
 
     hearingPreviewOpen = !hearingPreviewOpen;
     if (!hearingPreviewOpen) {
-        hearingPreviewListeners.clear();
+	    hearingPreviewListeners_.clear();
+	    hearingPreviewDominantListenerIndex_.clear();
         hearingPreviewMinReq.clear();
         hearingPreviewFootstepVol.clear();
         return;
@@ -500,7 +505,8 @@ void Game::toggleThreatPreview() {
         soundPreviewDist.clear();
 
         hearingPreviewOpen = false;
-        hearingPreviewListeners.clear();
+	        hearingPreviewListeners_.clear();
+	        hearingPreviewDominantListenerIndex_.clear();
         hearingPreviewMinReq.clear();
         hearingPreviewFootstepVol.clear();
     }
@@ -902,7 +908,7 @@ std::string Game::lookInfoText() const {
 
         const int step = clampi(stepBase + hearingPreviewVolBias, 0, 30);
 
-        if (hearingPreviewListeners.empty() || hearingPreviewMinReq.empty()) {
+	    if (hearingPreviewListeners_.empty() || hearingPreviewMinReq.empty()) {
             s += " NO VISIBLE HOSTILES";
         } else {
             int req = -1;
@@ -922,7 +928,31 @@ std::string Game::lookInfoText() const {
                 }
             }
 
-            s += " LISTENERS " + std::to_string((int)hearingPreviewListeners.size());
+	            // Mention the single most "sensitive" listener for the current tile.
+	            // This is derived from *visible* hostiles only, so it never leaks unseen info.
+	            const int dom = hearingPreviewDominantListenerIndexAt(lookPos);
+	            if (dom >= 0 && dom < (int)hearingPreviewListeners_.size()) {
+	                const Vec2i lp = hearingPreviewListeners_[static_cast<size_t>(dom)];
+	                const Entity* domEnt = nullptr;
+	                for (const auto& m : ents) {
+	                    if (m.id == playerId_) continue;
+	                    if (m.hp <= 0) continue;
+	                    if (m.friendly) continue;
+	                    if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
+	                    if (m.pos.x != lp.x || m.pos.y != lp.y) continue;
+	                    if (!dung.inBounds(m.pos.x, m.pos.y)) continue;
+	                    if (!dung.at(m.pos.x, m.pos.y).visible) continue;
+	                    domEnt = &m;
+	                    break;
+	                }
+	                if (domEnt) {
+	                    s += " DOM " + entityKindName(domEnt->kind);
+	                } else {
+	                    s += " DOM (" + std::to_string(lp.x) + "," + std::to_string(lp.y) + ")";
+	                }
+	            }
+
+	            s += " LISTENERS " + std::to_string((int)hearingPreviewListeners_.size());
         }
 
         s += "  ([ ] ADJUST)";

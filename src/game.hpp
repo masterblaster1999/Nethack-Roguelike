@@ -1640,7 +1640,14 @@ bool clearItemCallLabel(ItemKind k);
     // as real noise emission; never leaks hidden monsters).
     bool isHearingPreviewOpen() const { return hearingPreviewOpen; }
     int hearingPreviewVolumeBias() const { return hearingPreviewVolBias; }
-    const std::vector<Vec2i>& hearingPreviewListeners() const { return hearingPreviewListeners; }
+	    const std::vector<Vec2i>& hearingPreviewListeners() const { return hearingPreviewListeners_; }
+	    int hearingPreviewDominantListenerIndexAt(Vec2i p) const {
+	        if (!dung.inBounds(p.x, p.y)) return -1;
+	        if (dung.width <= 0 || dung.height <= 0) return -1;
+	        const size_t i = static_cast<size_t>(p.y * dung.width + p.x);
+	        if (i >= hearingPreviewDominantListenerIndex_.size()) return -1;
+	        return hearingPreviewDominantListenerIndex_[i];
+	    }
     const std::vector<int>& hearingPreviewMinRequiredVolume() const { return hearingPreviewMinReq; }
     const std::vector<int>& hearingPreviewFootstepVolume() const { return hearingPreviewFootstepVol; }
     void toggleHearingPreview();
@@ -2066,7 +2073,8 @@ private:
     // field for currently visible hostiles, plus the player's per-tile footstep volume.
     bool hearingPreviewOpen = false;
     int hearingPreviewVolBias = 0; // user bias via [ ] while preview is open
-    std::vector<Vec2i> hearingPreviewListeners;
+	    std::vector<Vec2i> hearingPreviewListeners_;
+	    std::vector<int> hearingPreviewDominantListenerIndex_;
     std::vector<int> hearingPreviewMinReq;
     std::vector<int> hearingPreviewFootstepVol;
 

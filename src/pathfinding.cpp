@@ -279,6 +279,115 @@ std::vector<int> dijkstraCostToNearestSeeded(
 }
 
 
+DijkstraNearestSeededResult dijkstraCostToNearestSeededWithProvenance(
+	int width,
+	int height,
+	const std::vector<DijkstraSeed>& seeds,
+	const PassableFn& passable,
+	const StepCostFn& stepCost,
+	const DiagonalOkFn& diagonalOk,
+	int maxCost)
+{
+	DijkstraNearestSeededResult out;
+	const size_t n = static_cast<size_t>(std::max(0, width) * std::max(0, height));
+	out.cost.assign(n, -1);
+	out.nearestSeedIndex.assign(n, -1);
+	if (width <= 0 || height <= 0) return out;
+	if (seeds.empty()) return out;
+
+	const int INF = std::numeric_limits<int>::max() / 4;
+	std::vector<int> best(n, INF);
+	std::vector<int> bestSeed(n, -1);
+
+	std::priority_queue<Node, std::vector<Node>, std::greater<Node>> pq;
+
+	// Seed with all valid sources.
+	for (int si = 0; si < static_cast<int>(seeds.size()); ++si) {
+		const DijkstraSeed& s = seeds[static_cast<size_t>(si)];
+		if (!inBounds(width, height, s.pos.x, s.pos.y)) continue;
+		if (!passable(s.pos.x, s.pos.y)) continue;
+
+		int init = s.initialCost;
+		if (init < 0) init = 0;
+		if (maxCost >= 0 && init > maxCost) continue;
+
+		const int idx = idxOf(width, s.pos.x, s.pos.y);
+		const size_t ii = static_cast<size_t>(idx);
+		if (ii >= n) continue;
+
+		const int cur = best[ii];
+		if (init < cur || (init == cur && (bestSeed[ii] < 0 || si < bestSeed[ii]))) {
+			best[ii] = init;
+			bestSeed[ii] = si;
+			pq.push({init, idx});
+		}
+	}
+
+	if (pq.empty()) return out;
+
+	while (!pq.empty()) {
+		const Node cur = pq.top();
+		pq.pop();
+
+		const int costHere = cur.first;
+		const int i = cur.second;
+		const size_t ii = static_cast<size_t>(i);
+
+		if (maxCost >= 0 && costHere > maxCost) continue;
+		if (ii >= n) continue;
+		if (best[ii] != costHere) continue;
+
+		const int seedHere = bestSeed[ii];
+		if (seedHere < 0) continue;
+
+		const int x = i % width;
+		const int y = i / width;
+
+		// While expanding outward (reverse), add the cost of entering the CURRENT tile
+		// so a neighbor -> (x,y) -> ... path is priced correctly.
+		const int enterCostHere = stepCost(x, y);
+		if (enterCostHere <= 0) continue;
+
+		for (const auto& dv : DIRS8) {
+			const int nx = x + dv[0];
+			const int ny = y + dv[1];
+			if (!inBounds(width, height, nx, ny)) continue;
+			if (!passable(nx, ny)) continue;
+
+			if (dv[0] != 0 && dv[1] != 0) {
+				// Reverse move: neighbor -> current, so flip the direction.
+				if (diagonalOk && !diagonalOk(nx, ny, -dv[0], -dv[1])) continue;
+			}
+
+			const int ni = idxOf(width, nx, ny);
+			const int ncost = costHere + enterCostHere;
+			if (maxCost >= 0 && ncost > maxCost) continue;
+
+			const size_t nii = static_cast<size_t>(ni);
+			if (nii >= n) continue;
+
+			const int prevCost = best[nii];
+			const int prevSeed = bestSeed[nii];
+			if (ncost < prevCost || (ncost == prevCost && (prevSeed < 0 || seedHere < prevSeed))) {
+				best[nii] = ncost;
+				bestSeed[nii] = seedHere;
+				pq.push({ncost, ni});
+			}
+		}
+	}
+
+	// Convert to the public -1 sentinel format.
+	for (size_t i = 0; i < n; ++i) {
+		if (best[i] == INF) continue;
+		if (maxCost >= 0 && best[i] > maxCost) continue;
+		out.cost[i] = best[i];
+		out.nearestSeedIndex[i] = bestSeed[i];
+	}
+
+	return out;
+}
+
+
 std::vector<int> dijkstraCostFromSources(
     int width,
     int height,

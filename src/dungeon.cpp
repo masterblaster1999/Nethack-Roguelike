@@ -3195,20 +3195,20 @@ static bool applyPerimeterServiceTunnels(Dungeon& d, RNG& rng, DungeonBranch bra
     std::vector<HatchCand> cands;
     cands.reserve(ring.size());
 
-    for (const Vec2i& p : ring) {
-        if (!d.inBounds(p.x, p.y)) continue;
-        const TileType tt = d.at(p.x, p.y).type;
+	for (const Vec2i& pos : ring) {
+	    if (!d.inBounds(pos.x, pos.y)) continue;
+	    const TileType tt = d.at(pos.x, pos.y).type;
         if (tt == TileType::Chasm || tt == TileType::Pillar || tt == TileType::Boulder) continue;
-        if (!farFromStairs(p)) continue;
-        if (anyDoorInRadius(d, p.x, p.y, 2)) continue;
+	    if (!farFromStairs(pos)) continue;
+	    if (anyDoorInRadius(d, pos.x, pos.y, 2)) continue;
 
-        const Vec2i dir = innerRingInteriorDir(d, p);
-        const Vec2i first{p.x + dir.x, p.y + dir.y};
+	    const Vec2i dir = innerRingInteriorDir(d, pos);
+	    const Vec2i first{pos.x + dir.x, pos.y + dir.y};
         if (!d.inBounds(first.x, first.y)) continue;
         if (d.at(first.x, first.y).type != TileType::Wall) continue;
 
-        const int sc = std::abs(p.x - d.stairsUp.x) + std::abs(p.y - d.stairsUp.y);
-        cands.push_back({p, dir, sc});
+	    const int sc = std::abs(pos.x - d.stairsUp.x) + std::abs(pos.y - d.stairsUp.y);
+	    cands.push_back({pos, dir, sc});
     }
 
     // Prefer hatches far from stairs so the tunnels tend to create meaningful alternative routes.
@@ -3335,16 +3335,16 @@ static bool applyPerimeterServiceTunnels(Dungeon& d, RNG& rng, DungeonBranch bra
 
         Vec2i best{-1, -1};
         int bestD = -1;
-        for (const Vec2i& p : ring) {
-            if (!d.inBounds(p.x, p.y)) continue;
-            if (d.at(p.x, p.y).type != TileType::Floor) continue;
-            if (anyDoorInRadius(d, p.x, p.y, 1)) continue;
-            const int dd = distAfterAt(p);
+	    for (const Vec2i& pos : ring) {
+	        if (!d.inBounds(pos.x, pos.y)) continue;
+	        if (d.at(pos.x, pos.y).type != TileType::Floor) continue;
+	        if (anyDoorInRadius(d, pos.x, pos.y, 1)) continue;
+	        const int dd = distAfterAt(pos);
             if (dd < 0) continue;
             if (dd < 22) continue;
             if (dd > bestD) {
                 bestD = dd;
-                best = p;
+	            best = pos;
             }
         }
 
@@ -3770,9 +3770,9 @@ static bool applyBurrowCrosscuts(Dungeon& d, RNG& rng, DungeonBranch branch, int
 
         // Require the tunnel to actually dig through wall mass (not mostly reuse existing floors).
         int wallTiles = 0;
-        for (const Vec2i& p : path) {
-            if (!d.inBounds(p.x, p.y)) continue;
-            if (d.at(p.x, p.y).type == TileType::Wall) wallTiles += 1;
+	for (const Vec2i& pos : path) {
+	    if (!d.inBounds(pos.x, pos.y)) continue;
+	    if (d.at(pos.x, pos.y).type == TileType::Wall) wallTiles += 1;
         }
 
         // Door endpoints are walls by construction.
@@ -3787,15 +3787,15 @@ static bool applyBurrowCrosscuts(Dungeon& d, RNG& rng, DungeonBranch branch, int
 
         // Carve interior.
         for (size_t i = 0; i < path.size(); ++i) {
-            const Vec2i p = path[i];
-            if (!d.inBounds(p.x, p.y)) continue;
+	    const Vec2i pos = path[i];
+	    if (!d.inBounds(pos.x, pos.y)) continue;
 
             // Keep endpoints reserved for doors.
-            if (p.x == doorA.x && p.y == doorA.y) continue;
-            if (p.x == doorB.x && p.y == doorB.y) continue;
+	    if (pos.x == doorA.x && pos.y == doorA.y) continue;
+	    if (pos.x == doorB.x && pos.y == doorB.y) continue;
 
-            if (d.at(p.x, p.y).type == TileType::Wall) {
-                recordSet(p.x, p.y, TileType::Floor, changes);
+	    if (d.at(pos.x, pos.y).type == TileType::Wall) {
+	        recordSet(pos.x, pos.y, TileType::Floor, changes);
             }
         }
 
@@ -16104,12 +16104,12 @@ static bool maybeCarveRiftCachePockets(Dungeon& d, RNG& rng, int depth, GenKind 
         if (depth >= 8 && rng.chance(0.18f)) {
             Vec2i loot2{-1, -1};
             // Try a few times to find a different floor tile far from the first.
-            for (int t = 0; t < 24; ++t) {
-                Vec2i p{rng.range(x0 + 1, x0 + pw - 2), rng.range(y0 + 1, y0 + ph - 2)};
-                if (!d.inBounds(p.x, p.y)) continue;
-                if (d.at(p.x, p.y).type != TileType::Floor) continue;
-                if (manhattan2(p, loot) < 4) continue;
-                loot2 = p;
+	            for (int t = 0; t < 24; ++t) {
+	                Vec2i pos{rng.range(x0 + 1, x0 + pw - 2), rng.range(y0 + 1, y0 + ph - 2)};
+	                if (!d.inBounds(pos.x, pos.y)) continue;
+	                if (d.at(pos.x, pos.y).type != TileType::Floor) continue;
+	                if (manhattan2(pos, loot) < 4) continue;
+	                loot2 = pos;
                 break;
             }
             if (d.inBounds(loot2.x, loot2.y) && d.at(loot2.x, loot2.y).type == TileType::Floor) {

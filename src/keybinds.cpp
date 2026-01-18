@@ -7,7 +7,7 @@
 #include <sstream>
 
 Uint16 KeyBinds::normalizeMods(Uint16 mods) {
-    return mods & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT);
+    return mods & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT | KMOD_GUI);
 }
 
 bool KeyBinds::chordMatches(const KeyChord& chord, SDL_Keycode key, Uint16 mods) {
@@ -57,7 +57,43 @@ static SDL_Keycode baseKeycodeForLayout(SDL_Keycode key, Uint16* impliedMods) {
 
     // Layout-aware fallback: map keycode -> scancode -> base keycode.
     const SDL_Scancode sc = SDL_GetScancodeFromKey(key);
-    if (sc == SDL_SCANCODE_UNKNOWN) return key;
+    if (sc == SDL_SCANCODE_UNKNOWN) {
+        // SDL's keycode->scancode mapping is layout-dependent and may not
+        // resolve *shifted* printable symbols (e.g. '<', '>', '?') on some
+        // platforms/layouts.
+        //
+        // Our runtime input path normalizes events using the physical scancode
+        // (see main.cpp) so binds are stored as: base key + required modifiers.
+        //
+        // If SDL cannot map a shifted symbol keycode back to its scancode, do a
+        // small best-effort fallback for the most common NetHack / desktop UX
+        // symbols, using the US keyboard shift pairs.
+        //
+        // IMPORTANT: This fallback only triggers when SDL reports UNKNOWN,
+        // so layouts with dedicated '<'/'>' keys (where SDL *can* map them)
+        // will keep working as-is.
+        if (impliedMods) {
+            switch (key) {
+                case '?': *impliedMods |= KMOD_SHIFT; return SDLK_SLASH;
+                case '<': *impliedMods |= KMOD_SHIFT; return SDLK_COMMA;
+                case '>': {
+                    // If SDL can't map '>' directly but *can* map '<', prefer
+                    // interpreting '>' as SHIFT+'<' (common on keyboards with a
+                    // dedicated '<'/'>' key).
+                    const SDL_Scancode scLess = SDL_GetScancodeFromKey(SDLK_LESS);
+                    if (scLess != SDL_SCANCODE_UNKNOWN) {
+                        *impliedMods |= KMOD_SHIFT;
+                        return SDL_GetKeyFromScancode(scLess);
+                    }
+
+                    *impliedMods |= KMOD_SHIFT;
+                    return SDLK_PERIOD;
+                }
+                default: break;
+            }
+        }
+        return key;
+    }
 
     const SDL_Keycode base = SDL_GetKeyFromScancode(sc);
     if (base == SDLK_UNKNOWN || base == key) return key;
@@ -169,6 +205,7 @@ std::optional<KeyChord> KeyBinds::parseChord(const std::string& tokenIn) {
         if (m == "shift") mods |= KMOD_SHIFT;
         else if (m == "ctrl" || m == "control") mods |= KMOD_CTRL;
         else if (m == "alt") mods |= KMOD_ALT;
+        else if (m == "cmd" || m == "gui" || m == "meta" || m == "super") mods |= KMOD_GUI;
         else return std::nullopt;
     }
 
@@ -294,6 +331,10 @@ KeyBinds KeyBinds::defaults() {
     add(Action::StairsUp, SDLK_LESS);
 
     add(Action::StairsDown, SDLK_PERIOD, KMOD_SHIFT);
+    // Some keyboard layouts have a dedicated '<'/'>' key. Since we normalize
+    // keybinds to the *base* key from the scancode, '>' becomes SHIFT+'<' on
+    // those layouts.
+    add(Action::StairsDown, SDLK_LESS, KMOD_SHIFT);
     add(Action::StairsDown, SDLK_GREATER);
 
     add(Action::AutoExplore, SDLK_o);
@@ -303,6 +344,8 @@ KeyBinds KeyBinds::defaults() {
     add(Action::Help, SDLK_F1);
     add(Action::Help, SDLK_SLASH, KMOD_SHIFT);
     add(Action::Help, SDLK_h);
+    // Common desktop UX: Command+? (Cmd+Shift+/) for Help.
+    add(Action::Help, SDLK_SLASH, KMOD_GUI | KMOD_SHIFT);
 
     add(Action::Options, SDLK_F2);
     add(Action::Command, SDLK_3, KMOD_SHIFT);
@@ -324,6 +367,9 @@ KeyBinds KeyBinds::defaults() {
 
     // LOOK helper: show a tactical "heatmap" of nearby monster threat/ETA
     add(Action::ToggleThreatPreview, SDLK_t, KMOD_CTRL);
+
+    // LOOK helper: show an "audibility map" of where your footsteps would be heard
+    add(Action::ToggleHearingPreview, SDLK_h, KMOD_CTRL);
 
     add(Action::ToggleViewMode, SDLK_F7);
     add(Action::ToggleVoxelSprites, SDLK_F8);
@@ -364,7 +410,35 @@ void KeyBinds::loadOverridesFromIni(const std::string& settingsPath) {
         auto act = parseActionName(key);
         if (!act.has_value()) continue;
 
-        binds[*act] = parseChordList(val);
+        std::vector<KeyChord> chords = parseChordList(val);
+
+        // Back-compat: older default settings files (and some old control preset writes) omitted cmd+?
+        // from the Help binding. Now that cmd/gui is a first-class modifier, upgrade the common
+        // default binds in-memory so macOS-style Command+? works without requiring a manual settings edit.
+        if (*act == Action::Help) {
+            bool hasCmd = false;
+            bool hasF1 = false;
+            bool hasShiftSlash = false;
+            bool hasH = false;
+
+            for (const auto& c : chords) {
+                if ((c.mods & KMOD_GUI) != 0) hasCmd = true;
+                if (c.key == SDLK_F1 && c.mods == KMOD_NONE) hasF1 = true;
+                if (c.key == SDLK_SLASH && c.mods == KMOD_SHIFT) hasShiftSlash = true;
+                if (c.key == SDLK_h && c.mods == KMOD_NONE) hasH = true;
+            }
+
+            const bool looksLikeOldModern = (chords.size() == 3 && hasF1 && hasShiftSlash && hasH);
+            const bool looksLikeOldNethack = (chords.size() == 2 && hasF1 && hasShiftSlash && !hasH);
+
+            if (!hasCmd && (looksLikeOldModern || looksLikeOldNethack)) {
+                if (auto cmdChord = parseChord("cmd+?"); cmdChord.has_value()) {
+                    chords.push_back(*cmdChord);
+                }
+            }
+        }
+
+        binds[*act] = std::move(chords);
     }
 
     // Back-compat: older default settings files wrote `bind_search = c`, which
@@ -458,6 +532,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::TogglePerfOverlay,
             Action::ToggleSoundPreview,
             Action::ToggleThreatPreview,
+            Action::ToggleHearingPreview,
             Action::ToggleViewMode,
             Action::ToggleVoxelSprites,
             Action::ToggleFullscreen,
@@ -492,6 +567,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::TogglePerfOverlay,
         Action::ToggleSoundPreview,
         Action::ToggleThreatPreview,
+        Action::ToggleHearingPreview,
         Action::ToggleViewMode,
         Action::ToggleVoxelSprites,
         Action::ToggleFullscreen,
@@ -634,10 +710,11 @@ bool KeyBinds::isModifierKey(SDL_Keycode key) {
 }
 
 std::string KeyBinds::chordToString(SDL_Keycode key, Uint16 mods) {
-    // NOTE: We intentionally ignore GUI/CAPS/NUM modifiers to match the bind parser.
+    // NOTE: We intentionally ignore CAPS/NUM (and other non-bindable) modifiers.
     const Uint16 nm = normalizeMods(mods);
 
     std::string out;
+    if (nm & KMOD_GUI) out += "cmd+";
     if (nm & KMOD_CTRL) out += "ctrl+";
     if (nm & KMOD_ALT) out += "alt+";
     if (nm & KMOD_SHIFT) out += "shift+";

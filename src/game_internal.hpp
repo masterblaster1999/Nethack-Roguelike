@@ -876,6 +876,7 @@ static std::vector<std::string> extendedCommandList() {
         "preset",
         "sprites3d",
         "isoraytrace",
+        "isoterrainvox",
         "isocutaway",
         "binds",
         "bind",
@@ -1062,6 +1063,10 @@ static std::string normalizeExtendedCommandAlias(const std::string& in) {
         {"iso_cutaway", "isocutaway"},
         {"cutaway", "isocutaway"},
 
+        {"isoblocks", "isoterrainvox"},
+        {"iso_blocks", "isoterrainvox"},
+        {"iso_terrain_voxels", "isoterrainvox"},
+
         // Quality-of-life shortcuts.
         {"goto", "travel"},
         {"go", "travel"},
@@ -1116,7 +1121,7 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
         // Look: ':' is usually shift+semicolon on most layouts.
         ok &= updateIniKey(settingsPath, "bind_look", "shift+semicolon, v");
         // Help: remove 'h' to avoid conflicting with vi movement.
-        ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash");
+        ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash, cmd+?");
         // Sneak: avoid 'n' (movement down-right in vi keys).
         ok &= updateIniKey(settingsPath, "bind_sneak", "shift+n");
         ok &= updateIniKey(settingsPath, "bind_evade", "ctrl+e");
@@ -1139,7 +1144,7 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
         ok &= updateIniKey(settingsPath, "bind_kick", "b");
         ok &= updateIniKey(settingsPath, "bind_dig", "shift+d");
         ok &= updateIniKey(settingsPath, "bind_look", "l, v");
-        ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash, h");
+        ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash, h, cmd+?");
         ok &= updateIniKey(settingsPath, "bind_sneak", "n");
         ok &= updateIniKey(settingsPath, "bind_evade", "ctrl+e");
     }
@@ -2983,6 +2988,39 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         }
 
         game.pushSystemMessage("USAGE: #isoraytrace on/off/toggle");
+        return;
+    }
+
+
+
+    if (cmd == "isoterrainvox" || cmd == "isoblocks" || cmd == "iso_blocks" || cmd == "iso_terrain_voxels") {
+        if (toks.size() <= 1) {
+            game.pushSystemMessage(std::string("ISO TERRAIN VOXELS: ") + (game.isoTerrainVoxelBlocksEnabled() ? "ON" : "OFF"));
+            game.pushSystemMessage("USAGE: #isoterrainvox on/off/toggle");
+            return;
+        }
+
+        const std::string v = toLower(toks[1]);
+        if (v == "on" || v == "true" || v == "1") {
+            game.setIsoTerrainVoxelBlocksEnabled(true);
+            game.markSettingsDirty();
+            game.pushSystemMessage("ISO TERRAIN VOXELS: ON");
+            return;
+        }
+        if (v == "off" || v == "false" || v == "0") {
+            game.setIsoTerrainVoxelBlocksEnabled(false);
+            game.markSettingsDirty();
+            game.pushSystemMessage("ISO TERRAIN VOXELS: OFF");
+            return;
+        }
+        if (v == "toggle" || v == "t") {
+            game.setIsoTerrainVoxelBlocksEnabled(!game.isoTerrainVoxelBlocksEnabled());
+            game.markSettingsDirty();
+            game.pushSystemMessage(std::string("ISO TERRAIN VOXELS: ") + (game.isoTerrainVoxelBlocksEnabled() ? "ON" : "OFF"));
+            return;
+        }
+
+        game.pushSystemMessage("USAGE: #isoterrainvox on/off/toggle");
         return;
     }
 

@@ -18,7 +18,9 @@
 // Each key can be:
 //   - a single character: w, ., ?
 //   - a named key: up, down, left, right, tab, enter, escape, pageup, f1, kp_8, ...
-// Modifiers can be prefixed with: shift+, ctrl+, alt+  (example: shift+comma)
+// Modifiers can be prefixed with: shift+, ctrl+, alt+, cmd+  (example: shift+comma)
+
+// On macOS, cmd+ corresponds to the Command key. On Windows/Linux, it maps to the GUI/Windows/Super key.
 //
 // Notes:
 //   * We treat bindings as (keycode + required modifiers). Extra modifiers do NOT match.
@@ -26,7 +28,7 @@
 
 struct KeyChord {
     SDL_Keycode key = SDLK_UNKNOWN;
-    Uint16 mods = KMOD_NONE; // only SHIFT/CTRL/ALT bits are used
+    Uint16 mods = KMOD_NONE; // only SHIFT/CTRL/ALT/GUI bits are used
 };
 
 struct ActionHash {

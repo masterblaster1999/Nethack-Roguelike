@@ -314,6 +314,378 @@ inline float fbm2D01(float x, float y, uint32_t seed) {
 }
 
 
+// --- Looped noise helpers (seamless 4-frame cycle) ---------------------
+// Many of our procedural tiles/sprites are authored as a tiny flipbook (FRAMES=4).
+// To avoid harsh per-frame flicker, we animate by *moving the sampling point* around a
+// circle in noise-space. Because cos/sin return to the same point every 2π, the
+// animation loops seamlessly.
+static constexpr float TAU = 6.28318530718f;
+
+inline float phase01_4(int frame) {
+    return static_cast<float>(frame & 3) * 0.25f; // 0, 0.25, 0.5, 0.75
+}
+
+inline float phaseAngle_4(int frame) {
+    return phase01_4(frame) * TAU;
+}
+
+inline float loopValueNoise2D01(float x, float y, uint32_t seed, float period, int frame, float radius) {
+    const float ang = phaseAngle_4(frame);
+    const float ox = std::cos(ang) * radius;
+    const float oy = std::sin(ang) * radius;
+    return valueNoise2D01(x + ox, y + oy, seed, period);
+}
+
+inline float loopFbm2D01(float x, float y, uint32_t seed, int frame, float radius) {
+    const float ang = phaseAngle_4(frame);
+    const float ox = std::cos(ang) * radius;
+    const float oy = std::sin(ang) * radius;
+    return fbm2D01(x + ox, y + oy, seed);
+}
+
+// --- Curl-noise / flow-warp helpers ----------------------------------------
+// For smoke/fire-like visuals, simple domain-warped fBm already looks good.
+// But we can push it further by warping sample points along a divergence-free
+// velocity field derived from noise ("curl noise"). This creates a more
+// convincing "advected" look without running a full fluid solver.
+//
+// These helpers are intentionally lightweight (tiny grids, few steps) because
+// spritegen runs for many variants at startup.
+
+struct V2 {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+inline V2 v2Add(V2 a, V2 b) { return { a.x + b.x, a.y + b.y }; }
+inline V2 v2Mul(V2 a, float s) { return { a.x * s, a.y * s }; }
+
+inline V2 v2Norm(V2 v) {
+    const float l2 = v.x * v.x + v.y * v.y;
+    if (l2 < 1e-8f) return {0.0f, 0.0f};
+    const float inv = 1.0f / std::sqrt(l2);
+    return { v.x * inv, v.y * inv };
+}
+
+// Curl of a scalar field n(x,y): v = (dn/dy, -dn/dx)
+inline V2 curlLoopFbm2D(float x, float y, uint32_t seed, int frame, float loopRadius, float eps) {
+    eps = std::max(0.05f, eps);
+    const float nL = loopFbm2D01(x - eps, y,       seed, frame, loopRadius);
+    const float nR = loopFbm2D01(x + eps, y,       seed, frame, loopRadius);
+    const float nD = loopFbm2D01(x,       y - eps, seed, frame, loopRadius);
+    const float nU = loopFbm2D01(x,       y + eps, seed, frame, loopRadius);
+
+    const float dndx = (nR - nL) / (2.0f * eps);
+    const float dndy = (nU - nD) / (2.0f * eps);
+    return { dndy, -dndx };
+}
+
+// Multi-scale curl field: combine two curls at different frequencies for richer motion.
+inline V2 flowVelocity(V2 p, uint32_t seed, int frame) {
+    const V2 c1 = curlLoopFbm2D(p.x * 0.85f,           p.y * 0.85f,
+                               seed ^ 0xA11CE5u, frame, /*loopRadius=*/2.6f, /*eps=*/0.40f);
+    const V2 c2 = curlLoopFbm2D(p.x * 1.65f + 11.7f,   p.y * 1.65f - 9.2f,
+                               seed ^ 0xC0FFEE11u, frame, /*loopRadius=*/1.9f, /*eps=*/0.28f);
+
+    V2 v = v2Add(v2Mul(c1, 0.72f), v2Mul(c2, 0.28f));
+
+    // Make speed stable across the tiny 16x16 domain: normalize, then allow
+    // a small, looped pulse so different seeds don't look identical.
+    v = v2Norm(v);
+    const float ang = phaseAngle_4(frame);
+    const float pulse = 0.85f + 0.15f * std::sin(ang * 2.0f + hash01_16(seed) * TAU);
+    return v2Mul(v, pulse);
+}
+
+// In-place flow-warp using a few short Euler steps.
+inline void flowWarp2D(float& x, float& y, uint32_t seed, int frame, float strength, int steps) {
+    steps = std::clamp(steps, 1, 6);
+    const float step = strength / static_cast<float>(steps);
+
+    V2 p{ x, y };
+    for (int i = 0; i < steps; ++i) {
+        const uint32_t salt = static_cast<uint32_t>(i * 0x9E3779B9u);
+        const V2 v = flowVelocity(p, seed ^ salt, frame);
+        p.x += v.x * step;
+        p.y += v.y * step;
+    }
+
+    x = p.x;
+    y = p.y;
+}
+
+// --- Reaction-diffusion helpers (Gray-Scott) ------------------------------
+// A tiny Gray-Scott reaction-diffusion simulation gives us organic, rune-like
+// "worm" patterns from a deterministic seed. We use this as a *base* field for
+// arcane UI / shrine visuals, and animate it by smoothly drifting the sampling
+// coordinates around a circle (seamless 4-frame loop) — similar to our looped
+// noise trick, but with a very different underlying texture.
+//
+// NOTE: This is intentionally lightweight (16x16 grid, modest iteration count).
+
+struct RDField {
+    static constexpr int W = 16;
+    static constexpr int H = 16;
+    std::vector<float> U;
+    std::vector<float> V;
+    RDField() : U(static_cast<size_t>(W * H), 1.0f),
+                V(static_cast<size_t>(W * H), 0.0f) {}
+};
+
+inline int rdWrap(int v, int m) {
+    v %= m;
+    if (v < 0) v += m;
+    return v;
+}
+
+inline size_t rdIndex(int x, int y) {
+    x = rdWrap(x, RDField::W);
+    y = rdWrap(y, RDField::H);
+    return static_cast<size_t>(y * RDField::W + x);
+}
+
+inline float rdClamp01(float v) {
+    return std::clamp(v, 0.0f, 1.0f);
+}
+
+inline float smoothstepEdge(float a, float b, float x) {
+    if (a == b) return (x < a) ? 0.0f : 1.0f;
+    float t = (x - a) / (b - a);
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+inline void rdLaplacian(const RDField& f, int x, int y, float& lapU, float& lapV) {
+    const size_t c = rdIndex(x, y);
+
+    auto U = [&](int ix, int iy) -> float { return f.U[rdIndex(ix, iy)]; };
+    auto V = [&](int ix, int iy) -> float { return f.V[rdIndex(ix, iy)]; };
+
+    const float uC = f.U[c];
+    const float vC = f.V[c];
+
+    // Classic 3x3 kernel used in many Gray-Scott examples:
+    // center -1, cardinals 0.2, diagonals 0.05
+    lapU = -uC;
+    lapV = -vC;
+
+    lapU += 0.20f * (U(x - 1, y) + U(x + 1, y) + U(x, y - 1) + U(x, y + 1));
+    lapV += 0.20f * (V(x - 1, y) + V(x + 1, y) + V(x, y - 1) + V(x, y + 1));
+
+    lapU += 0.05f * (U(x - 1, y - 1) + U(x + 1, y - 1) + U(x - 1, y + 1) + U(x + 1, y + 1));
+    lapV += 0.05f * (V(x - 1, y - 1) + V(x + 1, y - 1) + V(x - 1, y + 1) + V(x + 1, y + 1));
+}
+
+// Deterministic Gray-Scott field seeded with a handful of "ink drops".
+inline RDField makeRDSigilField(uint32_t seed, int iters) {
+    iters = std::clamp(iters, 8, 260);
+
+    RDField f;
+    RDField tmp;
+
+    RNG rng(hash32(seed ^ 0xA7C4A11u));
+
+    // Seed a few V "droplets".
+    const int drops = 5 + rng.range(0, 4);
+    for (int i = 0; i < drops; ++i) {
+        const int cx = rng.range(2, RDField::W - 3);
+        const int cy = rng.range(2, RDField::H - 3);
+        const int r  = rng.range(1, 2);
+        for (int oy = -r; oy <= r; ++oy) {
+            for (int ox = -r; ox <= r; ++ox) {
+                if (ox * ox + oy * oy > r * r) continue;
+                const size_t id = rdIndex(cx + ox, cy + oy);
+                f.U[id] = 0.0f;
+                f.V[id] = 1.0f;
+            }
+        }
+    }
+
+    // Slight parameter variation per seed (keeps different seeds from looking identical).
+    const float Du = 0.16f;
+    const float Dv = 0.08f;
+
+    float feed = 0.034f + (hash01_16(hash32(seed ^ 0xF33D1234u)) - 0.5f) * 0.010f;
+    float kill = 0.062f + (hash01_16(hash32(seed ^ 0xBEEFC0DEu)) - 0.5f) * 0.010f;
+    feed = std::clamp(feed, 0.020f, 0.060f);
+    kill = std::clamp(kill, 0.045f, 0.075f);
+
+    for (int iter = 0; iter < iters; ++iter) {
+        for (int y = 0; y < RDField::H; ++y) {
+            for (int x = 0; x < RDField::W; ++x) {
+                const size_t id = static_cast<size_t>(y * RDField::W + x);
+
+                const float u = f.U[id];
+                const float v = f.V[id];
+
+                float lapU = 0.0f, lapV = 0.0f;
+                rdLaplacian(f, x, y, lapU, lapV);
+
+                const float uvv = u * v * v;
+                const float du = Du * lapU - uvv + feed * (1.0f - u);
+                const float dv = Dv * lapV + uvv - (kill + feed) * v;
+
+                // dt ~ 1 is fine for this tiny grid; clamp for stability.
+                tmp.U[id] = rdClamp01(u + du);
+                tmp.V[id] = rdClamp01(v + dv);
+            }
+        }
+        f.U.swap(tmp.U);
+        f.V.swap(tmp.V);
+    }
+
+    return f;
+}
+
+inline float rdSampleV(const RDField& f, float x, float y) {
+    // Wrap coordinates into [0,W/H).
+    const float fx = x - std::floor(x / static_cast<float>(RDField::W)) * static_cast<float>(RDField::W);
+    const float fy = y - std::floor(y / static_cast<float>(RDField::H)) * static_cast<float>(RDField::H);
+
+    const int x0 = static_cast<int>(std::floor(fx));
+    const int y0 = static_cast<int>(std::floor(fy));
+    const int x1 = x0 + 1;
+    const int y1 = y0 + 1;
+
+    const float tx = fx - static_cast<float>(x0);
+    const float ty = fy - static_cast<float>(y0);
+
+    const float v00 = f.V[rdIndex(x0, y0)];
+    const float v10 = f.V[rdIndex(x1, y0)];
+    const float v01 = f.V[rdIndex(x0, y1)];
+    const float v11 = f.V[rdIndex(x1, y1)];
+
+    const float a = lerpf(v00, v10, tx);
+    const float b = lerpf(v01, v11, tx);
+    return lerpf(a, b, ty);
+}
+
+inline float rdGradMag(const RDField& f, float x, float y) {
+    const float vL = rdSampleV(f, x - 1.0f, y);
+    const float vR = rdSampleV(f, x + 1.0f, y);
+    const float vD = rdSampleV(f, x, y - 1.0f);
+    const float vU = rdSampleV(f, x, y + 1.0f);
+    return std::abs(vR - vL) + std::abs(vU - vD);
+}
+
+// Simple row-wise domain warp (keeps pixel art crisp). Intended for ethereal sprites
+// like ghosts and subtle HUD shimmer.
+SpritePixels warpSpriteRowWave(const SpritePixels& src, uint32_t seed, int frame, float ampPx, float freq) {
+    SpritePixels out = makeSprite(src.w, src.h, {0, 0, 0, 0});
+
+    const float ang = phaseAngle_4(frame);
+    const float base = static_cast<float>(seed & 0xFFu) * 0.017f;
+
+    for (int y = 0; y < src.h; ++y) {
+        const float yy = static_cast<float>(y);
+
+        // Mix a sinusoid and a tiny looped noise for a less "robotic" wobble.
+        float s = std::sin(ang + base + yy * freq);
+        float n = loopValueNoise2D01(yy * 0.85f + 3.7f, 9.1f, seed ^ 0x51A11u, 6.0f, frame, 2.2f) - 0.5f;
+
+        int shift = static_cast<int>(std::lround(s * ampPx + n * 0.75f));
+        shift = std::clamp(shift, -2, 2);
+
+        for (int x = 0; x < src.w; ++x) {
+            const int sx = x - shift;
+            if (sx < 0 || sx >= src.w) continue;
+            out.at(x, y) = src.at(sx, y);
+        }
+    }
+
+    return out;
+}
+
+// Nearest-neighbor sprite scaling around an anchor point (inverse mapping).
+// This is used for pixel-art-friendly squash & stretch.
+SpritePixels warpSpriteScaleNearest(const SpritePixels& src, float sx, float sy, float anchorX, float anchorY) {
+    sx = std::clamp(sx, 0.40f, 2.50f);
+    sy = std::clamp(sy, 0.40f, 2.50f);
+
+    // Early-out for identity.
+    if (std::abs(sx - 1.0f) < 0.0005f && std::abs(sy - 1.0f) < 0.0005f) return src;
+
+    SpritePixels out = makeSprite(src.w, src.h, {0, 0, 0, 0});
+
+    for (int y = 0; y < out.h; ++y) {
+        for (int x = 0; x < out.w; ++x) {
+            const float fx = (static_cast<float>(x) - anchorX) / sx + anchorX;
+            const float fy = (static_cast<float>(y) - anchorY) / sy + anchorY;
+
+            const int sx0 = static_cast<int>(std::lround(fx));
+            const int sy0 = static_cast<int>(std::lround(fy));
+            if (sx0 < 0 || sy0 < 0 || sx0 >= src.w || sy0 >= src.h) continue;
+
+            out.at(x, y) = src.at(sx0, sy0);
+        }
+    }
+
+    return out;
+}
+
+// Column-wise domain warp (keeps pixel art crisp). Useful for slithering / "waving" motion.
+SpritePixels warpSpriteColumnWave(const SpritePixels& src, uint32_t seed, int frame, float ampPx, float freq) {
+    SpritePixels out = makeSprite(src.w, src.h, {0, 0, 0, 0});
+
+    const float ang = phaseAngle_4(frame);
+    const float base = static_cast<float>((seed >> 8) & 0xFFu) * 0.017f;
+
+    for (int x = 0; x < src.w; ++x) {
+        const float xx = static_cast<float>(x);
+
+        // Mix a sinusoid and a tiny looped noise for a more organic slither.
+        float s = std::sin(ang + base + xx * freq);
+        float n = loopValueNoise2D01(xx * 0.85f + 2.7f, 7.9f, seed ^ 0xA11CE5u, 6.0f, frame, 2.2f) - 0.5f;
+
+        int shift = static_cast<int>(std::lround(s * ampPx + n * 0.75f));
+        shift = std::clamp(shift, -2, 2);
+
+        for (int y = 0; y < src.h; ++y) {
+            const int sy = y - shift;
+            if (sy < 0 || sy >= src.h) continue;
+            out.at(x, y) = src.at(x, sy);
+        }
+    }
+
+    return out;
+}
+
+// Side-only (wing/leg) horizontal wave: keeps the center mass stable and pushes
+// pixels near the left/right edges in/out. Great for bat wing flaps and spider leg scuttles.
+SpritePixels warpSpriteSideWave(const SpritePixels& src, uint32_t seed, int frame, float ampPx, float freq, int margin) {
+    SpritePixels out = makeSprite(src.w, src.h, {0, 0, 0, 0});
+
+    const float ang = phaseAngle_4(frame);
+    const float base = static_cast<float>((seed >> 16) & 0xFFu) * 0.019f;
+
+    const int cx = src.w / 2;
+    margin = std::clamp(margin, 0, std::max(0, cx - 1));
+
+    for (int y = 0; y < src.h; ++y) {
+        const float yy = static_cast<float>(y);
+
+        // Cosine gives us an "open/mid/closed/mid" cycle across 4 frames.
+        float c = std::cos(ang + base + yy * freq);
+        float n = loopValueNoise2D01(yy * 0.70f + 3.1f, 5.3f, seed ^ 0xF1A9u, 6.0f, frame, 2.0f) - 0.5f;
+
+        int sh = static_cast<int>(std::lround(c * ampPx + n * 0.55f));
+        sh = std::clamp(sh, -2, 2);
+
+        for (int x = 0; x < src.w; ++x) {
+            int sx = x;
+            if (x < cx - margin) sx = x + sh;
+            else if (x > cx + margin) sx = x - sh;
+
+            if (sx < 0 || sx >= src.w) continue;
+            out.at(x, y) = src.at(sx, y);
+        }
+    }
+
+    return out;
+}
+
+
+
 Color averageOpaqueColor(const SpritePixels& s) {
     uint64_t sr = 0, sg = 0, sb = 0, sa = 0;
     for (const Color& c : s.px) {
@@ -494,62 +866,140 @@ void drawPotionAppearance(SpritePixels& s, uint32_t seed, RNG& rng, uint8_t a, i
     rect(s, 7, 5, 2, 7, glass);
     rect(s, 6, 3, 4, 2, cork);
 
-    // Liquid (slight gradient)
-    rect(s, 7, 7, 2, 5, st.fluid);
-    setPx(s, 7, 7, st.fluidHi);
-    setPx(s, 8, 7, st.fluidHi);
+    // -----------------------------------------------------------------
+    // Animated liquid (4-frame loop): sloshy surface + internal swirl.
+    //
+    // We keep everything deterministic from seed, and drive motion with the
+    // same 4-frame looping phase helpers used elsewhere in spritegen.
+    // -----------------------------------------------------------------
+    const float ang = phaseAngle_4(frame);
 
-    // Extra vibe: metallic shimmer / smoke / murk.
-    const uint32_t h = hash32(seed ^ (0xC0FFEEu + static_cast<uint32_t>(frame) * 1337u));
+    auto quant3 = [](float v, float t) -> int {
+        if (v > t) return 1;
+        if (v < -t) return -1;
+        return 0;
+    };
 
-    if (st.metallic) {
-        // Dithered sparkle inside the liquid.
-        for (int yy = 7; yy <= 11; ++yy) {
-            for (int xx = 7; xx <= 8; ++xx) {
-                const uint32_t v = hash32(h ^ static_cast<uint32_t>(xx * 31 + yy * 97));
-                if ((v & 7u) == 0u) setPx(s, xx, yy, {255, 255, 255, 210});
-                else if ((v & 7u) == 1u) setPx(s, xx, yy, mul(st.fluid, 0.85f));
+    // Per-potion slosh parameters (stable across frames).
+    const float p0 = hash01_16(seed ^ 0xA11CE5u) * TAU;
+    const float p1 = hash01_16(seed ^ 0xC0FFEEu) * TAU;
+
+    // Small, quantized slosh so it reads as liquid movement even at 16x16.
+    const int slosh = quant3(std::sin(ang + p0), 0.28f);
+    const int tilt  = quant3(std::cos(ang + p1), 0.35f);
+
+    const int fx0 = 7;
+    const int fx1 = 8;
+    const int baseTop = 7;
+    const int fyBot = 11;
+
+    int topY[2] = { baseTop, baseTop };
+
+    for (int xx = fx0; xx <= fx1; ++xx) {
+        const int side = (xx == fx0) ? -1 : 1;
+        int top = baseTop + slosh + side * tilt;
+        top = std::clamp(top, 6, 9);
+        topY[xx - fx0] = top;
+
+        for (int yy = top; yy <= fyBot; ++yy) {
+            // Brighter near the surface.
+            const float t01 = (fyBot > top) ? (static_cast<float>(yy - top) / static_cast<float>(fyBot - top)) : 0.0f;
+            const float surf = 1.0f - t01;
+
+            // Internal swirl using looped fBm (so the flipbook wraps cleanly).
+            float n = loopFbm2D01(xx * 0.90f + 2.1f,
+                                 yy * 0.90f - 3.7f,
+                                 seed ^ 0xB00B1Eu,
+                                 frame,
+                                 2.0f);
+            n = (n - 0.5f); // [-0.5, 0.5]
+
+            float shade = 0.70f + 0.26f * surf + 0.18f * n;
+            Color c = rampShade(st.fluid, shade, xx, yy);
+
+            // Style-specific accents.
+            if (st.metallic) {
+                // Flakes / shimmer that move coherently (not per-frame random).
+                const float m = loopValueNoise2D01(xx * 2.20f + 7.3f,
+                                                  yy * 2.20f - 1.9f,
+                                                  seed ^ 0x51A11u,
+                                                  2.5f,
+                                                  frame,
+                                                  1.7f);
+                if (m > 0.84f) c = {255, 255, 255, 210};
+                else if (m < 0.18f) c = mul(c, 0.85f);
             }
+
+            if (st.murky) {
+                // Dark specks that drift subtly.
+                const float m = loopValueNoise2D01(xx * 1.80f - 4.1f,
+                                                  yy * 1.80f + 3.9f,
+                                                  seed ^ 0xD17F00Du,
+                                                  3.0f,
+                                                  frame,
+                                                  1.9f);
+                if (m < 0.20f) c = mul(c, 0.62f);
+            }
+
+            if (st.milky) {
+                // Soft, creamy swirl highlights.
+                const float m = loopValueNoise2D01(xx * 1.60f + 1.1f,
+                                                  yy * 1.60f - 9.3f,
+                                                  seed ^ 0x0111C0DEu,
+                                                  3.5f,
+                                                  frame,
+                                                  2.0f);
+                if (m > 0.72f) c = add(c, 20, 18, 12);
+            }
+
+            setPx(s, xx, yy, c);
         }
     }
 
-    if (st.murky) {
-        // Dark specks.
-        for (int i = 0; i < 3; ++i) {
-            const int xx = 7 + static_cast<int>((h >> (i * 3)) & 1u);
-            const int yy = 8 + static_cast<int>((h >> (i * 4)) & 3u);
-            setPx(s, xx, yy, mul(st.fluid, 0.60f));
+    // Surface highlight line (helps sell the "sloshing" motion).
+    for (int xx = fx0; xx <= fx1; ++xx) {
+        const int top = topY[xx - fx0];
+        setPx(s, xx, top, st.fluidHi);
+    }
+
+    // Tiny bubble: coherent motion driven by looped noise.
+    {
+        const float b = loopValueNoise2D01(9.1f, 2.3f, seed ^ 0xB0BB1Eu, 3.0f, frame, 2.1f);
+        if (b > 0.55f) {
+            const int bx = (b > 0.80f) ? 7 : 8;
+            int by = 8 + static_cast<int>(std::lround((1.0f - b) * 3.0f));
+            by = std::clamp(by, topY[bx - fx0] + 1, fyBot);
+            setPx(s, bx, by, {255, 255, 255, 90});
         }
     }
 
     if (st.smoky) {
-        // A little smoke curl above the bottle.
-        Color smoke = {190, 190, 205, static_cast<uint8_t>(120 + (frame % 2) * 30)};
-        const int off = (frame % 2);
-        setPx(s, 9 + off, 2, smoke);
-        setPx(s, 10 + off, 3, smoke);
-        setPx(s, 11 + off, 4, {190, 190, 205, 90});
+        // A small smoke curl above the bottle. Use looped noise so it's not
+        // a harsh 2-frame blink.
+        for (int yy = 1; yy <= 4; ++yy) {
+            for (int xx = 8; xx <= 13; ++xx) {
+                const float n = loopFbm2D01(xx * 1.15f, yy * 1.15f,
+                                           seed ^ 0x5E10E12u,
+                                           frame,
+                                           2.2f);
+                if (n > 0.74f) {
+                    const int a0 = 70 + static_cast<int>(std::lround((n - 0.74f) * 420.0f));
+                    int a1 = std::clamp(a0 - (yy * 10), 45, 150);
+                    setPx(s, xx, yy, {190, 190, 205, static_cast<uint8_t>(a1)});
+                }
+            }
+        }
     }
 
-    if (st.milky) {
-        // Soft swirl highlight.
-        setPx(s, 7, 9, {255,255,255,120});
-        setPx(s, 8, 10, {255,255,255,90});
-    }
-
-    // Glass highlight
+    // Glass highlight (subtle).
     if (frame % 2 == 1) {
-        setPx(s, 9, 5, {255,255,255,130});
-        setPx(s, 9, 7, {255,255,255,90});
-    }
-
-    // Tiny bubble (stable-ish, but flickers with frame)
-    if ((h & 3u) == 0u) {
-        setPx(s, 8, 9 + (frame % 2), {255,255,255,90});
+        setPx(s, 9, 5, {255, 255, 255, 130});
+        setPx(s, 9, 7, {255, 255, 255, 90});
     }
 
     (void)rng; // reserved for future shape variation
 }
+
 
 // A tiny 3x5 rune alphabet (15-bit masks).
 // Bit i corresponds to x + 3*y (x in [0,2], y in [0,4]).
@@ -591,6 +1041,15 @@ void drawScrollAppearance(SpritePixels& s, uint32_t seed, RNG& rng, uint8_t a, i
     rect(s, 4, 6, 1, 5, mul(paper, 0.75f));
     rect(s, 11, 6, 1, 5, mul(paper, 0.75f));
 
+    // A tiny "flutter" cue: alternate shading of the curls (keeps outline stable).
+    if ((frame & 3) == 1) {
+        rect(s, 4, 6, 1, 5, mul(paper, 0.68f));
+        rect(s, 11, 6, 1, 5, mul(paper, 0.80f));
+    } else if ((frame & 3) == 3) {
+        rect(s, 4, 6, 1, 5, mul(paper, 0.80f));
+        rect(s, 11, 6, 1, 5, mul(paper, 0.68f));
+    }
+
     // Wax seal color varies with appearance id.
     static const Color waxColors[] = {
         {170, 40, 50, 255}, {70, 90, 190, 255}, {60, 160, 100, 255}, {150, 90, 170, 255},
@@ -611,19 +1070,58 @@ void drawScrollAppearance(SpritePixels& s, uint32_t seed, RNG& rng, uint8_t a, i
             const uint16_t g = RUNE_GLYPHS[r.nextU32() % (sizeof(RUNE_GLYPHS)/sizeof(RUNE_GLYPHS[0]))];
             const int x = gx0 + col * 4;
             const int y = gy0 + row * 3;
-            // draw slightly squashed (top 3 rows of 5) to fit.
             drawRuneGlyph(s, x, y, g, ink);
         }
     }
 
-    // A little magical glint
-    if (frame % 2 == 1) {
-        const int fx = 5 + static_cast<int>((hash32(seed ^ 0x51A11u) % 6u));
-        setPx(s, fx, 7, {255,255,255,120});
+    // -----------------------------------------------------------------
+    // Animated ink shimmer (4-frame loop).
+    //
+    // Instead of per-frame random sparkles, we modulate the ink with looped
+    // noise so the label reads as "magically alive" without harsh blinking.
+    // -----------------------------------------------------------------
+    const uint32_t shSeed = seed ^ (0x1A55B11Eu + static_cast<uint32_t>(a) * 0x9E3779B9u);
+
+    for (int yy = 6; yy <= 12; ++yy) {
+        for (int xx = 5; xx <= 11; ++xx) {
+            Color c = getPx(s, xx, yy);
+            if (c.a == 0) continue;
+
+            // Only touch the rune ink pixels.
+            if (c.r == ink.r && c.g == ink.g && c.b == ink.b) {
+                const float n = loopValueNoise2D01(xx * 1.35f, yy * 1.35f,
+                                                  shSeed,
+                                                  3.5f,
+                                                  frame,
+                                                  1.8f);
+                if (n > 0.80f) {
+                    c = add(c, 55, 45, 35);
+                } else if (n < 0.22f) {
+                    c = mul(c, 0.78f);
+                }
+                setPx(s, xx, yy, c);
+            }
+        }
+    }
+
+    // A small traveling paper glint.
+    {
+        const float g = loopValueNoise2D01(0.9f, 3.7f, seed ^ 0x51A11u, 5.0f, frame, 2.0f);
+        const int fx = 5 + std::clamp(static_cast<int>(std::lround(g * 5.0f)), 0, 5);
+        setPx(s, fx, 7, {255,255,255,110});
+        if ((frame & 3) == 1) setPx(s, fx + 1, 8, {255,255,255,70});
+    }
+
+    // A couple tiny magic dust pixels around the scroll (subtle).
+    if ((frame & 3) == 1) {
+        setPx(s, 12, 6, {255,255,255,70});
+    } else if ((frame & 3) == 3) {
+        setPx(s, 3, 10, {255,255,255,60});
     }
 
     (void)rng;
 }
+
 
 Color ringMaterial(uint8_t a) {
     // Mapping matches Game's RING_APPEARANCES (16 entries).
@@ -662,22 +1160,38 @@ void drawRingAppearance(SpritePixels& s, uint32_t seed, RNG& rng, uint8_t a, int
     const bool gemLike = (a % 16u) >= 8u;
     if (gemLike) {
         Color gem = base;
-        // Opal: iridescent shimmer.
+
+        // Opal: 4-step iridescent cycle.
         if ((a % 16u) == 8u) {
-            gem = (frame % 2 == 0) ? Color{200, 255, 240, 235} : Color{255, 210, 255, 235};
+            static const Color OPAL[4] = {
+                {200, 255, 240, 235},
+                {255, 210, 255, 235},
+                {255, 245, 200, 235},
+                {210, 220, 255, 235},
+            };
+            gem = OPAL[static_cast<size_t>(frame & 3)];
         }
+
         circle(s, 8, 5, 2, gem);
         circle(s, 8, 5, 1, mul(gem, 0.85f));
+
+        // Gem glint orbits around the stone (reads as rotation).
+        static const int gx[4] = { 9, 8, 7, 8 };
+        static const int gy[4] = { 5, 4, 5, 6 };
+        const int gi = frame & 3;
+        setPx(s, gx[gi], gy[gi], {255,255,255,140});
     }
 
-    // Highlights
-    if (frame % 2 == 1) {
-        setPx(s, 9, 7, {255,255,255,110});
-        setPx(s, 7, 8, {255,255,255,90});
-    }
+    // Specular glint orbit around the band.
+    static const int hx[4] = { 9, 10, 7, 6 };
+    static const int hy[4] = { 7,  9, 11, 9 };
+    const int i = frame & 3;
+    setPx(s, hx[i], hy[i], {255,255,255,110});
+    setPx(s, hx[(i + 1) & 3], hy[(i + 1) & 3], {255,255,255,70});
 
     (void)seed;
 }
+
 
 Color wandMaterial(uint8_t a) {
     // Mapping matches Game's WAND_APPEARANCES (16 entries).
@@ -717,10 +1231,21 @@ void drawWandAppearance(SpritePixels& s, uint32_t seed, RNG& rng, uint8_t a, int
     // Grip / wrap
     rect(s, 5, 11, 2, 2, mul(mat, 0.70f));
 
-    // Tip ornament
-    circle(s, 12, 4, 1, tip);
-    if (frame % 2 == 1) {
-        setPx(s, 13, 4, {255,255,255,150});
+    // Tip ornament (pulses on the 4-frame loop).
+    const float ang = phaseAngle_4(frame);
+    const float pulse01 = 0.5f + 0.5f * std::cos(ang); // 1,0.5,0,0.5
+    const float f = 0.78f + 0.22f * pulse01;
+    circle(s, 12, 4, 1, mul(tip, f));
+
+    // Orbiting sparkle around the tip for magical materials.
+    if ((a % 16u) >= 12u) {
+        static const int ox[4] = { 1, 0, -1, 0 };
+        static const int oy[4] = { 0, -1, 0, 1 };
+        const int i = frame & 3;
+        setPx(s, 12 + ox[i], 4 + oy[i], {255,255,255,110});
+    } else if ((frame & 3) == 1) {
+        // Non-magical wands still get a tiny highlight.
+        setPx(s, 13, 4, {255,255,255,120});
     }
 
     // Tiny rune notches along the shaft (deterministic).
@@ -732,13 +1257,33 @@ void drawWandAppearance(SpritePixels& s, uint32_t seed, RNG& rng, uint8_t a, int
         if ((h >> i) & 1u) setPx(s, x, y, {30, 25, 20, 200});
     }
 
+    // Energy crawl: highlight one notch per frame (0,1,2,1) so it loops smoothly.
+    {
+        const int seq[4] = { 0, 1, 2, 1 };
+        const int i = seq[frame & 3];
+        const int t = 2 + i * 3;
+        const int x = 4 + t;
+        const int y = 12 - t;
+        Color g = add(tip, -40, -40, -40);
+        g.a = 160;
+        setPx(s, x, y, g);
+        // Small trailing sparkle.
+        if ((frame & 3) == 1 || (frame & 3) == 3) {
+            setPx(s, x - 1, y + 1, {255,255,255,70});
+        }
+    }
+
     // Subtle sparkle for magical materials.
-    if ((a % 16u) >= 12u && (frame % 2 == 1)) {
-        setPx(s, 10, 6, {255,255,255,110});
+    if ((a % 16u) >= 12u) {
+        const float n = loopValueNoise2D01(10.0f, 6.0f, seed ^ 0x51A11u, 4.0f, frame, 2.0f);
+        if (n > 0.72f) {
+            setPx(s, 10, 6, {255,255,255,90});
+        }
     }
 
     (void)rng;
 }
+
 
 
 float densityFor(EntityKind k) {
@@ -990,8 +1535,14 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, boo
                     shade *= (0.78f + 0.30f * sphere);
 
                     // Seeded micro-noise so large flat areas don't band.
-                    const uint32_t n = hashCombine(seed, static_cast<uint32_t>(xx + yy * 17 + frame * 131));
-                    const float noise = (n & 0xFFu) / 255.0f;
+                    // Use a *looped* noise so the shimmer animates without harsh per-frame flicker
+                    // (wraps cleanly across the 4-frame flipbook).
+                    const float noise = loopValueNoise2D01(static_cast<float>(xx) + 0.37f,
+                                                        static_cast<float>(yy) - 1.91f,
+                                                        seed ^ 0xC0DEC0DEu,
+                                                        5.0f,
+                                                        frame,
+                                                        2.2f);
                     shade *= (0.90f + 0.18f * noise);
 
                     setPx(s, xx, yy, rampShade(base, shade, xx, yy));
@@ -1277,7 +1828,73 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, boo
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Procedural sprite-space idle animation (4-frame loop).
+    //
+    // Renderer-side motion already provides hop/squash on movement; these warps
+    // add *per-sprite* life even while standing still (bat wing flap, slime pulse,
+    // snake slither, spider leg scuttle, etc.).
+    //
+    // NOTE: These are designed to preserve crisp pixel art (nearest-neighbor warps)
+    // and to loop seamlessly across FRAMES=4.
+    // ---------------------------------------------------------------------
+    if (kind == EntityKind::Slime) {
+        // Classic squash & stretch pulse.
+        const float ang = phaseAngle_4(frame);
+        const float osc = std::cos(ang); // 1,0,-1,0
+        const float sx = 1.0f + 0.10f * osc;
+        const float sy = 1.0f - 0.10f * osc;
+        s = warpSpriteScaleNearest(s, sx, sy, /*anchorX=*/7.5f, /*anchorY=*/15.0f);
+    }
+
+    if (kind == EntityKind::Bat) {
+        // Wing flap: push side membranes in/out while keeping the torso stable.
+        s = warpSpriteSideWave(s, seed ^ 0xBA7F00Du, frame, /*ampPx=*/1.25f, /*freq=*/0.22f, /*margin=*/2);
+    }
+
+    if (kind == EntityKind::Snake) {
+        // Slither: vertical wave travels along the body.
+        s = warpSpriteColumnWave(s, seed ^ 0x51E7E1E7u, frame, /*ampPx=*/1.05f, /*freq=*/0.55f);
+    }
+
+    if (kind == EntityKind::Spider) {
+        // Leg scuttle: subtle outward/inward splay.
+        s = warpSpriteSideWave(s, seed ^ 0x5A1D3E11u, frame, /*ampPx=*/1.05f, /*freq=*/0.30f, /*margin=*/3);
+    }
+
+    if (kind == EntityKind::Wolf || kind == EntityKind::Dog) {
+        // Tail wag (slight asymmetry reads as life).
+        const bool tailRight = ((seed >> 6) & 1u) != 0u;
+        const int wag = (frame == 1) ? 1 : (frame == 3) ? -1 : 0;
+        const int up  = (frame == 2) ? -1 : 0;
+
+        Color tail = mul(base, 0.82f);
+        const int dir = tailRight ? 1 : -1;
+
+        const int bx = tailRight ? 11 : 4;
+        const int by = 10;
+
+        auto safeSet = [&](int x, int y, Color c) {
+            if (x < 0 || y < 0 || x >= 16 || y >= 16) return;
+            if (c.a == 0) return;
+            // Prefer empty pixels so we don't erase the body.
+            if (s.at(x, y).a == 0 || s.at(x, y).a < 80) setPx(s, x, y, c);
+        };
+
+        // Base + mid segment.
+        safeSet(bx, by, tail);
+        safeSet(bx + dir, by, tail);
+
+        // Tip wags + lifts slightly.
+        safeSet(bx + dir * (2 + wag), by + up, add(tail, 12, 12, 12));
+    }
+
+
     if (kind == EntityKind::Ghost) {
+        // Ethereal wobble: procedurally warp rows so the sprite "breathes" / drifts
+        // without needing authored hand-drawn frames.
+        s = warpSpriteRowWave(s, seed ^ 0xB00FCA11u, frame, /*ampPx=*/1.05f, /*freq=*/0.38f);
+
         // Make ghosts more ethereal: fade out toward the bottom.
         for (int y = 0; y < 16; ++y) {
             const float t = y / 15.0f;
@@ -2519,17 +3136,36 @@ case ItemKind::Arrow: {
         }
         case ItemKind::TorchLit: {
             Color wood = add({130,90,45,255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
-            Color flame1 = {255,170,60,220};
-            Color flame2 = {255,255,180,200};
+
+            // Flame flicker: drive a tiny circular offset and brightness pulse from the
+            // same 4-frame phase used by the rest of the procedural animation system.
+            const float ang = phaseAngle_4(frame);
+            const int ox = static_cast<int>(std::lround(std::cos(ang) * 0.85f)); // 1,0,-1,0
+            const int oy = static_cast<int>(std::lround(std::sin(ang) * 0.65f)); // 0,1,0,-1
+
+            const float pulse01 = 0.5f + 0.5f * std::cos(ang * 2.0f + hash01_16(hash32(seed ^ 0xF1A9u)) * TAU);
+            const float hot = 0.78f + 0.22f * pulse01;
+
+            Color flameOuter = {255,170,60,220};
+            Color flameMid   = {255,220,120,210};
+            Color flameCore  = {255,255,200,190};
+
             line(s, 8, 5, 8, 14, wood);
             rect(s, 7, 11, 3, 3, mul(wood, 0.85f));
             rect(s, 6, 4, 5, 2, mul(wood, 0.6f));
-            circle(s, 8, 3, 2, flame1);
-            circle(s, 8, 2, 1, flame2);
-            if (frame % 2 == 1) {
-                setPx(s, 9, 2, {255,255,255,180});
-                setPx(s, 7, 3, {255,255,255,100});
-            }
+
+            const int fx = 8 + ox;
+            const int fy = 3 + oy;
+
+            circle(s, fx, fy, 2, mul(flameOuter, hot));
+            circle(s, fx, fy - 1, 2, mul(flameMid, hot));
+            circle(s, fx, fy - 1, 1, mul(flameCore, 0.92f + 0.08f * hot));
+
+            // Tiny embers / smoke specks (coherent, looped noise — no harsh blink).
+            const float n = loopValueNoise2D01(3.7f, 1.2f, seed ^ 0xE11B3A5u, 3.0f, frame, 2.1f);
+            if (n > 0.62f) setPx(s, fx + 1, fy - 2, {255,255,255,120});
+            if (n < 0.28f) setPx(s, fx - 1, fy - 3, {190,190,205,80});
+
             break;
         }
 
@@ -2565,10 +3201,18 @@ case ItemKind::Arrow: {
             // Gem on top of the ring
             circle(s, 8, 5, 2, gem);
             circle(s, 8, 5, 1, mul(gem, 0.85f));
-            if (frame % 2 == 1) {
-                setPx(s, 9, 4, {255,255,255,180});
-                setPx(s, 7, 5, {255,255,255,120});
-            }
+
+            // Orbiting glints (4-frame loop) make rings feel "alive" without flicker.
+            static const int hx[4] = { 9, 10, 7, 6 };
+            static const int hy[4] = { 7,  9, 11, 9 };
+            const int i = frame & 3;
+            setPx(s, hx[i], hy[i], {255,255,255,110});
+            setPx(s, hx[(i + 1) & 3], hy[(i + 1) & 3], {255,255,255,70});
+
+            static const int gx[4] = { 9, 8, 7, 8 };
+            static const int gy[4] = { 5, 4, 5, 6 };
+            setPx(s, gx[i], gy[i], {255,255,255,150});
+
             break;
         }
 
@@ -2720,12 +3364,28 @@ SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int fr
             line(s, 3, 13, 13, 3, c);
             line(s, 12, 2, 14, 4, c);
             line(s, 2, 14, 4, 12, c);
+
+            // Specular glint that travels along the shaft over 4 frames.
+            const int fi = (frame & 3);
+            const int gx = 4 + fi * 3;           // 4,7,10,13
+            const int gy = 12 - fi * 3;          // 12,9,6,3
+            setPx(s, gx, gy, {255,255,255,180});
+            if (fi == 1 || fi == 3) setPx(s, gx - 1, gy + 1, {255,255,255,90});
             break;
         }
         case ProjectileKind::Rock: {
             Color stone = {140,140,150,255};
             circle(s, 8, 8, 3, stone);
-            if (frame % 2 == 1) setPx(s, 9, 7, {255,255,255,120});
+
+            // Tumble highlight rotates around the rock across 4 frames.
+            static const int hx[4] = {9, 8, 7, 8};
+            static const int hy[4] = {7, 6, 7, 8};
+            static const int sx[4] = {7, 6, 7, 8};
+            static const int sy[4] = {9, 8, 9, 10};
+
+            const int fi = (frame & 3);
+            setPx(s, hx[fi], hy[fi], {255,255,255,120});
+            setPx(s, sx[fi], sy[fi], {60,60,70,85});
             break;
         }
         case ProjectileKind::Spark: {
@@ -3248,39 +3908,62 @@ SpritePixels generateChasmTile(uint32_t seed, int frame, int pxSize) {
     Color base = { 10, 14, 28, 255 };
     base = add(base, rng.range(-2, 2), rng.range(-2, 2), rng.range(-2, 2));
 
+    // Seamless 4-frame animation: drift the sampling point in a circle.
+    const float ang = phaseAngle_4(frame);
+    const float driftX = std::cos(ang) * 2.6f;
+    const float driftY = std::sin(ang) * 2.6f;
+
     for (int y = 0; y < 16; ++y) {
         for (int x = 0; x < 16; ++x) {
-            uint32_t n = hashCombine(seed, static_cast<uint32_t>(x + y * 31));
-            float noise = ((n & 0xFFu) / 255.0f);
+            const float fx = static_cast<float>(x);
+            const float fy = static_cast<float>(y);
 
             // Stronger vignette than floor to suggest depth.
-            float cx = (x - 7.5f) / 7.5f;
-            float cy = (y - 7.5f) / 7.5f;
-            float v = 1.0f - 0.22f * (cx*cx + cy*cy);
+            float cx = (fx - 7.5f) / 7.5f;
+            float cy = (fy - 7.5f) / 7.5f;
+            float v = 1.0f - 0.24f * (cx*cx + cy*cy);
 
-            // A faint ripple banding effect.
-            float ripple = 0.90f + 0.10f * std::sin((x * 0.55f) + (y * 0.35f) + (seed % 97u) * 0.05f);
+            // Coherent void texture (no harsh per-frame flicker).
+            const float n = fbm2D01(fx * 1.05f + driftX + 4.7f,
+                                    fy * 1.05f + driftY - 2.9f,
+                                    seed ^ 0xC4A5Au);
+            float f = (0.74f + (n - 0.5f) * 0.38f) * v;
 
-            float f = (0.78f + noise * 0.22f) * v * ripple;
+            // Faint animated ripple banding.
+            const float ripple = 0.90f + 0.10f * std::sin((fx * 0.55f) + (fy * 0.35f) + (seed % 97u) * 0.05f + ang * 1.15f);
+            f *= ripple;
+
+            // Tiny drifting micro-grain to keep large chasms from feeling static.
+            const float g = loopValueNoise2D01(fx * 0.90f, fy * 0.90f, seed ^ 0xBADD1u, 4.0f, frame, 1.9f);
+            f += (g - 0.5f) * 0.05f;
+
             s.at(x, y) = rampShadeTile(base, f * 0.95f, x, y);
         }
     }
 
     // Tiny "embers" of reflected light in the abyss.
+    // Instead of toggling random points each frame (which can flicker), we place a
+    // deterministic set of candidates and animate their intensity smoothly.
     RNG sp(hash32(seed ^ 0xC4A5Au));
-    int sparks = 6;
-    if (frame % 2 == 1) sparks = 8;
-    for (int i = 0; i < sparks; ++i) {
+    const int candidates = 10;
+    for (int i = 0; i < candidates; ++i) {
         int x = sp.range(1, 14);
         int y = sp.range(1, 14);
+
+        const float tw = 0.35f + 0.65f * (0.5f + 0.5f * std::sin(ang * 1.7f + static_cast<float>(i) * 1.1f + static_cast<float>(seed & 0xFFu) * 0.03f));
+        if (tw < 0.55f) continue;
+
         Color c = s.at(x, y);
-        c = add(c, 15, 18, 30);
-        if (frame % 2 == 1 && (i % 2 == 0)) c = add(c, 18, 20, 35);
+        c = add(c,
+                static_cast<int>(std::lround(18.0f * tw)),
+                static_cast<int>(std::lround(22.0f * tw)),
+                static_cast<int>(std::lround(35.0f * tw)));
         s.at(x, y) = c;
     }
 
     return resampleSpriteToSize(s, pxSize);
 }
+
 
 SpritePixels projectToIsometricDiamond(const SpritePixels& src, uint32_t seed, int frame, bool outline) {
     // NOTE: This is a pure pixel-space transform used by the renderer.
@@ -3863,7 +4546,10 @@ SpritePixels generateIsometricChasmTile(uint32_t seed, int frame, int pxSize) {
     const float du = 16.0f / std::max(1.0f, static_cast<float>(w - 1));
     const float dv = 16.0f / std::max(1.0f, static_cast<float>(h - 1));
 
-    const float time = static_cast<float>(frame & 1) * 0.55f;
+    // Seamless 4-frame drift for the void core animation.
+    const float ang = phaseAngle_4(frame);
+    const float driftX = std::cos(ang) * 2.4f;
+    const float driftY = std::sin(ang) * 2.4f;
 
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
@@ -3880,7 +4566,7 @@ SpritePixels generateIsometricChasmTile(uint32_t seed, int frame, int pxSize) {
             const float uy = static_cast<float>(y) * dv;
 
             // Small, stable per-pixel grain for "rock" breakup.
-            const uint32_t hn = hashCombine(seed ^ 0xC1A500u, static_cast<uint32_t>(x + y * 131 + frame * 17));
+            const uint32_t hn = hashCombine(seed ^ 0xC1A500u, static_cast<uint32_t>(x + y * 131));
             const float grain = ((hn & 0xFFu) / 255.0f - 0.5f) * 0.10f;
 
             Color c{0, 0, 0, 0};
@@ -3929,8 +4615,8 @@ SpritePixels generateIsometricChasmTile(uint32_t seed, int frame, int pxSize) {
             } else {
                 // --- Deep void core ---
                 // Domain-warped fBm for a slow, "swirling" abyss texture.
-                const float w1 = fbm2D01(ux * 0.95f + time * 4.3f, uy * 0.95f - time * 3.7f, seed ^ 0xA11CEu);
-                const float w2 = fbm2D01(ux * 0.95f - time * 3.9f, uy * 0.95f + time * 4.1f, seed ^ 0xBEEFu);
+                const float w1 = fbm2D01(ux * 0.95f + driftX + 4.3f, uy * 0.95f + driftY - 3.7f, seed ^ 0xA11CEu);
+                const float w2 = fbm2D01(ux * 0.95f - driftX - 3.9f, uy * 0.95f - driftY + 4.1f, seed ^ 0xBEEFu);
                 const float uu = ux + (w1 - 0.5f) * 3.2f;
                 const float vv = uy + (w2 - 0.5f) * 3.2f;
 
@@ -3942,7 +4628,7 @@ SpritePixels generateIsometricChasmTile(uint32_t seed, int frame, int pxSize) {
                 float v = 0.70f - 0.18f * center * center;
 
                 // Gentle ripple banding so the void doesn't look like static.
-                const float ripple = 0.90f + 0.10f * std::sin((uu * 0.55f) + (vv * 0.35f) + (seed % 97u) * 0.05f + time * 1.15f);
+                const float ripple = 0.90f + 0.10f * std::sin((uu * 0.55f) + (vv * 0.35f) + (seed % 97u) * 0.05f + ang * 1.15f);
 
                 float shade = (0.52f + n * 0.26f + grain * 0.5f) * v * ripple;
 
@@ -3959,10 +4645,11 @@ SpritePixels generateIsometricChasmTile(uint32_t seed, int frame, int pxSize) {
     }
 
     // Tiny "embers" / glints in the abyss (kept inside the void core so they don't
-    // fight the rim shading). Deterministic per seed + frame.
+    // fight the rim shading). Instead of toggling random points, we keep deterministic candidates
+    // and animate their intensity smoothly across the 4-frame cycle (reduces flicker, adds life).
     RNG sp(hash32(seed ^ 0xC4A5Au));
-    int sparks = (frame % 2 == 1) ? 7 : 5;
-    for (int i = 0; i < sparks; ++i) {
+    const int candidates = 8;
+    for (int i = 0; i < candidates; ++i) {
         const int x = sp.range(1, w - 2);
         const int y = sp.range(1, h - 2);
 
@@ -3971,11 +4658,16 @@ SpritePixels generateIsometricChasmTile(uint32_t seed, int frame, int pxSize) {
         const float d = std::abs(nx) + std::abs(ny);
         if (d > innerD * 0.92f) continue;
 
+        const float tw = 0.35f + 0.65f * (0.5f + 0.5f * std::sin(ang * 1.9f + static_cast<float>(i) * 1.3f + static_cast<float>(seed & 0xFFu) * 0.03f));
+        if (tw < 0.55f) continue;
+
         Color c = out.at(x, y);
         if (c.a == 0) continue;
 
-        c = add(c, 15, 18, 30);
-        if (frame % 2 == 1 && (i % 2 == 0)) c = add(c, 18, 20, 35);
+        c = add(c,
+                static_cast<int>(std::lround(15.0f * tw)),
+                static_cast<int>(std::lround(18.0f * tw)),
+                static_cast<int>(std::lround(30.0f * tw)));
         out.at(x, y) = c;
     }
 
@@ -5677,9 +6369,6 @@ SpritePixels generateBoulderTile(uint32_t seed, int frame, int pxSize) {
     Color dark = mul(stone, 0.58f);
     Color light = add(mul(stone, 1.12f), 14, 14, 16);
 
-    auto rand01 = [&](uint32_t v) -> float {
-        return static_cast<float>(v) / 4294967295.0f;
-    };
 
     // Soft shadow under the boulder.
     for (int y = 9; y < 15; ++y) {
@@ -5786,9 +6475,6 @@ SpritePixels generateFountainTile(uint32_t seed, int frame, int pxSize) {
     Color waterDark = { 42, 92, 160, 210 };
     Color waterLight = { 96, 170, 240, 220 };
 
-    auto rand01 = [&](uint32_t v) -> float {
-        return static_cast<float>(v) / 4294967295.0f;
-    };
 
     // Soft shadow on the floor under the basin.
     for (int y = 10; y < 16; ++y) {
@@ -5808,6 +6494,11 @@ SpritePixels generateFountainTile(uint32_t seed, int frame, int pxSize) {
     const float cy = 8.0f;
     const float rx = 6.3f;
     const float ry = 4.6f;
+
+    // Seamless 4-frame loop phase for the water ripple field.
+    const float ang = phaseAngle_4(frame);
+    const float driftX = std::cos(ang + hash01_16(seed ^ 0xF00F7A1u) * TAU) * 1.25f;
+    const float driftY = std::sin(ang + hash01_16(seed ^ 0xBEEF1234u) * TAU) * 1.25f;
 
     for (int y = 1; y < 15; ++y) {
         for (int x = 1; x < 15; ++x) {
@@ -5831,18 +6522,42 @@ SpritePixels generateFountainTile(uint32_t seed, int frame, int pxSize) {
 
                 setPx(s, x, y, c);
             } else {
-                // Water pool: animated ripples.
-                uint32_t hv = hash32(seed ^ static_cast<uint32_t>(x * 73856093) ^ static_cast<uint32_t>(y * 19349663) ^ static_cast<uint32_t>(frame * 83492791));
-                float n = rand01(hv);
+                // Water pool: animated ripples (seamless + coherent 4-frame loop).
+                // Compose a couple traveling waves with looped fBm, then gently flow-warp.
+                float fx = static_cast<float>(x) + driftX;
+                float fy = static_cast<float>(y) + driftY;
+                flowWarp2D(fx, fy, seed ^ 0xF00F7A1u, frame, /*strength=*/1.05f, /*steps=*/2);
 
-                // Simple ripple bands that shift each frame.
-                const float phase = static_cast<float>(frame) * 0.90f;
-                const float band = std::sin((static_cast<float>(x + y) * 0.8f) + phase);
-                float ripple = (band * 0.5f + 0.5f) * 0.35f; // 0..~0.35
-                ripple += (n - 0.5f) * 0.12f; // subtle noise
+                const float w0 = std::sin((nx * 6.2f + ny * 5.1f) * 2.2f + ang * 2.0f);
+                const float w1 = std::sin((nx * -4.8f + ny * 6.9f) * 1.9f - ang * 1.6f + hash01_16(seed) * TAU);
+                float ripple = (w0 * 0.50f + w1 * 0.50f) * 0.16f;
 
-                Color c = lerp(waterDark, water, 0.55f + ripple);
-                c = lerp(c, waterLight, std::clamp(ripple, 0.0f, 0.35f));
+                const float n = loopFbm2D01(fx * 0.95f + 7.1f,
+                                           fy * 0.95f - 3.3f,
+                                           seed ^ 0xBADC0DEu,
+                                           frame,
+                                           /*radius=*/2.2f);
+                ripple += (n - 0.5f) * 0.22f;
+
+                // Tiny sparkles that loop instead of popping randomly.
+                const float gl = loopValueNoise2D01(fx + 11.2f,
+                                                   fy - 9.7f,
+                                                   seed ^ 0x51A11u,
+                                                   /*period=*/5.0f,
+                                                   frame,
+                                                   /*radius=*/1.7f);
+                if (gl > 0.92f) ripple += (gl - 0.92f) * 0.60f;
+
+                // Slightly stronger movement nearer the center.
+                const float r = std::sqrt(std::max(0.0f, d2));
+                ripple *= (0.70f + 0.30f * (1.0f - r));
+
+                float t = 0.55f + ripple;
+                t = std::clamp(t, 0.0f, 1.0f);
+
+                Color c = lerp(waterDark, water, t);
+                const float hl = std::clamp(0.18f + ripple, 0.0f, 0.60f);
+                c = lerp(c, waterLight, hl);
                 c.a = water.a;
 
                 // Slight highlight near top-left.
@@ -5952,6 +6667,54 @@ SpritePixels generateAltarTile(uint32_t seed, int frame, int pxSize) {
     // Crisp outlines.
     outlineRect(s, 3, 6, 10, 3, mul(dark, 0.95f));
     outlineRect(s, 4, 9, 8, 4, mul(dark, 0.92f));
+
+    // Subtle etched rune glow (seamless 4-frame loop).
+    // Uses a tiny reaction-diffusion field as a base, then drifts/warps the
+    // sampling coordinates so the runes feel alive without popping.
+    {
+        const uint32_t rseed = hash32(seed ^ 0xA17A12u ^ 0x5EEDBEEFu);
+        const RDField rd = makeRDSigilField(rseed, /*iters=*/112);
+
+        const float ang = phaseAngle_4(frame);
+        const float driftX = std::cos(ang + hash01_16(rseed) * TAU) * 1.10f;
+        const float driftY = std::sin(ang + hash01_16(rseed >> 11) * TAU) * 1.10f;
+
+        // Apply only to the carved stone (top slab + front face).
+        for (int y = 6; y <= 12; ++y) {
+            for (int x = 3; x <= 12; ++x) {
+                if (s.at(x, y).a == 0) continue;
+
+                float fx = static_cast<float>(x) + driftX;
+                float fy = static_cast<float>(y) + driftY;
+
+                // Slight swirl to avoid looking like a rigid scrolling texture.
+                flowWarp2D(fx, fy, rseed ^ 0xF105EEDu, frame, /*strength=*/0.70f, /*steps=*/2);
+
+                const float g = rdGradMag(rd, fx * 0.90f, fy * 0.90f);
+                float line = smoothstepEdge(0.040f, 0.125f, g);
+
+                // Fade near the altar's edges so it doesn't look "printed".
+                const float ex = std::min(static_cast<float>(x), 15.0f - static_cast<float>(x));
+                const float ey = std::min(static_cast<float>(y), 15.0f - static_cast<float>(y));
+                float edgeFade = std::min(ex, ey) / 3.0f;
+                edgeFade = std::clamp(edgeFade, 0.0f, 1.0f);
+
+                const float pulse = 0.60f + 0.40f * std::cos(ang * 1.6f + static_cast<float>(x + y) * 0.35f);
+                line *= edgeFade * pulse;
+
+                if (line > 0.001f) {
+                    Color cur = s.at(x, y);
+
+                    // Warm holy glow etched into the stone.
+                    const int dr = static_cast<int>(std::lround(line * 24.0f));
+                    const int dg = static_cast<int>(std::lround(line * 20.0f));
+                    const int db = static_cast<int>(std::lround(line * 10.0f));
+
+                    setPx(s, x, y, add(cur, dr, dg, db));
+                }
+            }
+        }
+    }
 
     // Cloth runner on top.
     Color cloth = { 150, 45, 55, 235 };
@@ -6166,16 +6929,33 @@ SpritePixels generateUIPanelTile(UITheme theme, uint32_t seed, int frame, int px
     const uint32_t t = static_cast<uint32_t>(theme);
     RNG rng(hash32(seed ^ (0xC0FFEEu + t * 101u)));
 
+    // Smooth, *seamless* 4-frame animation: we drift the noise sampling point around a
+    // circle in noise-space, which avoids harsh per-frame flicker.
+    const float ang = phaseAngle_4(frame);
+    const float driftX = std::cos(ang) * 2.2f;
+    const float driftY = std::sin(ang) * 2.2f;
+
     for (int y = 0; y < 16; ++y) {
         for (int x = 0; x < 16; ++x) {
-            uint32_t n = hashCombine(seed ^ (0xA11CEu + t * 177u),
-                                     static_cast<uint32_t>(x + y * 17 + frame * 131));
-            float noise = ((n & 0xFFu) / 255.0f);
-            float f = 0.72f + noise * 0.35f;
+            const float fx = static_cast<float>(x);
+            const float fy = static_cast<float>(y);
 
-            // Very subtle banding makes the panels feel less flat.
-            float band = 0.92f + 0.08f * std::sin((x + frame * 2) * 0.9f + (seed & 0xFFu) * 0.10f);
+            // Coherent grain (fBm) + a gentle moving band, both looped.
+            const float n = fbm2D01(fx * 0.95f + driftX + 7.1f,
+                                    fy * 0.95f + driftY - 3.3f,
+                                    seed ^ (0xA11CEu + t * 177u));
+            float f = 0.70f + (n - 0.5f) * 0.42f; // ~0.49..0.91
+
+            const float band = 0.92f + 0.08f * std::sin((fx * 0.85f + fy * 0.33f) + ang * 1.35f + (seed & 0xFFu) * 0.10f);
             f *= band;
+
+            // Add a second, tiny drifting component so large panels don't read as a static loop.
+            const float n2 = loopValueNoise2D01(fx + 1.7f, fy - 2.3f,
+                                                seed ^ (0xBEEFu + t * 13u),
+                                                /*period=*/5.0f,
+                                                frame,
+                                                /*radius=*/1.6f);
+            f += (n2 - 0.5f) * 0.06f;
 
             // Darken edges a bit (helps framing).
             if (x == 0 || y == 0 || x == 15 || y == 15) f *= 0.85f;
@@ -6192,40 +6972,102 @@ SpritePixels generateUIPanelTile(UITheme theme, uint32_t seed, int frame, int px
             int y0 = rng.range(0, 15);
             int x1 = std::clamp(x0 + rng.range(-6, 6), 0, 15);
             int y1 = std::clamp(y0 + rng.range(-6, 6), 0, 15);
-            line(s, x0, y0, x1, y1, mul(accent, 0.25f));
+
+            // Slight pulse so cracks feel like they're catching shifting torchlight.
+            const float p = 0.88f + 0.12f * std::cos(ang + static_cast<float>(i) * 1.7f);
+            line(s, x0, y0, x1, y1, mul(accent, 0.25f * p));
         }
     } else if (theme == UITheme::Parchment) {
         // Fibers.
+        const float p = 0.85f + 0.15f * std::cos(ang);
         for (int i = 0; i < 6; ++i) {
             int x = rng.range(0, 15);
             int y = rng.range(0, 15);
             int len = rng.range(3, 7);
             for (int j = 0; j < len; ++j) {
                 int yy = std::clamp(y + j, 0, 15);
-                setPx(s, x, yy, mul(accent, 0.18f));
+                setPx(s, x, yy, mul(accent, 0.18f * p));
             }
         }
     } else { // Arcane
-        // Subtle rune-dots, with a mild "pulse" every other frame.
+        // Organic rune field using a tiny reaction-diffusion simulation (Gray-Scott).
+        // We animate it by drifting/wrapping sampling coordinates around a circle
+        // (seamless 4-frame loop) and adding a gentle curl-noise flow warp.
+        const uint32_t rseed = hash32(seed ^ (0xA11CE5u + t * 991u));
+        const RDField rd = makeRDSigilField(rseed, /*iters=*/96);
+
+        const float dX = std::cos(ang + hash01_16(rseed) * TAU) * 1.15f;
+        const float dY = std::sin(ang + hash01_16(rseed >> 9) * TAU) * 1.15f;
+
+        for (int y = 1; y < 15; ++y) {
+            for (int x = 1; x < 15; ++x) {
+                float fx = static_cast<float>(x) + dX;
+                float fy = static_cast<float>(y) + dY;
+
+                // Swirl the rune field a bit so it feels "alive" (still loops because
+                // flowWarp2D is looped, and dX/dY form a loop over 4 frames).
+                flowWarp2D(fx, fy, rseed ^ 0xF105EEDu, frame, /*strength=*/0.85f, /*steps=*/2);
+
+                const float g = rdGradMag(rd, fx * 0.85f, fy * 0.85f);
+                float line = smoothstepEdge(0.035f, 0.115f, g);
+
+                // Keep it low-contrast so UI text remains readable.
+                const float p = 0.70f + 0.30f * std::cos(ang * 1.35f + (static_cast<float>(x) - static_cast<float>(y)) * 0.22f);
+                line *= p;
+
+                if (line > 0.001f) {
+                    Color cur = s.at(x, y);
+                    const int dr = static_cast<int>(std::lround(line * 18.0f));
+                    const int dg = static_cast<int>(std::lround(line * 10.0f));
+                    const int db = static_cast<int>(std::lround(line * 26.0f));
+                    s.at(x, y) = add(cur, dr, dg, db);
+                }
+            }
+        }
+
+        // A few rune "nodes" with a traveling spark (reads as magic circuitry).
         Color rune = mul(accent, 0.28f);
         rune.a = 220;
         Color rune2 = mul(accent, 0.18f);
         rune2.a = 200;
 
+        const float pulse = 0.70f + 0.30f * std::cos(ang);
+        Color runeP = mul(rune, pulse);
+        runeP.a = rune.a;
+        Color rune2P = mul(rune2, 0.85f + 0.15f * std::sin(ang + 1.3f));
+        rune2P.a = rune2.a;
+
         const int dots = 8;
+        std::vector<Vec2i> pos;
+        pos.reserve(static_cast<size_t>(dots));
         for (int i = 0; i < dots; ++i) {
             int x = rng.range(2, 13);
             int y = rng.range(2, 13);
-            setPx(s, x, y, (i % 2 == 0) ? rune : rune2);
+            pos.push_back({x, y});
+
+            // Modulate node brightness by local line strength so nodes tend to land
+            // on the more interesting parts of the field.
+            const float gg = rdGradMag(rd, static_cast<float>(x), static_cast<float>(y));
+            const float w = 0.65f + 0.35f * smoothstepEdge(0.030f, 0.115f, gg);
+
+            Color c = (i % 2 == 0) ? runeP : rune2P;
+            c = mul(c, w);
+            c.a = (i % 2 == 0) ? runeP.a : rune2P.a;
+            setPx(s, x, y, c);
         }
 
-        if (frame % 2 == 1) {
-            // One extra bright spark on pulse frame.
-            int x = rng.range(3, 12);
-            int y = rng.range(3, 12);
-            Color spark = accent;
-            spark.a = 120;
-            setPx(s, x, y, spark);
+        // Hop the spark between every-other node so it "travels" instead of flashing randomly.
+        if (!pos.empty()) {
+            const int hi = ((frame & 3) * 2) % dots;
+            const Vec2i p = pos[static_cast<size_t>(hi)];
+            Color cur = getPx(s, p.x, p.y);
+            if (cur.a != 0) {
+                setPx(s, p.x, p.y, add(cur, 22, 18, 30));
+            } else {
+                Color spark = add(accent, 18, 12, 22);
+                spark.a = static_cast<uint8_t>(110 + std::lround(70.0f * pulse));
+                setPx(s, p.x, p.y, spark);
+            }
         }
     }
 
@@ -6255,21 +7097,36 @@ SpritePixels generateUIOrnamentTile(UITheme theme, uint32_t seed, int frame, int
     line(s, 1, 1, 6, 1, c2);
     line(s, 1, 1, 1, 6, c2);
 
-    // Tiny rune-ish mark
-    setPx(s, 3, 3, c);
-    setPx(s, 4, 3, c2);
-    setPx(s, 3, 4, c2);
-    setPx(s, 5, 4, c2);
+    const float ang = phaseAngle_4(frame);
+    const float pulse = 0.70f + 0.30f * std::cos(ang);
 
-    // Flicker highlight for a bit of life.
-    if (frame % 2 == 1) {
-        setPx(s, 2, 0, {255,255,255,110});
-        setPx(s, 0, 2, {255,255,255,80});
-        setPx(s, 3, 2, {255,255,255,60});
-    }
+    // Tiny rune-ish mark (pulses subtly).
+    Color r0 = mul(c, 0.92f * pulse);
+    r0.a = c.a;
+    Color r1 = mul(c2, 0.95f * pulse);
+    r1.a = c2.a;
+
+    setPx(s, 3, 3, r0);
+    setPx(s, 4, 3, r1);
+    setPx(s, 3, 4, r1);
+    setPx(s, 5, 4, r1);
+
+    // Traveling glint along the bracket so the corners feel "alive".
+    // 4-frame loop: glint marches out from the corner, then wraps.
+    const int step = (frame & 3);
+    const int gx = std::min(7, 1 + step * 2);
+    const int gy = std::min(7, 1 + step * 2);
+
+    setPx(s, gx, 0, {255,255,255,110});
+    setPx(s, 0, gy, {255,255,255,85});
+
+    // A softer inner glint.
+    if (gx >= 1 && gx <= 6) setPx(s, gx, 1, {255,255,255,70});
+    if (gy >= 1 && gy <= 6) setPx(s, 1, gy, {255,255,255,55});
 
     return resampleSpriteToSize(s, pxSize);
 }
+
 
 
 
@@ -7285,35 +8142,45 @@ SpritePixels generateConfusionGasTile(uint32_t seed, int frame, int pxSize) {
     // expensive fluid simulation.
     const uint32_t base = hash32(seed ^ 0xC0FF1151u);
 
-    const float time = static_cast<float>(frame) * 0.85f;
+    // Seamless 4-frame loop: drive motion from an angle step instead of a linear
+    // time value so frame 3 -> frame 0 wraps without a discontinuity.
+    const float ang = phaseAngle_4(frame);
+    const float ca = std::cos(ang);
+    const float sa = std::sin(ang);
 
     // Slow drift so the 4-frame animation doesn't feel static.
-    const float driftX = std::sin(time * 0.9f + hash01_16(base) * 6.2831853f) * 0.65f;
-    const float driftY = std::cos(time * 0.8f + hash01_16(base >> 7) * 6.2831853f) * 0.65f;
+    const float driftX = std::sin(ang + hash01_16(base) * TAU) * 0.65f;
+    const float driftY = std::cos(ang + hash01_16(base >> 7) * TAU) * 0.65f;
 
     for (int y = 0; y < 16; ++y) {
         for (int x = 0; x < 16; ++x) {
             const float px = static_cast<float>(x) + driftX;
             const float py = static_cast<float>(y) + driftY;
 
+            // Flow-warp the sample point along a divergence-free curl field.
+            // This gives the cloud a more "advected" look than pure domain-warp.
+            float fx = px;
+            float fy = py;
+            flowWarp2D(fx, fy, base ^ 0xF105EEDu, frame, /*strength=*/1.85f, /*steps=*/3);
+
             // Domain warp (two independent fields -> "swirl" impression).
-            const float w1 = fbm2D01(px * 1.10f + time * 6.0f, py * 1.10f - time * 5.0f, base ^ 0xA11CEu);
-            const float w2 = fbm2D01(px * 1.10f - time * 5.5f, py * 1.10f + time * 6.3f, base ^ 0xBEEFu);
+            const float w1 = fbm2D01(fx * 1.10f + ca * 6.0f, fy * 1.10f - sa * 5.0f, base ^ 0xA11CEu);
+            const float w2 = fbm2D01(fx * 1.10f - ca * 5.5f, fy * 1.10f + sa * 6.3f, base ^ 0xBEEFu);
 
             const float wx = (w1 - 0.5f) * 3.2f;
             const float wy = (w2 - 0.5f) * 3.2f;
 
-            const float sx = px + wx;
-            const float sy = py + wy;
+            const float sx = fx + wx;
+            const float sy = fy + wy;
 
             // Main density + a moving "hole" field (cuts gaps into the cloud).
-            const float n = fbm2D01(sx * 1.55f + time * 2.8f, sy * 1.55f - time * 2.2f, base ^ 0x6A5u);
-            const float holes = fbm2D01(sx * 2.15f - time * 1.6f + 13.7f,
-                                        sy * 2.15f + time * 1.3f - 9.2f,
+            const float n = fbm2D01(sx * 1.55f + ca * 2.8f, sy * 1.55f - sa * 2.2f, base ^ 0x6A5u);
+            const float holes = fbm2D01(sx * 2.15f - ca * 1.6f + 13.7f,
+                                        sy * 2.15f + sa * 1.3f - 9.2f,
                                         base ^ 0xC0DEC0DEu);
 
             // Extra fine grain so it reads as gas at 16x16.
-            const float fine = valueNoise2D01(sx * 3.0f + time * 4.0f, sy * 3.0f - time * 3.7f,
+            const float fine = valueNoise2D01(sx * 3.0f + ca * 4.0f, sy * 3.0f - sa * 3.7f,
                                               base ^ 0x12345u, 1.75f);
 
             float v = (n * 0.70f + fine * 0.30f) - holes * 0.55f;
@@ -7340,7 +8207,7 @@ SpritePixels generateConfusionGasTile(uint32_t seed, int frame, int pxSize) {
             center = std::clamp(center, 0.55f, 1.0f);
 
             // Tiny flicker so different frames don't just "slide" the same pattern.
-            const float flick = 0.94f + 0.10f * std::sin((sx + sy) * 0.35f + time * 3.1f + (base & 0xFFu) * 0.02f);
+            const float flick = 0.94f + 0.10f * std::sin((sx + sy) * 0.35f + ang * 3.1f + (base & 0xFFu) * 0.02f);
 
             const uint8_t g = clamp8(static_cast<int>(std::round(225.0f * center * flick)));
             setPx(s, x, y, Color{ g, g, g, aa });
@@ -7367,11 +8234,14 @@ SpritePixels generateIsometricGasTile(uint32_t seed, int frame, int pxSize) {
     SpritePixels s = makeSprite(BASE_W, BASE_H, {0,0,0,0});
 
     const uint32_t base = hash32(seed ^ 0xC0FF1151u);
-    const float time = static_cast<float>(frame) * 0.85f;
+    // Seamless 4-frame loop: angle step.
+    const float ang = phaseAngle_4(frame);
+    const float ca = std::cos(ang);
+    const float sa = std::sin(ang);
 
     // Slow drift so the 4-frame animation doesn't feel static.
-    const float driftX = std::sin(time * 0.9f + hash01_16(base) * 6.2831853f) * 0.65f;
-    const float driftY = std::cos(time * 0.8f + hash01_16(base >> 7) * 6.2831853f) * 0.65f;
+    const float driftX = std::sin(ang + hash01_16(base) * TAU) * 0.65f;
+    const float driftY = std::cos(ang + hash01_16(base >> 7) * TAU) * 0.65f;
 
     const float cx = (static_cast<float>(BASE_W) - 1.0f) * 0.5f;
     const float cy = (static_cast<float>(BASE_H) - 1.0f) * 0.5f;
@@ -7397,23 +8267,30 @@ SpritePixels generateIsometricGasTile(uint32_t seed, int frame, int pxSize) {
             float px = (u + 1.0f) * 8.0f + driftX;
             float py = (v + 1.0f) * 8.0f + driftY;
 
+            // Flow-warp the sample point along a divergence-free curl field.
+            // This makes the diamond gas overlay match the square version's
+            // more advected, smoky motion.
+            float fx = px;
+            float fy = py;
+            flowWarp2D(fx, fy, base ^ 0xF105EEDu, frame, /*strength=*/1.85f, /*steps=*/3);
+
             // Domain warp (two independent fields -> "swirl" impression).
-            const float w1 = fbm2D01(px * 1.10f + time * 6.0f, py * 1.10f - time * 5.0f, base ^ 0xA11CEu);
-            const float w2 = fbm2D01(px * 1.10f - time * 5.5f, py * 1.10f + time * 6.3f, base ^ 0xBEEFu);
+            const float w1 = fbm2D01(fx * 1.10f + ca * 6.0f, fy * 1.10f - sa * 5.0f, base ^ 0xA11CEu);
+            const float w2 = fbm2D01(fx * 1.10f - ca * 5.5f, fy * 1.10f + sa * 6.3f, base ^ 0xBEEFu);
 
             const float wx = (w1 - 0.5f) * 3.2f;
             const float wy = (w2 - 0.5f) * 3.2f;
 
-            const float sxp = px + wx;
-            const float syp = py + wy;
+            const float sxp = fx + wx;
+            const float syp = fy + wy;
 
             // Main density + moving hole field (cuts gaps into the cloud).
-            const float n = fbm2D01(sxp * 1.55f + time * 2.8f, syp * 1.55f - time * 2.2f, base ^ 0x6A5u);
-            const float holes = fbm2D01(sxp * 2.15f - time * 1.6f + 13.7f,
-                                        syp * 2.15f + time * 1.3f - 9.2f,
+            const float n = fbm2D01(sxp * 1.55f + ca * 2.8f, syp * 1.55f - sa * 2.2f, base ^ 0x6A5u);
+            const float holes = fbm2D01(sxp * 2.15f - ca * 1.6f + 13.7f,
+                                        syp * 2.15f + sa * 1.3f - 9.2f,
                                         base ^ 0xC0DEC0DEu);
 
-            const float fine = valueNoise2D01(sxp * 3.0f + time * 4.0f, syp * 3.0f - time * 3.7f,
+            const float fine = valueNoise2D01(sxp * 3.0f + ca * 4.0f, syp * 3.0f - sa * 3.7f,
                                               base ^ 0x12345u, 1.75f);
 
             float den = (n * 0.70f + fine * 0.30f) - holes * 0.55f;
@@ -7444,7 +8321,7 @@ SpritePixels generateIsometricGasTile(uint32_t seed, int frame, int pxSize) {
             center = std::clamp(center, 0.55f, 1.0f);
 
             // Tiny flicker so different frames don't just "slide" the same pattern.
-            const float flick = 0.94f + 0.10f * std::sin((sxp + syp) * 0.35f + time * 3.1f + (base & 0xFFu) * 0.02f);
+            const float flick = 0.94f + 0.10f * std::sin((sxp + syp) * 0.35f + ang * 3.1f + (base & 0xFFu) * 0.02f);
 
             const uint8_t g = clamp8(static_cast<int>(std::round(225.0f * center * flick)));
             setPx(s, x, y, Color{ g, g, g, aa });
@@ -7482,7 +8359,12 @@ SpritePixels generateFireTile(uint32_t seed, int frame, int pxSize) {
     const float ph2 = rand01(base ^ 0x92u) * 6.2831853f;
     const float ph3 = rand01(base ^ 0x93u) * 6.2831853f;
 
-    const float time = static_cast<float>(frame) * 0.85f;
+    // Seamless 4-frame loop: angle step.
+    const float ang = phaseAngle_4(frame);
+    const float ca = std::cos(ang);
+    const float sa = std::sin(ang);
+    const float ca2 = std::cos(ang * 2.0f);
+    const float sa2 = std::sin(ang * 2.0f);
 
     for (int y = 0; y < 16; ++y) {
         // y=0 top, y=15 bottom
@@ -7496,16 +8378,22 @@ SpritePixels generateFireTile(uint32_t seed, int frame, int pxSize) {
         for (int x = 0; x < 16; ++x) {
             const float xx = static_cast<float>(x);
 
+            // Flow-warp a pixel-space coordinate for the turbulence fields.
+            // (Keep the geometric tongue shapes based on the unwarped `xx`.)
+            float nx = xx;
+            float ny = static_cast<float>(y);
+            flowWarp2D(nx, ny, base ^ 0xF10F1E11u, frame, /*strength=*/1.25f, /*steps=*/2);
+
+            // Turbulence-driven lateral drift that increases toward the top.
+            const float drift = (fbm2D01(nx * 0.90f + ca * 3.2f + sa2 * 1.2f,
+                                         (ny / 15.0f) * 12.0f - sa * 6.5f + ca2 * 1.1f,
+                                         base ^ 0xA511u) - 0.5f) * inv * 1.25f;
+
             auto tongue = [&](float cx, float w, float ph) -> float {
                 // More lateral wobble near the top.
                 const float wobAmp = inv * 1.9f;
 
-                // Turbulence-driven drift that increases toward the top.
-                const float drift = (fbm2D01(xx * 0.90f + time * 3.2f,
-                                             yy * 12.0f - time * 6.5f,
-                                             base ^ 0xA511u) - 0.5f) * inv * 1.2f;
-
-                const float wob = std::sin(ph + yy * 3.6f + time * 2.6f) * wobAmp;
+                const float wob = std::sin(ph + yy * 3.6f + ang) * wobAmp;
                 const float c = cx + wob + drift;
 
                 // Wider at the bottom.
@@ -7523,14 +8411,14 @@ SpritePixels generateFireTile(uint32_t seed, int frame, int pxSize) {
             v *= baseV;
 
             // Rising turbulence: add upward-moving noise so flames feel alive.
-            const float turb = (fbm2D01(xx * 1.20f + time * 4.2f,
-                                        static_cast<float>(y) * 1.35f - time * 10.0f,
-                                        base ^ 0xB00B1Eu) - 0.5f) * (0.60f * inv);
+            const float turb = (fbm2D01(nx * 1.20f + ca * 4.2f,
+                                        ny * 1.35f - sa * 10.0f,
+                                        base ^ 0xB00B1Eu) - 0.5f) * (0.62f * inv);
             v += turb;
 
             // Carve small gaps near the top so it doesn't read as a solid blob.
-            const float cut = fbm2D01(xx * 1.60f - time * 3.1f + 19.0f,
-                                      static_cast<float>(y) * 1.55f - time * 12.0f,
+            const float cut = fbm2D01(nx * 1.60f - ca * 3.1f + 19.0f,
+                                      ny * 1.55f - sa * 12.0f,
                                       base ^ 0xC011AB1Eu);
             v -= (cut * 0.55f) * inv;
 
@@ -7569,16 +8457,18 @@ SpritePixels generateFireTile(uint32_t seed, int frame, int pxSize) {
         return false;
     };
 
-    if ((frame & 1) == 1) {
-        for (int i = 0; i < 4; ++i) {
-            const uint32_t h = hash32(base ^ 0x51A11u ^ static_cast<uint32_t>(i * 131 + frame * 17));
-            const int sx = static_cast<int>(h % 16u);
-            const int sy = static_cast<int>((h >> 8) % 6u); // top region
-            if (!nearFire(sx, sy)) continue;
+    // Candidate sparks that animate intensity smoothly across the 4-frame loop.
+    for (int i = 0; i < 4; ++i) {
+        const uint32_t h = hash32(base ^ 0x51A11u ^ static_cast<uint32_t>(i * 131));
+        const int sx = static_cast<int>(h % 16u);
+        const int sy = static_cast<int>((h >> 8) % 6u); // top region
+        if (!nearFire(sx, sy)) continue;
 
-            const uint8_t aa = static_cast<uint8_t>(160 + (h & 0x3Fu));
-            setPx(s, sx, sy, Color{ 255, 255, 255, aa });
-        }
+        const float tw = 0.35f + 0.65f * (0.5f + 0.5f * std::sin(ang * 2.0f + static_cast<float>(i) * 1.7f));
+        if (tw < 0.55f) continue;
+
+        const uint8_t aa = static_cast<uint8_t>(120 + static_cast<int>(std::lround(120.0f * tw)) + (h & 0x1Fu));
+        setPx(s, sx, sy, Color{ 255, 255, 255, aa });
     }
 
     // A little dark outline helps flames read in bright rooms.
@@ -7619,7 +8509,12 @@ SpritePixels generateIsometricFireTile(uint32_t seed, int frame, int pxSize) {
     const float ph2 = rand01(base ^ 0x92u) * 6.2831853f;
     const float ph3 = rand01(base ^ 0x93u) * 6.2831853f;
 
-    const float time = static_cast<float>(frame) * 0.85f;
+    // Seamless 4-frame loop: angle step.
+    const float ang = phaseAngle_4(frame);
+    const float ca = std::cos(ang);
+    const float sa = std::sin(ang);
+    const float ca2 = std::cos(ang * 2.0f);
+    const float sa2 = std::sin(ang * 2.0f);
 
     const float cx = (static_cast<float>(BASE_W) - 1.0f) * 0.5f;
     const float cy = (static_cast<float>(BASE_H) - 1.0f) * 0.5f;
@@ -7644,16 +8539,23 @@ SpritePixels generateIsometricFireTile(uint32_t seed, int frame, int pxSize) {
 
             const float xx = static_cast<float>(x);
 
+            // Flow-warp a pixel-space coordinate for the turbulence fields.
+            // We map the 16x8 design grid into the same ~0..15 range used by the
+            // square fire generator so the motion feels consistent.
+            float nx = xx;
+            float ny = yy * 15.0f;
+            flowWarp2D(nx, ny, base ^ 0xF10F1E11u, frame, /*strength=*/1.25f, /*steps=*/2);
+
+            // Turbulence-driven lateral drift that increases toward the top.
+            const float drift = (fbm2D01(nx * 0.90f + ca * 3.2f + sa2 * 1.2f,
+                                         (ny / 15.0f) * 12.0f - sa * 6.5f + ca2 * 1.1f,
+                                         base ^ 0xA511u) - 0.5f) * inv * 1.25f;
+
             auto tongue = [&](float ccx, float w, float ph) -> float {
                 // More lateral wobble near the top.
                 const float wobAmp = inv * 1.9f;
 
-                // Turbulence-driven drift that increases toward the top.
-                const float drift = (fbm2D01(xx * 0.90f + time * 3.2f,
-                                             yy * 12.0f - time * 6.5f,
-                                             base ^ 0xA511u) - 0.5f) * inv * 1.2f;
-
-                const float wob = std::sin(ph + yy * 3.6f + time * 2.6f) * wobAmp;
+                const float wob = std::sin(ph + yy * 3.6f + ang) * wobAmp;
                 const float c = ccx + wob + drift;
 
                 // Wider at the bottom.
@@ -7671,14 +8573,14 @@ SpritePixels generateIsometricFireTile(uint32_t seed, int frame, int pxSize) {
             v *= baseV;
 
             // Rising turbulence: add upward-moving noise so flames feel alive.
-            const float turb = (fbm2D01(xx * 1.20f + time * 4.2f,
-                                        yy * 20.25f - time * 10.0f,
-                                        base ^ 0xB00B1Eu) - 0.5f) * (0.60f * inv);
+            const float turb = (fbm2D01(nx * 1.20f + ca * 4.2f,
+                                        ny * 1.35f - sa * 10.0f,
+                                        base ^ 0xB00B1Eu) - 0.5f) * (0.62f * inv);
             v += turb;
 
             // Carve small gaps near the top so it doesn't read as a solid blob.
-            const float cut = fbm2D01(xx * 1.60f - time * 3.1f + 19.0f,
-                                      yy * 23.25f - time * 12.0f,
+            const float cut = fbm2D01(nx * 1.60f - ca * 3.1f + 19.0f,
+                                      ny * 1.55f - sa * 12.0f,
                                       base ^ 0xC011AB1Eu);
             v -= (cut * 0.55f) * inv;
 
@@ -7720,23 +8622,24 @@ SpritePixels generateIsometricFireTile(uint32_t seed, int frame, int pxSize) {
         return false;
     };
 
-    if ((frame & 1) == 1) {
-        const int topRows = std::max(1, (BASE_H * 3) / 8); // ~top 3/8ths
-        for (int i = 0; i < 3; ++i) {
-            const uint32_t h = hash32(base ^ 0x51A11u ^ static_cast<uint32_t>(i * 131 + frame * 17));
-            const int sx = static_cast<int>(h % static_cast<uint32_t>(BASE_W));
-            const int sy = static_cast<int>((h >> 8) % static_cast<uint32_t>(topRows));
+    const int topRows = std::max(1, (BASE_H * 3) / 8); // ~top 3/8ths
+    for (int i = 0; i < 3; ++i) {
+        const uint32_t h = hash32(base ^ 0x51A11u ^ static_cast<uint32_t>(i * 131));
+        const int sx = static_cast<int>(h % static_cast<uint32_t>(BASE_W));
+        const int sy = static_cast<int>((h >> 8) % static_cast<uint32_t>(topRows));
 
-            // Keep sparks inside the diamond silhouette.
-            const float nx = (static_cast<float>(sx) - cx) / hw;
-            const float ny = (static_cast<float>(sy) - cy) / hh;
-            if (std::abs(nx) + std::abs(ny) > 1.0f) continue;
+        // Keep sparks inside the diamond silhouette.
+        const float nx = (static_cast<float>(sx) - cx) / hw;
+        const float ny = (static_cast<float>(sy) - cy) / hh;
+        if (std::abs(nx) + std::abs(ny) > 1.0f) continue;
 
-            if (!nearFire(sx, sy)) continue;
+        if (!nearFire(sx, sy)) continue;
 
-            const uint8_t aa = static_cast<uint8_t>(160 + (h & 0x3Fu));
-            setPx(s, sx, sy, Color{ 255, 255, 255, aa });
-        }
+        const float tw = 0.35f + 0.65f * (0.5f + 0.5f * std::sin(ang * 2.0f + static_cast<float>(i) * 1.7f));
+        if (tw < 0.55f) continue;
+
+        const uint8_t aa = static_cast<uint8_t>(120 + static_cast<int>(std::lround(120.0f * tw)) + (h & 0x1Fu));
+        setPx(s, sx, sy, Color{ 255, 255, 255, aa });
     }
 
     // A little dark outline helps flames read in bright rooms.
@@ -7767,78 +8670,102 @@ SpritePixels generateEffectIcon(EffectKind kind, int frame, int pxSize) {
     pxSize = clampSpriteSize(pxSize);
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
 
+    // 4-frame procedural HUD animation helpers.
+    // Using a cosine pulse gives a smooth-in/smooth-out cycle across FRAMES=4.
+    const float ang = phaseAngle_4(frame);
+    const float pulse01 = 0.5f + 0.5f * std::cos(ang);   // 1.0, 0.5, 0.0, 0.5
+    const float pulse02 = 0.5f + 0.5f * std::sin(ang);   // 0.5, 1.0, 0.5, 0.0
+
+    const int wobX = (frame == 1) ? 1 : (frame == 3) ? -1 : 0; // 0, +1, 0, -1
+    const int wobY = (frame == 2) ? 1 : 0;
+
     auto pulse = [&](Color c, int addv) {
-        if (frame % 2 == 1) return add(c, addv, addv, addv);
-        return c;
+        const int dv = static_cast<int>(std::lround(static_cast<float>(addv) * pulse01));
+        return add(c, dv, dv, dv);
     };
 
     switch (kind) {
         case EffectKind::Poison: {
-            Color g = pulse(Color{90, 235, 110, 255}, 15);
+            Color g = pulse(Color{90, 235, 110, 255}, 18);
             Color dk{20, 35, 20, 255};
 
-            // Droplet
-            circle(s, 8, 6, 3, mul(g, 0.85f));
-            circle(s, 8, 7, 3, g);
-            line(s, 8, 9, 8, 12, g);
-            setPx(s, 7, 11, mul(g, 0.80f));
-            setPx(s, 9, 11, mul(g, 0.80f));
+            const int cx = 8 + wobX;
 
-            // Tiny skull eyes
-            setPx(s, 7, 7, dk);
-            setPx(s, 9, 7, dk);
+            // Droplet (slight sway).
+            circle(s, cx, 6, 3, mul(g, 0.85f));
+            circle(s, cx, 7, 3, g);
+            line(s, cx, 9, cx, 12, g);
+            setPx(s, cx - 1, 11, mul(g, 0.80f));
+            setPx(s, cx + 1, 11, mul(g, 0.80f));
+
+            // Tiny skull eyes.
+            setPx(s, cx - 1, 7, dk);
+            setPx(s, cx + 1, 7, dk);
+
+            // A drifting bubble (procedural 4-frame loop).
+            const int by = 11 - (frame & 3) * 2; // 11,9,7,5
+            if (by >= 3) {
+                Color b = mul(g, 0.70f);
+                b.a = static_cast<uint8_t>(120 + std::lround(80.0f * pulse02));
+                circle(s, cx + 3, by, 1, b);
+                setPx(s, cx + 3, by, add(b, 35, 35, 35));
+            }
             break;
         }
         case EffectKind::Regen: {
-            Color c = pulse(Color{120, 255, 140, 255}, 10);
+            Color c = pulse(Color{120, 255, 140, 255}, 12);
             Color c2 = mul(c, 0.70f);
 
-            // Plus
+            // Plus (subtle pulse).
             rect(s, 7, 4, 2, 8, c);
             rect(s, 4, 7, 8, 2, c);
 
-            // heartbeat tick
-            line(s, 3, 12, 6, 12, c2);
-            line(s, 6, 12, 7, 10, c2);
-            line(s, 7, 10, 8, 13, c2);
-            line(s, 8, 13, 10, 11, c2);
-            line(s, 10, 11, 13, 11, c2);
+            // Heartbeat tick (tiny wobble so it doesn't look like a static stamp).
+            const int dx = wobX;
+            line(s, 3 + dx, 12, 6 + dx, 12, c2);
+            line(s, 6 + dx, 12, 7 + dx, 10, c2);
+            line(s, 7 + dx, 10, 8 + dx, 13, c2);
+            line(s, 8 + dx, 13, 10 + dx, 11, c2);
+            line(s, 10 + dx, 11, 13 + dx, 11, c2);
             break;
         }
         case EffectKind::Shield: {
-            Color c = pulse(Color{210, 220, 235, 255}, 8);
+            Color c = pulse(Color{210, 220, 235, 255}, 10);
             Color c2 = mul(c, 0.75f);
 
-            // Shield silhouette
+            // Shield silhouette.
             rect(s, 5, 3, 6, 8, c2);
             rect(s, 6, 2, 4, 10, c);
             line(s, 6, 12, 8, 14, c2);
             line(s, 8, 14, 10, 12, c2);
 
-            // Shine
-            if (frame % 2 == 1) {
-                line(s, 7, 4, 7, 10, Color{255,255,255,140});
-            }
+            // Shine stripe sweeps across the shield over 4 frames.
+            const int sx = 6 + (frame & 3); // 6..9
+            line(s, sx, 4, sx, 10, Color{255,255,255,static_cast<uint8_t>(90 + std::lround(80.0f * pulse02))});
+            if ((frame & 3) == 1) setPx(s, sx + 1, 5, {255,255,255,70});
             break;
         }
         case EffectKind::Haste: {
-            Color c = pulse(Color{255, 225, 120, 255}, 12);
+            Color c = pulse(Color{255, 225, 120, 255}, 16);
             Color c2 = mul(c, 0.70f);
 
-            // Lightning bolt
-            line(s, 9, 2, 6, 8, c);
-            line(s, 6, 8, 10, 8, c);
-            line(s, 10, 8, 7, 14, c);
-            // motion ticks
-            line(s, 3, 5, 5, 5, c2);
+            // Lightning bolt (flickers + nudges).
+            const int dx = wobX;
+            line(s, 9 + dx, 2, 6 + dx, 8, c);
+            line(s, 6 + dx, 8, 10 + dx, 8, c);
+            line(s, 10 + dx, 8, 7 + dx, 14, c);
+
+            // Motion ticks.
+            line(s, 3, 5 + wobY, 5, 5 + wobY, c2);
             line(s, 2, 8, 5, 8, c2);
+            line(s, 4, 11 - wobY, 6, 11 - wobY, c2);
             break;
         }
         case EffectKind::Vision: {
-            Color c = pulse(Color{140, 220, 255, 255}, 8);
+            Color c = pulse(Color{140, 220, 255, 255}, 10);
             Color c2 = mul(c, 0.70f);
 
-            // Eye outline
+            // Eye outline.
             line(s, 3, 8, 6, 5, c2);
             line(s, 6, 5, 10, 5, c2);
             line(s, 10, 5, 13, 8, c2);
@@ -7846,15 +8773,20 @@ SpritePixels generateEffectIcon(EffectKind kind, int frame, int pxSize) {
             line(s, 10, 11, 6, 11, c2);
             line(s, 6, 11, 3, 8, c2);
 
-            circle(s, 8, 8, 2, c);
+            // Iris dilation.
+            const int r = (frame == 2) ? 1 : 2;
+            circle(s, 8, 8, r, c);
             setPx(s, 8, 8, Color{20, 30, 40, 255});
+            if (frame == 1) setPx(s, 9, 7, Color{255,255,255,80});
             break;
         }
         case EffectKind::Invis: {
-            Color c{190, 160, 255, static_cast<uint8_t>((frame % 2 == 1) ? 170 : 210) };
+            // Alpha pulse feels more "alive" than a hard 2-frame blink.
+            const uint8_t a = static_cast<uint8_t>(150 + std::lround(70.0f * pulse01));
+            Color c{190, 160, 255, a};
             Color c2 = mul(c, 0.75f);
 
-            // Faint ghost-ish silhouette
+            // Faint ghost-ish silhouette.
             circle(s, 6, 7, 2, c2);
             circle(s, 10, 7, 2, c2);
             rect(s, 5, 8, 6, 5, c);
@@ -7864,98 +8796,124 @@ SpritePixels generateEffectIcon(EffectKind kind, int frame, int pxSize) {
             break;
         }
         case EffectKind::Web: {
-            Color c = pulse(Color{230, 230, 240, 255}, 6);
+            Color c = pulse(Color{230, 230, 240, 255}, 8);
             Color c2 = mul(c, 0.65f);
 
-            // Web spokes
+            // Web spokes.
             line(s, 8, 2, 8, 14, c2);
             line(s, 2, 8, 14, 8, c2);
             line(s, 3, 3, 13, 13, c2);
             line(s, 13, 3, 3, 13, c2);
 
-            // Rings
+            // Rings.
             circle(s, 8, 8, 5, c);
             circle(s, 8, 8, 3, c);
+
+            // Specular crawl (a tiny highlight that moves along a ring segment).
+            const int hx = 8 + ((frame & 3) == 1 ? 3 : (frame & 3) == 3 ? -3 : 0);
+            const int hy = 8 + ((frame & 3) == 0 ? -3 : (frame & 3) == 2 ? 3 : 0);
+            setPx(s, hx, hy, {255,255,255,static_cast<uint8_t>(70 + std::lround(70.0f * pulse02))});
             break;
         }
         case EffectKind::Confusion: {
-            Color c = pulse(Color{255, 140, 255, 255}, 10);
+            Color c = pulse(Color{255, 140, 255, 255}, 14);
             Color c2 = mul(c, 0.70f);
 
-            // Spiral-ish squiggle
-            line(s, 4, 8, 12, 4, c2);
-            line(s, 12, 4, 10, 10, c2);
-            line(s, 10, 10, 6, 12, c2);
-            line(s, 6, 12, 8, 6, c2);
-            setPx(s, 8, 6, c);
-            if (frame % 2 == 1) {
-                setPx(s, 5, 6, Color{255,255,255,100});
-                setPx(s, 11, 11, Color{255,255,255,80});
-            }
+            // Spiral-ish squiggle that "orbits" around the center.
+            const int dx = wobX;
+            const int dy = (frame == 2) ? 1 : 0;
+
+            line(s, 4 + dx, 8 + dy, 12 + dx, 4 + dy, c2);
+            line(s, 12 + dx, 4 + dy, 10 + dx, 10 + dy, c2);
+            line(s, 10 + dx, 10 + dy, 6 + dx, 12 + dy, c2);
+            line(s, 6 + dx, 12 + dy, 8 + dx, 6 + dy, c2);
+            setPx(s, 8 + dx, 6 + dy, c);
+
+            // A couple sparkles that walk around the icon.
+            setPx(s, 5 + dx, 6 + dy, Color{255,255,255,static_cast<uint8_t>(60 + std::lround(80.0f * pulse02))});
+            setPx(s, 11 + dx, 11 + dy, Color{255,255,255,static_cast<uint8_t>(45 + std::lround(60.0f * pulse01))});
             break;
         }
         case EffectKind::Burn: {
-            Color hot  = pulse(Color{255, 170, 90, 255}, 12);
-            Color core = pulse(Color{255, 235, 160, 255}, 8);
+            Color hot  = pulse(Color{255, 170, 90, 255}, 18);
+            Color core = pulse(Color{255, 235, 160, 255}, 12);
             Color dk{70, 25, 10, 255};
 
-            // Flame base
-            circle(s, 8, 11, 3, mul(hot, 0.90f));
-            circle(s, 8, 10, 2, hot);
+            const int dx = wobX;
 
-            // Rising tongue
-            line(s, 8, 4, 8, 10, hot);
-            circle(s, 8, 6, 2, mul(core, 0.95f));
-            setPx(s, 8, 5, core);
-            setPx(s, 7, 6, core);
-            setPx(s, 9, 6, core);
+            // Flame base.
+            circle(s, 8 + dx, 11, 3, mul(hot, 0.90f));
+            circle(s, 8 + dx, 10, 2, hot);
 
-            // Ember/spark
-            if (frame % 2 == 1) {
-                setPx(s, 5, 6, Color{255, 255, 255, 120});
-                setPx(s, 11, 4, Color{255, 255, 255, 90});
+            // Rising tongue.
+            line(s, 8 + dx, 4, 8 + dx, 10, hot);
+            circle(s, 8 + dx, 6, 2, mul(core, 0.95f));
+            setPx(s, 8 + dx, 5, core);
+            setPx(s, 7 + dx, 6, core);
+            setPx(s, 9 + dx, 6, core);
+
+            // Ember/spark rises and drifts.
+            const int ey = 12 - (frame & 3) * 2; // 12,10,8,6
+            if (ey >= 4) {
+                setPx(s, 11 - dx, ey, Color{255, 255, 255, static_cast<uint8_t>(80 + std::lround(90.0f * pulse02))});
             }
 
-            // A couple dark pixels to add contrast
-            setPx(s, 7, 12, dk);
-            setPx(s, 9, 12, dk);
+            // A couple dark pixels to add contrast.
+            setPx(s, 7 + dx, 12, dk);
+            setPx(s, 9 + dx, 12, dk);
             break;
         }
         case EffectKind::Levitation: {
-            Color c = pulse(Color{175, 205, 255, 255}, 8);
+            Color c = pulse(Color{175, 205, 255, 255}, 10);
             Color c2 = mul(c, 0.70f);
 
-            // Upward arrow + little wind ticks
-            line(s, 8, 3, 8, 12, c);
-            line(s, 8, 3, 5, 6, c);
-            line(s, 8, 3, 11, 6, c);
+            // Bob the arrow up/down over the 4-frame cycle.
+            const int by = (frame == 1) ? -1 : (frame == 3) ? 1 : 0;
 
+            line(s, 8, 3 + by, 8, 12 + by, c);
+            line(s, 8, 3 + by, 5, 6 + by, c);
+            line(s, 8, 3 + by, 11, 6 + by, c);
+
+            // Wind ticks.
             line(s, 3, 11, 5, 11, c2);
-            line(s, 11, 9, 13, 9, c2);
+            line(s, 11, 9 + wobY, 13, 9 + wobY, c2);
             break;
         }
         case EffectKind::Fear: {
-            Color c = pulse(Color{255, 205, 120, 255}, 10);
+            Color c = pulse(Color{255, 205, 120, 255}, 14);
             Color dk{50, 25, 10, 255};
 
-            // An exclamation mark inside a little "shiver" halo.
-            rect(s, 7, 3, 2, 7, c);
-            setPx(s, 8, 12, c);
-            circle(s, 8, 8, 5, mul(c, 0.45f));
+            const int dx = wobX;
 
-            setPx(s, 8, 6, dk);
-            setPx(s, 8, 9, dk);
+            // Exclamation mark trembles slightly.
+            rect(s, 7 + dx, 3, 2, 7, c);
+            setPx(s, 8 + dx, 12, c);
+
+            // Shiver halo pulses.
+            circle(s, 8, 8, 5, mul(c, 0.45f + 0.10f * pulse01));
+
+            setPx(s, 8 + dx, 6, dk);
+            setPx(s, 8 + dx, 9, dk);
             break;
         }
         case EffectKind::Hallucination: {
-            Color c = pulse(Color{255, 140, 255, 255}, 14);
-            Color c2 = pulse(Color{140, 220, 255, 255}, 10);
+            // Cycle two palettes and "rotate" the star by swapping diagonal emphasis.
+            Color c = pulse(Color{255, 140, 255, 255}, 18);
+            Color c2 = pulse(Color{140, 220, 255, 255}, 14);
 
-            // A tiny "kaleidoscope" star.
+            const bool diagA = ((frame & 3) == 0) || ((frame & 3) == 2);
+
             line(s, 8, 2, 8, 14, mul(c, 0.75f));
             line(s, 2, 8, 14, 8, mul(c2, 0.75f));
-            line(s, 3, 3, 13, 13, mul(c2, 0.55f));
-            line(s, 13, 3, 3, 13, mul(c, 0.55f));
+
+            if (diagA) {
+                line(s, 3, 3, 13, 13, mul(c2, 0.55f));
+                line(s, 13, 3, 3, 13, mul(c, 0.55f));
+            } else {
+                line(s, 3, 3, 13, 13, mul(c, 0.55f));
+                line(s, 13, 3, 3, 13, mul(c2, 0.55f));
+            }
+
             circle(s, 8, 8, 2, add(c, 10, 10, 10));
             setPx(s, 8, 8, Color{20, 20, 30, 255});
             break;
@@ -7969,3 +8927,189 @@ SpritePixels generateEffectIcon(EffectKind kind, int frame, int pxSize) {
     return resampleSpriteToSize(s, pxSize);
 }
 
+
+
+// -----------------------------------------------------------------------------
+// Cursor / targeting reticle overlay (transparent, animated)
+//
+// This is a *UI* overlay generated at pixel resolution (pxSize x pxSize) so the
+// stroke thickness remains readable when users zoom to very large tile sizes.
+//
+// Animation style: a classic "marching ants" dashed outline. We implement it by
+// parameterizing the reticle perimeter into a 1D index and then shifting the dash
+// phase each frame. Choosing a period that is divisible by FRAMES ensures the
+// 4-frame loop is seamless.
+// -----------------------------------------------------------------------------
+
+SpritePixels generateCursorReticleTile(uint32_t seed, bool isometric, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    frame &= 3;
+
+    const int W = pxSize;
+    const int H = pxSize;
+    SpritePixels s = makeSprite(W, H, {0, 0, 0, 0});
+
+    const uint32_t h = hash32(seed ^ 0xC0A51EEDu);
+
+    // Scale dash size gently with resolution (avoid huge chunky dashes at 256px).
+    const int scale = std::clamp(pxSize / 96, 1, 4); // 16..95=>1, 96..191=>1, 192..287=>2, etc
+
+    // Pick one of a few base periods (all divisible by 4) and scale it.
+    const int baseSel = static_cast<int>(h & 3u);
+    int basePeriod = 8;
+    if (baseSel == 1) basePeriod = 12;
+    else if (baseSel == 2) basePeriod = 16;
+    else if (baseSel == 3) basePeriod = 8;
+
+    const int period = std::max(4, basePeriod * scale);
+    const int duty = std::clamp((period * 5) / 8, 2, period - 1); // ~62% on
+    const int step = period / 4; // ensures 4-frame loop closes
+    const int offset = (frame * step) % period;
+
+    // Glow band thickness (inner ring) and crosshair thickness.
+    const int glowT = std::clamp(pxSize / 64, 1, 5);
+    const int crossT = std::clamp(pxSize / 96, 1, 3);
+
+    const float ang = phaseAngle_4(frame);
+    const float pulse = 0.80f + 0.20f * std::cos(ang);
+
+    const uint8_t brightA = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(210 + std::lround(30.0f * pulse)), 0, 255));
+    const uint8_t dimA    = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(70 + (h & 15u) + std::lround(12.0f * pulse)), 0, 255));
+    const uint8_t glowA0  = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(26 + (h & 7u) * 2 + std::lround(10.0f * pulse)), 0, 255));
+
+    auto put = [&](int x, int y, uint8_t a) {
+        if (x < 0 || y < 0 || x >= W || y >= H) return;
+        Color& c = s.at(x, y);
+        if (a <= c.a) return;
+        c = {255, 255, 255, a};
+    };
+
+    // Build an ordered list of perimeter pixels (so we can march along it).
+    std::vector<Vec2i> per;
+
+    if (!isometric) {
+        per.reserve(static_cast<size_t>(W * 4));
+
+        // Clockwise perimeter order.
+        for (int x = 0; x < W; ++x) per.push_back({x, 0});
+        for (int y = 1; y < H - 1; ++y) per.push_back({W - 1, y});
+        for (int x = W - 1; x >= 0; --x) per.push_back({x, H - 1});
+        for (int y = H - 2; y >= 1; --y) per.push_back({0, y});
+
+        // Inner glow band (inside the rectangle border).
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                const int d = std::min(std::min(x, y), std::min(W - 1 - x, H - 1 - y));
+                if (d <= 0 || d > glowT) continue;
+                const float t = 1.0f - static_cast<float>(d - 1) / static_cast<float>(std::max(1, glowT));
+                const uint8_t a = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::lround(static_cast<float>(glowA0) * t)), 0, 255));
+                put(x, y, a);
+            }
+        }
+
+        // Center crosshair: a small plus that subtly breathes.
+        const int cx = W / 2;
+        const int cy = H / 2;
+        const int len = std::max(3, W / 6);
+        const int len2 = (frame == 1 || frame == 3) ? len + 1 : len;
+        const uint8_t ca = static_cast<uint8_t>(std::clamp<int>(90 + std::lround(35.0f * pulse), 0, 255));
+        Color cc{255, 255, 255, ca};
+
+        for (int t = -crossT; t <= crossT; ++t) {
+            line(s, cx - len2, cy + t, cx + len2, cy + t, cc);
+            line(s, cx + t, cy - len2, cx + t, cy + len2, cc);
+        }
+
+    } else {
+        // Isometric: diamond perimeter inscribed in the square.
+        const int cx = W / 2;
+        const int cy = H / 2;
+        const Vec2i top{cx, 0};
+        const Vec2i right{W - 1, cy};
+        const Vec2i bot{cx, H - 1};
+        const Vec2i left{0, cy};
+
+        auto rasterLine = [&](Vec2i a, Vec2i b) {
+            std::vector<Vec2i> pts;
+            int x0 = a.x, y0 = a.y, x1 = b.x, y1 = b.y;
+            const int dx = std::abs(x1 - x0);
+            const int sx = (x0 < x1) ? 1 : -1;
+            const int dy = -std::abs(y1 - y0);
+            const int sy = (y0 < y1) ? 1 : -1;
+            int err = dx + dy;
+            while (true) {
+                pts.push_back({x0, y0});
+                if (x0 == x1 && y0 == y1) break;
+                const int e2 = 2 * err;
+                if (e2 >= dy) { err += dy; x0 += sx; }
+                if (e2 <= dx) { err += dx; y0 += sy; }
+            }
+            return pts;
+        };
+
+        auto addEdge = [&](Vec2i a, Vec2i b, bool includeFirst) {
+            auto pts = rasterLine(a, b);
+            const size_t start = includeFirst ? 0u : 1u;
+            for (size_t i = start; i < pts.size(); ++i) per.push_back(pts[i]);
+        };
+
+        per.reserve(static_cast<size_t>(W * 4));
+        addEdge(top, right, true);
+        addEdge(right, bot, false);
+        addEdge(bot, left, false);
+        addEdge(left, top, false);
+
+        // Inner diamond glow band (computed via normalized L1 distance to stay symmetric).
+        const float hw = static_cast<float>(W) * 0.5f;
+        const float hh = static_cast<float>(H) * 0.5f;
+        const float band = std::clamp(static_cast<float>(glowT) / std::max(1.0f, hw), 0.004f, 0.12f);
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                const float nx = std::abs((static_cast<float>(x) + 0.5f) - hw) / hw;
+                const float ny = std::abs((static_cast<float>(y) + 0.5f) - hh) / hh;
+                const float d = nx + ny;
+                if (d > 1.0f) continue;
+                const float edge = 1.0f - d;
+                if (edge < 0.0f || edge > band) continue;
+
+                const float t = 1.0f - (edge / band);
+                const uint8_t a = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::lround(static_cast<float>(glowA0) * t)), 0, 255));
+                put(x, y, a);
+            }
+        }
+
+        // Center crosshair: short axis lines that breathe.
+        const int len = std::max(3, W / 6);
+        const int len2 = (frame == 1 || frame == 3) ? len + 1 : len;
+        const uint8_t ca = static_cast<uint8_t>(std::clamp<int>(90 + std::lround(35.0f * pulse), 0, 255));
+        Color cc{255, 255, 255, ca};
+
+        for (int t = -crossT; t <= crossT; ++t) {
+            line(s, cx - len2, cy + t, cx + len2, cy + t, cc);
+            line(s, cx + t, cy - len2, cx + t, cy + len2, cc);
+        }
+    }
+
+    // Marching-ants perimeter stroke.
+    if (!per.empty()) {
+        const size_t L = per.size();
+
+        // Add a single traveling "spark" to help motion read even when dashes are tiny.
+        const size_t sparkStep = std::max<size_t>(1u, L / 4u);
+        const size_t sparkIdx = (static_cast<size_t>(h) + static_cast<size_t>(frame) * sparkStep) % L;
+
+        for (size_t i = 0; i < L; ++i) {
+            const Vec2i p = per[i];
+            const bool on = (static_cast<int>((i + static_cast<size_t>(offset)) % static_cast<size_t>(period)) < duty);
+            uint8_t a = on ? brightA : dimA;
+
+            if (i == sparkIdx) {
+                a = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(a) + 55, 0, 255));
+            }
+
+            put(p.x, p.y, a);
+        }
+    }
+
+    return s;
+}

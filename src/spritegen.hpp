@@ -155,3 +155,9 @@ SpritePixels generateIsometricFireTile(uint32_t seed, int frame, int pxSize = 16
 
 // HUD/status icon (procedural). Defaults to 16x16.
 SpritePixels generateEffectIcon(EffectKind kind, int frame, int pxSize = 16);
+
+// Cursor / targeting reticle overlay (procedural, animated).
+// Generated at pixel resolution (pxSize x pxSize) so stroke thickness stays readable at high zoom.
+// If isometric=true, the reticle is a diamond inscribed in the square tile.
+SpritePixels generateCursorReticleTile(uint32_t seed, bool isometric, int frame, int pxSize = 16);
+

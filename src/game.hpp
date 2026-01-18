@@ -553,6 +553,9 @@ enum class Action : uint8_t {
 
     // Tactical helpers (append-only)
     Evade, // Smart evasive step away from visible threats (uses threat+hearing fields)
+
+    // LOOK helper (append-only)
+    ToggleHearingPreview, // Toggle the hearing/audibility heatmap overlay (Look-mode helper)
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -1352,6 +1355,8 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     // This is UI-only and only affects sprite generation/caching.
     bool isoVoxelRaytraceEnabled() const { return isoVoxelRaytraceEnabled_; }
     void setIsoVoxelRaytraceEnabled(bool enabled) { isoVoxelRaytraceEnabled_ = enabled; }
+    bool isoTerrainVoxelBlocksEnabled() const { return isoTerrainVoxelBlocksEnabled_; }
+    void setIsoTerrainVoxelBlocksEnabled(bool enabled) { isoTerrainVoxelBlocksEnabled_ = enabled; }
 
     // Isometric-only: fade foreground occluders near the player/cursor for readability.
     bool isoCutawayEnabled() const { return isoCutawayEnabled_; }
@@ -1629,6 +1634,17 @@ bool clearItemCallLabel(ItemKind k);
     const std::vector<int>& threatPreviewMap() const { return threatPreviewDist; }
     void toggleThreatPreview();
     void adjustThreatPreviewHorizon(int delta);
+
+    // Hearing preview overlay (LOOK helper; UI-only): visualize where your *footsteps*
+    // would be audible to any currently visible hostile (uses the same hearing stats
+    // as real noise emission; never leaks hidden monsters).
+    bool isHearingPreviewOpen() const { return hearingPreviewOpen; }
+    int hearingPreviewVolumeBias() const { return hearingPreviewVolBias; }
+    const std::vector<Vec2i>& hearingPreviewListeners() const { return hearingPreviewListeners; }
+    const std::vector<int>& hearingPreviewMinRequiredVolume() const { return hearingPreviewMinReq; }
+    const std::vector<int>& hearingPreviewFootstepVolume() const { return hearingPreviewFootstepVol; }
+    void toggleHearingPreview();
+    void adjustHearingPreviewVolume(int delta);
 
     // Minimap / stats overlays
     bool isMinimapOpen() const { return minimapOpen; }
@@ -2046,6 +2062,14 @@ private:
     std::vector<Vec2i> threatPreviewSrcs;
     std::vector<int> threatPreviewDist;
 
+    // Hearing preview (UI-only; not serialized): caches a per-tile "minimum volume required"
+    // field for currently visible hostiles, plus the player's per-tile footstep volume.
+    bool hearingPreviewOpen = false;
+    int hearingPreviewVolBias = 0; // user bias via [ ] while preview is open
+    std::vector<Vec2i> hearingPreviewListeners;
+    std::vector<int> hearingPreviewMinReq;
+    std::vector<int> hearingPreviewFootstepVol;
+
     // Minimap / stats overlays
     bool minimapOpen = false;
     bool statsOpen = false;
@@ -2283,6 +2307,7 @@ private:
     ControlPreset controlPreset_ = ControlPreset::Modern;
     bool voxelSpritesEnabled_ = true;
     bool isoVoxelRaytraceEnabled_ = false;
+    bool isoTerrainVoxelBlocksEnabled_ = true;
     bool isoCutawayEnabled_ = true;
     bool procPaletteEnabled_ = true;
     int procPaletteStrength_ = 70; // 0..100
@@ -2313,6 +2338,9 @@ private:
     // Recompute the cached LOOK-mode sound preview map (volume + dist field).
     // Safe to call frequently while the cursor moves.
     void refreshSoundPreview();
+    // Recompute the cached LOOK-mode hearing preview fields.
+    // Safe to call on toggle or when hostiles visibility changes.
+    void refreshHearingPreview();
     // If kick=true, perform an unarmed kick attack (ignores equipped melee weapon)
     // with a stronger knockback profile.
     void attackMelee(Entity& attacker, Entity& defender, bool kick = false);

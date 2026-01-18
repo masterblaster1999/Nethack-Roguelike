@@ -1821,13 +1821,18 @@ if (optionsSel == 19) {
             case Action::ToggleThreatPreview:
                 toggleThreatPreview();
                 break;
+            case Action::ToggleHearingPreview:
+                toggleHearingPreview();
+                break;
             case Action::MinimapZoomIn:
                 if (threatPreviewOpen) adjustThreatPreviewHorizon(+1);
                 else if (soundPreviewOpen) adjustSoundPreviewVolume(+1);
+                else if (hearingPreviewOpen) adjustHearingPreviewVolume(+1);
                 break;
             case Action::MinimapZoomOut:
                 if (threatPreviewOpen) adjustThreatPreviewHorizon(-1);
                 else if (soundPreviewOpen) adjustSoundPreviewVolume(-1);
+                else if (hearingPreviewOpen) adjustHearingPreviewVolume(-1);
                 break;
 
             case Action::Confirm:
@@ -2186,6 +2191,10 @@ if (optionsSel == 19) {
             break;
         case Action::ToggleThreatPreview:
             toggleThreatPreview();
+            acted = false;
+            break;
+        case Action::ToggleHearingPreview:
+            toggleHearingPreview();
             acted = false;
             break;
         case Action::Rest:

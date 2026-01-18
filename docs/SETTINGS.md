@@ -226,6 +226,7 @@ Available actions:
 
 **UI / Meta**
 - `help`, `options`, `command`
+- `sound_preview`, `hearing_preview`, `threat_preview` (LOOK lenses: sound propagation, audibility, and threat ETA heatmaps)
 - `message_history`, `codex`, `discoveries`
 - `toggle_minimap`, `minimap_zoom_in`, `minimap_zoom_out`, `toggle_stats`, `toggle_perf_overlay`
 - `fullscreen`, `screenshot`

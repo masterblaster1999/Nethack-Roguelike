@@ -4,6 +4,7 @@
 #include "hallucination.hpp"
 #include "monster_pathing.hpp"
 #include "threat_field.hpp"
+#include "hearing_field.hpp"
 #include "vtuber_gen.hpp"
 #include "pathfinding.hpp"
 
@@ -222,6 +223,13 @@ void Game::beginLook() {
     threatPreviewSrcs.clear();
     threatPreviewDist.clear();
 
+    // UI-only helper: hearing preview is scoped to LOOK mode.
+    hearingPreviewOpen = false;
+    hearingPreviewVolBias = 0;
+    hearingPreviewListeners.clear();
+    hearingPreviewMinReq.clear();
+    hearingPreviewFootstepVol.clear();
+
     looking = true;
     lookPos = player().pos;
 }
@@ -236,6 +244,11 @@ void Game::endLook() {
     threatPreviewOpen = false;
     threatPreviewSrcs.clear();
     threatPreviewDist.clear();
+    hearingPreviewOpen = false;
+    hearingPreviewVolBias = 0;
+    hearingPreviewListeners.clear();
+    hearingPreviewMinReq.clear();
+    hearingPreviewFootstepVol.clear();
 }
 
 void Game::beginLookAt(Vec2i p) {
@@ -325,6 +338,11 @@ void Game::toggleSoundPreview() {
         threatPreviewOpen = false;
         threatPreviewSrcs.clear();
         threatPreviewDist.clear();
+
+        hearingPreviewOpen = false;
+        hearingPreviewListeners.clear();
+        hearingPreviewMinReq.clear();
+        hearingPreviewFootstepVol.clear();
     }
 
     soundPreviewOpen = !soundPreviewOpen;
@@ -347,6 +365,128 @@ void Game::adjustSoundPreviewVolume(int delta) {
     refreshSoundPreview();
 }
 
+void Game::refreshHearingPreview() {
+    if (!hearingPreviewOpen) return;
+
+    // Compute a per-tile "minimum required volume" map for currently visible hostiles.
+    // We use a fixed generous window so the user can adjust a volume bias without recomputing.
+    const int maxCost = 30;
+    HearingFieldResult hf = buildVisibleHostileHearingField(*this, maxCost);
+    hearingPreviewListeners = std::move(hf.listeners);
+    hearingPreviewMinReq = std::move(hf.minRequiredVolume);
+
+    hearingPreviewFootstepVol.clear();
+
+    const int W = dung.width;
+    const int H = dung.height;
+    if (W <= 0 || H <= 0) return;
+
+    // Precompute the player's footstep noise volume across the whole map.
+    // This mirrors playerFootstepNoiseVolumeAt(), but uses cached material lookups
+    // so the overlay stays responsive.
+    hearingPreviewFootstepVol.assign(static_cast<size_t>(W * H), 0);
+
+    // Prep deterministic materials once (saves repeated keying work).
+    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
+    int baseVol = 4;
+    if (encumbranceEnabled_) {
+        switch (burdenState()) {
+            case BurdenState::Unburdened: break;
+            case BurdenState::Burdened:   baseVol += 1; break;
+            case BurdenState::Stressed:   baseVol += 2; break;
+            case BurdenState::Strained:   baseVol += 3; break;
+            case BurdenState::Overloaded: baseVol += 4; break;
+        }
+    }
+    if (const Item* a = equippedArmor()) {
+        if (a->kind == ItemKind::ChainArmor) baseVol += 1;
+        if (a->kind == ItemKind::PlateArmor) baseVol += 2;
+    }
+
+    const bool sneakingNow = isSneaking();
+
+    int reduce = 0;
+    int minVol = 0;
+    if (sneakingNow) {
+        // Sneaking can reduce footstep noise to near-silent levels, but heavy armor/encumbrance
+        // still makes at least some noise. (Matches playerFootstepNoiseVolumeAt.)
+        reduce = 4 + std::min(2, playerAgility() / 4);
+
+        if (encumbranceEnabled_) {
+            switch (burdenState()) {
+                case BurdenState::Unburdened: break;
+                case BurdenState::Burdened:   minVol = std::max(minVol, 1); break;
+                case BurdenState::Stressed:   minVol = std::max(minVol, 1); break;
+                case BurdenState::Strained:   minVol = std::max(minVol, 1); break;
+                case BurdenState::Overloaded: minVol = std::max(minVol, 2); break;
+            }
+        }
+        if (const Item* a = equippedArmor()) {
+            if (a->kind == ItemKind::ChainArmor) minVol = std::max(minVol, 1);
+            if (a->kind == ItemKind::PlateArmor) minVol = std::max(minVol, 2);
+        }
+    }
+
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            int vol = baseVol;
+
+            // Substrate materials subtly affect how much sound you make while moving.
+            const TerrainMaterial m = dung.materialAtCached(x, y);
+            const int matDelta = terrainMaterialFx(m).footstepNoiseDelta;
+
+            if (sneakingNow) {
+                vol -= reduce;
+                vol = clampi(vol, minVol, 14);
+                vol = clampi(vol + matDelta, minVol, 14);
+            } else {
+                vol = clampi(vol, 2, 14);
+                vol = clampi(vol + matDelta, 1, 14);
+            }
+
+            hearingPreviewFootstepVol[static_cast<size_t>(y * W + x)] = std::max(0, vol);
+        }
+    }
+}
+
+void Game::toggleHearingPreview() {
+    // This is a UI-only planning helper; it never consumes a turn.
+    if (!looking) {
+        beginLook();
+    }
+
+    // Keep LOOK helpers mutually exclusive for clarity.
+    if (!hearingPreviewOpen) {
+        soundPreviewOpen = false;
+        soundPreviewDist.clear();
+
+        threatPreviewOpen = false;
+        threatPreviewSrcs.clear();
+        threatPreviewDist.clear();
+    }
+
+    hearingPreviewOpen = !hearingPreviewOpen;
+    if (!hearingPreviewOpen) {
+        hearingPreviewListeners.clear();
+        hearingPreviewMinReq.clear();
+        hearingPreviewFootstepVol.clear();
+        return;
+    }
+
+    hearingPreviewVolBias = 0;
+    refreshHearingPreview();
+}
+
+void Game::adjustHearingPreviewVolume(int delta) {
+    if (!hearingPreviewOpen) return;
+    // Common in-game noises fall roughly in the 1..18 range; keep a little headroom.
+    // `[`/`]` adjusts a bias on top of the real footstep model so you can simulate
+    // quieter/louder actions without consuming a turn.
+    hearingPreviewVolBias = clampi(hearingPreviewVolBias + delta, -30, 30);
+}
+
+
 
 void Game::toggleThreatPreview() {
     // This is a UI-only planning helper; it never consumes a turn.
@@ -358,6 +498,11 @@ void Game::toggleThreatPreview() {
     if (!threatPreviewOpen) {
         soundPreviewOpen = false;
         soundPreviewDist.clear();
+
+        hearingPreviewOpen = false;
+        hearingPreviewListeners.clear();
+        hearingPreviewMinReq.clear();
+        hearingPreviewFootstepVol.clear();
     }
 
     threatPreviewOpen = !threatPreviewOpen;
@@ -480,9 +625,16 @@ ss << baseDesc;
 
     // Environmental fields (only if currently visible).
     if (t.visible) {
-        if (confusionGasAt(p.x, p.y) > 0u) ss << " | CONFUSION GAS";
-        if (poisonGasAt(p.x, p.y) > 0u) ss << " | POISON GAS";
-        if (fireAt(p.x, p.y) > 0u) ss << " | FIRE";
+        const uint8_t cg = confusionGasAt(p.x, p.y);
+        const uint8_t pg = poisonGasAt(p.x, p.y);
+        const uint8_t ff = fireAt(p.x, p.y);
+
+        if (cg > 0u) ss << " | CONFUSION GAS";
+        if (pg > 0u) ss << " | POISON GAS";
+        if (ff > 0u) ss << " | FIRE";
+
+        // Field chemistry hint: poison gas + fire can occasionally ignite into a flash-fire.
+        if (pg > 0u && ff > 0u) ss << " | IGNITION RISK";
     }
 
     // Player map marker / note (persistent on this floor).
@@ -731,6 +883,50 @@ std::string Game::lookInfoText() const {
 
         s += "  ([ ] ADJUST)";
     }
+    if (hearingPreviewOpen) {
+        s += " | HEARING PREVIEW";
+
+        const int W = dung.width;
+        auto idx = [&](int x, int y) { return y * W + x; };
+
+        int stepBase = playerFootstepNoiseVolumeAt(lookPos);
+        if (!hearingPreviewFootstepVol.empty() && W > 0 && (int)hearingPreviewFootstepVol.size() >= W * dung.height) {
+            stepBase = hearingPreviewFootstepVol[static_cast<size_t>(idx(lookPos.x, lookPos.y))];
+        }
+
+        // Show the automatically-derived base step volume, plus any user bias.
+        std::string bb = "STEP " + std::to_string(stepBase);
+        if (hearingPreviewVolBias > 0) bb += " +" + std::to_string(hearingPreviewVolBias);
+        else if (hearingPreviewVolBias < 0) bb += " " + std::to_string(hearingPreviewVolBias);
+        s += " (" + bb + ")";
+
+        const int step = clampi(stepBase + hearingPreviewVolBias, 0, 30);
+
+        if (hearingPreviewListeners.empty() || hearingPreviewMinReq.empty()) {
+            s += " NO VISIBLE HOSTILES";
+        } else {
+            int req = -1;
+            if (W > 0 && (int)hearingPreviewMinReq.size() >= W * dung.height) {
+                req = hearingPreviewMinReq[static_cast<size_t>(idx(lookPos.x, lookPos.y))];
+            }
+
+            if (req < 0) {
+                s += " SAFE";
+            } else {
+                if (step <= 0) {
+                    s += " SILENT";
+                } else if (step < req) {
+                    s += " SAFE (REQ " + std::to_string(req) + ")";
+                } else {
+                    s += " AUDIBLE (REQ " + std::to_string(req) + ")";
+                }
+            }
+
+            s += " LISTENERS " + std::to_string((int)hearingPreviewListeners.size());
+        }
+
+        s += "  ([ ] ADJUST)";
+    }
     if (threatPreviewOpen) {
         s += " | THREAT PREVIEW HORIZON " + std::to_string(threatPreviewMaxCost) + "  ([ ] ADJUST)";
     }
@@ -913,4 +1109,3 @@ int Game::repeatSearch(int maxTurns, bool stopOnFind) {
 
     return steps;
 }
-

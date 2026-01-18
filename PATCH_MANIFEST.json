@@ -1,11 +1,26 @@
 {
-  "patch_id": "round71_patch",
-  "previous_patch_id": "round70_patch",
-  "round": 71,
-  "date": "2026-01-17",
+  "patch_id": "round86_patch",
+  "previous_patch_id": "round85_patch",
+  "round": 86,
+  "date": "2026-01-18",
   "project": "Nethack-Roguelike",
-  "summary": "Add secret crawlspace networks procgen pass: carve a small hidden 1-tile-wide tunnel network entirely within wall mass, connect it back to the corridor graph via 2\u20133 secret doors, and optionally seed a bonus cache chest deep inside. Surfaced via #mapstats as CRAWLSPACES.",
+  "summary": [
+    "Added a new LOOK lens: Hearing Preview (audibility heatmap).",
+    "Hearing Preview marks explored tiles where your footsteps would be audible to currently visible hostile listeners (visibility-gated; no unseen-enemy leaks).",
+    "Default keybind: Ctrl+H (bind_hearing_preview); [ / ] adjusts a volume bias to simulate louder/quieter actions.",
+    "Help overlay now lists LOOK lenses (sound / hearing / threat).",
+    "Docs: added docs/HEARING_PREVIEW.md and updated settings docs to include the new action."
+  ],
   "files_in_patch_zip": [
+    "CHANGELOG.md",
+    "PATCH_MANIFEST.json",
+    "SETTINGS.md",
+    "docs/3D_TURNTABLE_PREVIEW.md",
+    "docs/HEARING_PREVIEW.md",
+    "docs/ISO_TERRAIN_VOXELS.md",
+    "docs/PROCEDURAL_ANIMATION.md",
+    "docs/REACTIVE_FIELDS.md",
+    "docs/SETTINGS.md",
     "src/action_info.hpp",
     "src/ai.cpp",
     "src/combat.cpp",
@@ -26,6 +41,7 @@
     "src/items.cpp",
     "src/items.hpp",
     "src/keybinds.cpp",
+    "src/keybinds.hpp",
     "src/main.cpp",
     "src/monster_pathing.hpp",
     "src/pathfinding.cpp",
@@ -38,10 +54,11 @@
     "src/spritegen.cpp",
     "src/spritegen.hpp",
     "src/spritegen3d.cpp",
+    "src/spritegen3d.hpp",
     "src/threat_field.hpp",
-    "src/vtuber_gen.hpp",
-    "CHANGELOG.md",
-    "PATCH_MANIFEST.json"
+    "src/vtuber_gen.hpp"
   ],
-  "timestamp_utc": "2026-01-17T09:24:40Z"
+  "timestamp_utc": "2026-01-18T00:00:00Z",
+  "description": "Adds a new LOOK lens: Hearing Preview (audibility heatmap) that marks explored tiles where your footsteps would be audible to currently visible hostiles. Includes default keybind (Ctrl+H), help overlay entry, and docs.",
+  "timestamp": "2026-01-18T00:00:00Z"
 }

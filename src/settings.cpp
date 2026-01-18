@@ -212,6 +212,9 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "iso_voxel_raytrace" || key == "voxel_iso_raytrace" || key == "isometric_voxel_raytrace") {
             bool b = false;
             if (parseBool(val, b)) s.isoVoxelRaytrace = b;
+        } else if (key == "iso_terrain_voxels" || key == "iso_terrain_voxel_blocks" || key == "isometric_terrain_voxels") {
+            bool b = s.isoTerrainVoxelBlocks;
+            if (parseBool(val, b)) s.isoTerrainVoxelBlocks = b;
         } else if (key == "iso_cutaway" || key == "isometric_cutaway" || key == "iso_wall_cutaway") {
             bool b = true;
             if (parseBool(val, b)) s.isoCutaway = b;
@@ -366,6 +369,13 @@ voxel_sprites = true
 # custom voxel raytracer (orthographic DDA) instead of the face-meshed isometric rasterizer.
 iso_voxel_raytrace = false
 
+
+# iso_terrain_voxels: true/false
+# Isometric view only. When true, wall/door/pillar/boulder "block" sprites are generated
+# from small voxel models for cohesive 3D shading with voxel_sprites.
+# NOTE: When iso_voxel_raytrace is enabled, terrain blocks use raytrace only for small tile sizes (<=64px).
+iso_terrain_voxels = true
+
 # iso_cutaway: true/false
 # Isometric view only. When true, foreground walls/doors (in front of the player/cursor)
 # are faded ("cutaway") so interiors remain readable.
@@ -457,7 +467,7 @@ save_backups = 3
 # Rebind keys by adding entries of the form:
 #   bind_<action> = key[, key, ...]
 #
-# Modifiers: shift, ctrl, alt. Example: shift+comma
+# Modifiers: shift, ctrl, alt, cmd. Example: shift+comma
 # Tip: for '<' and '>' on most layouts, use shift+comma / shift+period.
 #
 # Set a binding to "none" to disable it.
@@ -492,6 +502,7 @@ bind_dig = shift+d
 bind_look = l, v
 bind_sound_preview = ctrl+n
 bind_threat_preview = ctrl+t
+bind_hearing_preview = ctrl+h
 bind_stairs_up = shift+comma, less
 bind_stairs_down = shift+period, greater
 bind_auto_explore = o
@@ -505,7 +516,7 @@ bind_drop_all = shift+x
 bind_sort_inventory = shift+s
 
 # UI / meta
-bind_help = f1, shift+slash, h
+bind_help = f1, shift+slash, h, cmd+?
 bind_options = f2
 bind_command = shift+3
 bind_toggle_minimap = m

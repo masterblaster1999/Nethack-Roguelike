@@ -2554,6 +2554,157 @@ void Game::applyEndOfTurnEffects() {
 
 
     // ------------------------------------------------------------
+    // Field chemistry: fire / gas reactions
+    //
+    // Fire can burn away lingering gas clouds, and dense poison vapors
+    // can occasionally ignite into a brief flash-fire explosion. This
+    // adds emergent interactions between hazards without introducing
+    // any new persistent field types.
+    // ------------------------------------------------------------
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (expect > 0) {
+            if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+            if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+            if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+        }
+
+        // Only do any work if there is any overlap potential.
+        if (!fireField_.empty() && (!poisonGas_.empty() || !confusionGas_.empty())) {
+            const int w = dung.width;
+            const int h = dung.height;
+            auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
+
+            // Avoid runaway chain reactions.
+            constexpr int MAX_IGNITIONS = 4;
+
+            int ignitions = 0;
+            bool anyVisible = false;
+            bool playerHit = false;
+
+            // Pass 1: fire burns away gas in place; dense poison gas can ignite.
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const size_t i = idx2(x, y);
+                    const uint8_t f = fireField_[i];
+                    if (f == 0u) continue;
+
+                    // Confusion gas is not meant to be explosive; fire simply
+                    // cleans it up a bit.
+                    if (i < confusionGas_.size() && confusionGas_[i] > 0u) {
+                        const uint8_t g = confusionGas_[i];
+                        const int burn = 1 + static_cast<int>(f) / 6;
+                        confusionGas_[i] = (g > static_cast<uint8_t>(burn)) ? static_cast<uint8_t>(g - static_cast<uint8_t>(burn)) : 0u;
+                    }
+
+                    if (i >= poisonGas_.size()) continue;
+                    uint8_t g = poisonGas_[i];
+                    const uint8_t gPre = g;
+                    if (g == 0u) continue;
+
+                    // Poison vapors are combustible: fire consumes them quickly.
+                    {
+                        const int burn = 2 + static_cast<int>(f) / 4;
+                        g = (g > static_cast<uint8_t>(burn)) ? static_cast<uint8_t>(g - static_cast<uint8_t>(burn)) : 0u;
+                        poisonGas_[i] = g;
+
+                        // A little extra flame when vapor burns.
+                        if (g > 0u) {
+                            const uint8_t boosted = static_cast<uint8_t>(std::min(255, std::max<int>(static_cast<int>(f), static_cast<int>(g) + 2)));
+                            fireField_[i] = boosted;
+                        }
+                    }
+
+                    // Rare flash ignition (dense gas + strong flame).
+                    if (ignitions >= MAX_IGNITIONS) continue;
+
+                    // We base the ignition chance on the *pre-burn* gas level to
+                    // keep it intuitive: fresh, dense gas clouds are the risk.
+                    const uint8_t g0 = gPre;
+                    if (f >= 9u && g0 >= 10u) {
+                        float chance = 0.10f;
+                        chance += 0.02f * static_cast<float>(g0 - 10u);
+                        chance += 0.015f * static_cast<float>(f - 9u);
+                        chance = std::min(0.28f, std::max(0.0f, chance));
+
+                        if (rng.chance(chance)) {
+                            ++ignitions;
+
+                            const int radius = (g0 >= 12u && rng.chance(0.25f)) ? 2 : 1;
+
+                            std::vector<uint8_t> mask;
+                            dung.computeFovMask(x, y, radius, mask);
+
+                            const int minX = std::max(0, x - radius);
+                            const int maxX = std::min(w - 1, x + radius);
+                            const int minY = std::max(0, y - radius);
+                            const int maxY = std::min(h - 1, y + radius);
+
+                            // A flash fire is loud.
+                            emitNoise({x, y}, 16);
+
+                            for (int yy = minY; yy <= maxY; ++yy) {
+                                for (int xx = minX; xx <= maxX; ++xx) {
+                                    const size_t j = idx2(xx, yy);
+                                    if (j >= mask.size() || mask[j] == 0u) continue;
+
+                                    // Consume poison gas in the blast.
+                                    if (j < poisonGas_.size()) poisonGas_[j] = 0u;
+
+                                    // Fire lingers in the blast area on walkable tiles.
+                                    if (dung.isWalkable(xx, yy)) {
+                                        const int dist = std::max(std::abs(xx - x), std::abs(yy - y));
+                                        const int base = 10 + static_cast<int>(g0) / 2 + static_cast<int>(f) / 2;
+                                        const int s = std::max(2, base - dist * 3);
+                                        const uint8_t su = static_cast<uint8_t>(clampi(s, 0, 255));
+                                        if (j < fireField_.size() && fireField_[j] < su) fireField_[j] = su;
+                                    }
+
+                                    // Damage entities caught in the blast; also ignite them.
+                                    if (Entity* e = entityAtMut(xx, yy)) {
+                                        if (e->hp > 0) {
+                                            const int dist = std::max(std::abs(xx - x), std::abs(yy - y));
+                                            int dmg = rng.range(2, 4) + static_cast<int>(g0) / 6 + static_cast<int>(f) / 8;
+                                            dmg = std::max(0, dmg - dist);
+
+                                            if (dmg > 0) {
+                                                e->hp -= dmg;
+                                                const bool vis = (dung.inBounds(xx, yy) && dung.at(xx, yy).visible);
+                                                if (e->id == playerId_) {
+                                                    playerHit = true;
+                                                    if (e->hp <= 0) {
+                                                        pushMsg("YOU ARE INCINERATED BY IGNITING VAPORS.", MessageKind::Combat, false);
+                                                        if (endCause_.empty()) endCause_ = "INCINERATED BY IGNITING VAPORS";
+                                                        gameOver = true;
+                                                        return;
+                                                    }
+                                                } else if (vis && e->hp <= 0) {
+                                                    std::ostringstream ss;
+                                                    ss << kindName(e->kind) << " IS INCINERATED.";
+                                                    pushMsg(ss.str(), MessageKind::Combat, false);
+                                                }
+                                            }
+
+                                            const int burnTurns = clampi(2 + static_cast<int>(g0) / 4, 2, 10);
+                                            if (e->effects.burnTurns < burnTurns) e->effects.burnTurns = burnTurns;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (dung.inBounds(x, y) && dung.at(x, y).visible) anyVisible = true;
+                        }
+                    }
+                }
+            }
+
+            if (ignitions > 0 && (anyVisible || playerHit)) {
+                pushMsg("TOXIC VAPORS IGNITE!", MessageKind::Warning, playerHit);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
     // Environmental fields: Confusion Gas (persistent, tile-based)
     //
     // The gas itself is stored as an intensity map (0..255). Entities standing

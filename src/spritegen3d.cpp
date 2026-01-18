@@ -978,7 +978,7 @@ VoxelModel buildEntityModel(EntityKind kind, uint32_t seed, int frame, const Spr
     return {};
 }
 
-SpritePixels renderVoxel(const VoxelModel& m, int outW, int outH, int frame, float yawScale = 1.0f) {
+SpritePixels renderVoxel(const VoxelModel& m, int outW, int outH, int frame, float yawScale = 1.0f, float yawBase = 0.0f) {
     SpritePixels img;
     img.w = outW;
     img.h = outH;
@@ -1016,8 +1016,12 @@ SpritePixels renderVoxel(const VoxelModel& m, int outW, int outH, int frame, flo
     Vec3f center = (boundMin + boundMax) * 0.5f;
 
     // Camera direction with a tiny frame-based wobble.
+    //
+    // yawBase is used by UI "turntable" previews so we can rotate the camera
+    // smoothly around the model without affecting the main in-game sprite frames.
     Vec3f dirBase = normalize({0.70f, -0.42f, 1.0f});
-    float yaw = ((frame % 2 == 0) ? -0.10f : +0.10f) * yawScale;
+    const float yawWobble = ((frame % 2 == 0) ? -0.10f : +0.10f) * yawScale;
+    const float yaw = yawBase + yawWobble;
     // Rotate around Y axis: (x,z) plane.
     const float cy = std::cos(yaw);
     const float sy = std::sin(yaw);
@@ -1543,6 +1547,22 @@ SpritePixels renderModelToSprite(const VoxelModel& model, int frame, float yawSc
     SpritePixels out = (hiW == outPx) ? hi : downscale2x(hi);
 
     // Keep edges crisp and readable in tiny tile sizes.
+    if (outPx <= 32) addOutline(out);
+    return out;
+}
+
+SpritePixels renderModelToSpriteTurntable(const VoxelModel& model, int frame, float yawRad, int outPx) {
+    outPx = clampOutPx(outPx);
+
+    // Same sampling rules as the normal sprite path.
+    const int hiW = (outPx <= 32) ? outPx * 2 : outPx;
+    const int hiH = hiW;
+
+    // Turntable previews want deterministic yaw, not the in-game wobble.
+    SpritePixels hi = renderVoxel(model, /*outW=*/hiW, /*outH=*/hiH, frame,
+                                 /*yawScale=*/0.0f, /*yawBase=*/yawRad);
+    SpritePixels out = (hiW == outPx) ? hi : downscale2x(hi);
+
     if (outPx <= 32) addOutline(out);
     return out;
 }
@@ -2438,6 +2458,54 @@ SpritePixels renderSprite3DProjectile(ProjectileKind kind, const SpritePixels& b
     return renderSprite3DExtruded(base2d, seed, frame, outPx);
 }
 
+SpritePixels renderSprite3DExtrudedTurntable(const SpritePixels& base2d, uint32_t seed, int frame, float yawRad, int outPx) {
+    outPx = clampOutPx(outPx);
+    if (base2d.w <= 0 || base2d.h <= 0) return base2d;
+
+    const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
+
+    constexpr int maxDepth = 6;
+    VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
+    if (detailScale > 1) vox = scaleVoxelModelNearest(vox, detailScale);
+
+    return renderModelToSpriteTurntable(vox, frame, yawRad, outPx);
+}
+
+SpritePixels renderSprite3DEntityTurntable(EntityKind kind, const SpritePixels& base2d, uint32_t seed, int frame, float yawRad, int outPx) {
+    // Identical to renderSprite3DEntity() but uses a stable yaw for UI preview rotation.
+    const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
+    VoxelModel m = buildEntityModel(kind, seed, frame, base2d);
+    if (m.w > 0 && m.h > 0 && m.d > 0) {
+        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
+        return renderModelToSpriteTurntable(m, frame, yawRad, outPx);
+    }
+
+    // Fallback: 2D -> 3D extrusion.
+    outPx = clampOutPx(outPx);
+    const int d = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
+    constexpr int maxDepth = 6;
+    VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
+    if (d > 1) vox = scaleVoxelModelNearest(vox, d);
+    return renderModelToSpriteTurntable(vox, frame, yawRad, outPx);
+}
+
+SpritePixels renderSprite3DItemTurntable(ItemKind kind, const SpritePixels& base2d, uint32_t seed, int frame, float yawRad, int outPx) {
+    const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
+    VoxelModel m = buildItemModel(kind, seed, frame, base2d);
+    if (m.w > 0 && m.h > 0 && m.d > 0) {
+        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
+        return renderModelToSpriteTurntable(m, frame, yawRad, outPx);
+    }
+
+    // Fallback: 2D -> 3D extrusion.
+    outPx = clampOutPx(outPx);
+    const int d = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
+    constexpr int maxDepth = 6;
+    VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
+    if (d > 1) vox = scaleVoxelModelNearest(vox, d);
+    return renderModelToSpriteTurntable(vox, frame, yawRad, outPx);
+}
+
 SpritePixels renderSprite3DExtrudedIso(const SpritePixels& base2d, uint32_t seed, int frame, int outPx, bool isoRaytrace) {
     outPx = clampOutPx(outPx);
     if (base2d.w <= 0 || base2d.h <= 0) return base2d;
@@ -2480,4 +2548,287 @@ SpritePixels renderSprite3DProjectileIso(ProjectileKind kind, const SpritePixels
         return renderModelToSpriteIsometric(m, frame, outPx, isoRaytrace);
     }
     return renderSprite3DExtrudedIso(base2d, seed, frame, outPx, isoRaytrace);
+}
+
+
+// -----------------------------------------------------------------------------
+// Isometric terrain voxel blocks
+// -----------------------------------------------------------------------------
+
+namespace {
+
+Color sampleSpriteOr(const SpritePixels& s, int x, int y, Color fallback) {
+    if (s.w <= 0 || s.h <= 0) return fallback;
+    x = std::clamp(x, 0, s.w - 1);
+    y = std::clamp(y, 0, s.h - 1);
+    const Color c = s.at(x, y);
+    return (c.a == 0) ? fallback : c;
+}
+
+void carveBoxAlpha0(VoxelModel& m, int x0, int y0, int z0, int x1, int y1, int z1) {
+        if (x0 > x1) std::swap(x0, x1);
+        if (y0 > y1) std::swap(y0, y1);
+        if (z0 > z1) std::swap(z0, z1);
+    for (int z = z0; z <= z1; ++z) {
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
+                m.set(x, y, z, {0, 0, 0, 0});
+            }
+        }
+    }
+}
+
+VoxelModel buildIsoTerrainBlockModel(IsoTerrainBlockKind kind, uint32_t seed, int frame) {
+    // Build a small base-resolution model; caller applies detail scaling.
+    // Coords: X=right, Z=left (in iso projection), Y=up.
+    constexpr int W = 16;
+    constexpr int D = 16;
+    constexpr int H = 20;
+
+    VoxelModel m = makeModel(W, H, D);
+
+    RNG rng(hashCombine(seed, 0x715E77A1u ^ static_cast<uint32_t>(frame * 131)));
+
+    const int bodyH = 14;
+    const int x0 = 1, x1 = 14;
+    const int z0 = 1, z1 = 14;
+
+    // Helper: fill a beveled stone-ish box using a source texture for per-voxel variation.
+    auto fillBeveledBox = [&](const SpritePixels& tex2d, const Palette& pal, int height) {
+        for (int y = 0; y < height; ++y) {
+            // Bevel the top few layers inward for a chunkier silhouette.
+            int inset = 0;
+            if (y >= height - 3) inset = (y - (height - 3)) + 1; // 1..3
+
+            const int xx0 = x0 + inset;
+            const int xx1 = x1 - inset;
+            const int zz0 = z0 + inset;
+            const int zz1 = z1 - inset;
+
+            const float t = (height > 1) ? (static_cast<float>(y) / static_cast<float>(height - 1)) : 0.0f;
+            const float grad = 0.88f + 0.12f * t;
+
+            for (int z = zz0; z <= zz1; ++z) {
+                for (int x = xx0; x <= xx1; ++x) {
+                    // Sample the 2D tile as a coarse material pattern.
+                    Color c = sampleSpriteOr(tex2d, x, z, pal.primary);
+
+                    // Mix toward the dominant palette to avoid overly noisy textures.
+                    c = lerp(c, pal.primary, 0.35f);
+
+                    // Slight vertical gradient.
+                    c = mul(c, grad);
+
+                    // Occasional speckle / mottling.
+                    if ((hash32(hashCombine(seed, static_cast<uint32_t>((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)))) & 15u) == 0u) {
+                        c = lerp(c, pal.secondary, 0.20f);
+                    }
+
+                    m.set(x, y, z, c);
+                }
+            }
+        }
+
+        // Edge wear: brighten a few top-edge voxels.
+        for (int k = 0; k < 18; ++k) {
+            const int y = height - 1;
+            const int x = (rng.nextU32() & 1u) ? x0 : x1;
+            const int z = 2 + static_cast<int>(rng.nextU32() % 12u);
+            Color c = m.at(x, y, z);
+            if (c.a == 0) continue;
+            m.set(x, y, z, lerp(c, pal.accent, 0.35f));
+        }
+    };
+
+    auto stoneTex = generateWallTile(seed ^ 0xAA110u, frame, /*pxSize=*/16);
+    Palette stonePal = extractPalette(stoneTex);
+
+    if (kind == IsoTerrainBlockKind::Wall) {
+        fillBeveledBox(stoneTex, stonePal, bodyH);
+        return m;
+    }
+
+    // Door base: start from stone frame.
+    if (kind == IsoTerrainBlockKind::DoorClosed || kind == IsoTerrainBlockKind::DoorLocked || kind == IsoTerrainBlockKind::DoorOpen) {
+        fillBeveledBox(stoneTex, stonePal, bodyH);
+
+        const bool faceX = (hash32(seed ^ 0xD00Du) & 1u) == 0u; // choose which visible iso face gets the door detail
+        SpritePixels doorTex;
+        if (kind == IsoTerrainBlockKind::DoorLocked) doorTex = generateLockedDoorTile(seed ^ 0x10CCEDu, frame, /*pxSize=*/16);
+        else doorTex = generateDoorTile(seed ^ 0xC105EDu, /*open=*/false, frame, /*pxSize=*/16);
+        Palette doorPal = extractPalette(doorTex);
+
+        // Door rectangle on the chosen face.
+        const int y0d = 1;
+        const int y1d = bodyH - 3;
+        const int a0 = 5;
+        const int a1 = 10;
+
+        if (kind == IsoTerrainBlockKind::DoorOpen) {
+            // Carve an opening through the face (with a bit of depth), leaving a stone frame.
+            if (faceX) {
+                for (int y = y0d; y <= y1d; ++y) {
+                    for (int z = a0 + 1; z <= a1 - 1; ++z) {
+                        for (int x = x1 - 3; x <= x1; ++x) {
+                            m.set(x, y, z, {0, 0, 0, 0});
+                        }
+                    }
+                }
+            } else {
+                for (int y = y0d; y <= y1d; ++y) {
+                    for (int x = a0 + 1; x <= a1 - 1; ++x) {
+                        for (int z = z1 - 3; z <= z1; ++z) {
+                            m.set(x, y, z, {0, 0, 0, 0});
+                        }
+                    }
+                }
+            }
+
+            // Darken interior rim for readability.
+            const Color rim = mul(stonePal.secondary, 0.75f);
+            if (faceX) {
+                const int x = x1 - 3;
+                for (int y = y0d; y <= y1d; ++y) {
+                    m.set(x, y, a0, rim);
+                    m.set(x, y, a1, rim);
+                }
+            } else {
+                const int z = z1 - 3;
+                for (int y = y0d; y <= y1d; ++y) {
+                    m.set(a0, y, z, rim);
+                    m.set(a1, y, z, rim);
+                }
+            }
+
+            return m;
+        }
+
+        // Closed/locked: stamp a wood door panel on the visible face.
+        const int faceCoord = faceX ? x1 : z1;
+        for (int y = y0d; y <= y1d; ++y) {
+            for (int a = a0; a <= a1; ++a) {
+                // Simple vertical plank pattern.
+                Color c = doorPal.primary;
+                if (((a - a0) % 2) == 0) c = lerp(c, doorPal.secondary, 0.35f);
+                if (((y + frame) % 5) == 0) c = lerp(c, doorPal.accent, 0.10f);
+
+                if (faceX) {
+                    m.set(faceCoord, y, a, c);
+                } else {
+                    m.set(a, y, faceCoord, c);
+                }
+            }
+        }
+
+        // Locked: add a tiny brass lock/handle accent.
+        if (kind == IsoTerrainBlockKind::DoorLocked) {
+            const Color brass = {220, 200, 80, 255};
+            const int ly = (y0d + y1d) / 2;
+            const int la = a1 - 1;
+            if (faceX) {
+                m.set(faceCoord, ly, la, brass);
+                m.set(faceCoord, ly + 1, la, brass);
+            } else {
+                m.set(la, ly, faceCoord, brass);
+                m.set(la, ly + 1, faceCoord, brass);
+            }
+        }
+
+        return m;
+    }
+
+    if (kind == IsoTerrainBlockKind::Pillar) {
+        const SpritePixels pTex = generatePillarTile(seed ^ 0x9111A0u, frame, /*pxSize=*/16);
+        const Palette pPal = extractPalette(pTex);
+
+        // Base + shaft + cap.
+        addCylinderY(m, 7.5f, 7.5f, 4.3f, 0, 1, mul(pPal.secondary, 0.95f), z0, z1);
+        addCylinderY(m, 7.5f, 7.5f, 3.7f, 2, 12, pPal.primary, z0, z1);
+        addCylinderY(m, 7.5f, 7.5f, 4.1f, 13, 13, lerp(pPal.primary, pPal.accent, 0.25f), z0, z1);
+        addCylinderY(m, 7.5f, 7.5f, 4.4f, 14, 14, lerp(pPal.primary, pPal.accent, 0.45f), z0, z1);
+
+        // Small chips.
+        for (int i = 0; i < 10; ++i) {
+            const int y = 2 + static_cast<int>(rng.nextU32() % 11u);
+            const int a = 2 + static_cast<int>(rng.nextU32() % 12u);
+            const int x = a;
+            const int z = 2 + static_cast<int>(rng.nextU32() % 12u);
+            if (m.at(x, y, z).a == 0) continue;
+            if ((rng.nextU32() & 3u) == 0u) m.set(x, y, z, {0, 0, 0, 0});
+        }
+
+        return m;
+    }
+
+    if (kind == IsoTerrainBlockKind::Boulder) {
+        const SpritePixels bTex = generateBoulderTile(seed ^ 0xB011D3u, frame, /*pxSize=*/16);
+        const Palette bPal = extractPalette(bTex);
+
+        // Start with a lumpy sphere.
+        addSphere(m, 7.5f, 6.8f, 7.5f, 5.7f, bPal.primary);
+
+        // Carve a few random chunks to break symmetry.
+        for (int i = 0; i < 18; ++i) {
+            const float cx = 4.0f + (rng.nextU32() % 800u) / 100.0f; // 4..12
+            const float cy = 2.5f + (rng.nextU32() % 700u) / 100.0f; // 2.5..9.5
+            const float cz = 4.0f + (rng.nextU32() % 800u) / 100.0f;
+            const float rr = 1.0f + (rng.nextU32() % 200u) / 100.0f; // 1..3
+            for (int z = 0; z < m.d; ++z) {
+                for (int y = 0; y < m.h; ++y) {
+                    for (int x = 0; x < m.w; ++x) {
+                        const Color c = m.at(x, y, z);
+                        if (c.a == 0) continue;
+                        const float dx = (x + 0.5f) - cx;
+                        const float dy = (y + 0.5f) - cy;
+                        const float dz = (z + 0.5f) - cz;
+                        if (dx*dx + dy*dy + dz*dz < rr*rr) {
+                            m.set(x, y, z, {0, 0, 0, 0});
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply per-voxel color variation using the 2D sprite as a material swatch.
+        for (int z = 0; z < m.d; ++z) {
+            for (int y = 0; y < m.h; ++y) {
+                for (int x = 0; x < m.w; ++x) {
+                    Color c = m.at(x, y, z);
+                    if (c.a == 0) continue;
+
+                    Color s = sampleSpriteOr(bTex, x, z, bPal.primary);
+                    c = lerp(c, s, 0.45f);
+
+                    const uint32_t h = hash32(hashCombine(seed ^ 0xB01D3u, static_cast<uint32_t>((x * 33) ^ (y * 97) ^ (z * 131))));
+                    const float n = ((h & 255u) / 255.0f) - 0.5f;
+                    c = mul(c, 1.0f + 0.18f * n);
+
+                    // Rare brighter fleck.
+                    if ((h & 127u) == 0u) c = lerp(c, bPal.accent, 0.25f);
+
+                    m.set(x, y, z, c);
+                }
+            }
+        }
+
+        return m;
+    }
+
+    // Fallback.
+    fillBeveledBox(stoneTex, stonePal, bodyH);
+    return m;
+}
+
+} // namespace
+
+SpritePixels renderIsoTerrainBlockVoxel(IsoTerrainBlockKind kind, uint32_t seed, int frame, int outPx, bool isoRaytrace) {
+    outPx = clampOutPx(outPx);
+    frame = frame % FRAMES;
+
+    const int detailScale = voxelDetailScaleForOutPx(outPx, isoRaytrace);
+
+    VoxelModel vox = buildIsoTerrainBlockModel(kind, seed, frame);
+    if (detailScale > 1) vox = scaleVoxelModelNearest(vox, detailScale);
+
+    return renderModelToSpriteIsometric(vox, frame, outPx, isoRaytrace);
 }

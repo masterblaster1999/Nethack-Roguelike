@@ -56,6 +56,12 @@ Comments start with `#` or `;`.
   - This is more expensive to generate, but sprites are cached, so it mainly affects *generation time* (not per-frame rendering).
   - Toggle at runtime via `#isoraytrace on|off|toggle` (this also clears the sprite cache so textures regenerate cleanly).
 
+- `iso_terrain_voxels` (`true/false`, default `true`)
+  - **Isometric view only** (ignored in `topdown`).
+  - When `true`, isometric terrain "block" sprites (walls/doors/pillars/boulders) are generated from small voxel models, so they match the voxel-sprite shading pipeline.
+  - When `iso_voxel_raytrace` is enabled, terrain blocks use raytrace **only** for small tile sizes (<=64px); larger sizes fall back to the faster mesh renderer to avoid long stalls.
+  - Toggle at runtime via `#isoterrainvox on|off|toggle` (alias: `#isoblocks`).
+
 - `player_name` (string, default `PLAYER`)
   - Used in the HUD + scoreboard.
 
@@ -176,7 +182,9 @@ bind_<action> = key[, key, ...]
 ```
 
 - Multiple keys can be bound to the same action by separating them with commas.
-- Modifiers are written as `shift+`, `ctrl+`, or `alt+` prefixes (example: `shift+comma`).
+- Modifiers are written as `shift+`, `ctrl+`, `alt+`, or `cmd+` prefixes (example: `shift+comma`).
+
+  - On macOS, `cmd+` corresponds to the Command key. On Windows/Linux it maps to the GUI/Windows/Super key.
 - Key names are case-insensitive.
 
 Examples:
@@ -226,6 +234,7 @@ Available actions:
 
 **UI / Meta**
 - `help`, `options`, `command`
+- `sound_preview`, `hearing_preview`, `threat_preview` (LOOK lenses: sound propagation, audibility, and threat ETA heatmaps)
 - `message_history`, `codex`, `discoveries`
 - `toggle_minimap`, `minimap_zoom_in`, `minimap_zoom_out`, `toggle_stats`, `toggle_perf_overlay`
 - `fullscreen`, `screenshot`

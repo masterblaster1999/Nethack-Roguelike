@@ -4,6 +4,7 @@
 #include "rng.hpp"
 #include "version.hpp"
 #include "action_info.hpp"
+#include "spritegen3d.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -127,6 +128,243 @@ inline std::vector<std::string> wrapToChars(const std::string& s, int maxChars, 
         }
     }
 
+    return out;
+}
+
+// ------------------------------------------------------------
+// Keybind UI formatting helpers
+// ------------------------------------------------------------
+// Keybinds are stored/edited as parseable tokens (e.g. "cmd+shift+slash"),
+// but for the HUD we want a friendlier presentation ("CMD+?", "<", "ENTER").
+// This layer is *display-only*; it does not change the underlying config.
+
+inline std::string trimCopy(std::string s) {
+    auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+    s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+    return s;
+}
+
+inline std::string toLowerCopy(std::string s) {
+    for (char& ch : s) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return s;
+}
+
+inline std::string toUpperCopy(std::string s) {
+    for (char& ch : s) {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+    return s;
+}
+
+inline std::vector<std::string> splitByChar(const std::string& s, char delim) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char ch : s) {
+        if (ch == delim) {
+            out.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    out.push_back(cur);
+    return out;
+}
+
+// Convert the "key" part of a chord into a compact UI label.
+// Returns the label and sets consumedShift=true when the label itself conveys Shift.
+inline std::string keyTokenToDisplay(const std::string& keyTokIn, bool shift, bool& consumedShift) {
+    consumedShift = false;
+    const std::string raw = trimCopy(keyTokIn);
+    if (raw.empty()) return "?";
+
+    // Common named tokens produced by KeyBinds::keycodeToToken().
+    const std::string k = toLowerCopy(raw);
+
+    // Special keys.
+    if (k == "enter" || k == "return") return "ENTER";
+    if (k == "escape" || k == "esc") return "ESC";
+    if (k == "tab") return "TAB";
+    if (k == "space") return "SPACE";
+    if (k == "backspace") return "BACK";
+    if (k == "delete" || k == "del") return "DEL";
+    if (k == "insert" || k == "ins") return "INS";
+    if (k == "pageup" || k == "pgup") return "PGUP";
+    if (k == "pagedown" || k == "pgdn") return "PGDN";
+    if (k == "home") return "HOME";
+    if (k == "end") return "END";
+    if (k == "up") return "UP";
+    if (k == "down") return "DOWN";
+    if (k == "left") return "LEFT";
+    if (k == "right") return "RIGHT";
+
+    // Function keys ("f1".."f24").
+    if (k.size() >= 2 && k[0] == 'f' && std::isdigit(static_cast<unsigned char>(k[1]))) {
+        return toUpperCopy(k);
+    }
+
+    // Keypad tokens.
+    if (k.rfind("kp_", 0) == 0) {
+        if (k == "kp_enter") return "KP ENTER";
+        if (k.size() == 4 && std::isdigit(static_cast<unsigned char>(k[3]))) {
+            return std::string("KP") + static_cast<char>(k[3]);
+        }
+        return toUpperCopy(k);
+    }
+
+    // Punctuation names we emit.
+    if (k == "comma") {
+        if (shift) { consumedShift = true; return "<"; }
+        return ",";
+    }
+    if (k == "period" || k == "dot") {
+        if (shift) { consumedShift = true; return ">"; }
+        return ".";
+    }
+    if (k == "slash") {
+        if (shift) { consumedShift = true; return "?"; }
+        return "/";
+    }
+    if (k == "backslash") {
+        if (shift) { consumedShift = true; return "|"; }
+        return "\\";
+    }
+    if (k == "minus" || k == "dash") {
+        if (shift) { consumedShift = true; return "_"; }
+        return "-";
+    }
+    if (k == "equals" || k == "equal") {
+        if (shift) { consumedShift = true; return "+"; }
+        return "=";
+    }
+    if (k == "semicolon") {
+        if (shift) { consumedShift = true; return ":"; }
+        return ";";
+    }
+    if (k == "apostrophe" || k == "quote") {
+        if (shift) { consumedShift = true; return "\""; }
+        return "'";
+    }
+    if (k == "grave" || k == "backquote") {
+        if (shift) { consumedShift = true; return "~"; }
+        return "`";
+    }
+    if (k == "less") {
+        // Dedicated '<' key on some layouts.
+        if (shift) { consumedShift = true; return ">"; }
+        return "<";
+    }
+    if (k == "greater") {
+        // Symmetric handling (rare, but keeps the display consistent).
+        if (shift) { consumedShift = true; return "<"; }
+        return ">";
+    }
+
+    // Single character fallback (letters, digits, brackets, etc.).
+    if (raw.size() == 1) {
+        const char c = raw[0];
+        if (shift && c >= 'a' && c <= 'z') {
+            consumedShift = true;
+            return std::string(1, static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        }
+
+        // Common US digit shift pairs (nice for quick readability).
+        if (shift && c >= '0' && c <= '9') {
+            consumedShift = true;
+            switch (c) {
+                case '1': return "!";
+                case '2': return "@";
+                case '3': return "#";
+                case '4': return "$";
+                case '5': return "%";
+                case '6': return "^";
+                case '7': return "&";
+                case '8': return "*";
+                case '9': return "(";
+                case '0': return ")";
+                default: break;
+            }
+        }
+
+        return std::string(1, c);
+    }
+
+    // Generic fallback: uppercase the token (keeps it readable for SDL key names).
+    return toUpperCopy(raw);
+}
+
+inline std::string chordTokenToDisplay(const std::string& chordTokIn) {
+    std::string chordTok = trimCopy(chordTokIn);
+    if (chordTok.empty()) return "";
+
+    const std::string low = toLowerCopy(chordTok);
+    if (low == "none" || low == "unbound" || low == "disabled") return "NONE";
+
+    bool cmd = false;
+    bool ctrl = false;
+    bool alt = false;
+    bool shift = false;
+    std::string keyTok;
+
+    const std::vector<std::string> parts = splitByChar(chordTok, '+');
+    for (size_t i = 0; i < parts.size(); ++i) {
+        const std::string pRaw = trimCopy(parts[i]);
+        if (pRaw.empty()) continue;
+        const std::string p = toLowerCopy(pRaw);
+
+        // All but the last part are usually modifiers, but be defensive.
+        if (p == "cmd" || p == "gui" || p == "meta" || p == "super") cmd = true;
+        else if (p == "ctrl" || p == "control") ctrl = true;
+        else if (p == "alt" || p == "option") alt = true;
+        else if (p == "shift") shift = true;
+        else keyTok = pRaw; // treat as key
+    }
+
+    bool consumedShift = false;
+    const std::string keyDisp = keyTokenToDisplay(keyTok, shift, consumedShift);
+
+    std::string out;
+    if (cmd) out += "CMD+";
+    if (ctrl) out += "CTRL+";
+    if (alt) out += "ALT+";
+    if (shift && !consumedShift) out += "SHIFT+";
+    out += keyDisp;
+    return out;
+}
+
+inline std::string chordListToDisplay(const std::string& chordListIn) {
+    const std::string chordList = trimCopy(chordListIn);
+    if (chordList.empty()) return "NONE";
+
+    const std::string low = toLowerCopy(chordList);
+    if (low == "none" || low == "unbound" || low == "disabled") return "NONE";
+
+    std::vector<std::string> parts = splitByChar(chordList, ',');
+    std::vector<std::string> unique;
+    unique.reserve(parts.size());
+
+    for (std::string& part : parts) {
+        part = trimCopy(part);
+        if (part.empty()) continue;
+        const std::string disp = chordTokenToDisplay(part);
+        if (disp.empty() || disp == "NONE") continue;
+
+        // De-dupe at the UI level to avoid noisy repeats (e.g. "<, <" when
+        // multiple physical keys converge on the same printed symbol).
+        if (std::find(unique.begin(), unique.end(), disp) == unique.end()) {
+            unique.push_back(disp);
+        }
+    }
+
+    std::string out;
+    for (size_t i = 0; i < unique.size(); ++i) {
+        if (i) out += ", ";
+        out += unique[i];
+    }
+    if (out.empty()) return "NONE";
     return out;
 }
 
@@ -422,6 +660,10 @@ struct ParticleEngine {
     static constexpr uint8_t LAYER_BEHIND = 0;
     static constexpr uint8_t LAYER_FRONT  = 1;
 
+    // Particle textures are tiny procedural sprites. Give them the same 4-frame
+    // flipbook contract as the rest of the renderer so they can animate smoothly.
+    static constexpr int ANIM_FRAMES = Renderer::FRAMES;
+
     struct Particle {
         // World position in map tiles (fractional ok). z is "height" in tiles.
         float x = 0.0f;
@@ -461,10 +703,12 @@ struct ParticleEngine {
     static constexpr int EMBER_VARS = 4;
     static constexpr int MOTE_VARS = 6;
 
-    SDL_Texture* sparkTex[SPARK_VARS]{};
-    SDL_Texture* smokeTex[SMOKE_VARS]{};
-    SDL_Texture* emberTex[EMBER_VARS]{};
-    SDL_Texture* moteTex[MOTE_VARS]{};
+    // Animated flipbooks per particle type. This makes smoke/motes feel "alive"
+    // without requiring runtime texture warping or authored sprite sheets.
+    SDL_Texture* sparkTex[SPARK_VARS][ANIM_FRAMES]{};
+    SDL_Texture* smokeTex[SMOKE_VARS][ANIM_FRAMES]{};
+    SDL_Texture* emberTex[EMBER_VARS][ANIM_FRAMES]{};
+    SDL_Texture* moteTex[MOTE_VARS][ANIM_FRAMES]{};
 
     std::vector<Particle> particles;
     float time = 0.0f;
@@ -478,43 +722,76 @@ struct ParticleEngine {
     bool init(SDL_Renderer* r) {
         shutdown();
 
-        // Spark: small "star" burst (additive).
+        // Spark: small "star" burst (additive) — animated twinkle.
         for (int i = 0; i < SPARK_VARS; ++i) {
-            sparkTex[i] = createTex(r, 16, 16, hashCombine(0x51A7u, static_cast<uint32_t>(i)), Kind::Spark);
-            if (!sparkTex[i]) return false;
-            SDL_SetTextureBlendMode(sparkTex[i], SDL_BLENDMODE_ADD);
+            const uint32_t baseSeed = hashCombine(0x51A7u, static_cast<uint32_t>(i));
+            for (int f = 0; f < ANIM_FRAMES; ++f) {
+                sparkTex[i][f] = createTex(r, 16, 16, baseSeed, Kind::Spark, f);
+                if (!sparkTex[i][f]) return false;
+                SDL_SetTextureBlendMode(sparkTex[i][f], SDL_BLENDMODE_ADD);
+            }
         }
 
-        // Smoke: noisy blob (alpha blend).
+        // Smoke: noisy blob (alpha blend) — animated domain-warped noise.
         for (int i = 0; i < SMOKE_VARS; ++i) {
-            smokeTex[i] = createTex(r, 32, 32, hashCombine(0x5A0C3u, static_cast<uint32_t>(i)), Kind::Smoke);
-            if (!smokeTex[i]) return false;
-            SDL_SetTextureBlendMode(smokeTex[i], SDL_BLENDMODE_BLEND);
+            const uint32_t baseSeed = hashCombine(0x5A0C3u, static_cast<uint32_t>(i));
+            for (int f = 0; f < ANIM_FRAMES; ++f) {
+                smokeTex[i][f] = createTex(r, 32, 32, baseSeed, Kind::Smoke, f);
+                if (!smokeTex[i][f]) return false;
+                SDL_SetTextureBlendMode(smokeTex[i][f], SDL_BLENDMODE_BLEND);
+            }
         }
 
-        // Ember: tiny soft disc (additive).
+        // Ember: tiny soft disc (additive) — animated flicker.
         for (int i = 0; i < EMBER_VARS; ++i) {
-            emberTex[i] = createTex(r, 16, 16, hashCombine(0x3E8B3u, static_cast<uint32_t>(i)), Kind::Ember);
-            if (!emberTex[i]) return false;
-            SDL_SetTextureBlendMode(emberTex[i], SDL_BLENDMODE_ADD);
+            const uint32_t baseSeed = hashCombine(0x3E8B3u, static_cast<uint32_t>(i));
+            for (int f = 0; f < ANIM_FRAMES; ++f) {
+                emberTex[i][f] = createTex(r, 16, 16, baseSeed, Kind::Ember, f);
+                if (!emberTex[i][f]) return false;
+                SDL_SetTextureBlendMode(emberTex[i][f], SDL_BLENDMODE_ADD);
+            }
         }
 
-        // Mote: soft diamond dust (additive).
+        // Mote: soft diamond dust (additive) — animated ring + twinkle.
         for (int i = 0; i < MOTE_VARS; ++i) {
-            moteTex[i] = createTex(r, 16, 16, hashCombine(0x4D4F5445u, static_cast<uint32_t>(i)), Kind::Mote);
-            if (!moteTex[i]) return false;
-            SDL_SetTextureBlendMode(moteTex[i], SDL_BLENDMODE_ADD);
+            const uint32_t baseSeed = hashCombine(0x4D4F5445u, static_cast<uint32_t>(i));
+            for (int f = 0; f < ANIM_FRAMES; ++f) {
+                moteTex[i][f] = createTex(r, 16, 16, baseSeed, Kind::Mote, f);
+                if (!moteTex[i][f]) return false;
+                SDL_SetTextureBlendMode(moteTex[i][f], SDL_BLENDMODE_ADD);
+            }
         }
 
         return true;
     }
 
     void shutdown() {
-        for (auto*& t : sparkTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
-        for (auto*& t : smokeTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
-        for (auto*& t : emberTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
-        for (auto*& t : moteTex) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+        for (int i = 0; i < SPARK_VARS; ++i) {
+            for (int f = 0; f < ANIM_FRAMES; ++f) {
+                if (sparkTex[i][f]) SDL_DestroyTexture(sparkTex[i][f]);
+                sparkTex[i][f] = nullptr;
+            }
+        }
+        for (int i = 0; i < SMOKE_VARS; ++i) {
+            for (int f = 0; f < ANIM_FRAMES; ++f) {
+                if (smokeTex[i][f]) SDL_DestroyTexture(smokeTex[i][f]);
+                smokeTex[i][f] = nullptr;
+            }
+        }
+        for (int i = 0; i < EMBER_VARS; ++i) {
+            for (int f = 0; f < ANIM_FRAMES; ++f) {
+                if (emberTex[i][f]) SDL_DestroyTexture(emberTex[i][f]);
+                emberTex[i][f] = nullptr;
+            }
+        }
+        for (int i = 0; i < MOTE_VARS; ++i) {
+            for (int f = 0; f < ANIM_FRAMES; ++f) {
+                if (moteTex[i][f]) SDL_DestroyTexture(moteTex[i][f]);
+                moteTex[i][f] = nullptr;
+            }
+        }
         particles.clear();
+        time = 0.0f;
     }
 
     void add(const Particle& p) {
@@ -522,7 +799,12 @@ struct ParticleEngine {
         particles.push_back(p);
     }
 
-    void update(float dt) {
+    // Update the simulation by dt seconds.
+    //
+    // `windAccel` is a small, *visual-only* global acceleration (tiles/sec^2)
+    // used to bias smoke/embers/motes so they drift consistently with the
+    // game's deterministic per-level wind.
+    void update(float dt, Vec2f windAccel = Vec2f{0.0f, 0.0f}) {
         if (dt <= 0.0f) return;
         dt = std::min(dt, 0.10f);
 
@@ -547,14 +829,65 @@ struct ParticleEngine {
                     continue;
                 }
 
-                // Procedural drift for smoke + motes.
-                if (p.kind == Kind::Smoke || p.kind == Kind::Mote) {
-                    const float s0 = static_cast<float>((p.seed & 0xFFu)) * (1.0f / 255.0f);
-                    const float w = std::sin((p.x * 2.1f + p.y * 1.7f) + time * 1.2f + s0 * 6.28318f);
-                    const float v = std::cos((p.y * 2.0f - p.x * 1.4f) + time * 1.0f + s0 * 6.28318f);
-                    const float amp = (p.kind == Kind::Smoke) ? 0.25f : 0.10f;
-                    p.vx += w * amp * h;
-                    p.vy += v * amp * h;
+                // -----------------------------------------------------------------
+                // Procedural drift: curl-noise flow field
+                //
+                // Instead of adding ad-hoc sin/cos wobble (which can read like a
+                // jittery texture slide), we advect smoke/motes/embers through a
+                // lightweight divergence-free (curl) noise field.
+                //
+                // This produces much more "fluid" motion while staying fully
+                // procedural and deterministic.
+                // -----------------------------------------------------------------
+                if (p.kind == Kind::Smoke || p.kind == Kind::Mote || p.kind == Kind::Ember) {
+                    const float t01 = std::clamp(p.age / std::max(0.0001f, p.life), 0.0f, 1.0f);
+                    // Stronger at spawn, taper later so particles don't accelerate
+                    // wildly at the end of their lifetime.
+                    float fade = 1.0f - t01;
+                    fade = fade * fade;
+
+                    // Per-kind tuning: smoke flows slower/larger-scale, motes
+                    // smaller-scale, embers are subtle.
+                    float amp = 0.0f;
+                    float scale = 1.0f;
+                    int octaves = 3;
+                    if (p.kind == Kind::Smoke) {
+                        amp = 0.65f;
+                        scale = 0.80f;
+                        octaves = 4;
+                    } else if (p.kind == Kind::Mote) {
+                        amp = 0.35f;
+                        scale = 1.15f;
+                        octaves = 3;
+                    } else { // Ember
+                        amp = 0.22f;
+                        scale = 1.35f;
+                        octaves = 3;
+                    }
+
+                    // Per-particle variation (stable).
+                    const float v0 = 0.85f + 0.30f * rand01(p.seed ^ 0xC0A51EEDu);
+                    amp *= v0;
+                    scale *= (0.90f + 0.25f * rand01(p.seed ^ 0xA11CE5u));
+
+                    const Vec2f flow = curlNoise2D(p.x * scale, p.y * scale, time,
+                                                   p.seed ^ 0xBADC0DEu,
+                                                   /*eps=*/0.18f,
+                                                   /*octaves=*/octaves);
+
+                    p.vx += flow.x * amp * fade * h;
+                    p.vy += flow.y * amp * fade * h;
+                }
+
+                // Global wind bias (visual-only; comes from the deterministic
+                // per-level wind in Game).
+                if ((p.kind == Kind::Smoke) || (p.kind == Kind::Mote) || (p.kind == Kind::Ember)) {
+                    float k = 0.0f;
+                    if (p.kind == Kind::Smoke) k = 1.00f;
+                    else if (p.kind == Kind::Mote) k = 0.55f;
+                    else k = 0.25f; // Ember
+                    p.vx += windAccel.x * k * h;
+                    p.vy += windAccel.y * k * h;
                 }
 
                 // Integrate.
@@ -567,6 +900,18 @@ struct ParticleEngine {
                     p.vx *= k;
                     p.vy *= k;
                     p.vz *= k;
+                }
+
+                // Safety clamp: keep rare pathological cases from exploding.
+                const float vmax = (p.kind == Kind::Smoke) ? 1.60f
+                                  : (p.kind == Kind::Mote)  ? 1.20f
+                                  : (p.kind == Kind::Ember) ? 2.80f
+                                  : 6.00f;
+                const float sp2 = p.vx * p.vx + p.vy * p.vy;
+                if (sp2 > vmax * vmax) {
+                    const float inv = vmax / std::sqrt(std::max(0.000001f, sp2));
+                    p.vx *= inv;
+                    p.vy *= inv;
                 }
 
                 p.x += p.vx * h;
@@ -604,7 +949,8 @@ struct ParticleEngine {
 
             const Color c = lerpColor(p.c0, p.c1, t01);
 
-            SDL_Texture* tex = texFor(p);
+            const int af = animFrameFor(p);
+            SDL_Texture* tex = texFor(p, af);
             if (!tex) continue;
 
             float sx = 0.0f;
@@ -668,18 +1014,145 @@ private:
         };
     }
 
-    SDL_Texture* texFor(const Particle& p) const {
-        if (p.kind == Kind::Spark) {
-            return sparkTex[static_cast<int>(p.var) % SPARK_VARS];
-        } else if (p.kind == Kind::Smoke) {
-            return smokeTex[static_cast<int>(p.var) % SMOKE_VARS];
-        } else if (p.kind == Kind::Mote) {
-            return moteTex[static_cast<int>(p.var) % MOTE_VARS];
+    int animFrameFor(const Particle& p) const {
+        // Use particle-relative time so each particle animates across its lifetime,
+        // then apply a stable per-particle phase offset to avoid lockstep motion.
+        const float base = std::clamp(p.age / std::max(0.0001f, p.life), 0.0f, 1.0f);
+        const float phase = static_cast<float>(hash32(p.seed ^ 0xA11CEu) & 0xFFFFu) * (1.0f / 65535.0f);
+
+        float speed = 1.0f;
+        switch (p.kind) {
+            case Kind::Spark: speed = 2.0f; break;
+            case Kind::Ember: speed = 1.6f; break;
+            case Kind::Mote:  speed = 1.3f; break;
+            case Kind::Smoke:
+            default:          speed = 1.0f; break;
         }
-        return emberTex[static_cast<int>(p.var) % EMBER_VARS];
+
+        const float t = base * speed + phase;
+        int fi = static_cast<int>(std::floor(t * static_cast<float>(ANIM_FRAMES))) % ANIM_FRAMES;
+        if (fi < 0) fi += ANIM_FRAMES;
+        return fi;
     }
 
-    SDL_Texture* createTex(SDL_Renderer* r, int w, int h, uint32_t seed, Kind kind) {
+    SDL_Texture* texFor(const Particle& p, int frame) const {
+        frame = (ANIM_FRAMES > 0) ? (frame % ANIM_FRAMES) : 0;
+        if (frame < 0) frame += ANIM_FRAMES;
+
+        if (p.kind == Kind::Spark) {
+            return sparkTex[static_cast<int>(p.var) % SPARK_VARS][frame];
+        } else if (p.kind == Kind::Smoke) {
+            return smokeTex[static_cast<int>(p.var) % SMOKE_VARS][frame];
+        } else if (p.kind == Kind::Mote) {
+            return moteTex[static_cast<int>(p.var) % MOTE_VARS][frame];
+        }
+        return emberTex[static_cast<int>(p.var) % EMBER_VARS][frame];
+    }
+
+    static float rand01(uint32_t s) {
+        return static_cast<float>(hash32(s) & 0xFFFFu) * (1.0f / 65535.0f);
+    }
+
+    static float fade(float t) {
+        // Quintic smoothstep.
+        return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+    }
+
+    static float valueNoise2D01(float x, float y, uint32_t seed) {
+        const float fx = std::floor(x);
+        const float fy = std::floor(y);
+        const int xi = static_cast<int>(fx);
+        const int yi = static_cast<int>(fy);
+
+        const float tx = x - fx;
+        const float ty = y - fy;
+
+        const float u = fade(std::clamp(tx, 0.0f, 1.0f));
+        const float v = fade(std::clamp(ty, 0.0f, 1.0f));
+
+        auto h = [&](int x0, int y0) -> float {
+            const uint32_t hx = static_cast<uint32_t>(x0);
+            const uint32_t hy = static_cast<uint32_t>(y0);
+            return rand01(hashCombine(seed, hashCombine(hx, hy)));
+        };
+
+        const float v00 = h(xi,     yi);
+        const float v10 = h(xi + 1, yi);
+        const float v01 = h(xi,     yi + 1);
+        const float v11 = h(xi + 1, yi + 1);
+
+        const float a = lerp(v00, v10, u);
+        const float b = lerp(v01, v11, u);
+        return lerp(a, b, v);
+    }
+
+    static float fbm2D01(float x, float y, uint32_t seed, int octaves = 4) {
+        octaves = std::clamp(octaves, 1, 8);
+        float sum = 0.0f;
+        float amp = 0.5f;
+        float freq = 1.0f;
+        float norm = 0.0f;
+        uint32_t s = seed;
+
+        for (int i = 0; i < octaves; ++i) {
+            sum += valueNoise2D01(x * freq, y * freq, s) * amp;
+            norm += amp;
+            amp *= 0.5f;
+            freq *= 2.0f;
+            s = hashCombine(s, static_cast<uint32_t>(0x9E37u + i * 131u));
+        }
+
+        return (norm > 0.0f) ? (sum / norm) : 0.0f;
+    }
+
+    // Divergence-free 2D flow field derived from a scalar noise potential.
+    //
+    // We build a (time-varying) scalar field n(x,y,t), estimate its gradient,
+    // then rotate that gradient by 90 degrees to obtain a curl field:
+    //   v = (dn/dy, -dn/dx)
+    //
+    // This is a common trick for getting fluid-like advection in particle
+    // systems without simulating Navier–Stokes.
+    static Vec2f curlNoise2D(float x, float y, float time, uint32_t seed, float eps, int octaves) {
+        constexpr float TAU = 6.28318530718f;
+
+        eps = std::clamp(eps, 0.02f, 0.75f);
+        octaves = std::clamp(octaves, 1, 6);
+
+        // Animate by drifting through the noise domain along a circle so the
+        // field changes smoothly over time.
+        const float phase = rand01(seed ^ 0xC0A51EEDu) * TAU;
+        const float ang = time * 0.70f + phase;
+        const float driftX = std::cos(ang) * 0.85f;
+        const float driftY = std::sin(ang) * 0.85f;
+
+        auto pot = [&](float xx, float yy) -> float {
+            // A small fixed offset keeps x,y near the origin from looking too
+            // "grid aligned" (value-noise artifacts).
+            return fbm2D01(xx + driftX + 19.7f, yy + driftY - 8.3f, seed ^ 0xBADC0DEu, octaves);
+        };
+
+        const float nL = pot(x - eps, y);
+        const float nR = pot(x + eps, y);
+        const float nD = pot(x, y - eps);
+        const float nU = pot(x, y + eps);
+
+        const float dX = (nR - nL) / (2.0f * eps);
+        const float dY = (nU - nD) / (2.0f * eps);
+
+        Vec2f v{ dY, -dX };
+
+        // Clamp magnitude to keep the flow stable regardless of scale.
+        const float m2 = v.x * v.x + v.y * v.y;
+        if (m2 > 1.0f) {
+            const float inv = 1.0f / std::sqrt(m2);
+            v.x *= inv;
+            v.y *= inv;
+        }
+        return v;
+    }
+
+    SDL_Texture* createTex(SDL_Renderer* r, int w, int h, uint32_t seed, Kind kind, int frame) {
         if (!r) return nullptr;
 
         SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA8888);
@@ -688,9 +1161,17 @@ private:
         uint32_t* px = static_cast<uint32_t*>(surf->pixels);
         SDL_PixelFormat* fmt = surf->format;
 
-        auto rand01 = [&](uint32_t s) -> float {
-            return static_cast<float>(hash32(s) & 0xFFFFu) * (1.0f / 65535.0f);
-        };
+        constexpr float kTwoPi = 6.28318530718f;
+        const float animT = static_cast<float>(frame % std::max(1, ANIM_FRAMES)) / static_cast<float>(std::max(1, ANIM_FRAMES));
+        const float seedPhase = static_cast<float>(hash32(seed ^ 0xBADC0DEu) & 0xFFFFu) * (1.0f / 65535.0f);
+        const float ang = (animT + seedPhase) * kTwoPi;
+
+        // Circular drift in noise domain => seamless looping animation.
+        const float driftX = std::cos(ang) * 0.35f;
+        const float driftY = std::sin(ang) * 0.35f;
+
+        const float pulse1 = 0.85f + 0.15f * std::sin(ang);
+        const float pulse2 = 0.80f + 0.20f * std::sin(ang * 2.0f + seedPhase * kTwoPi * 0.37f);
 
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
@@ -701,53 +1182,85 @@ private:
                 float a = 0.0f;
 
                 if (kind == Kind::Spark) {
-                    float core = std::max(0.0f, 1.0f - r0 * 1.55f);
+                    // Subtle rotation wobble so sparks twinkle rather than just scale.
+                    const float wob = 0.28f * std::sin(ang * 2.0f + seedPhase * kTwoPi * 0.73f);
+                    const float cs = std::cos(wob);
+                    const float sn = std::sin(wob);
+                    const float rx = nx * cs - ny * sn;
+                    const float ry = nx * sn + ny * cs;
+                    const float rr = std::sqrt(rx * rx + ry * ry);
+
+                    float core = std::max(0.0f, 1.0f - rr * 1.55f);
                     core = core * core * core;
 
                     // Star spikes.
-                    const float spikeX = std::max(0.0f, 1.0f - std::abs(nx) * 7.0f);
-                    const float spikeY = std::max(0.0f, 1.0f - std::abs(ny) * 7.0f);
-                    const float spikeD1 = std::max(0.0f, 1.0f - std::abs(nx + ny) * 4.5f);
-                    const float spikeD2 = std::max(0.0f, 1.0f - std::abs(nx - ny) * 4.5f);
+                    const float spikeX = std::max(0.0f, 1.0f - std::abs(rx) * 7.0f);
+                    const float spikeY = std::max(0.0f, 1.0f - std::abs(ry) * 7.0f);
+                    const float spikeD1 = std::max(0.0f, 1.0f - std::abs(rx + ry) * 4.5f);
+                    const float spikeD2 = std::max(0.0f, 1.0f - std::abs(rx - ry) * 4.5f);
 
                     float spikes = (spikeX + spikeY) * 0.35f + (spikeD1 + spikeD2) * 0.20f;
 
-                    const float n = (rand01(hashCombine(seed, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y)))) - 0.5f) * 0.25f;
+                    // Twinkle modulation from looped noise.
+                    const float tw = fbm2D01(rx * 6.0f + driftX * 2.0f, ry * 6.0f + driftY * 2.0f, seed ^ 0x51A7u, 3);
+                    const float n = (tw - 0.5f) * 0.20f;
 
-                    a = std::clamp(core + spikes + n, 0.0f, 1.0f);
+                    a = std::clamp((core + spikes) * pulse2 + n, 0.0f, 1.0f);
                 } else if (kind == Kind::Smoke) {
+                    // Domain-warped fBm "puff" that loops over 4 frames.
                     float edge = std::max(0.0f, 1.0f - r0);
                     edge = edge * edge;
 
-                    // Cheap fractal-ish noise at a few scales.
-                    const float n0 = rand01(hashCombine(seed ^ 0x1234u, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y))));
-                    const float n1 = rand01(hashCombine(seed ^ 0xBEEF1234u, hashCombine(static_cast<uint32_t>(x / 2), static_cast<uint32_t>(y / 2))));
-                    const float n2 = rand01(hashCombine(seed ^ 0x9E3779B9u, hashCombine(static_cast<uint32_t>(x / 4), static_cast<uint32_t>(y / 4))));
-                    const float n = (n0 * 0.55f + n1 * 0.30f + n2 * 0.15f);
+                    const float w1 = fbm2D01(nx * 2.25f + driftX * 1.8f, ny * 2.25f + driftY * 1.8f, seed ^ 0xBEEF1234u, 4);
+                    const float w2 = fbm2D01(nx * 2.25f - driftY * 1.6f + 12.3f, ny * 2.25f + driftX * 1.6f - 9.1f, seed ^ 0x1234u, 4);
+                    const float wx = (w1 - 0.5f) * 0.70f;
+                    const float wy = (w2 - 0.5f) * 0.70f;
 
-                    a = edge * (0.35f + n * 0.85f);
-                    a = std::clamp(a, 0.0f, 1.0f);
+                    const float d0 = fbm2D01((nx + wx) * 3.15f + driftX * 0.8f,
+                                            (ny + wy) * 3.15f + driftY * 0.8f,
+                                            seed ^ 0x9E3779B9u,
+                                            5);
+
+                    const float grain = fbm2D01(nx * 8.0f + driftX * 4.0f,
+                                               ny * 8.0f + driftY * 4.0f,
+                                               seed ^ 0xC0FFEEu,
+                                               3);
+
+                    const float density = d0 * 0.85f + grain * 0.15f;
+                    a = edge * (0.25f + density * 0.95f);
+                    a = std::clamp(a * pulse1, 0.0f, 1.0f);
                 } else if (kind == Kind::Mote) {
-                    // Soft diamond "mote": a tiny magical dust speck with a faint ring and a noisy twinkle.
+                    // Soft diamond "mote": a magical dust speck with a faint animated ring.
                     const float d = std::abs(nx) + std::abs(ny); // diamond distance
                     float core = std::max(0.0f, 1.0f - d * 1.35f);
                     core = core * core * core;
 
-                    float ring = std::max(0.0f, 1.0f - std::abs(d - 0.55f) * 4.2f);
+                    const float ringPos = 0.55f + 0.04f * std::sin(ang + seedPhase * kTwoPi * 0.91f);
+                    float ring = std::max(0.0f, 1.0f - std::abs(d - ringPos) * 4.2f);
                     ring = ring * ring;
 
                     const float crossX = std::max(0.0f, 1.0f - std::abs(nx) * 6.0f);
                     const float crossY = std::max(0.0f, 1.0f - std::abs(ny) * 6.0f);
 
-                    const float n = (rand01(hashCombine(seed ^ 0x51A11u, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y)))) - 0.5f) * 0.22f;
+                    const float tw = fbm2D01(nx * 6.0f + driftX * 2.0f,
+                                            ny * 6.0f + driftY * 2.0f,
+                                            seed ^ 0x4D4F5445u,
+                                            3);
+                    const float n = (tw - 0.5f) * 0.22f;
 
-                    a = std::clamp(core + ring * 0.28f + (crossX + crossY) * 0.06f + n, 0.0f, 1.0f);
+                    a = std::clamp((core + ring * 0.28f + (crossX + crossY) * 0.06f + n) * pulse2, 0.0f, 1.0f);
                 } else { // Ember
+                    // Ember: flickering hot dot with a little internal noise.
                     float core = std::max(0.0f, 1.0f - r0 * 1.85f);
                     core = core * core;
 
-                    const float n = (rand01(hashCombine(seed, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y)))) - 0.5f) * 0.25f;
-                    a = std::clamp(core + n, 0.0f, 1.0f);
+                    const float tw = fbm2D01(nx * 7.0f + driftX * 3.5f,
+                                            ny * 7.0f + driftY * 3.5f,
+                                            seed ^ 0x3E8B3u,
+                                            3);
+                    const float n = (tw - 0.5f) * 0.28f;
+
+                    a = std::clamp((core + n) * pulse2, 0.0f, 1.0f);
                 }
 
                 const uint8_t alpha = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::round(a * 255.0f)), 0, 255));
@@ -760,7 +1273,6 @@ private:
         return tex;
     }
 };
-
 Renderer::Renderer(int windowW, int windowH, int tileSize, int hudHeight, bool vsync, int textureCacheMB_)
     : winW(windowW), winH(windowH), tile(tileSize), hudH(hudHeight), vsyncEnabled(vsync), textureCacheMB(textureCacheMB_) {
     // Derive viewport size in tiles from the logical window size.
@@ -848,6 +1360,17 @@ bool Renderer::init() {
     }
     spriteTex.setBudgetBytes(budgetBytes);
     spriteTex.resetStats();
+
+    // Configure the UI preview cache budget.
+    // These are larger (e.g. 128x128+) and rotate through multiple yaws.
+    size_t previewBudgetBytes = 0;
+    if (budgetBytes > 0) {
+        // Allocate a slice of the main cache budget to UI previews.
+        previewBudgetBytes = std::max<size_t>(1024ull * 1024ull, budgetBytes / 8ull);
+        previewBudgetBytes = std::min(previewBudgetBytes, 16ull * 1024ull * 1024ull);
+    }
+    uiPreviewTex.setBudgetBytes(previewBudgetBytes);
+    uiPreviewTex.resetStats();
 
     // More variants reduce visible repetition, but large tile sizes can become
     // expensive in VRAM. Scale the variant count down as tile size increases.
@@ -972,6 +1495,13 @@ for (int k = 0; k < EFFECT_KIND_COUNT; ++k) {
     for (int f = 0; f < FRAMES; ++f) {
         effectIconTex[static_cast<size_t>(k)][static_cast<size_t>(f)] = textureFromSprite(generateEffectIcon(ek, f, 16));
     }
+}
+
+
+// Pre-generate cursor / targeting reticle overlays (map-space UI).
+for (int f = 0; f < FRAMES; ++f) {
+    cursorReticleTex[static_cast<size_t>(f)] = textureFromSprite(generateCursorReticleTile(0xC0A51Eu, /*isometric=*/false, f, spritePx));
+    cursorReticleIsoTex[static_cast<size_t>(f)] = textureFromSprite(generateCursorReticleTile(0xC0A51Eu, /*isometric=*/true, f, spritePx));
 }
 
 // Reset room-type cache (rebuilt lazily in render()).
@@ -1249,8 +1779,17 @@ uiAssetsValid = false;
     doorLockedOverlayTex.fill(nullptr);
     doorOpenOverlayTex.fill(nullptr);
 
+    // Targeting / look cursor reticle overlays.
+    for (auto& t : cursorReticleTex) if (t) SDL_DestroyTexture(t);
+    for (auto& t : cursorReticleIsoTex) if (t) SDL_DestroyTexture(t);
+    cursorReticleTex.fill(nullptr);
+    cursorReticleIsoTex.fill(nullptr);
+
     // Entity/item/projectile textures are budget-cached in spriteTex.
     spriteTex.clear();
+
+    // UI preview textures (Codex/etc.).
+    uiPreviewTex.clear();
 
     // Renderer-owned procedural particle textures (visual-only).
     if (particles_) {
@@ -2790,7 +3329,12 @@ void Renderer::ensureUIAssets(const Game& game) {
     if (!initialized) return;
 
     const UITheme want = game.uiTheme();
-    if (uiAssetsValid && want == uiThemeCached) return;
+    // Procedural GUI: let the UI tile textures pick up a subtle per-run
+    // "paint job" derived from the run seed (purely cosmetic, deterministic).
+    const uint32_t runSeed = game.seed();
+    const uint32_t styleSeed = (runSeed != 0u) ? (hash32(runSeed ^ 0xA11C0DEu) | 1u) : 0u;
+
+    if (uiAssetsValid && want == uiThemeCached && styleSeed == uiStyleSeedCached_) return;
 
     for (auto& t : uiPanelTileTex) {
         if (t) SDL_DestroyTexture(t);
@@ -2802,23 +3346,33 @@ void Renderer::ensureUIAssets(const Game& game) {
     }
 
     uiThemeCached = want;
+    uiStyleSeedCached_ = styleSeed;
+
+    const uint32_t tileSeed = (styleSeed != 0u) ? hashCombine(styleSeed, 0x51A11u) : 0x51A11u;
+    const uint32_t ornSeed  = (styleSeed != 0u) ? hashCombine(styleSeed, 0x0ABCDu) : 0x0ABCDu;
 
     for (int f = 0; f < FRAMES; ++f) {
-        uiPanelTileTex[static_cast<size_t>(f)] = textureFromSprite(generateUIPanelTile(uiThemeCached, 0x51A11u, f, 16));
-        uiOrnamentTex[static_cast<size_t>(f)]  = textureFromSprite(generateUIOrnamentTile(uiThemeCached, 0x0ABCDu, f, 16));
+        uiPanelTileTex[static_cast<size_t>(f)] = textureFromSprite(generateUIPanelTile(uiThemeCached, tileSeed, f, 16));
+        uiOrnamentTex[static_cast<size_t>(f)]  = textureFromSprite(generateUIOrnamentTile(uiThemeCached, ornSeed, f, 16));
     }
 
     uiAssetsValid = true;
 }
 
-void Renderer::ensureIsoTerrainAssets(uint32_t styleSeed) {
+void Renderer::ensureIsoTerrainAssets(uint32_t styleSeed, bool voxelBlocks, bool isoRaytrace) {
     if (!renderer || !pixfmt) return;
 
     // Tile textures are generated in a clamped "sprite" resolution to keep VRAM reasonable
     // for very large tile sizes. This matches the logic in Renderer::init().
     const int spritePx = std::max(16, std::min(256, tile));
     const int tileVars = (spritePx >= 224) ? 8 : (spritePx >= 160) ? 10 : (spritePx >= 96) ? 14 : 18;
-    if (isoTerrainAssetsValid && isoTerrainStyleSeedCached_ == styleSeed && isoTerrainSpritePxCached_ == spritePx) return;
+    const bool useRaytraceBlocks = voxelBlocks && isoRaytrace && spritePx <= 64;
+    const int blockVars = (useRaytraceBlocks) ? std::min(tileVars, 10) : tileVars;
+    if (isoTerrainAssetsValid
+        && isoTerrainStyleSeedCached_ == styleSeed
+        && isoTerrainSpritePxCached_ == spritePx
+        && isoTerrainVoxelBlocksCached_ == voxelBlocks
+        && isoTerrainVoxelBlocksRaytraceCached_ == useRaytraceBlocks) return;
 
     // Defensive cleanup in case we ever re-generate (e.g., future runtime tile-size changes).
     for (auto& styleVec : floorThemeVarIso) {
@@ -2953,45 +3507,70 @@ void Renderer::ensureIsoTerrainAssets(uint32_t styleSeed) {
     }
 
     // 2.5D walls are drawn as sprites (square textures) so they can extend above the ground plane.
-    wallBlockVarIso.resize(static_cast<size_t>(tileVars));
-    for (int i = 0; i < tileVars; ++i) {
+    wallBlockVarIso.resize(static_cast<size_t>(blockVars));
+    for (int i = 0; i < blockVars; ++i) {
         const uint32_t seed = hashCombine(mixSeed(0xAA110u ^ 0xB10Cu), static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
-            wallBlockVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] =
-                textureFromSprite(generateIsometricWallBlockTile(seed, f, spritePx));
+            SpritePixels sp;
+            if (voxelBlocks) {
+                sp = renderIsoTerrainBlockVoxel(IsoTerrainBlockKind::Wall, seed, f, spritePx, useRaytraceBlocks);
+            } else {
+                sp = generateIsometricWallBlockTile(seed, f, spritePx);
+            }
+            wallBlockVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(sp);
         }
     }
 
     // 2.5D doors are drawn as sprites too, so closed/locked doors read as part of
     // the wall geometry instead of flat top-down overlays.
-    doorBlockClosedVarIso.resize(static_cast<size_t>(tileVars));
-    doorBlockLockedVarIso.resize(static_cast<size_t>(tileVars));
-    doorBlockOpenVarIso.resize(static_cast<size_t>(tileVars));
-    for (int i = 0; i < tileVars; ++i) {
+    doorBlockClosedVarIso.resize(static_cast<size_t>(blockVars));
+    doorBlockLockedVarIso.resize(static_cast<size_t>(blockVars));
+    doorBlockOpenVarIso.resize(static_cast<size_t>(blockVars));
+    for (int i = 0; i < blockVars; ++i) {
         const uint32_t baseSeed = hashCombine(mixSeed(0xD00Du ^ 0xB10Cu), static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
-            doorBlockClosedVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] =
-                textureFromSprite(generateIsometricDoorBlockTile(baseSeed ^ 0xC105EDu, /*locked=*/false, f, spritePx));
-            doorBlockLockedVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] =
-                textureFromSprite(generateIsometricDoorBlockTile(baseSeed ^ 0x10CCEDu, /*locked=*/true, f, spritePx));
-            doorBlockOpenVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] =
-                textureFromSprite(generateIsometricDoorwayBlockTile(baseSeed ^ 0x0B0A1u, f, spritePx));
+            SpritePixels closed;
+            SpritePixels locked;
+            SpritePixels open;
+
+            if (voxelBlocks) {
+                closed = renderIsoTerrainBlockVoxel(IsoTerrainBlockKind::DoorClosed, baseSeed ^ 0xC105EDu, f, spritePx, useRaytraceBlocks);
+                locked = renderIsoTerrainBlockVoxel(IsoTerrainBlockKind::DoorLocked, baseSeed ^ 0x10CCEDu, f, spritePx, useRaytraceBlocks);
+                open   = renderIsoTerrainBlockVoxel(IsoTerrainBlockKind::DoorOpen,   baseSeed ^ 0x0B0A1u, f, spritePx, useRaytraceBlocks);
+            } else {
+                closed = generateIsometricDoorBlockTile(baseSeed ^ 0xC105EDu, /*locked=*/false, f, spritePx);
+                locked = generateIsometricDoorBlockTile(baseSeed ^ 0x10CCEDu, /*locked=*/true, f, spritePx);
+                open   = generateIsometricDoorwayBlockTile(baseSeed ^ 0x0B0A1u, f, spritePx);
+            }
+
+            doorBlockClosedVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(closed);
+            doorBlockLockedVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(locked);
+            doorBlockOpenVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(open);
         }
     }
 
 
     // 2.5D pillars/boulders are also drawn as sprites in isometric view so props read as
     // volumetric blockers instead of flat top-down overlays.
-    pillarBlockVarIso.resize(static_cast<size_t>(tileVars));
-    boulderBlockVarIso.resize(static_cast<size_t>(tileVars));
-    for (int i = 0; i < tileVars; ++i) {
+    pillarBlockVarIso.resize(static_cast<size_t>(blockVars));
+    boulderBlockVarIso.resize(static_cast<size_t>(blockVars));
+    for (int i = 0; i < blockVars; ++i) {
         const uint32_t pSeed = hashCombine(mixSeed(0x9111A0u ^ 0xB10Cu), static_cast<uint32_t>(i));
         const uint32_t bSeed = hashCombine(mixSeed(0xB011D3u ^ 0xB10Cu), static_cast<uint32_t>(i));
         for (int f = 0; f < FRAMES; ++f) {
-            pillarBlockVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] =
-                textureFromSprite(generateIsometricPillarBlockTile(pSeed, f, spritePx));
-            boulderBlockVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] =
-                textureFromSprite(generateIsometricBoulderBlockTile(bSeed, f, spritePx));
+            SpritePixels psp;
+            SpritePixels bsp;
+
+            if (voxelBlocks) {
+                psp = renderIsoTerrainBlockVoxel(IsoTerrainBlockKind::Pillar, pSeed, f, spritePx, useRaytraceBlocks);
+                bsp = renderIsoTerrainBlockVoxel(IsoTerrainBlockKind::Boulder, bSeed, f, spritePx, useRaytraceBlocks);
+            } else {
+                psp = generateIsometricPillarBlockTile(pSeed, f, spritePx);
+                bsp = generateIsometricBoulderBlockTile(bSeed, f, spritePx);
+            }
+
+            pillarBlockVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(psp);
+            boulderBlockVarIso[static_cast<size_t>(i)][static_cast<size_t>(f)] = textureFromSprite(bsp);
         }
     }
 
@@ -3100,6 +3679,8 @@ void Renderer::ensureIsoTerrainAssets(uint32_t styleSeed) {
 
     isoTerrainStyleSeedCached_ = styleSeed;
     isoTerrainSpritePxCached_ = spritePx;
+    isoTerrainVoxelBlocksCached_ = voxelBlocks;
+    isoTerrainVoxelBlocksRaytraceCached_ = useRaytraceBlocks;
     isoTerrainAssetsValid = true;
 }
 
@@ -3354,6 +3935,8 @@ void Renderer::render(const Game& game) {
         // Entity/item/projectile textures are budget-cached in spriteTex.
         spriteTex.clear();
         spriteTex.resetStats();
+        uiPreviewTex.clear();
+        uiPreviewTex.resetStats();
         voxelSpritesCached = wantVoxelSprites;
     }
 
@@ -3362,6 +3945,8 @@ void Renderer::render(const Game& game) {
     if (wantIsoRaytrace != isoVoxelRaytraceCached) {
         spriteTex.clear();
         spriteTex.resetStats();
+        uiPreviewTex.clear();
+        uiPreviewTex.resetStats();
         isoVoxelRaytraceCached = wantIsoRaytrace;
     }
 
@@ -3445,12 +4030,26 @@ d.ensureMaterials(runSeed, game.branch(), game.depth(), game.dungeonMaxDepth());
     // Build isometric-diamond terrain textures lazily so top-down mode doesn't pay
     // the VRAM + CPU cost unless it is actually used.
     if (isoView) {
-        ensureIsoTerrainAssets(styleSeed);
+        ensureIsoTerrainAssets(styleSeed, game.isoTerrainVoxelBlocksEnabled(), game.isoVoxelRaytraceEnabled());
     }
 
     // Update procedural particles and emit new ones from current game FX.
     if (particles_) {
-        particles_->update(static_cast<float>(frameDt));
+        // Per-level wind is deterministic (seed + branch + depth). We feed it
+        // into the particle engine as a small global drift so smoke/embers feel
+        // like they're in the same "air" as the gas/fire simulation.
+        Vec2f windAccel{0.0f, 0.0f};
+        {
+            const Vec2i w = game.windDir();
+            const int ws = game.windStrength();
+            if (ws > 0 && (w.x != 0 || w.y != 0)) {
+                const float a = 0.12f * static_cast<float>(ws); // tiles/sec^2
+                windAccel.x = static_cast<float>(w.x) * a;
+                windAccel.y = static_cast<float>(w.y) * a;
+            }
+        }
+
+        particles_->update(static_cast<float>(frameDt), windAccel);
         updateParticlesFromGame(game, static_cast<float>(frameDt), ticks);
     }
 
@@ -5035,20 +5634,76 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
     if (game.isAutoActive()) {
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
-        if (game.isAutoExploring()) {
-            SDL_SetRenderDrawColor(renderer, 80, 220, 140, 90);
+        const bool exploring = game.isAutoExploring();
+        const Uint8 cr = 80;
+        const Uint8 cg = exploring ? Uint8{220} : Uint8{170};
+        const Uint8 cb = exploring ? Uint8{140} : Uint8{255};
+
+        // In isometric view, render a more legible path: a faint polyline plus
+        // diamond pips that match the tile projection.
+        if (isoView) {
+            std::vector<Vec2i> tiles;
+            tiles.reserve(game.autoPath().size());
+
+            std::vector<SDL_Point> pts;
+            pts.reserve(game.autoPath().size());
+
+            for (const Vec2i& p : game.autoPath()) {
+                if (!d.inBounds(p.x, p.y)) continue;
+                const Tile& t = d.at(p.x, p.y);
+                if (!t.explored) continue;
+
+                tiles.push_back(p);
+                const SDL_Rect base = mapTileDst(p.x, p.y);
+                pts.push_back(SDL_Point{ base.x + base.w / 2, base.y + base.h / 2 });
+            }
+
+            // Faint connecting line to make long paths readable at a glance.
+            SDL_SetRenderDrawColor(renderer, cr, cg, cb, Uint8{55});
+            for (size_t i = 1; i < pts.size(); ++i) {
+                SDL_RenderDrawLine(renderer, pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y);
+            }
+
+            // Per-tile pips (small diamonds).
+            SDL_SetRenderDrawColor(renderer, cr, cg, cb, Uint8{90});
+            for (const Vec2i& p : tiles) {
+                const SDL_Rect base = mapTileDst(p.x, p.y);
+                const int cx = base.x + base.w / 2;
+                const int cy = base.y + base.h / 2;
+
+                const int hw = std::max(1, base.w / 10);
+                const int hh = std::max(1, base.h / 5);
+                fillIsoDiamond(renderer, cx, cy, hw, hh);
+            }
+
+            // Destination accent.
+            if (!tiles.empty()) {
+                const Vec2i& end = tiles.back();
+                SDL_Rect endRect = mapTileDst(end.x, end.y);
+                SDL_SetRenderDrawColor(renderer, cr, cg, cb, Uint8{180});
+                drawIsoDiamondOutline(renderer, endRect);
+            }
         } else {
-            SDL_SetRenderDrawColor(renderer, 80, 170, 255, 90);
-        }
+            SDL_SetRenderDrawColor(renderer, cr, cg, cb, Uint8{90});
 
-        for (const Vec2i& p : game.autoPath()) {
-            if (!d.inBounds(p.x, p.y)) continue;
-            const Tile& t = d.at(p.x, p.y);
-            if (!t.explored) continue;
+            for (const Vec2i& p : game.autoPath()) {
+                if (!d.inBounds(p.x, p.y)) continue;
+                const Tile& t = d.at(p.x, p.y);
+                if (!t.explored) continue;
 
-            SDL_Rect base = tileDst(p.x, p.y);
-            SDL_Rect r{ base.x + tile / 3, base.y + tile / 3, tile / 3, tile / 3 };
-            SDL_RenderFillRect(renderer, &r);
+                SDL_Rect base = tileDst(p.x, p.y);
+                SDL_Rect r{ base.x + base.w / 3, base.y + base.h / 3, base.w / 3, base.h / 3 };
+                SDL_RenderFillRect(renderer, &r);
+            }
+
+            if (!game.autoPath().empty()) {
+                const Vec2i& end = game.autoPath().back();
+                if (d.inBounds(end.x, end.y) && d.at(end.x, end.y).explored) {
+                    SDL_Rect endRect = tileDst(end.x, end.y);
+                    SDL_SetRenderDrawColor(renderer, cr, cg, cb, Uint8{180});
+                    SDL_RenderDrawRect(renderer, &endRect);
+                }
+            }
         }
 
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
@@ -5431,13 +6086,22 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
         SDL_SetRenderDrawColor(renderer, r, g, b, a);
 
         SDL_Rect base = mapTileDst(tr.pos.x, tr.pos.y);
-        const int x0 = base.x;
-        const int y0 = base.y;
-        const int x1 = x0 + base.w - 5;
-        const int y1 = y0 + base.h - 5;
-        SDL_RenderDrawLine(renderer, x0 + 4, y0 + 4, x1, y1);
-        SDL_RenderDrawLine(renderer, x1, y0 + 4, x0 + 4, y1);
-        SDL_RenderDrawPoint(renderer, x0 + base.w / 2, y0 + base.h / 2);
+        if (isoView) {
+            // In isometric mode, match the projection: a diamond outline + cross.
+            drawIsoDiamondOutline(renderer, base);
+            SDL_SetRenderDrawColor(renderer, r, g, b, static_cast<uint8_t>(std::max(40, a / 2)));
+            drawIsoDiamondCross(renderer, base);
+            SDL_SetRenderDrawColor(renderer, r, g, b, a);
+            SDL_RenderDrawPoint(renderer, base.x + base.w / 2, base.y + base.h / 2);
+        } else {
+            const int x0 = base.x;
+            const int y0 = base.y;
+            const int x1 = x0 + base.w - 5;
+            const int y1 = y0 + base.h - 5;
+            SDL_RenderDrawLine(renderer, x0 + 4, y0 + 4, x1, y1);
+            SDL_RenderDrawLine(renderer, x1, y0 + 4, x0 + 4, y1);
+            SDL_RenderDrawPoint(renderer, x0 + base.w / 2, y0 + base.h / 2);
+        }
     }
 
     // Draw player map markers / notes (shown on explored tiles; subtle indicator).
@@ -5461,8 +6125,23 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
 
         SDL_Rect base = mapTileDst(m.pos.x, m.pos.y);
         const int s = (m.kind == MarkerKind::Danger) ? 6 : 4;
-        SDL_Rect pip{ base.x + tile - s - 2, base.y + 2, s, s };
-        SDL_RenderFillRect(renderer, &pip);
+
+        if (isoView) {
+            // Pin the marker to the isometric diamond corner so it reads as part of the tile.
+            SDL_Point top{}, right{}, bottom{}, left{};
+            isoDiamondCorners(base, top, right, bottom, left);
+
+            const int hw = std::max(1, s / 2);
+            const int hh = std::max(1, hw / 2);
+
+            // Slight inset so the pip doesn't clip at the map edge.
+            const int cx = right.x - hw - 1;
+            const int cy = right.y;
+            fillIsoDiamond(renderer, cx, cy, hw, hh);
+        } else {
+            SDL_Rect pip{ base.x + base.w - s - 2, base.y + 2, s, s };
+            SDL_RenderFillRect(renderer, &pip);
+        }
     }
 
     // Draw entities (only if their tile is visible; player always visible)
@@ -5899,27 +6578,81 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
 
                 SDL_Rect base = tileDst(p.x, p.y);
 
-                // Inner flash.
-                SDL_SetRenderDrawColor(renderer, core.r, core.g, core.b, static_cast<uint8_t>(std::min(255, aCore)));
-                SDL_Rect inner{ base.x + 4, base.y + 4, tile - 8, tile - 8 };
-                SDL_RenderFillRect(renderer, &inner);
+                // Inner flash + bloom ring.
+                if (isoView) {
+                    const int cx = base.x + base.w / 2;
+                    const int cy = base.y + base.h / 2;
 
-                // Soft bloom ring.
-                SDL_SetRenderDrawColor(renderer, 255, 190, 110, static_cast<uint8_t>(std::min(255, aCore / 2)));
-                SDL_Rect mid{ base.x + 2, base.y + 2, tile - 4, tile - 4 };
-                SDL_RenderFillRect(renderer, &mid);
+                    // Inner flash.
+                    SDL_SetRenderDrawColor(renderer, core.r, core.g, core.b, static_cast<uint8_t>(std::min(255, aCore)));
+                    {
+                        const int hw = std::max(1, base.w / 4);
+                        const int hh = std::max(1, base.h / 4);
+                        fillIsoDiamond(renderer, cx, cy, hw, hh);
+                    }
 
-                // Tiny spark specks (deterministic) for texture.
-                uint32_t seed = hashCombine(hashCombine(static_cast<uint32_t>(game.turns()), static_cast<uint32_t>(ticks / 40u)),
-                                            hashCombine(static_cast<uint32_t>(p.x), static_cast<uint32_t>(p.y)));
-                const int sparks = 1 + static_cast<int>(seed & 0x3u);
+                    // Soft bloom ring.
+                    SDL_SetRenderDrawColor(renderer, 255, 190, 110, static_cast<uint8_t>(std::min(255, aCore / 2)));
+                    {
+                        const int hw = std::max(1, base.w / 3);
+                        const int hh = std::max(1, base.h / 3);
+                        fillIsoDiamond(renderer, cx, cy, hw, hh);
+                    }
 
-                SDL_SetRenderDrawColor(renderer, 255, 240, 200, static_cast<uint8_t>(std::min(255, (aCore * 2) / 3)));
-                for (int s = 0; s < sparks; ++s) {
-                    seed = hash32(seed + 0x9e3779b9u + static_cast<uint32_t>(s) * 101u);
-                    const int sx = base.x + 2 + static_cast<int>(seed % static_cast<uint32_t>(std::max(1, tile - 4)));
-                    const int sy = base.y + 2 + static_cast<int>((seed >> 8) % static_cast<uint32_t>(std::max(1, tile - 4)));
-                    SDL_RenderDrawPoint(renderer, sx, sy);
+                    // Tiny spark specks (deterministic) for texture (kept inside the diamond).
+                    uint32_t seed = hashCombine(
+                        hashCombine(static_cast<uint32_t>(game.turns()), static_cast<uint32_t>(ticks / 40u)),
+                        hashCombine(static_cast<uint32_t>(p.x), static_cast<uint32_t>(p.y)));
+                    const int sparks = 1 + static_cast<int>(seed & 0x3u);
+
+                    SDL_SetRenderDrawColor(renderer, 255, 240, 200, static_cast<uint8_t>(std::min(255, (aCore * 2) / 3)));
+                    for (int s = 0; s < sparks; ++s) {
+                        seed = hash32(seed + 0x9e3779b9u + static_cast<uint32_t>(s) * 101u);
+
+                        int sx = cx;
+                        int sy = cy;
+
+                        // Few attempts to land inside the isometric diamond.
+                        for (int attempt = 0; attempt < 6; ++attempt) {
+                            const int bw = std::max(1, base.w - 4);
+                            const int bh = std::max(1, base.h - 4);
+
+                            const int rx = static_cast<int>(seed % static_cast<uint32_t>(bw));
+                            const int ry = static_cast<int>((seed >> 8) % static_cast<uint32_t>(bh));
+
+                            sx = base.x + 2 + rx;
+                            sy = base.y + 2 + ry;
+
+                            if (pointInIsoDiamond(base, sx, sy)) break;
+                            seed = hash32(seed + 0xBEEFu + static_cast<uint32_t>(attempt) * 97u);
+                        }
+
+                        SDL_RenderDrawPoint(renderer, sx, sy);
+                    }
+                } else {
+                    // Top-down (square) version.
+                    SDL_SetRenderDrawColor(renderer, core.r, core.g, core.b, static_cast<uint8_t>(std::min(255, aCore)));
+                    SDL_Rect inner{ base.x + 4, base.y + 4, base.w - 8, base.h - 8 };
+                    SDL_RenderFillRect(renderer, &inner);
+
+                    SDL_SetRenderDrawColor(renderer, 255, 190, 110, static_cast<uint8_t>(std::min(255, aCore / 2)));
+                    SDL_Rect mid{ base.x + 2, base.y + 2, base.w - 4, base.h - 4 };
+                    SDL_RenderFillRect(renderer, &mid);
+
+                    uint32_t seed = hashCombine(
+                        hashCombine(static_cast<uint32_t>(game.turns()), static_cast<uint32_t>(ticks / 40u)),
+                        hashCombine(static_cast<uint32_t>(p.x), static_cast<uint32_t>(p.y)));
+                    const int sparks = 1 + static_cast<int>(seed & 0x3u);
+
+                    SDL_SetRenderDrawColor(renderer, 255, 240, 200, static_cast<uint8_t>(std::min(255, (aCore * 2) / 3)));
+                    for (int s = 0; s < sparks; ++s) {
+                        seed = hash32(seed + 0x9e3779b9u + static_cast<uint32_t>(s) * 101u);
+                        const int bw = std::max(1, base.w - 4);
+                        const int bh = std::max(1, base.h - 4);
+                        const int sx = base.x + 2 + static_cast<int>(seed % static_cast<uint32_t>(bw));
+                        const int sy = base.y + 2 + static_cast<int>((seed >> 8) % static_cast<uint32_t>(bh));
+                        SDL_RenderDrawPoint(renderer, sx, sy);
+                    }
                 }
             }
 
@@ -5931,8 +6664,16 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
                 const Tile& t = d.at(p.x, p.y);
                 if (!t.explored) continue;
                 SDL_Rect base = tileDst(p.x, p.y);
-                SDL_Rect outer{ base.x + 1, base.y + 1, tile - 2, tile - 2 };
-                SDL_RenderFillRect(renderer, &outer);
+                if (isoView) {
+                    const int cx = base.x + base.w / 2;
+                    const int cy = base.y + base.h / 2;
+                    const int hw = std::max(1, base.w / 2 - 1);
+                    const int hh = std::max(1, base.h / 2 - 1);
+                    fillIsoDiamond(renderer, cx, cy, hw, hh);
+                } else {
+                    SDL_Rect outer{ base.x + 1, base.y + 1, base.w - 2, base.h - 2 };
+                    SDL_RenderFillRect(renderer, &outer);
+                }
             }
 
             SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
@@ -5945,6 +6686,10 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
     }
 
     // Overlays
+    if (isoView) {
+        drawIsoHoverOverlay(game);
+    }
+
     if (game.isLooking()) {
         drawLookOverlay(game);
     }
@@ -7494,7 +8239,8 @@ void Renderer::drawKeybindsOverlay(const Game& game) {
             const Color c = (vi == sel) ? white : (conflict ? warn : gray);
 
             std::string label = upperSpaces(rows[idx].first);
-            std::string val = rows[idx].second;
+            // Show human-friendly key labels in the UI (keep raw tokens in settings).
+            std::string val = chordListToDisplay(rows[idx].second);
 
             // Build a padded label column for alignment.
             label = fit(label, labelChars);
@@ -7845,6 +8591,20 @@ void Renderer::drawHelpOverlay(const Game& game) {
     const std::string settingsFile = baseName(game.settingsPath());
     if (!settingsFile.empty()) add("EDIT " + settingsFile + " (bind_*)", gray);
     else add("EDIT procrogue_settings.ini (bind_*)", gray);
+
+    // Current binds (pulled from the runtime table so this panel stays in sync with user overrides).
+    auto bindFor = [&](const char* token) -> std::string {
+        for (const auto& row : game.keybindsDescription()) {
+            if (row.first == token) return row.second;
+        }
+        return "unbound";
+    };
+
+    add("HELP: " + chordListToDisplay(bindFor("help")), gray);
+    add("OPTIONS: " + chordListToDisplay(bindFor("options")) + "   EXT CMD: " + chordListToDisplay(bindFor("command")), gray);
+    add("INVENTORY: " + chordListToDisplay(bindFor("inventory")) + "   LOOK: " + chordListToDisplay(bindFor("look")) + "   SEARCH: " + chordListToDisplay(bindFor("search")), gray);
+    add("MINIMAP: " + chordListToDisplay(bindFor("toggle_minimap")) + "   STATS: " + chordListToDisplay(bindFor("toggle_stats")) + "   MSGS: " + chordListToDisplay(bindFor("message_history")), gray);
+    add("LOOK LENSES: SOUND " + chordListToDisplay(bindFor("sound_preview")) + "   HEARING " + chordListToDisplay(bindFor("hearing_preview")) + "   THREAT " + chordListToDisplay(bindFor("threat_preview")), gray);
 
     blank();
     add("TIPS:", white);
@@ -8760,7 +9520,7 @@ void Renderer::drawCodexOverlay(const Game& game) {
         drawText5x7(renderer, x, y, bodyScale, gray, meta);
         y += 14;
         drawText5x7(renderer, x, y, bodyScale, gray,
-                    "UP/DOWN SELECT   ENTER/ESC CLOSE");
+                    "UP/DOWN SELECT   ENTER/ESC CLOSE   (3D PREVIEW AUTO-ROTATES)");
         y += 18;
     }
 
@@ -8868,6 +9628,89 @@ void Renderer::drawCodexOverlay(const Game& game) {
 
         // Header.
         dline(std::string(entityKindName(k)), white);
+
+        // --- 3D turntable preview -------------------------------------------------
+        //
+        // Large UI preview sprites are rendered through the voxel renderer with an
+        // explicit yaw angle (camera rotated around the model).
+        // This gives the Codex a "3D inspect" feel without changing gameplay.
+        {
+            // Clamp to keep the details column readable.
+            const int maxPx = std::min(detailsW, std::min(innerH / 2, 220));
+            const int prevPx = std::clamp(maxPx, 96, 220);
+
+            // Don't try to draw if the panel is too small.
+            if (prevPx >= 96) {
+                drawText5x7(renderer, detailsX, y, bodyScale, gray, "3D PREVIEW");
+                y += 14;
+
+                const int px = detailsX + (detailsW - prevPx) / 2;
+                SDL_Rect r{px, y, prevPx, prevPx};
+
+                // Background plate.
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 90);
+                SDL_RenderFillRect(renderer, &r);
+
+                SDL_Texture* tex = nullptr;
+
+                // Cache key: [cat=4][sub=1 entity][kind][yawStep][px][animFrame]
+                const uint32_t t = SDL_GetTicks();
+                constexpr int yawSteps = 24;
+                const int yawStep = static_cast<int>((t / 120u) % static_cast<uint32_t>(yawSteps));
+                const int animF = static_cast<int>((t / 180u) % static_cast<uint32_t>(FRAMES));
+                constexpr float PI = 3.14159265358979323846f;
+                const float yaw = (2.0f * PI) * (static_cast<float>(yawStep) / static_cast<float>(yawSteps));
+
+                const uint8_t kind8 = static_cast<uint8_t>(k);
+                const uint8_t px8 = static_cast<uint8_t>(std::clamp(prevPx, 0, 255));
+                const uint8_t a8 = static_cast<uint8_t>(std::clamp(animF, 0, 255));
+                const uint16_t yaw16 = static_cast<uint16_t>(yawStep);
+
+                const uint64_t key = (static_cast<uint64_t>(4) << 56) |
+                                     (static_cast<uint64_t>(1) << 48) |
+                                     (static_cast<uint64_t>(kind8) << 40) |
+                                     (static_cast<uint64_t>(yaw16) << 24) |
+                                     (static_cast<uint64_t>(px8) << 16) |
+                                     (static_cast<uint64_t>(a8) << 8);
+
+                if (auto arr = uiPreviewTex.get(key)) {
+                    tex = (*arr)[0];
+                } else {
+                    // Stable, per-kind seed so the Codex feels consistent across runs.
+                    const uint32_t seed = hash32(0xC0D3u ^ (static_cast<uint32_t>(kind8) * 0x9E3779B9u));
+
+                    // Build the base 2D sprite, then render a 3D turntable preview at prevPx.
+                    SpritePixels base2d = generateEntitySprite(k, seed, animF,
+                                                              /*use3d=*/false,
+                                                              /*pxSize=*/16,
+                                                              /*isometric=*/false,
+                                                              /*isoRaytrace=*/false);
+
+                    SpritePixels prev = game.voxelSpritesEnabled()
+                        ? renderSprite3DEntityTurntable(k, base2d, seed, animF, yaw, prevPx)
+                        : resampleSpriteToSize(base2d, prevPx);
+
+                    SDL_Texture* created = textureFromSprite(prev);
+                    if (created) {
+                        std::array<SDL_Texture*, 1> a{created};
+                        const size_t bytes = static_cast<size_t>(prevPx) * static_cast<size_t>(prevPx) * sizeof(uint32_t);
+                        uiPreviewTex.put(key, a, bytes);
+                        if (auto arr2 = uiPreviewTex.get(key)) tex = (*arr2)[0];
+                    }
+                }
+
+                if (tex) {
+                    SDL_RenderCopy(renderer, tex, nullptr, &r);
+                }
+
+                // Subtle border.
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 50);
+                SDL_RenderDrawRect(renderer, &r);
+
+                y += prevPx + 12;
+            }
+        }
 
         // Stats.
         const MonsterBaseStats base = baseMonsterStatsFor(k);
@@ -8997,7 +9840,7 @@ void Renderer::drawDiscoveriesOverlay(const Game& game) {
         drawText5x7(renderer, x, y, bodyScale, gray, ss.str());
     }
     y += 16;
-    drawText5x7(renderer, x, y, bodyScale, dark, "LEFT/RIGHT/TAB FILTER  SHIFT+S SORT  ESC CLOSE");
+    drawText5x7(renderer, x, y, bodyScale, dark, "LEFT/RIGHT/TAB FILTER  SHIFT+S SORT  ESC CLOSE   (3D PREVIEW AUTO-ROTATES)");
     y += 18;
 
     // Build current list.
@@ -9143,6 +9986,89 @@ void Renderer::drawDiscoveriesOverlay(const Game& game) {
         dline(std::string("CATEGORY: ") + category(), gray);
         dline(std::string("APPEARANCE: ") + app, gray);
         dline(std::string("IDENTIFIED: ") + (id ? "YES" : "NO"), gray);
+
+        // --- 3D turntable preview -------------------------------------------------
+        {
+            const int maxPx = std::min(detailsW, std::min(innerH / 2, 220));
+            const int prevPx = std::clamp(maxPx, 96, 220);
+
+            if (prevPx >= 96) {
+                drawText5x7(renderer, detailsX, dy, bodyScale, gray, "3D PREVIEW");
+                dy += 14;
+
+                const int px = detailsX + (detailsW - prevPx) / 2;
+                SDL_Rect r{px, dy, prevPx, prevPx};
+
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 90);
+                SDL_RenderFillRect(renderer, &r);
+
+                SDL_Texture* tex = nullptr;
+
+                const uint32_t t = SDL_GetTicks();
+                constexpr int yawSteps = 24;
+                const int yawStep = static_cast<int>((t / 120u) % static_cast<uint32_t>(yawSteps));
+                const int animF = static_cast<int>((t / 190u) % static_cast<uint32_t>(FRAMES));
+                constexpr float PI = 3.14159265358979323846f;
+                const float yaw = (2.0f * PI) * (static_cast<float>(yawStep) / static_cast<float>(yawSteps));
+
+                const uint8_t kind8 = static_cast<uint8_t>(k);
+                const uint8_t px8 = static_cast<uint8_t>(std::clamp(prevPx, 0, 255));
+                const uint8_t a8 = static_cast<uint8_t>(std::clamp(animF, 0, 255));
+                const uint16_t yaw16 = static_cast<uint16_t>(yawStep);
+
+                const uint8_t appId = static_cast<uint8_t>(game.itemAppearanceFor(k));
+                const uint8_t variant = static_cast<uint8_t>((id ? 0x80u : 0x00u) | (appId & 0x7Fu));
+
+                const uint64_t key = (static_cast<uint64_t>(4) << 56) |
+                                     (static_cast<uint64_t>(2) << 48) |
+                                     (static_cast<uint64_t>(kind8) << 40) |
+                                     (static_cast<uint64_t>(yaw16) << 24) |
+                                     (static_cast<uint64_t>(px8) << 16) |
+                                     (static_cast<uint64_t>(a8) << 8) |
+                                     (static_cast<uint64_t>(variant));
+
+                if (auto arr = uiPreviewTex.get(key)) {
+                    tex = (*arr)[0];
+                } else {
+                    // If unidentified, seed by appearance id only (NetHack-style). Otherwise, use a stable per-kind seed.
+                    const uint32_t seed = id
+                        ? hash32(0xD15Cu ^ (static_cast<uint32_t>(kind8) * 0x9E3779B9u))
+                        : (SPRITE_SEED_IDENT_APPEARANCE_FLAG | static_cast<uint32_t>(appId));
+
+                    SpritePixels base2d = generateItemSprite(k, seed, animF,
+                                                            /*use3d=*/false,
+                                                            /*pxSize=*/16,
+                                                            /*isometric=*/false,
+                                                            /*isoRaytrace=*/false);
+
+                    SpritePixels prev;
+                    if (game.voxelSpritesEnabled()) {
+                        // If unidentified, use extrusion to preserve the appearance-based 2D details.
+                        prev = id
+                            ? renderSprite3DItemTurntable(k, base2d, seed, animF, yaw, prevPx)
+                            : renderSprite3DExtrudedTurntable(base2d, seed, animF, yaw, prevPx);
+                    } else {
+                        prev = resampleSpriteToSize(base2d, prevPx);
+                    }
+
+                    SDL_Texture* created = textureFromSprite(prev);
+                    if (created) {
+                        std::array<SDL_Texture*, 1> a{created};
+                        const size_t bytes = static_cast<size_t>(prevPx) * static_cast<size_t>(prevPx) * sizeof(uint32_t);
+                        uiPreviewTex.put(key, a, bytes);
+                        if (auto arr2 = uiPreviewTex.get(key)) tex = (*arr2)[0];
+                    }
+                }
+
+                if (tex) SDL_RenderCopy(renderer, tex, nullptr, &r);
+
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 50);
+                SDL_RenderDrawRect(renderer, &r);
+
+                dy += prevPx + 12;
+            }
+        }
 
         if (!id) {
             dline("", gray);
@@ -9464,6 +10390,106 @@ void Renderer::drawMessageHistoryOverlay(const Game& game) {
     }
 }
 
+void Renderer::drawIsoHoverOverlay(const Game& game) {
+    if (!renderer) return;
+    if (viewMode_ != ViewMode::Isometric) return;
+
+    // Don't fight with explicit inspect/target modes; those already own the cursor.
+    if (game.isLooking() || game.isTargeting()) return;
+
+    // Suppress hover-inspect when modal UIs are open.
+    if (game.isCommandOpen() || game.isInventoryOpen() || game.isSpellsOpen() || game.isChestOpen() ||
+        game.isOptionsOpen() || game.isKeybindsOpen() || game.isHelpOpen() || game.isMessageHistoryOpen() ||
+        game.isScoresOpen() || game.isCodexOpen() || game.isDiscoveriesOpen() || game.isMinimapOpen() ||
+        game.isStatsOpen() || game.isLevelUpOpen()) {
+        return;
+    }
+
+    // Only update while the window is focused (prevents stale hover text when alt-tabbed).
+    if (!window) return;
+    if ((SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) == 0u) return;
+
+    int mx = 0;
+    int my = 0;
+    SDL_GetMouseState(&mx, &my);
+
+    int tx = 0;
+    int ty = 0;
+    if (!windowToMapTile(game, mx, my, tx, ty)) {
+        isoHoverValid_ = false;
+        return;
+    }
+
+    const Dungeon& d = game.dungeon();
+    if (!d.inBounds(tx, ty)) {
+        isoHoverValid_ = false;
+        return;
+    }
+
+    const Tile& t = d.at(tx, ty);
+    if (!t.explored) {
+        // No hover UI on unknown tiles (avoids accidentally "revealing" coordinate structure).
+        isoHoverValid_ = false;
+        return;
+    }
+
+    const Vec2i p{tx, ty};
+    const uint32_t now = SDL_GetTicks();
+
+    // Refresh when the mouse moves to a different tile, or occasionally while hovering
+    // (so visibility/exploration state changes can update without requiring mouse motion).
+    if (!isoHoverValid_ || isoHoverTile_.x != p.x || isoHoverTile_.y != p.y || (now - isoHoverTextTick_) > 350u) {
+        isoHoverTile_ = p;
+        isoHoverValid_ = true;
+        isoHoverText_ = game.describeAt(p);
+        isoHoverTextTick_ = now;
+    }
+
+    if (!isoHoverValid_) return;
+
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    // Tile highlight (diamond) - subtle outline + inner glow.
+    SDL_Rect base = mapTileDst(isoHoverTile_.x, isoHoverTile_.y);
+    const int cx = base.x + base.w / 2;
+    const int cy = base.y + base.h / 2;
+
+    // Inner glow keeps the cursor readable over bright floors.
+    SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{28});
+    {
+        const int hw = std::max(1, base.w / 4);
+        const int hh = std::max(1, base.h / 4);
+        fillIsoDiamond(renderer, cx, cy, hw, hh);
+    }
+
+    // Outline + crosshair.
+    SDL_SetRenderDrawColor(renderer, Uint8{160}, Uint8{235}, Uint8{255}, Uint8{185});
+    drawIsoDiamondOutline(renderer, base);
+    SDL_SetRenderDrawColor(renderer, Uint8{160}, Uint8{235}, Uint8{255}, Uint8{75});
+    drawIsoDiamondCross(renderer, base);
+
+    // One-line (up to two wrapped lines) hover tooltip near the HUD.
+    {
+        const int scale = 2;
+        const Color cyan{ 140, 220, 255, 255 };
+        const int hudTop = winH - hudH;
+
+        std::string s = isoHoverText_.empty() ? "HOVER" : ("HOVER: " + isoHoverText_);
+
+        const int charW = 6 * scale;
+        const int maxChars = (winW - 20) / std::max(1, charW);
+        const std::vector<std::string> lines = wrapToChars(s, maxChars, 2);
+        const int lineH = 16;
+
+        if (lines.size() >= 2) {
+            drawText5x7(renderer, 10, hudTop - 18 - lineH, scale, cyan, fitToCharsMiddle(lines[0], maxChars));
+            drawText5x7(renderer, 10, hudTop - 18,          scale, cyan, fitToCharsMiddle(lines[1], maxChars));
+        } else if (!lines.empty()) {
+            drawText5x7(renderer, 10, hudTop - 18, scale, cyan, fitToCharsMiddle(lines[0], maxChars));
+        }
+    }
+}
+
 void Renderer::drawTargetingOverlay(const Game& game) {
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
@@ -9500,15 +10526,28 @@ void Renderer::drawTargetingOverlay(const Game& game) {
         }
     }
 
-    // Crosshair on cursor
+    // Crosshair / reticle on cursor (procedural animated texture).
     SDL_Rect c = mapTileDst(cursor.x, cursor.y);
-    SDL_SetRenderDrawColor(renderer, lr, lg, lb, Uint8{200});
-    if (iso) {
-        drawIsoDiamondOutline(renderer, c);
-        SDL_SetRenderDrawColor(renderer, lr, lg, lb, Uint8{110});
-        drawIsoDiamondCross(renderer, c);
+    SDL_Texture* ret = iso ? cursorReticleIsoTex[static_cast<size_t>(lastFrame)]
+                           : cursorReticleTex[static_cast<size_t>(lastFrame)];
+    if (ret) {
+        SDL_SetTextureBlendMode(ret, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureColorMod(ret, lr, lg, lb);
+        SDL_SetTextureAlphaMod(ret, 255);
+        SDL_RenderCopy(renderer, ret, nullptr, &c);
+
+        // Reset mods (textures are shared between overlays).
+        SDL_SetTextureColorMod(ret, 255, 255, 255);
+        SDL_SetTextureAlphaMod(ret, 255);
     } else {
-        SDL_RenderDrawRect(renderer, &c);
+        SDL_SetRenderDrawColor(renderer, lr, lg, lb, Uint8{200});
+        if (iso) {
+            drawIsoDiamondOutline(renderer, c);
+            SDL_SetRenderDrawColor(renderer, lr, lg, lb, Uint8{110});
+            drawIsoDiamondCross(renderer, c);
+        } else {
+            SDL_RenderDrawRect(renderer, &c);
+        }
     }
 
     // Small label near bottom HUD: two-line hint bar.
@@ -9628,7 +10667,63 @@ void Renderer::drawLookOverlay(const Game& game) {
         }
     }
 
-    // Threat preview heatmap (UI-only): visualize approximate "time-to-contact" from
+    
+
+    // Hearing preview heatmap (UI-only): visualize where your footsteps would be audible
+    // to the *currently visible* hostile listeners (visibility-gated; never leaks unseen enemies).
+    if (game.isHearingPreviewOpen()) {
+        const auto& req = game.hearingPreviewMinRequiredVolume();
+        const auto& step = game.hearingPreviewFootstepVolume();
+        const int bias = game.hearingPreviewVolumeBias();
+        const auto& listeners = game.hearingPreviewListeners();
+
+        if (!req.empty() && !step.empty() && (int)req.size() == d.width * d.height && (int)step.size() == d.width * d.height) {
+            // Color choice: a violet tint reads as "stealth / audibility" and stays distinct
+            // from the blue sound preview and the red threat preview.
+            for (int y = 0; y < d.height; ++y) {
+                for (int x = 0; x < d.width; ++x) {
+                    const Tile& t = d.at(x, y);
+                    if (!t.explored) continue;
+                    const int idx = y * d.width + x;
+                    const int r = req[idx];
+                    if (r < 0) continue;
+
+                    const int v = std::clamp(step[idx] + bias, 0, 30);
+                    if (v <= 0) continue;
+                    if (v < r) continue;
+
+                    const int margin = v - r;
+                    int alpha = 35 + margin * 18;
+                    if (r <= 2) alpha += 30; // very close listeners: punchier overlay
+                    alpha = std::clamp(alpha, 35, 215);
+
+                    SDL_SetRenderDrawColor(renderer, Uint8{200}, Uint8{120}, Uint8{255}, clampToU8(alpha));
+                    SDL_Rect rct = mapTileDst(x, y);
+                    if (iso) {
+                        fillIsoDiamond(renderer, rct.x + rct.w / 2, rct.y + rct.h / 2, rct.w / 2, rct.h / 2);
+                    } else {
+                        SDL_RenderFillRect(renderer, &rct);
+                    }
+                }
+            }
+
+            // Accent the listener tiles so the player can see who the field is computed from.
+            if (!listeners.empty()) {
+                SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{75});
+                for (const Vec2i& s : listeners) {
+                    if (!d.inBounds(s.x, s.y)) continue;
+                    if (!d.at(s.x, s.y).visible) continue;
+                    SDL_Rect rct = mapTileDst(s.x, s.y);
+                    if (iso) {
+                        drawIsoDiamondOutline(renderer, rct);
+                    } else {
+                        SDL_RenderDrawRect(renderer, &rct);
+                    }
+                }
+            }
+        }
+    }
+// Threat preview heatmap (UI-only): visualize approximate "time-to-contact" from
     // the nearest currently VISIBLE hostile. This is intentionally visibility-gated
     // so it never leaks information about unseen enemies.
     if (game.isThreatPreviewOpen()) {
@@ -9677,22 +10772,34 @@ void Renderer::drawLookOverlay(const Game& game) {
         }
     }
 
-    // Cursor box
+    // Cursor reticle (procedural animated texture).
     SDL_Rect c = mapTileDst(cursor.x, cursor.y);
-    SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{200});
-    if (iso) {
-        drawIsoDiamondOutline(renderer, c);
-    } else {
-        SDL_RenderDrawRect(renderer, &c);
-    }
+    SDL_Texture* ret = iso ? cursorReticleIsoTex[static_cast<size_t>(lastFrame)]
+                           : cursorReticleTex[static_cast<size_t>(lastFrame)];
+    if (ret) {
+        SDL_SetTextureBlendMode(ret, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureColorMod(ret, 255, 255, 255);
+        SDL_SetTextureAlphaMod(ret, 240);
+        SDL_RenderCopy(renderer, ret, nullptr, &c);
 
-    // Crosshair lines (subtle)
-    SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{90});
-    if (iso) {
-        drawIsoDiamondCross(renderer, c);
+        // Reset alpha mod (textures are shared).
+        SDL_SetTextureAlphaMod(ret, 255);
     } else {
-        SDL_RenderDrawLine(renderer, c.x, c.y + c.h / 2, c.x + c.w, c.y + c.h / 2);
-        SDL_RenderDrawLine(renderer, c.x + c.w / 2, c.y, c.x + c.w / 2, c.y + c.h);
+        // Fallback (primitives) if textures are missing.
+        SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{200});
+        if (iso) {
+            drawIsoDiamondOutline(renderer, c);
+        } else {
+            SDL_RenderDrawRect(renderer, &c);
+        }
+
+        SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{90});
+        if (iso) {
+            drawIsoDiamondCross(renderer, c);
+        } else {
+            SDL_RenderDrawLine(renderer, c.x, c.y + c.h / 2, c.x + c.w, c.y + c.h / 2);
+            SDL_RenderDrawLine(renderer, c.x + c.w / 2, c.y, c.x + c.w / 2, c.y + c.h);
+        }
     }
 
     // Label near bottom of map

@@ -78,6 +78,7 @@ inline constexpr ActionInfo kActionInfoTable[] = {
     {Action::TogglePerfOverlay, "toggle_perf_overlay", "Toggle performance overlay"},
     {Action::ToggleSoundPreview,  "sound_preview",  "Toggle sound preview"},
     {Action::ToggleThreatPreview, "threat_preview", "Toggle threat preview"},
+    {Action::ToggleHearingPreview, "hearing_preview", "Toggle hearing (audibility) preview"},
     {Action::ToggleViewMode,      "toggle_view_mode", "Toggle top-down / isometric"},
     {Action::ToggleVoxelSprites,  "toggle_voxel_sprites", "Toggle 3D voxel sprites"},
     {Action::ToggleFullscreen,    "fullscreen", "Toggle fullscreen"},
@@ -209,6 +210,12 @@ inline std::string normalizeToken(std::string_view in) {
         {"soundpreview", "sound_preview"},
         {"acoustic_preview", "sound_preview"},
         {"acoustic", "sound_preview"},
+
+        {"toggle_hearing_preview", "hearing_preview"},
+        {"togglehearingpreview", "hearing_preview"},
+        {"hearingpreview", "hearing_preview"},
+        {"audibility_preview", "hearing_preview"},
+        {"audibility", "hearing_preview"},
 
         {"toggle_threat_preview", "threat_preview"},
         {"togglethreatpreview", "threat_preview"},

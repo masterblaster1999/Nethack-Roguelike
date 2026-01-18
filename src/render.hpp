@@ -239,6 +239,13 @@ private:
 	// Cached animation frame index for overlay/UI draws.
 	int lastFrame = 0;
 
+    // Isometric hover-inspect (renderer-only UI).
+    // Caches the last hovered tile + description to avoid per-frame string churn.
+    Vec2i isoHoverTile_{-1, -1};
+    bool isoHoverValid_ = false;
+    std::string isoHoverText_;
+    uint32_t isoHoverTextTick_ = 0u;
+
     // Transient map render offset (used for screen shake / impact FX).
     // This is applied to map-space primitives (tiles/entities/items/FX), but NOT to the HUD/UI.
     int mapOffX = 0;
@@ -304,6 +311,8 @@ private:
     bool isoTerrainAssetsValid = false;
     uint32_t isoTerrainStyleSeedCached_ = 0u;
     int isoTerrainSpritePxCached_ = 0;
+    bool isoTerrainVoxelBlocksCached_ = false;
+    bool isoTerrainVoxelBlocksRaytraceCached_ = false;
     std::array<std::vector<AnimTex>, ROOM_STYLES> floorThemeVarIso;
     std::vector<AnimTex> chasmVarIso;
     // 2.5D wall "blocks" (drawn as sprites in isometric view to add verticality).
@@ -401,9 +410,17 @@ private:
     std::array<SDL_Texture*, FRAMES> doorLockedOverlayTex{};
     std::array<SDL_Texture*, FRAMES> doorOpenOverlayTex{};
 
+    // Cursor / targeting reticle overlays (procedurally generated; animated).
+    // These are drawn in map-space for LOOK and targeting cursors.
+    std::array<SDL_Texture*, FRAMES> cursorReticleTex{};
+    std::array<SDL_Texture*, FRAMES> cursorReticleIsoTex{};
+
     // UI skin textures (procedurally generated; refreshed if theme changes)
     bool uiAssetsValid = false;
     UITheme uiThemeCached = UITheme::DarkStone;
+    // Cached per-run style seed so UI panels can pick up subtle procedural
+    // variation without regenerating every frame.
+    uint32_t uiStyleSeedCached_ = 0u;
     // Cached sprite mode (2D vs 3D voxel-extruded) so we can invalidate caches on change.
     bool voxelSpritesCached = true;
     // Cached isometric voxel sprite renderer mode (mesh vs raytrace) so we can invalidate caches on change.
@@ -414,6 +431,11 @@ private:
     // Sprite texture cache (entities/items/projectiles), budgeted + LRU-evicted.
     // Key layout (uint64): [cat:8][kind:8][seed:32][unused:16]
     LRUTextureCache<FRAMES> spriteTex;
+
+    // UI 3D preview texture cache (Codex/etc.). These can be much larger than
+    // map sprites, so we keep a separate budgeted cache.
+    // Key layout is free-form but we reserve the top byte for category.
+    LRUTextureCache<1> uiPreviewTex;
     int textureCacheMB = 0;
     size_t spriteEntryBytes = 0;
 
@@ -443,7 +465,7 @@ private:
     // UI skin helpers
     void ensureUIAssets(const Game& game);
     // Terrain helpers
-    void ensureIsoTerrainAssets(uint32_t styleSeed);
+    void ensureIsoTerrainAssets(uint32_t styleSeed, bool voxelBlocks, bool isoRaytrace);
     void drawPanel(const Game& game, const SDL_Rect& rect, uint8_t alpha, int frame);
 
     void drawHud(const Game& game);
@@ -458,6 +480,7 @@ private:
     void drawScoresOverlay(const Game& game);
     void drawCodexOverlay(const Game& game);
     void drawDiscoveriesOverlay(const Game& game);
+    void drawIsoHoverOverlay(const Game& game);
     void drawTargetingOverlay(const Game& game);
     void drawLookOverlay(const Game& game);
 

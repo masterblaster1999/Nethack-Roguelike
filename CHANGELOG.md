@@ -16,8 +16,13 @@
   - HP pip color hints rank (hidden while hallucinating).
   - Rolls are deterministic per monster (seeded from its sprite seed + depth + room type) and are **saved/loaded** so variants survive reloads.
 - Game-driven procedural particle FX events (spells + digging) via `FXParticleEvent` queue.
+- **Procedural particle flipbook animation**: renderer-owned particle textures (spark/smoke/ember/mote) are now generated as **4-frame animated flipbooks** using looped noise + domain warp, with per-particle phase offsets so bursts don’t animate in perfect sync.
+- **Procedural particle motion advection**: smoke/motes/embers now drift through a lightweight **curl-noise** flow field and are biased by the game’s deterministic per-level **wind**, yielding more fluid, coherent motion (visual-only).
+- **Procedural item micro-animations (4-frame)**: potions now slosh with looped-noise swirl (plus metallic/milky/murky/smoky variants), scroll labels shimmer, rings get orbiting specular glints, wands pulse with an energy crawl, and lit torches flicker with coherent embers.
 - **Procedural sprite animation**: entities, items, and projectiles now use smooth, renderer-side procedural motion (move tween + hop/squash, idle bob, and hit recoil) to reduce "teleporty" feel in both top-down and isometric views.
 - **High-resolution voxel sprite detail (64x64/128x128)**: voxel sprites now automatically increase their internal voxel-model resolution (nearest-neighbor voxel upscaling) before rendering, so large tile sizes produce smoother 3D voxel meshes in both perspective and isometric modes (isometric raytracing caps detail to stay performant).
+- **3D turntable UI previews**: the **Monster Codex** and **Discoveries** overlays now include a large **auto-rotating 3D preview** (budget-cached). Unidentified items render an **appearance-based extruded turntable** so the NetHack-style identification game stays intact.
+- **Isometric voxel terrain blocks**: optional voxel-generated wall/door/pillar/boulder **block** sprites in isometric view for better 3D cohesion with `voxel_sprites` (`iso_terrain_voxels`; toggle with `#isoterrainvox` / `#isoblocks`). Uses raytrace only for small tile sizes (<=64px) to avoid long stalls.
 - **Expanded procedural surface camp (depth 0)**: the camp hub now generates a variable palisade yard with 2–4 packed tents/huts, an optional well + fire ring, clustered wilderness dressing, and a guaranteed walkable spine between EXIT and DUNGEON (with adaptive brush-clearing if trees/rocks block the route).
   - **Camp map size now varies per run** (compact/standard/sprawling) within the same safe bounds used by the dungeon generators, so the hub itself scales naturally with its palisade and wilderness dressing.
   - Camp gates now face the EXIT side, and the EXIT position varies per run for more distinct surface layouts.
@@ -31,7 +36,11 @@
 - **Burrow crosscuts (new procgen pass)**: on some room-based floors, the generator uses an A* search biased toward **digging through wall mass** to carve 1–2 long crosscut tunnels between two far-apart corridor points, gated by doors (often locked/secret on one end). This creates dramatic optional shortcuts without tunneling through rooms or touching the stairs core route. (#mapstats: CROSSCUTS | CARVED | LOCKED | SECRET)
 - **Secret crawlspace networks (new procgen pass)**: on some room-based floors, the generator carves a small hidden 1-tile-wide tunnel network entirely within wall mass, then connects it back to the corridor graph through 2–3 **secret doors**. Often contains an optional bonus cache chest deep inside. (#mapstats: CRAWLSPACES | CARVED | DOORS)
 - **Procedural VFX custom animation (4-frame)**: the renderer now samples **4 animation frames** for procedural hazard tiles (gas + fire), and cross-fades between frames with per-tile phase offsets so large fields don’t flicker in sync.
-- Fountain ripples now animate across all 4 frames, and item sprites (ground + UI icons) also get a small per-item phase offset to avoid synchronized blinking.
+- **Field chemistry: reactive hazards**: **fire** now burns away lingering **gas clouds**, and dense **poison vapors** can occasionally **ignite** into a brief flash-fire explosion that consumes the cloud and leaves lingering flames.
+- **Hearing preview LOOK lens**: a new audibility heatmap that marks explored tiles where your **footsteps** would be heard by any *currently visible* hostile listener (default **Ctrl+H**; **[ / ]** adjusts volume bias).
+- Fountain ripples now animate across all 4 frames using coherent traveling waves + looped fBm (no per-frame hash flicker), and item sprites (ground + UI icons) also get a small per-item phase offset to avoid synchronized blinking.
+- **Reaction-diffusion rune fields**: Arcane UI panels now get an animated “living circuitry” rune layer, and altars gain a subtle etched rune-glow pass — generated from a tiny Gray–Scott solver and animated via seamless domain drift.
+- **Procedural cursor reticles**: LOOK and targeting cursors now use procedurally generated animated “marching ants” reticle overlays (square + isometric diamond), improving focus/readability at high zoom.
 - **Procedural room ambiance decals (4-frame)**: lair floors now get an animated **biofilm shimmer** decal, and shrine rooms now get **rotating rune** decals (top-down + isometric).
   - The renderer de-syncs these animated decal styles per-tile so special rooms feel alive instead of flashing in perfect unison.
 - **Ambient environmental particles (procedural)**: fountains now exhale cool mist puffs (plus rare water sparkles) and altars shed slow arcane motes tinted to your UI theme. These are visual-only and phase-driven so they stay stable across frame rates.
@@ -281,6 +290,8 @@
 - Save version bumped to **v43** (v41 adds `Item.flags`; v42 adds merchant guild pursuit; v43 adds shrine piety + prayer cooldown).
 
 ### Changed
+- Procedural entity/projectile flipbooks: added sprite-space idle warps (slime squash & stretch, bat wing flap, snake slither, spider scuttle, wolf/dog tail wag) and replaced per-frame sprite shading jitter with a seamless looping shimmer; projectile arrow/rock now have 4-frame glint/tumble cues.
+- Procedural VFX flipbooks: **confusion/poison gas** and **fire** overlays now apply a lightweight **curl-noise flow warp** (divergence-free) before the existing domain-warp masks, producing more "advected" motion and richer turbulence in both top-down and isometric views.
 - **Dungeon length**: increased the default run from **20** to **25** floors (5 additional depths before the labyrinth and final sanctum).
 - Extended command prompt: **TAB completion** now extends to the **longest common prefix** and lets you **cycle** through ambiguous matches by pressing **TAB** repeatedly (also works for pasted NetHack-style `#cmd` inputs).
 - Extended command prompt: upgraded to a proper **caret editor** (LEFT/RIGHT, HOME/END, DEL forward-delete) with familiar shell/Readline shortcuts: **Ctrl+A/E** home/end, **Ctrl+W** delete previous word, **Ctrl+U** clear to start, **Ctrl+K** clear to end; plus **Ctrl+L** clears the whole line (consistent with filter UIs).
@@ -306,7 +317,9 @@
 - Floor decals now use jittered-grid placement to reduce clumping; wall stains avoid adjacent clusters for a cleaner, more deliberate look (top-down + isometric).
 - Isometric floor decals are now generated directly in diamond space (instead of projecting top-down squares), keeping thin cracks/runes crisper and better aligned to the 2.5D grid.
 - Isometric VFX overlays: confusion/poison gas and fire field overlays now generate directly in diamond space in isometric view (no square projection), keeping the animation aligned to the 2:1 grid; poison gas now also uses the isometric textures.
+- Isometric UI polish: auto-travel path overlay now renders as a faint polyline with diamond pips; trap/marker indicators snap to the diamond grid; explosions render in diamond space in isometric view (prevents square bleed), and a lightweight hover-inspect tooltip appears when no modal UI is open.
 - Procedural VFX overlays: **confusion/poison gas** and **fire fields** now use **domain-warped fBm** masks for more wispy motion (less blobby), with subtle **spark** highlights in fire; still uses ordered dithering to stay crisp in pixel-art.
+- Procedural animation generation: upgraded all major 4-frame flipbooks to use **seamless looping domain drift** (reduces the frame-3 → frame-0 “pop”), improved chasm void motion, added ghost row-warp drift, and refreshed UI tiles + HUD status icons with coherent 4-phase micro-animations. (See `docs/PROCEDURAL_ANIMATION.md`.)
 - Voxel sprites: improved 3D voxel sprite shading with hemisphere-based ambient occlusion (reduces over-darkening on flat surfaces) plus a softer drop shadow for better grounding.
 - Isometric voxel sprites: improved per-face lighting (directional diffuse + cheap AO + subtle spec/rim) so voxel_sprites read with more depth/volume in 2.5D view; shading is quantized to keep greedy face merges stable.
 - Isometric wall blocks now pick variants coherently along wall segments, improving brickwork continuity in 2.5D view.
@@ -333,6 +346,11 @@
 - Fixed MSVC build breaks/warnings: implemented missing chest overlay item icon helper, corrected keybind chord formatting, and centralized SDL includes to avoid SDL_MAIN_HANDLED macro redefinitions.
 - Fixed MSVC build break in minimap cursor tooltip: expose Game::describeAt and remove shadowing warnings in save migration + isometric phantom rendering.
 - Keybind parsing now **deduplicates equivalent chords** (e.g. `?` and `shift+slash`) so bindings don't “double up” in the UI.
+- Keybinds now treat the **CMD/GUI** modifier as a first-class bindable modifier (INI + editor), and the default help bind includes **cmd+?**.
+- Keybind parsing now robustly accepts literal `<`, `>`, and `?` tokens even when SDL can't map those shifted symbols back to scancodes (helps config-file editing across layouts).
+- StairsDown defaults now also bind to **SHIFT+<** for keyboards where `<`/`>` share a dedicated key (so `>` works on that same physical key + Shift).
+- Keybinds + Help overlays now render friendlier chord strings (e.g., **CMD+?**, **<**, **>**, **ENTER**) instead of raw token names.
+- UI panels now pick up subtle deterministic per-run variation (cached) to enhance the procedural GUI feel without impacting readability.
 - HUD text now **wraps** (stats, message log, and bottom hint lines) instead of clipping off the right edge on narrow windows.
 - Help overlay now **wraps** long lines and supports **scrolling** (Up/Down, PageUp/PageDown, mouse wheel) so content never clips off-screen.
 - Message history overlay now supports **PageUp/PageDown paging** (10 lines) and highlights **search matches**.

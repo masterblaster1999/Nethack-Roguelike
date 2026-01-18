@@ -46,6 +46,7 @@ struct Settings {
     bool uiPanelsTextured = true;           // textured|solid
     bool voxelSprites = true;               // true = 3D voxel-extruded sprites (entities/items/projectiles)
     bool isoVoxelRaytrace = false;        // isometric-only: raytraced voxel sprites instead of mesh rasterization
+    bool isoTerrainVoxelBlocks = true; // isometric-only: render terrain blocks as voxel sprites for 3D cohesion
     bool isoCutaway = true;             // isometric-only: fade foreground walls/doors near the player/cursor (cutaway) for readability
 
     // Procedural terrain palette (purely cosmetic).

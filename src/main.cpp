@@ -470,6 +470,7 @@ int main(int argc, char** argv) {
     game.setInfiniteKeepWindow(settings.infiniteKeepWindow);
     game.setVoxelSpritesEnabled(settings.voxelSprites);
     game.setIsoVoxelRaytraceEnabled(settings.isoVoxelRaytrace);
+    game.setIsoTerrainVoxelBlocksEnabled(settings.isoTerrainVoxelBlocks);
     game.setIsoCutawayEnabled(settings.isoCutaway);
     game.setProcPaletteEnabled(settings.procPalette);
     game.setProcPaletteStrength(settings.procPaletteStrength);
@@ -1471,6 +1472,7 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "bones_enabled", game.bonesEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "voxel_sprites", game.voxelSpritesEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "iso_voxel_raytrace", game.isoVoxelRaytraceEnabled() ? "true" : "false");
+            ok &= updateIniKey(settingsPath, "iso_terrain_voxels", game.isoTerrainVoxelBlocksEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "iso_cutaway", game.isoCutawayEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "proc_palette", game.procPaletteEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "proc_palette_strength", std::to_string(game.procPaletteStrength()));
@@ -1537,6 +1539,7 @@ int main(int argc, char** argv) {
             game.setMinimapZoom(newSettings.minimapZoom);
             game.setControlPreset(newSettings.controlPreset);
             game.setIsoVoxelRaytraceEnabled(newSettings.isoVoxelRaytrace);
+            game.setIsoTerrainVoxelBlocksEnabled(newSettings.isoTerrainVoxelBlocks);
             game.setIsoCutawayEnabled(newSettings.isoCutaway);
             game.setProcPaletteEnabled(newSettings.procPalette);
             game.setProcPaletteStrength(newSettings.procPaletteStrength);

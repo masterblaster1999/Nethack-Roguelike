@@ -348,6 +348,7 @@
 - Test/headless builds no longer require SDL2: **keybinds** are compiled only for the game executable.
 - Fixed build-breaking pointer dereferences in **Disarm Trap** and **Shrine prayer** interactions.
 - Fixed MSVC build breaks/warnings: implemented missing chest overlay item icon helper, corrected keybind chord formatting, and centralized SDL includes to avoid SDL_MAIN_HANDLED macro redefinitions.
+- Fixed MSVC build errors/warnings in renderer + procedural spritegen: declared `resampleSpriteToSize()` in the public spritegen header, added a `rand01(uint32_t)` hash-to-float helper, corrected an isometric `pointInIsoDiamond()` callsite, avoided shadowed locals in render UI preview blocks, exposed `Renderer::FRAMES` for flipbook consumers, and added `ScoreEntry.conducts` (recorded + persisted in the scores CSV).
 - Fixed MSVC build break in minimap cursor tooltip: expose Game::describeAt and remove shadowing warnings in save migration + isometric phantom rendering.
 - Keybind parsing now **deduplicates equivalent chords** (e.g. `?` and `shift+slash`) so bindings don't “double up” in the UI.
 - Keybinds now treat the **CMD/GUI** modifier as a first-class bindable modifier (INI + editor), and the default help bind includes **cmd+?**.

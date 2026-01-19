@@ -463,6 +463,10 @@ bool ScoreBoard::load(const std::string& path) {
         e.slot = getCol(cols, "slot");
         e.cause = getCol(cols, "cause");
 
+        // Optional: NetHack-style conduct tags (newer versions only).
+        e.conducts = getCol(cols, "conducts");
+        if (e.conducts.empty()) e.conducts = getCol(cols, "conduct");
+
         // Support either "game_version" or "version" as a column name.
         e.gameVersion = getCol(cols, "game_version");
         if (e.gameVersion.empty()) e.gameVersion = getCol(cols, "version");
@@ -519,7 +523,7 @@ bool ScoreBoard::append(const std::string& path, const ScoreEntry& eIn) {
     std::ostringstream out;
 
     // Newer, richer schema. Older files are still readable via header mapping.
-    out << "timestamp,name,class,slot,won,score,branch,depth,turns,kills,level,gold,seed,cause,game_version\n";
+    out << "timestamp,name,class,slot,won,score,branch,depth,turns,kills,level,gold,seed,conducts,cause,game_version\n";
     for (const auto& s : entries_) {
         out << csvEscape(s.timestamp) << ','
             << csvEscape(s.name) << ','
@@ -534,6 +538,7 @@ bool ScoreBoard::append(const std::string& path, const ScoreEntry& eIn) {
             << s.level << ','
             << s.gold << ','
             << s.seed << ','
+            << csvEscape(s.conducts) << ','
             << csvEscape(s.cause) << ','
             << csvEscape(s.gameVersion)
             << "\n";

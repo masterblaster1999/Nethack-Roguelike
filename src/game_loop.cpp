@@ -2953,6 +2953,9 @@ void Game::maybeRecordRun() {
     e.playerClass = playerClassIdString();
     e.slot = activeSlot_.empty() ? std::string("default") : activeSlot_;
     e.cause = endCause_;
+
+    // Record NetHack-style conducts kept for the run (if any).
+    e.conducts = runConductsTag();
     e.gameVersion = PROCROGUE_VERSION;
 
     e.score = computeScore(e);

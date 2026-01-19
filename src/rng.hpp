@@ -49,3 +49,11 @@ inline uint32_t hash32(uint32_t x) {
 inline uint32_t hashCombine(uint32_t a, uint32_t b) {
     return hash32(a ^ (b + 0x9e3779b9u + (a << 6) + (a >> 2)));
 }
+
+// Convert a 32-bit integer hash into a stable float in [0, 1).
+//
+// Useful for cheap deterministic noise without having to allocate a full RNG
+// instance (e.g. per-pixel variation in procedural sprites).
+inline float rand01(uint32_t h) {
+    return (h / (static_cast<float>(std::numeric_limits<uint32_t>::max()) + 1.0f));
+}

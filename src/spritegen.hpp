@@ -22,6 +22,15 @@ struct SpritePixels {
     const Color& at(int x, int y) const { return px[static_cast<size_t>(y * w + x)]; }
 };
 
+// Utility: resample a (usually square) sprite to a requested pixel size.
+//
+// This is used both by the sprite generator itself (internal upscaling) and by
+// UI code that wants to display a consistent-size preview even when 3D voxel
+// sprites are disabled.
+//
+// Implementation lives in spritegen.cpp.
+SpritePixels resampleSpriteToSize(const SpritePixels& src, int pxSize);
+
 // Special seed flag for item sprites.
 //
 // When this bit is set, generateItemSprite() treats the low 8 bits of `seed`

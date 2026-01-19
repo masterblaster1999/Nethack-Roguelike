@@ -30,6 +30,10 @@ struct ScoreEntry {
     std::string playerClass; // starting class/role (e.g. adventurer, wizard); optional
     std::string slot;        // save slot name ("default" or custom); optional
     std::string cause;       // end-of-run cause ("KILLED BY ...", "ESCAPED ...")
+
+    // NetHack-style voluntary challenges kept for this run.
+    // Stored as a human-readable tag string (e.g. "FOODLESS | ILLITERATE").
+    std::string conducts;
     std::string gameVersion; // e.g. "0.8.0"
 };
 

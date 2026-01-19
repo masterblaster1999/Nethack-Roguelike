@@ -166,6 +166,13 @@ private:
 
 class Renderer {
 public:
+    // Number of cached animation frames for procedurally-generated textures (gas/fire/etc.).
+    //
+    // This is part of the renderer's public contract because other subsystems
+    // (procedural VFX, sprite generators, UI previews) need to build small
+    // flipbooks that match the renderer's cache layout.
+    static constexpr int FRAMES = 4;
+
     Renderer(int windowW, int windowH, int tileSize, int hudHeight, bool vsync, int textureCacheMB);
     ~Renderer();
 
@@ -195,9 +202,6 @@ public:
     std::string saveScreenshotBMP(const std::string& directory, const std::string& prefix = "procrogue_shot") const;
 
 private:
-    // Number of cached animation frames for procedurally-generated textures (gas/fire/etc.).
-    static constexpr int FRAMES = 4;
-
     // Room-style / decal style count.
     // style mapping (matches renderer helpers + spritegen themed floors):
     //  0 = Normal, 1 = Treasure, 2 = Lair, 3 = Shrine, 4 = Secret, 5 = Vault, 6 = Shop

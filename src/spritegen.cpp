@@ -172,7 +172,7 @@ inline bool isPow2Multiple(int base, int target) {
     return isPow2(target / base);
 }
 
-SpritePixels resampleSpriteToSize(const SpritePixels& src, int pxSize) {
+SpritePixels resampleSpriteToSizeInternal(const SpritePixels& src, int pxSize) {
     pxSize = clampSpriteSize(pxSize);
     if (src.w == pxSize && src.h == pxSize) return src;
 
@@ -1343,6 +1343,13 @@ Color baseColorFor(EntityKind k, RNG& rng) {
 }
 
 } // namespace
+
+// Public wrapper: keep the heavy lifting in the anonymous namespace helpers but
+// expose a stable entry point for other translation units (renderer UI previews,
+// etc.).
+SpritePixels resampleSpriteToSize(const SpritePixels& src, int pxSize) {
+    return resampleSpriteToSizeInternal(src, pxSize);
+}
 
 
 SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, bool use3d, int pxSize, bool isometric, bool isoRaytrace) {

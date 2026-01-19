@@ -1,11 +1,11 @@
 {
-  "patch_id": "round90_patch",
-  "previous_patch_id": "round89_patch",
-  "round": 90,
+  "patch_id": "round91_patch",
+  "previous_patch_id": "round90_patch",
+  "round": 91,
   "date": "2026-01-19",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Fixed MSVC compile errors in game_look.cpp: LOOK info overlays (sound/hearing) now use a shared grid-index helper and safer bounds checks."
+    "Fixed MSVC build errors/warnings in renderer + procedural spritegen: exposed Renderer::FRAMES publicly for non-member flipbook consumers, declared resampleSpriteToSize() in spritegen.hpp, added rand01(uint32_t) hash-to-float helper, corrected pointInIsoDiamond() argument ordering, and added ScoreEntry.conducts (recorded + persisted in scores CSV)."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -47,6 +47,9 @@
     "src/projectile_utils.hpp",
     "src/render.cpp",
     "src/render.hpp",
+    "src/rng.hpp",
+    "src/scores.cpp",
+    "src/scores.hpp",
     "src/settings.cpp",
     "src/settings.hpp",
     "src/shop.cpp",
@@ -58,6 +61,6 @@
     "src/vtuber_gen.hpp"
   ],
   "timestamp_utc": "2026-01-19T00:00:00Z",
-  "description": "Fixes MSVC build errors introduced by the LOOK-mode sound/hearing overlays: the code referenced an undefined `idx` helper when indexing width*height fields. A shared local grid-index lambda is now defined in Game::lookInfoText(), and the overlay logic tightens vector size checks before indexing.",
+  "description": "Fixes MSVC build errors/warnings in render.cpp/spritegen* by exposing the renderer's frame-count constant, adding missing declarations/helpers (resampleSpriteToSize, rand01), correcting an isometric point-in-diamond call signature, and extending the scoreboard schema to include conduct tags.",
   "timestamp": "2026-01-19T00:00:00Z"
 }

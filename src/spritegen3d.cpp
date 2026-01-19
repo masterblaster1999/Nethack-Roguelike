@@ -2823,7 +2823,12 @@ VoxelModel buildIsoTerrainBlockModel(IsoTerrainBlockKind kind, uint32_t seed, in
 
 SpritePixels renderIsoTerrainBlockVoxel(IsoTerrainBlockKind kind, uint32_t seed, int frame, int outPx, bool isoRaytrace) {
     outPx = clampOutPx(outPx);
-    frame = frame % FRAMES;
+    // Keep in sync with the renderer's animation flipbook frame count.
+    constexpr int kAnimFrames = 4;
+    if (kAnimFrames > 0) {
+        frame = frame % kAnimFrames;
+        if (frame < 0) frame += kAnimFrames;
+    }
 
     const int detailScale = voxelDetailScaleForOutPx(outPx, isoRaytrace);
 

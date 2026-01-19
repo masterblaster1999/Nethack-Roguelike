@@ -6580,15 +6580,15 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
 
                 // Inner flash + bloom ring.
                 if (isoView) {
-                    const int cx = base.x + base.w / 2;
-                    const int cy = base.y + base.h / 2;
+                    const int dcx = base.x + base.w / 2;
+                    const int dcy = base.y + base.h / 2;
 
                     // Inner flash.
                     SDL_SetRenderDrawColor(renderer, core.r, core.g, core.b, static_cast<uint8_t>(std::min(255, aCore)));
                     {
                         const int hw = std::max(1, base.w / 4);
                         const int hh = std::max(1, base.h / 4);
-                        fillIsoDiamond(renderer, cx, cy, hw, hh);
+                        fillIsoDiamond(renderer, dcx, dcy, hw, hh);
                     }
 
                     // Soft bloom ring.
@@ -6596,7 +6596,7 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
                     {
                         const int hw = std::max(1, base.w / 3);
                         const int hh = std::max(1, base.h / 3);
-                        fillIsoDiamond(renderer, cx, cy, hw, hh);
+                        fillIsoDiamond(renderer, dcx, dcy, hw, hh);
                     }
 
                     // Tiny spark specks (deterministic) for texture (kept inside the diamond).
@@ -6609,8 +6609,8 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
                     for (int s = 0; s < sparks; ++s) {
                         seed = hash32(seed + 0x9e3779b9u + static_cast<uint32_t>(s) * 101u);
 
-                        int sx = cx;
-                        int sy = cy;
+                        int sx = dcx;
+                        int sy = dcy;
 
                         // Few attempts to land inside the isometric diamond.
                         for (int attempt = 0; attempt < 6; ++attempt) {
@@ -6623,7 +6623,7 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
                             sx = base.x + 2 + rx;
                             sy = base.y + 2 + ry;
 
-                            if (pointInIsoDiamond(base, sx, sy)) break;
+                            if (pointInIsoDiamond(sx, sy, base)) break;
                             seed = hash32(seed + 0xBEEFu + static_cast<uint32_t>(attempt) * 97u);
                         }
 
@@ -6665,11 +6665,11 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
                 if (!t.explored) continue;
                 SDL_Rect base = tileDst(p.x, p.y);
                 if (isoView) {
-                    const int cx = base.x + base.w / 2;
-                    const int cy = base.y + base.h / 2;
+                    const int dcx = base.x + base.w / 2;
+                    const int dcy = base.y + base.h / 2;
                     const int hw = std::max(1, base.w / 2 - 1);
                     const int hh = std::max(1, base.h / 2 - 1);
-                    fillIsoDiamond(renderer, cx, cy, hw, hh);
+                    fillIsoDiamond(renderer, dcx, dcy, hw, hh);
                 } else {
                     SDL_Rect outer{ base.x + 1, base.y + 1, base.w - 2, base.h - 2 };
                     SDL_RenderFillRect(renderer, &outer);
@@ -9662,8 +9662,8 @@ void Renderer::drawCodexOverlay(const Game& game) {
                 drawText5x7(renderer, detailsX, y, bodyScale, gray, "3D PREVIEW");
                 y += 14;
 
-                const int px = detailsX + (detailsW - prevPx) / 2;
-                SDL_Rect r{px, y, prevPx, prevPx};
+				const int previewX = detailsX + (detailsW - prevPx) / 2;
+				SDL_Rect r{previewX, y, prevPx, prevPx};
 
                 // Background plate.
                 SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
@@ -10014,8 +10014,8 @@ void Renderer::drawDiscoveriesOverlay(const Game& game) {
                 drawText5x7(renderer, detailsX, dy, bodyScale, gray, "3D PREVIEW");
                 dy += 14;
 
-                const int px = detailsX + (detailsW - prevPx) / 2;
-                SDL_Rect r{px, dy, prevPx, prevPx};
+				const int previewX = detailsX + (detailsW - prevPx) / 2;
+				SDL_Rect r{previewX, dy, prevPx, prevPx};
 
                 SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
                 SDL_SetRenderDrawColor(renderer, 0, 0, 0, 90);

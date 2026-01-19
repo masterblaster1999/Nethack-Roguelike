@@ -36,6 +36,38 @@ ItemEgo rollWeaponEgo(RNG& rng, ItemKind k, int depth, RoomType rt, bool fromSho
     return ItemEgo::Venom;
 }
 
+bool canBeArtifact(ItemKind k) {
+    if (k == ItemKind::AmuletYendor) return false;
+    if (isChestKind(k)) return false;
+    if (!isWearableGear(k)) return false;
+
+    // Keep artifacts focused on weapons/armor/rings for now.
+    // (Avoids stacking with wand identification/charge mechanics.)
+    if (isWandKind(k)) return false;
+
+    return true;
+}
+
+bool rollArtifact(RNG& rng, ItemKind k, int depth, RoomType rt, bool fromShop, bool forMonster) {
+    if (!canBeArtifact(k)) return false;
+    if (depth < 3) return false;
+
+    // Base chance ramps gently with depth.
+    float chance = 0.006f + 0.004f * static_cast<float>(std::min(10, std::max(0, depth - 3)));
+
+    // Treasure-y rooms are more likely to contain artifacts.
+    if (rt == RoomType::Treasure || rt == RoomType::Vault || rt == RoomType::Secret) chance += 0.010f;
+    if (rt == RoomType::Shrine) chance += 0.006f;
+    if (rt == RoomType::Lair) chance -= 0.004f;
+
+    // Shops and monsters should be stingier.
+    if (fromShop) chance *= 0.35f;
+    if (forMonster) chance *= 0.45f;
+
+    chance = std::max(0.0f, std::min(0.035f, chance));
+    return rng.chance(chance);
+}
+
 ItemKind pickSpellbookKind(RNG& rng, int depth) {
     // Depth-based distribution for spellbooks (WIP).
     // New books unlock as depth increases; early floors mostly contain the basics.
@@ -556,6 +588,16 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
             // Rare ego weapons.
             it.ego = rollWeaponEgo(rng, kind, depth_, rt, /*fromShop=*/false, /*forMonster=*/true);
 
+            // Rare artifacts on monster gear.
+            if (rollArtifact(rng, kind, depth_, rt, /*fromShop=*/false, /*forMonster=*/true)) {
+                setItemArtifact(it, true);
+                // Keep artifacts visually distinct from ego gear.
+                it.ego = ItemEgo::None;
+                // Artifacts tend to be at least +1.
+                it.enchant = std::max(it.enchant, 1);
+                if (depth_ >= 7 && rng.chance(0.30f)) it.enchant = std::max(it.enchant, 2);
+            }
+
             return it;
         };
 
@@ -845,7 +887,7 @@ inline EntityKind pickSpawnMonsterEcology(SpawnCategory category, RNG& rng, int 
 } // namespace
 
 void Game::spawnMonsters() {
-    if (branch_ == DungeonBranch::Camp) return;
+    if (atHomeCamp()) return;
 
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;
@@ -1083,7 +1125,7 @@ void Game::spawnMonsters() {
 }
 
 void Game::spawnItems() {
-    if (branch_ == DungeonBranch::Camp) return;
+    if (atHomeCamp()) return;
 
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;
@@ -1118,6 +1160,17 @@ void Game::spawnItems() {
 
             // Rare ego weapons (brands).
             it.ego = rollWeaponEgo(rng, k, depth_, rt, /*fromShop=*/false, /*forMonster=*/false);
+
+
+            // Rare artifacts.
+            if (rollArtifact(rng, k, depth_, rt, /*fromShop=*/false, /*forMonster=*/false)) {
+                setItemArtifact(it, true);
+                // Keep artifacts visually distinct from ego gear.
+                it.ego = ItemEgo::None;
+                // Artifacts tend to be at least +1.
+                it.enchant = std::max(it.enchant, 1);
+                if (depth_ >= 7 && rng.chance(0.30f)) it.enchant = std::max(it.enchant, 2);
+            }
         }
 
         GroundItem gi;
@@ -1155,6 +1208,17 @@ void Game::spawnItems() {
 
             // Rare premium ego weapons.
             it.ego = rollWeaponEgo(rng, k, depth_, rt, /*fromShop=*/true, /*forMonster=*/false);
+
+
+            // Extremely rare artifacts in shops.
+            if (rollArtifact(rng, k, depth_, rt, /*fromShop=*/true, /*forMonster=*/false)) {
+                setItemArtifact(it, true);
+                // Keep artifacts visually distinct from ego gear.
+                it.ego = ItemEgo::None;
+                // Artifacts tend to be at least +1.
+                it.enchant = std::max(it.enchant, 1);
+                if (depth_ >= 7 && rng.chance(0.25f)) it.enchant = std::max(it.enchant, 2);
+            }
         }
 
         it.shopPrice = shopBuyPricePerUnit(it, depth_);
@@ -1887,7 +1951,7 @@ void Game::spawnItems() {
 }
 
 void Game::spawnTraps() {
-    if (branch_ == DungeonBranch::Camp) return;
+    if (atHomeCamp()) return;
 
     trapsCur.clear();
 
@@ -4028,7 +4092,7 @@ void Game::spawnAltars() {
 
 
 void Game::spawnFountains() {
-    if (branch_ == DungeonBranch::Camp) return;
+    if (atHomeCamp()) return;
 
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;

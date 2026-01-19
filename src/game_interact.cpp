@@ -109,7 +109,12 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     const int nx = e.pos.x + dx;
     const int ny = e.pos.y + dy;
 
-    if (!dung.inBounds(nx, ny)) return false;
+    if (!dung.inBounds(nx, ny)) {
+        if (e.id == playerId_ && atCamp()) {
+            return tryOverworldStep(dx, dy);
+        }
+        return false;
+    }
 
     // Prevent diagonal corner-cutting (no slipping between two blocking tiles).
     if (!phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, e.pos, dx, dy)) {
@@ -2373,6 +2378,9 @@ bool Game::prayAtShrine(const std::string& modeIn) {
 
     // Spend piety now; selection prompts (if any) are UI-only and do not consume extra turns.
     piety_ -= costPiety;
+
+    // Conduct tracking: using shrine services breaks ATHEIST.
+    ++conductPrayers_;
     pushMsg("YOU OFFER " + std::to_string(costPiety) + " PIETY.", MessageKind::Info, true);
 
     // Set a simple prayer timeout scaled by how "expensive" the service is.

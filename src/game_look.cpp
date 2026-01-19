@@ -946,7 +946,8 @@ std::string Game::lookInfoText() const {
 	                    break;
 	                }
 	                if (domEnt) {
-	                    s += " DOM " + entityKindName(domEnt->kind);
+	                    s += " DOM ";
+                    s += entityKindName(domEnt->kind);
 	                } else {
 	                    s += " DOM (" + std::to_string(lp.x) + "," + std::to_string(lp.y) + ")";
 	                }

@@ -53,7 +53,7 @@ int shopBaseValuePerUnit(const Item& it) {
     }
 
     // Gear: enchantment affects value.
-    if (isWeapon(it.kind) || isArmor(it.kind)) {
+    if (isWeapon(it.kind) || isArmor(it.kind) || isRingKind(it.kind)) {
         // +1 is ~+20% base, -1 is ~-20% base.
         const int step = std::max(1, base / 5);
         v = base + it.enchant * step;
@@ -69,6 +69,12 @@ int shopBaseValuePerUnit(const Item& it) {
             v = (v * egoValueMultiplierPct(it.ego)) / 100;
             v = std::max(1, v);
         }
+    }
+
+    // Artifacts: a significant premium over normal gear.
+    if (itemIsArtifact(it)) {
+        v = (v * 280) / 100; // ~2.8x
+        v = std::max(1, v);
     }
 
 

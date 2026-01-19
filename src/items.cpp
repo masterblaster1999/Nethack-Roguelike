@@ -1,6 +1,7 @@
 #include "items.hpp"
 #include "content.hpp"
 #include "vtuber_gen.hpp"
+#include "rng.hpp"
 #include <algorithm>
 #include <sstream>
 
@@ -32,6 +33,62 @@ std::string pluralizeStackableName(ItemKind kind, const char* name, int count) {
     }
 
     if (!s.empty() && s.back() != 'S') s.push_back('S');
+    return s;
+}
+
+
+
+// -----------------------------------------------------------------------------
+// Procedural artifacts (rare gear variants)
+//
+// This is intentionally lightweight: artifacts are stored as a bit flag on Item
+// and use deterministic naming based on spriteSeed + kind. Effects can be layered
+// on later without needing new save fields.
+// -----------------------------------------------------------------------------
+
+constexpr const char* ARTIFACT_PREFIXES[] = {
+    "ANCIENT", "OBSIDIAN", "STARFORGED", "IVORY", "EMBER", "FROST", "BLOOD", "SILVER",
+    "VOID", "ECHOING", "GILDED", "ASHEN", "SABLE", "RADIANT", "GRIM", "CELESTIAL",
+};
+
+constexpr const char* ARTIFACT_NOUNS[] = {
+    "WHISPER", "FANG", "EDGE", "WARD", "GLORY", "BANE", "REQUIEM", "AURORA",
+    "CROWN", "OATH", "FURY", "ECLIPSE", "VEIL", "BULWARK", "MIRROR", "SPIRAL",
+};
+
+constexpr const char* ARTIFACT_POWERS[] = {
+    "FLAME", "VENOM", "DAZE", "WARD", "VITALITY",
+};
+
+inline uint32_t artifactSeed(const Item& it) {
+    uint32_t s = it.spriteSeed;
+    if (s == 0u) {
+        // Fallback should be stable-ish even for legacy items.
+        s = static_cast<uint32_t>(it.id) * 2654435761u;
+    }
+    s = hashCombine(s ^ 0xA11F00Du, static_cast<uint32_t>(it.kind));
+    return hash32(s ^ 0xC0FFEEu);
+}
+
+inline const char* artifactPowerTag(const Item& it) {
+    constexpr size_t n = sizeof(ARTIFACT_POWERS) / sizeof(ARTIFACT_POWERS[0]);
+    const uint32_t h = artifactSeed(it);
+    return ARTIFACT_POWERS[(n == 0) ? 0 : (h % static_cast<uint32_t>(n))];
+}
+
+inline std::string artifactTitle(const Item& it) {
+    const uint32_t h = artifactSeed(it);
+    constexpr size_t np = sizeof(ARTIFACT_PREFIXES) / sizeof(ARTIFACT_PREFIXES[0]);
+    constexpr size_t nn = sizeof(ARTIFACT_NOUNS) / sizeof(ARTIFACT_NOUNS[0]);
+
+    const char* pre = ARTIFACT_PREFIXES[(np == 0) ? 0 : ((h >> 8) % static_cast<uint32_t>(np))];
+    const char* noun = ARTIFACT_NOUNS[(nn == 0) ? 0 : ((h >> 16) % static_cast<uint32_t>(nn))];
+
+    std::string s;
+    s.reserve(32);
+    s += pre;
+    s += " ";
+    s += noun;
     return s;
 }
 
@@ -232,6 +289,7 @@ std::string itemDisplayName(const Item& it) {
     // Prefix BUC (blessed/uncursed/cursed) + enchantment for non-stackable equipment.
     // (We intentionally keep new ItemKind values appended to preserve old save compatibility.)
     if (isWearableGear(it.kind)) {
+        if (itemIsArtifact(it)) ss << "ARTIFACT ";
         if (it.buc < 0) ss << "CURSED ";
         else if (it.buc > 0) ss << "BLESSED ";
 
@@ -283,6 +341,12 @@ std::string itemDisplayName(const Item& it) {
         ss << it.count << " " << pluralizeStackableName(it.kind, d.name, it.count);
     } else {
         ss << d.name;
+    }
+
+    if (itemIsArtifact(it) && isWearableGear(it.kind)) {
+        ss << " '" << artifactTitle(it) << "'";
+        const char* p = artifactPowerTag(it);
+        if (p && p[0]) ss << " {" << p << "}";
     }
 
     if (it.kind == ItemKind::TorchLit) {

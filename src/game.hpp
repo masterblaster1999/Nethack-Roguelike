@@ -1289,6 +1289,12 @@ public:
 
     bool atCamp() const { return branch_ == DungeonBranch::Camp && depth_ == 0; }
 
+    // Infinite overworld (Camp depth 0): the surface camp hub lives at chunk (0,0).
+    // Traveling across map edges moves between adjacent chunks without changing branch/depth.
+    bool atHomeCamp() const { return atCamp() && overworldX_ == 0 && overworldY_ == 0; }
+    int overworldX() const { return overworldX_; }
+    int overworldY() const { return overworldY_; }
+
     int dungeonMaxDepth() const { return DUNGEON_MAX_DEPTH; }
     int questDepth() const { return QUEST_DEPTH; }
 
@@ -1300,6 +1306,19 @@ public:
     uint32_t seed() const { return seed_; }
     uint32_t kills() const { return killCount; }
     int maxDepthReached() const { return maxDepth; }
+
+    // Conducts (NetHack-style voluntary challenges).
+    // These are tracked per-run and persisted in saves for scoreboard/history.
+    uint32_t directKills() const { return directKillCount_; }
+    uint32_t foodsEaten() const { return conductFoodEaten_; }
+    uint32_t corpsesEaten() const { return conductCorpseEaten_; }
+    uint32_t scrollsRead() const { return conductScrollsRead_; }
+    uint32_t spellbooksRead() const { return conductSpellbooksRead_; }
+    uint32_t prayersUsed() const { return conductPrayers_; }
+
+    // Returns a '|' separated list of currently-kept conducts (e.g., "FOODLESS | PACIFIST"),
+    // or an empty string if none are currently kept.
+    std::string runConductsTag() const;
 
     // Player identity (used for HUD + scoreboard)
     const std::string& playerName() const { return playerName_; }
@@ -1933,6 +1952,23 @@ private:
     // Persistent visited levels (monsters + items + explored tiles)
     std::map<LevelId, LevelState> levels;
 
+    // Infinite overworld chunk cache (Camp depth 0).
+    //
+    // The hub camp is always at (0,0) and is stored in `levels[{Camp,0}]` like before.
+    // Wilderness chunks are stored here and are currently treated as ephemeral (not serialized).
+    struct OverworldKey {
+        int x = 0;
+        int y = 0;
+        bool operator<(const OverworldKey& o) const {
+            if (x != o.x) return x < o.x;
+            return y < o.y;
+        }
+    };
+
+    int overworldX_ = 0;
+    int overworldY_ = 0;
+    std::map<OverworldKey, LevelState> overworldChunks_;
+
     // Monsters/companions that fell through trap doors into a deeper level.
     // These are queued by destination depth and spawned when that level is entered.
     // Index 0 is unused.
@@ -2278,6 +2314,16 @@ private:
     // Run meta / stats
     uint32_t seed_ = 0;
     uint32_t killCount = 0;
+
+    // Conduct tracking (NetHack-style voluntary challenges).
+    // These do not affect gameplay, but are saved so they survive save/load.
+    uint32_t directKillCount_ = 0;       // kills delivered by the player (not allies)
+    uint32_t conductFoodEaten_ = 0;      // times the player ate any food (rations/corpses)
+    uint32_t conductCorpseEaten_ = 0;    // corpses eaten
+    uint32_t conductScrollsRead_ = 0;    // scrolls read
+    uint32_t conductSpellbooksRead_ = 0; // spellbooks studied
+    uint32_t conductPrayers_ = 0;        // shrine services used
+
     int maxDepth = 1;
 
     // Monster codex knowledge (per-run).
@@ -2395,6 +2441,12 @@ private:
     // Level transitions
     void storeCurrentLevel();
     bool restoreLevel(LevelId id);
+
+    // Overworld chunk travel (Camp depth 0).
+    // Triggered when the player attempts to step out-of-bounds through an edge gate.
+    bool tryOverworldStep(int dx, int dy);
+    bool restoreOverworldChunk(int x, int y);
+    void pruneOverworldChunks();
     void changeLevel(int newDepth, bool goingDown);
     void changeLevel(LevelId newLevel, bool goingDown);
 

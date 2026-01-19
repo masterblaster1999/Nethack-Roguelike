@@ -1,4 +1,5 @@
 #include "game_internal.hpp"
+#include "overworld.hpp"
 #include <cmath>
 
 uint32_t dailySeedUtc(std::string* outDateIso) {
@@ -1481,6 +1482,8 @@ std::string Game::unknownDisplayName(const Item& it) const {
     auto appendGearPrefix = [&]() {
         if (!isWearableGear(it.kind)) return;
 
+        if (itemIsArtifact(it)) ss << "ARTIFACT ";
+
         if (it.buc < 0) ss << "CURSED ";
         else if (it.buc > 0) ss << "BLESSED ";
 
@@ -1639,6 +1642,9 @@ void Game::newGame(uint32_t seed) {
     depth_ = 0;
     levels.clear();
     trapdoorFallers_.clear();
+    overworldX_ = 0;
+    overworldY_ = 0;
+    overworldChunks_.clear();
 
     ents.clear();
     ground.clear();
@@ -1738,6 +1744,12 @@ void Game::newGame(uint32_t seed) {
     lastAutosaveTurn = 0;
 
     killCount = 0;
+    directKillCount_ = 0;
+    conductFoodEaten_ = 0;
+    conductCorpseEaten_ = 0;
+    conductScrollsRead_ = 0;
+    conductSpellbooksRead_ = 0;
+    conductPrayers_ = 0;
     maxDepth = 0;
     codexSeen_.fill(0);
     codexKills_.fill(0);
@@ -1815,6 +1827,9 @@ void Game::newGame(uint32_t seed) {
     const Vec2i msz = proceduralMapSizeFor(rng, branch_, depth_);
     dung = Dungeon(msz.x, msz.y);
     dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH, seed_);
+    if (atHomeCamp()) {
+        overworld::ensureBorderGates(dung);
+    }
     // Environmental fields reset per floor (no lingering gas on a fresh level).
     confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
     poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
@@ -2081,7 +2096,11 @@ void Game::storeCurrentLevel() {
         if (e.id == playerId_) continue;
         st.monsters.push_back(e);
     }
-    levels[{branch_, depth_}] = std::move(st);
+    if (atCamp() && !atHomeCamp()) {
+        overworldChunks_[OverworldKey{overworldX_, overworldY_}] = std::move(st);
+    } else {
+        levels[{branch_, depth_}] = std::move(st);
+    }
 }
 
 bool Game::restoreLevel(LevelId id) {
@@ -2128,9 +2147,286 @@ bool Game::restoreLevel(LevelId id) {
         ents.push_back(m);
     }
 
+    if (id.branch == DungeonBranch::Camp && id.depth == 0) {
+        overworld::ensureBorderGates(dung);
+    }
+
     return true;
 }
 
+
+
+bool Game::restoreOverworldChunk(int x, int y) {
+    OverworldKey key{x, y};
+    auto it = overworldChunks_.find(key);
+    if (it == overworldChunks_.end()) return false;
+
+    dung = it->second.dung;
+    ground = it->second.ground;
+    trapsCur = it->second.traps;
+    mapMarkers_ = it->second.markers;
+    engravings_ = it->second.engravings;
+    chestContainers_ = it->second.chestContainers;
+
+    // Drop any orphaned containers (e.g., chests that were destroyed).
+    if (!chestContainers_.empty()) {
+        chestContainers_.erase(std::remove_if(chestContainers_.begin(), chestContainers_.end(), [&](const ChestContainer& c) {
+            if (c.chestId <= 0) return true;
+            for (const auto& gi : ground) {
+                if (isChestKind(gi.item.kind) && gi.item.id == c.chestId) return false;
+            }
+            return true;
+        }), chestContainers_.end());
+    }
+
+    confusionGas_ = it->second.confusionGas;
+    const size_t expect = static_cast<size_t>(dung.width * dung.height);
+    if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+
+    poisonGas_ = it->second.poisonGas;
+    if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+
+    fireField_ = it->second.fireField;
+    if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+
+    scentField_ = it->second.scentField;
+    if (scentField_.size() != expect) scentField_.assign(expect, 0u);
+
+    // Keep player, restore monsters.
+    ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+        return e.id != playerId_;
+    }), ents.end());
+
+    for (const auto& m : it->second.monsters) {
+        ents.push_back(m);
+    }
+
+    // Overworld chunks always have edge gates.
+    overworld::ensureBorderGates(dung);
+
+    return true;
+}
+
+void Game::pruneOverworldChunks() {
+    // Keep a bounded window around the current chunk to avoid unbounded memory growth.
+    // (This is intentionally larger than the main-dungeon infinite keep window: overworld
+    // travel is mostly lateral and players tend to backtrack.)
+    constexpr int kKeepRadius = 6;
+
+    for (auto it = overworldChunks_.begin(); it != overworldChunks_.end(); ) {
+        const int dx = it->first.x - overworldX_;
+        const int dy = it->first.y - overworldY_;
+        if (std::abs(dx) > kKeepRadius || std::abs(dy) > kKeepRadius) {
+            it = overworldChunks_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool Game::tryOverworldStep(int dx, int dy) {
+    if (!atCamp()) return false;
+    if ((dx == 0 && dy == 0) || (dx != 0 && dy != 0)) return false;
+    if (dx < -1 || dx > 1 || dy < -1 || dy > 1) return false;
+
+    Entity& p = playerMut();
+
+    // Only allow travel from edge tiles.
+    if (dx == -1 && p.pos.x != 0) return false;
+    if (dx ==  1 && p.pos.x != dung.width - 1) return false;
+    if (dy == -1 && p.pos.y != 0) return false;
+    if (dy ==  1 && p.pos.y != dung.height - 1) return false;
+
+    // The edge tile must be walkable (i.e., an opened gate).
+    if (!dung.isWalkable(p.pos.x, p.pos.y)) return false;
+
+    cancelAutoMove(true);
+
+    // Carry friendly companions that are set to follow/fetch.
+    std::vector<Entity> companions;
+    companions.reserve(4);
+    for (auto it = ents.begin(); it != ents.end(); ) {
+        if (it->id == playerId_) { ++it; continue; }
+        if (it->hp <= 0) { ++it; continue; }
+        if (!it->friendly) { ++it; continue; }
+        if (!(it->allyOrder == AllyOrder::Follow || it->allyOrder == AllyOrder::Fetch)) { ++it; continue; }
+        companions.push_back(*it);
+        it = ents.erase(it);
+    }
+
+    // Store the current chunk (without traveling companions).
+    storeCurrentLevel();
+
+    const int oldX = overworldX_;
+    const int oldY = overworldY_;
+
+    overworldX_ += dx;
+    overworldY_ += dy;
+
+    // Close transient effects; treat travel like a level transition.
+    fx.clear();
+    fxExpl.clear();
+    fxParticles_.clear();
+    inputLock = false;
+    msgScroll = 0;
+
+    // Restore destination chunk, or generate if first visit.
+    bool restored = false;
+    if (atHomeCamp()) {
+        restored = restoreLevel(LevelId{DungeonBranch::Camp, 0});
+    } else {
+        restored = restoreOverworldChunk(overworldX_, overworldY_);
+    }
+
+    auto computeArrival = [&]() -> Vec2i {
+        // You exit one side, enter the opposite side in the destination chunk.
+        const int w = dung.width;
+        const int h = dung.height;
+        if (dx ==  1) return Vec2i{0,      h / 2};
+        if (dx == -1) return Vec2i{w - 1,  h / 2};
+        if (dy ==  1) return Vec2i{w / 2,  0};
+        return Vec2i{w / 2,  h - 1};
+    };
+
+    // Helper: check for a free tile (optionally ignoring the player).
+    auto isFreeTile = [&](int x, int y, bool ignorePlayer) -> bool {
+        if (!dung.inBounds(x, y)) return false;
+        if (!dung.isWalkable(x, y)) return false;
+
+        const Entity* e = entityAt(x, y);
+        if (!e) return true;
+        if (ignorePlayer && e->id == playerId_) return true;
+        return false;
+    };
+
+    auto findNearbyFreeTile = [&](Vec2i center, int maxRadius, bool ignorePlayer) -> Vec2i {
+        if (isFreeTile(center.x, center.y, ignorePlayer)) return center;
+
+        for (int r = 1; r <= maxRadius; ++r) {
+            for (int ddy = -r; ddy <= r; ++ddy) {
+                for (int ddx = -r; ddx <= r; ++ddx) {
+                    if (std::abs(ddx) != r && std::abs(ddy) != r) continue; // ring
+                    Vec2i cand{center.x + ddx, center.y + ddy};
+                    if (isFreeTile(cand.x, cand.y, ignorePlayer)) return cand;
+                }
+            }
+        }
+
+        return center;
+    };
+
+    if (!restored) {
+        // New chunk: generate + populate deterministically without perturbing gameplay RNG.
+        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+            return e.id != playerId_;
+        }), ents.end());
+        ground.clear();
+        trapsCur.clear();
+        mapMarkers_.clear();
+        engravings_.clear();
+        chestContainers_.clear();
+        confusionGas_.clear();
+        poisonGas_.clear();
+        fireField_.clear();
+        scentField_.clear();
+
+        const uint32_t gameplayRngState = rng.state;
+        rng.state = overworld::chunkSeed(seed_, overworldX_, overworldY_);
+
+        // Keep chunk size stable (use whatever size the current surface uses).
+        const int w = std::max(16, dung.width);
+        const int h = std::max(16, dung.height);
+        dung = Dungeon(w, h);
+        overworld::generateWildernessChunk(dung, seed_, overworldX_, overworldY_);
+        dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
+        confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+
+        // Place player before spawning so we never spawn on top of them.
+        const Vec2i arrival = computeArrival();
+        p.pos = arrival;
+        p.alerted = false;
+
+        spawnGraffiti();
+        spawnMonsters();
+        spawnItems();
+        spawnTraps();
+        spawnFountains();
+
+        // Restore gameplay RNG after deterministic generation/spawns.
+        rng.state = gameplayRngState;
+    }
+
+    // Ensure gates in destination chunk (home camp or wilderness).
+    if (atCamp()) {
+        overworld::ensureBorderGates(dung);
+    }
+
+    // Place player at the arrival gate; if blocked, step aside.
+    {
+        const Vec2i arrival = computeArrival();
+        const Entity* blocker = entityAt(arrival.x, arrival.y);
+        if (blocker && blocker->id != playerId_) {
+            p.pos = findNearbyFreeTile(arrival, 6, true);
+            pushMsg("THE PASSAGE IS BLOCKED! YOU STUMBLE ASIDE.", MessageKind::Warning, true);
+        } else {
+            p.pos = arrival;
+        }
+        p.alerted = false;
+    }
+
+    // Place companions near the player on the destination chunk.
+    size_t companionCount = 0;
+    for (auto& c : companions) {
+        c.alerted = false;
+        c.lastKnownPlayerPos = {-1, -1};
+        c.lastKnownPlayerAge = 9999;
+        c.energy = 0;
+
+        Vec2i spawn = findNearbyFreeTile(p.pos, 4, false);
+        if (!dung.inBounds(spawn.x, spawn.y)) continue;
+        const Entity* b = entityAt(spawn.x, spawn.y);
+        if (b && b->id != playerId_) continue;
+        if (!dung.isWalkable(spawn.x, spawn.y)) continue;
+
+        c.pos = spawn;
+        ents.push_back(c);
+        ++companionCount;
+    }
+    if (companionCount > 0) {
+        if (companionCount == 1 && companions.size() == 1 && companions[0].kind == EntityKind::Dog) {
+            pushMsg("YOUR DOG FOLLOWS YOU.", MessageKind::System, true);
+        } else {
+            pushMsg("YOUR COMPANIONS FOLLOW YOU.", MessageKind::System, true);
+        }
+    }
+
+    // Auto-explore bookkeeping is transient per-floor; size it to the current dungeon.
+    autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+
+    recomputeFov();
+
+    // Prune the overworld cache around the new position.
+    pruneOverworldChunks();
+
+    // Flavor messages.
+    if (overworldX_ == 0 && overworldY_ == 0) {
+        pushMsg("YOU RETURN TO CAMP.", MessageKind::System, true);
+    } else if (oldX == 0 && oldY == 0) {
+        std::ostringstream ss;
+        ss << "YOU STEP INTO THE WILDERNESS (" << overworldX_ << "," << overworldY_ << ").";
+        pushMsg(ss.str(), MessageKind::System, true);
+    } else {
+        std::ostringstream ss;
+        ss << "YOU TRAVEL TO (" << overworldX_ << "," << overworldY_ << ").";
+        pushMsg(ss.str(), MessageKind::System, true);
+    }
+
+    return true;
+}
 uint32_t Game::levelGenSeed(LevelId id) const {
     // Stable per-level seed derived from the run seed + level identity.
     // Domain separation constant ensures future seed uses don't accidentally correlate.
@@ -2725,6 +3021,12 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
 
     branch_ = newLevel.branch;
     depth_ = newDepth;
+
+    if (branch_ == DungeonBranch::Camp && depth_ == 0) {
+        // Surface hub is always chunk (0,0).
+        overworldX_ = 0;
+        overworldY_ = 0;
+    }
     maxDepth = std::max(maxDepth, depth_);
 
     bool restored = restoreLevel(newLevel);
@@ -2914,6 +3216,10 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         const Vec2i msz = proceduralMapSizeFor(rng, branch_, depth_);
         dung = Dungeon(msz.x, msz.y);
         dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH, seed_);
+
+        if (branch_ == DungeonBranch::Camp && depth_ == 0) {
+            overworld::ensureBorderGates(dung);
+        }
 
         // In infinite mode, the sanctum (depth == max) gains a downstairs so depth 26+ is reachable.
         ensureEndlessSanctumDownstairs(newLevel, dung, rng);
@@ -3773,4 +4079,25 @@ void Game::pushFxParticle(FXParticlePreset preset, Vec2i pos, int intensity, flo
         fxParticles_.erase(fxParticles_.begin());
     }
     fxParticles_.push_back(ev);
+}
+
+
+std::string Game::runConductsTag() const {
+    std::vector<const char*> tags;
+    tags.reserve(6);
+
+    // A run starts with many conducts intact; they are broken by specific actions.
+    // This is inspired by NetHack-style voluntary challenges, but tailored to this game.
+    if (conductFoodEaten_ == 0) tags.push_back("FOODLESS");
+    if (conductCorpseEaten_ == 0) tags.push_back("VEGETARIAN");
+    if (conductPrayers_ == 0) tags.push_back("ATHEIST");
+    if (directKillCount_ == 0) tags.push_back("PACIFIST");
+    if (conductScrollsRead_ == 0 && conductSpellbooksRead_ == 0) tags.push_back("ILLITERATE");
+
+    std::string out;
+    for (size_t i = 0; i < tags.size(); ++i) {
+        if (i != 0) out += " | ";
+        out += tags[i];
+    }
+    return out;
 }

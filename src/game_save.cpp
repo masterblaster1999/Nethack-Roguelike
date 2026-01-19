@@ -1059,7 +1059,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 51u; // v51: infinite world options (endless mode + keep window) // v50: procedural monster abilities (active kit + cooldowns) // v49: procedural monster variants (rank + affix mask) // v48: item call labels (NetHack-style) // v47: trapdoorFallers keyed by (branch,depth) // v46: Message.branch (dungeon branch for log/history) // v45: dungeon branches (LevelId) // v44: mana + knownSpellsMask (WIP) // v43: shrine piety + prayer cooldown // v42: merchant guild pursuit state // v41: Item.flags (mimic bait + future extensibility)
+constexpr uint32_t SAVE_VERSION = 52u; // v52: conduct counters (pacifist/foodless/illiterate/etc)
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -1656,6 +1656,15 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
 } // namespace
 
 bool Game::saveToFile(const std::string& path, bool quiet) {
+    // Overworld chunks (Camp depth 0 outside the hub) are not yet serialized.
+    // Prevent saving there so loading cannot strand the player on an untracked chunk.
+    if (atCamp() && !atHomeCamp()) {
+        if (!quiet) {
+            pushMsg("YOU CANNOT SAVE WHILE LOST IN THE WILDERNESS.", MessageKind::Warning, true);
+        }
+        return false;
+    }
+
     // Ensure the currently-loaded level is persisted into `levels`.
     storeCurrentLevel();
 
@@ -1749,6 +1758,22 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
     writePod(mem, seedNow);
     writePod(mem, killsNow);
     writePod(mem, maxD);
+
+    // v52+: conduct counters (NetHack-style voluntary challenges)
+    if constexpr (SAVE_VERSION >= 52u) {
+        uint32_t directKillsNow = directKillCount_;
+        uint32_t foodNow = conductFoodEaten_;
+        uint32_t corpseNow = conductCorpseEaten_;
+        uint32_t scrollNow = conductScrollsRead_;
+        uint32_t bookNow = conductSpellbooksRead_;
+        uint32_t prayNow = conductPrayers_;
+        writePod(mem, directKillsNow);
+        writePod(mem, foodNow);
+        writePod(mem, corpseNow);
+        writePod(mem, scrollNow);
+        writePod(mem, bookNow);
+        writePod(mem, prayNow);
+    }
 
     // v26+: monster codex (seen flags + kill counts; per-run)
     if constexpr (SAVE_VERSION >= 26u) {
@@ -2265,6 +2290,14 @@ bool Game::loadFromFile(const std::string& path, bool reportErrors) {
         uint32_t killsNow = 0;
         int32_t maxD = 1;
 
+        // v52+: conduct counters (NetHack-style voluntary challenges)
+        uint32_t directKillsNow = 0;
+        uint32_t foodNow = 0;
+        uint32_t corpseNow = 0;
+        uint32_t scrollNow = 0;
+        uint32_t bookNow = 0;
+        uint32_t prayNow = 0;
+
         // v26+: monster codex knowledge (per-run).
         std::array<uint8_t, ENTITY_KIND_COUNT> codexSeenTmp{};
         std::array<uint16_t, ENTITY_KIND_COUNT> codexKillsTmp{};
@@ -2327,6 +2360,15 @@ bool Game::loadFromFile(const std::string& path, bool reportErrors) {
             if (!readPod(in, seedNow)) return fail();
             if (!readPod(in, killsNow)) return fail();
             if (!readPod(in, maxD)) return fail();
+        }
+
+        if (ver >= 52u) {
+            if (!readPod(in, directKillsNow)) return fail();
+            if (!readPod(in, foodNow)) return fail();
+            if (!readPod(in, corpseNow)) return fail();
+            if (!readPod(in, scrollNow)) return fail();
+            if (!readPod(in, bookNow)) return fail();
+            if (!readPod(in, prayNow)) return fail();
         }
 
         if (ver >= 26u) {
@@ -3044,6 +3086,21 @@ if (ver >= 33u) {
         seed_ = seedNow;
         killCount = killsNow;
         maxDepth = (maxD > 0) ? maxD : depth_;
+        if (ver >= 52u) {
+            directKillCount_ = directKillsNow;
+            conductFoodEaten_ = foodNow;
+            conductCorpseEaten_ = corpseNow;
+            conductScrollsRead_ = scrollNow;
+            conductSpellbooksRead_ = bookNow;
+            conductPrayers_ = prayNow;
+        } else {
+            directKillCount_ = 0;
+            conductFoodEaten_ = 0;
+            conductCorpseEaten_ = 0;
+            conductScrollsRead_ = 0;
+            conductSpellbooksRead_ = 0;
+            conductPrayers_ = 0;
+        }
         playerClass_ = (ver >= 20u) ? playerClassFromU8(playerClassTmp) : PlayerClass::Adventurer;
         if (maxDepth < depth_) maxDepth = depth_;
         // If we loaded an already-finished run, don't record it again.
@@ -3300,6 +3357,11 @@ if (ver >= 33u) {
                 st.monsters.push_back(sk);
             }
         }
+
+        // Overworld chunk state is currently session-only (not serialized).
+        overworldX_ = 0;
+        overworldY_ = 0;
+        overworldChunks_.clear();
 
         restoreLevel(LevelId{branch_, depth_});
 

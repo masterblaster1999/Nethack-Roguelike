@@ -363,11 +363,18 @@ struct GroundItem {
 // Item flags (append-only).
 // NOTE: flags are serialized; only add new bits at the end.
 inline constexpr uint8_t ITEM_FLAG_MIMIC_BAIT = 1u << 0;
+inline constexpr uint8_t ITEM_FLAG_ARTIFACT  = 1u << 1;
 
 inline bool itemIsMimicBait(const Item& it) { return (it.flags & ITEM_FLAG_MIMIC_BAIT) != 0; }
 inline void setItemMimicBait(Item& it, bool v) {
     if (v) it.flags = static_cast<uint8_t>(it.flags | ITEM_FLAG_MIMIC_BAIT);
     else   it.flags = static_cast<uint8_t>(it.flags & static_cast<uint8_t>(~ITEM_FLAG_MIMIC_BAIT));
+}
+
+inline bool itemIsArtifact(const Item& it) { return (it.flags & ITEM_FLAG_ARTIFACT) != 0; }
+inline void setItemArtifact(Item& it, bool v) {
+    if (v) it.flags = static_cast<uint8_t>(it.flags | ITEM_FLAG_ARTIFACT);
+    else   it.flags = static_cast<uint8_t>(it.flags & static_cast<uint8_t>(~ITEM_FLAG_ARTIFACT));
 }
 
 const ItemDef& itemDef(ItemKind k);

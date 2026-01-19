@@ -7595,7 +7595,8 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         const Item& it = inv[static_cast<size_t>(i)];
         const std::string tag = game.equippedTag(it.id); // "" or "M"/"R"/"A"/...
 
-        const Color c = (i == sel) ? white : gray;
+        Color c = (i == sel) ? white : gray;
+        if (i != sel && itemIsArtifact(it)) c = yellow;
 
         // Selection arrow
         drawText5x7(renderer, listRect.x, yy, scale, c, (i == sel) ? ">" : " ");
@@ -9121,6 +9122,16 @@ void Renderer::drawStatsOverlay(const Game& game) {
     }
     {
         std::stringstream ss;
+        std::string c = game.runConductsTag();
+        if (c.empty()) c = "NONE";
+        ss << "CONDUCTS: " << c;
+        // Use a smaller scale so the full tag list fits comfortably.
+        drawText5x7(renderer, x0 + pad, y, 1, white, ss.str());
+        y += 12;
+    }
+
+    {
+        std::stringstream ss;
         if (game.autosaveEveryTurns() > 0) {
             ss << "AUTOSAVE: every " << game.autosaveEveryTurns() << " turns (" << game.defaultAutosavePath() << ")";
         } else {
@@ -9442,6 +9453,13 @@ void Renderer::drawScoresOverlay(const Game& game) {
                 std::ostringstream ss;
                 ss << "KILLS: " << e.kills << "   LVL: " << e.level << "   GOLD: " << e.gold;
                 drawText5x7(renderer, detailX, dy, bodyScale, white, ss.str());
+                dy += lineH;
+            }
+
+            if (!e.conducts.empty()) {
+                std::ostringstream ss;
+                ss << "CONDUCTS: " << e.conducts;
+                drawText5x7(renderer, detailX, dy, bodyScale, gray, ss.str());
                 dy += lineH;
             }
 

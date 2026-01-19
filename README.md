@@ -1,5 +1,7 @@
 # Nethack Roguelike
 
+<img width="3508" height="1837" alt="Screenshot 2026-01-19 223849" src="https://github.com/user-attachments/assets/3c3e0797-77e2-405e-b7db-72694e585c66" />
+
 A tiny NetHack-inspired roguelike with:
 - Turn-based combat and dungeon crawling
 - Procedurally generated pixel sprites (player, monsters, items)
@@ -220,7 +222,6 @@ A tiny NetHack-inspired roguelike with:
 - **Restart**: `F6`
 - **Quit**: Esc (or Esc twice if `confirm_quit` is enabled)
 
-![game nethack](https://github.com/user-attachments/assets/fc0e0902-b161-47e6-b2f3-cc6f88100548)
 
 ## Save files + settings location
 

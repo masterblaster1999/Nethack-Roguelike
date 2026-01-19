@@ -898,6 +898,10 @@ ss << baseDesc;
 std::string Game::lookInfoText() const {
     if (!looking) return std::string();
     std::string s = describeAt(lookPos);
+
+    const int W = dung.width;
+    const int H = dung.height;
+    const auto idx = [W](int x, int y) -> int { return y * W + x; };
     if (soundPreviewOpen) {
         if (soundPreviewVol <= 0) {
             s += " | SOUND PREVIEW SILENT";
@@ -915,8 +919,7 @@ std::string Game::lookInfoText() const {
         // This avoids revealing hidden monsters while still making the sound lens
         // more actionable for stealth planning.
         int heard = 0;
-        if (soundPreviewVol > 0 && !soundPreviewDist.empty()) {
-            const int W = dung.width;
+        if (soundPreviewVol > 0 && W > 0 && H > 0 && (int)soundPreviewDist.size() >= W * H) {
             for (const auto& m : ents) {
                 if (m.id == playerId_) continue;
                 if (m.hp <= 0) continue;
@@ -941,10 +944,8 @@ std::string Game::lookInfoText() const {
     if (hearingPreviewOpen) {
         s += " | HEARING PREVIEW";
 
-        const int W = dung.width;
-
         int stepBase = playerFootstepNoiseVolumeAt(lookPos);
-        if (!hearingPreviewFootstepVol.empty() && W > 0 && (int)hearingPreviewFootstepVol.size() >= W * dung.height) {
+        if (!hearingPreviewFootstepVol.empty() && W > 0 && H > 0 && (int)hearingPreviewFootstepVol.size() >= W * H) {
             stepBase = hearingPreviewFootstepVol[static_cast<size_t>(idx(lookPos.x, lookPos.y))];
         }
 
@@ -960,7 +961,7 @@ std::string Game::lookInfoText() const {
             s += " NO VISIBLE HOSTILES";
         } else {
             int req = -1;
-            if (W > 0 && (int)hearingPreviewMinReq.size() >= W * dung.height) {
+            if (W > 0 && H > 0 && (int)hearingPreviewMinReq.size() >= W * H) {
                 req = hearingPreviewMinReq[static_cast<size_t>(idx(lookPos.x, lookPos.y))];
             }
 
@@ -1009,8 +1010,6 @@ std::string Game::lookInfoText() const {
     if (scentPreviewOpen) {
         s += " | SCENT PREVIEW";
 
-        const int W = dung.width;
-
         const uint8_t hereU = scentAt(lookPos.x, lookPos.y);
         const int here = static_cast<int>(hereU);
 
@@ -1018,7 +1017,7 @@ std::string Game::lookInfoText() const {
         s += " CUTOFF " + std::to_string(scentPreviewCutoff_);
 
         // Indicate the local gradient direction (where a smell-tracking monster would tend to move).
-        if (W > 0 && dung.height > 0 && here > 0) {
+        if (W > 0 && H > 0 && here > 0) {
             struct D { int dx; int dy; const char* name; };
             const D dirs[4] = { {0,-1,"N"}, {1,0,"E"}, {0,1,"S"}, {-1,0,"W"} };
 

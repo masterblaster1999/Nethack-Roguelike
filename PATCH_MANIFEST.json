@@ -1,13 +1,11 @@
 {
-  "patch_id": "round89_patch",
-  "previous_patch_id": "round88_patch",
-  "round": 89,
+  "patch_id": "round90_patch",
+  "previous_patch_id": "round89_patch",
+  "round": 90,
   "date": "2026-01-19",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Added `bonusItemSpawns`: a new procgen hint channel for guaranteed setpiece ground-item drops (keys/lockpicks/etc.), applied after generic room loot to avoid collisions and counted toward key/lockpick guarantees.",
-    "Extended the vault prefab glyph set with `K` (spawn a key) and `R` (spawn a lockpick), enabling deterministic lock-and-key micro-puzzles and tool caches.",
-    "Added new vault prefabs (Keyed Inner Vault + Secret Tools Cache) and enhanced dead-end stash closets to sometimes drop a small tools/gold find when no chest rolls."
+    "Fixed MSVC compile errors in game_look.cpp: LOOK info overlays (sound/hearing) now use a shared grid-index helper and safer bounds checks."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -60,6 +58,6 @@
     "src/vtuber_gen.hpp"
   ],
   "timestamp_utc": "2026-01-19T00:00:00Z",
-  "description": "Expands dungeon procedural generation with a small but powerful new capability: setpieces can now request exact ground-item spawns via `bonusItemSpawns`, letting procedural features reliably place keys/lockpicks/rewards outside of rooms. The vault prefab system gained `K`/`R` item glyphs and new prefabs that use them for a self-contained keyed inner-vault micro-puzzle and a secret tool cache. Dead-end stash closets also occasionally provide a small utility reward when they do not spawn a chest.",
+  "description": "Fixes MSVC build errors introduced by the LOOK-mode sound/hearing overlays: the code referenced an undefined `idx` helper when indexing width*height fields. A shared local grid-index lambda is now defined in Game::lookInfoText(), and the overlay logic tightens vector size checks before indexing.",
   "timestamp": "2026-01-19T00:00:00Z"
 }

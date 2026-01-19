@@ -10761,7 +10761,131 @@ void Renderer::drawLookOverlay(const Game& game) {
             }
         }
     }
-// Threat preview heatmap (UI-only): visualize approximate "time-to-contact" from
+
+
+    // Scent trail preview heatmap (UI-only): visualize your lingering scent field.
+    // This helps you reason about smell-tracking monsters and how doors/corridors shape your trail.
+    if (game.isScentPreviewOpen()) {
+        const int cutoff = std::clamp(game.scentPreviewCutoff(), 0, 255);
+
+        const int W = d.width;
+        const int H = d.height;
+        if (W > 0 && H > 0) {
+            // Heatmap fill: sepia tint to read as "odor" and remain distinct from the blue sound preview
+            // and the red threat preview.
+            for (int y = 0; y < H; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    const Tile& t = d.at(x, y);
+                    if (!t.explored) continue;
+
+                    const int v = static_cast<int>(game.scentAt(x, y));
+                    if (v <= cutoff) continue;
+
+                    const int strength = v - cutoff;
+                    const int denom = std::max(1, 255 - cutoff);
+                    const int alpha = std::clamp(18 + (strength * 190) / denom, 18, 205);
+
+                    SDL_SetRenderDrawColor(renderer, Uint8{235}, Uint8{200}, Uint8{120}, clampToU8(alpha));
+                    SDL_Rect rct = mapTileDst(x, y);
+                    if (iso) {
+                        fillIsoDiamond(renderer, rct.x + rct.w / 2, rct.y + rct.h / 2, rct.w / 2, rct.h / 2);
+                    } else {
+                        SDL_RenderFillRect(renderer, &rct);
+                    }
+                }
+            }
+
+            // Gradient arrows: point toward stronger scent (approximate "follow the trail" direction).
+            // Keep it subtle so it reads as a vector field rather than UI noise.
+            SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{90});
+
+            struct Dir { int dx; int dy; };
+            const Dir dirs[4] = { {0,-1}, {1,0}, {0,1}, {-1,0} };
+
+            for (int y = 0; y < H; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    const Tile& t = d.at(x, y);
+                    if (!t.explored) continue;
+
+                    const int v = static_cast<int>(game.scentAt(x, y));
+                    if (v <= cutoff) continue;
+
+                    int best = v;
+                    int bestDx = 0;
+                    int bestDy = 0;
+
+                    for (const auto& dd : dirs) {
+                        const int nx = x + dd.dx;
+                        const int ny = y + dd.dy;
+                        if (!d.inBounds(nx, ny)) continue;
+                        if (!d.at(nx, ny).explored) continue;
+                        const int nv = static_cast<int>(game.scentAt(nx, ny));
+                        if (nv > best) {
+                            best = nv;
+                            bestDx = dd.dx;
+                            bestDy = dd.dy;
+                        }
+                    }
+
+                    // Require a small margin to avoid drawing arrows on flat/ambiguous regions.
+                    if (best < v + 8) continue;
+
+                    SDL_Rect r0 = mapTileDst(x, y);
+                    SDL_Rect r1 = mapTileDst(x + bestDx, y + bestDy);
+
+                    const float cx = float(r0.x + r0.w * 0.5f);
+                    const float cy = float(r0.y + r0.h * 0.5f);
+                    const float tx = float(r1.x + r1.w * 0.5f);
+                    const float ty = float(r1.y + r1.h * 0.5f);
+
+                    const float vx = tx - cx;
+                    const float vy = ty - cy;
+                    const float len = std::sqrt(vx * vx + vy * vy);
+                    if (len <= 1.0f) continue;
+
+                    const float nx = vx / len;
+                    const float ny = vy / len;
+
+                    // Arrow size tuned for tile-sized spacing; these stay readable in both top-down and iso.
+                    const float tipLen = len * 0.35f;
+                    const float headLen = len * 0.12f;
+                    const float headW   = len * 0.08f;
+
+                    const float tipX = cx + nx * tipLen;
+                    const float tipY = cy + ny * tipLen;
+
+                    const float baseX = tipX - nx * headLen;
+                    const float baseY = tipY - ny * headLen;
+
+                    const float px = -ny;
+                    const float py = nx;
+
+                    const float leftX  = baseX + px * headW;
+                    const float leftY  = baseY + py * headW;
+                    const float rightX = baseX - px * headW;
+                    const float rightY = baseY - py * headW;
+
+                    SDL_RenderDrawLine(renderer, int(cx), int(cy), int(tipX), int(tipY));
+                    SDL_RenderDrawLine(renderer, int(tipX), int(tipY), int(leftX), int(leftY));
+                    SDL_RenderDrawLine(renderer, int(tipX), int(tipY), int(rightX), int(rightY));
+                }
+            }
+
+            // Subtle accent: outline the player's current tile so you can quickly locate "freshest" scent.
+            const Vec2i pp = game.player().pos;
+            if (d.inBounds(pp.x, pp.y) && d.at(pp.x, pp.y).explored) {
+                SDL_SetRenderDrawColor(renderer, Uint8{255}, Uint8{255}, Uint8{255}, Uint8{70});
+                SDL_Rect rr = mapTileDst(pp.x, pp.y);
+                if (iso) {
+                    drawIsoDiamondOutline(renderer, rr);
+                } else {
+                    SDL_RenderDrawRect(renderer, &rr);
+                }
+            }
+        }
+    }
+
+    // Threat preview heatmap (UI-only): visualize approximate "time-to-contact" from
     // the nearest currently VISIBLE hostile. This is intentionally visibility-gated
     // so it never leaks information about unseen enemies.
     if (game.isThreatPreviewOpen()) {

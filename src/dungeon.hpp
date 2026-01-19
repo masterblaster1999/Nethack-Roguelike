@@ -6,6 +6,8 @@
 
 enum class DungeonBranch : uint8_t;
 
+enum class ItemKind : uint8_t;
+
 enum class EndlessStratumTheme : uint8_t {
     Ruins = 0,
     Caverns,
@@ -196,6 +198,17 @@ struct Room {
     }
 };
 
+// Generation-only item spawn requests. These are set by the dungeon generator
+// (vault prefabs, stash closets, setpieces) to guarantee specific ground items
+// appear at specific tiles. They are applied during Game::spawnItems() and
+// intentionally are NOT serialized.
+struct BonusItemSpawn {
+    Vec2i pos{0,0};
+    ItemKind kind = static_cast<ItemKind>(0);
+    int count = 1;
+};
+
+
 class Dungeon {
 public:
     // Default map size.
@@ -235,6 +248,9 @@ mutable std::vector<uint8_t> materialCache;
     // Generator hints: optional guaranteed bonus loot spawns (e.g. boulder bridge caches).
     // Used only during floor generation; not serialized.
     std::vector<Vec2i> bonusLootSpots;
+    // Generator hints: optional guaranteed item spawns (e.g. keys in keyed vault prefabs).
+    // Used only during floor generation; not serialized.
+    std::vector<BonusItemSpawn> bonusItemSpawns;
     // Generator flags (not serialized): used for callouts/tests.
     bool hasCavernLake = false;
     bool hasWarrens = false; // Organic burrow/tunnel generator.

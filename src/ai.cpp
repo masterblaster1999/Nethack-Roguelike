@@ -5,6 +5,7 @@
 #include "grid_utils.hpp"
 #include "monster_pathing.hpp"
 #include "pathfinding.hpp"
+#include "projectile_utils.hpp"
 
 #include <limits>
 #include <sstream>
@@ -1906,8 +1907,14 @@ void Game::monsterTurn() {
                     }
                 }
 
-                // Friendly-fire avoidance: if an allied body blocks the line of fire, try to
-                // sidestep for a clear shot instead of peppering our own pack.
+                auto hasClearShotFrom = [&](Vec2i from, Vec2i to, const Entity& attacker) -> bool {
+                    const std::vector<Vec2i> line = bresenhamLine(from, to);
+                    return hasClearProjectileLine(dung, line, to, attacker.rangedRange);
+                };
+
+                // Line-of-fire handling: if cover (terrain/corners) blocks the shot, or an allied
+                // body blocks the line, try to sidestep for a clear shot instead of wasting ammo
+                // or peppering our own pack.
                 //
                 // NOTE: We only treat the *first* body in the projectile line as a blocker.
                 // In projectile combat, a miss can continue beyond the first creature, but
@@ -1927,20 +1934,7 @@ void Game::monsterTurn() {
                         if (!dung.inBounds(p0.x, p0.y)) break;
 
                         // Corner blocking identical to combat projectile rules.
-                        const Vec2i prev = line[ii - 1];
-                        const int dx = (p0.x > prev.x) ? 1 : (p0.x < prev.x) ? -1 : 0;
-                        const int dy = (p0.y > prev.y) ? 1 : (p0.y < prev.y) ? -1 : 0;
-                        if (dx != 0 && dy != 0) {
-                            const int ax = prev.x + dx;
-                            const int ay = prev.y;
-                            const int bx = prev.x;
-                            const int by = prev.y + dy;
-
-                            if (dung.inBounds(ax, ay) && dung.inBounds(bx, by) &&
-                                dung.blocksProjectiles(ax, ay) && dung.blocksProjectiles(bx, by)) {
-                                break;
-                            }
-                        }
+                        if (projectileCornerBlocked(dung, line[ii - 1], p0)) break;
 
                         if (dung.blocksProjectiles(p0.x, p0.y)) break;
 
@@ -1958,7 +1952,10 @@ void Game::monsterTurn() {
                     return false;
                 };
 
-                if (allyBlocksShotFrom(m.pos, p.pos, m)) {
+                const bool shotBlockedByTerrain = !hasClearShotFrom(m.pos, p.pos, m);
+                const bool shotBlockedByAlly = allyBlocksShotFrom(m.pos, p.pos, m);
+
+                if (shotBlockedByTerrain || shotBlockedByAlly) {
                     Vec2i bestStep = m.pos;
                     int bestScore = std::numeric_limits<int>::max();
                     bool found = false;
@@ -1974,10 +1971,10 @@ void Game::monsterTurn() {
                         if (!monsterPassableForCaps(*this, nx, ny, caps)) continue;
                         if (entityAt(nx, ny)) continue;
 
-                        // Still need LoS and range after stepping.
+                        // Still need a clear shot and range after stepping.
                         const int newMan = manhattan(Vec2i{nx, ny}, p.pos);
                         if (newMan > m.rangedRange) continue;
-                        if (!dung.hasLineOfSight(nx, ny, p.pos.x, p.pos.y)) continue;
+                        if (!hasClearShotFrom({nx, ny}, p.pos, m)) continue;
                         if (allyBlocksShotFrom({nx, ny}, p.pos, m)) continue;
 
                         int score = 0;

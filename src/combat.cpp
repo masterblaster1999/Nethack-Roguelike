@@ -2,6 +2,7 @@
 
 #include "combat_rules.hpp"
 #include "physics.hpp"
+#include "projectile_utils.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -733,24 +734,11 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
 
         // Corner blocking: don't allow shots to "thread" a diagonal gap when both orthogonal
         // neighbors are solid projectile blockers.
-        {
-            const Vec2i prev = line[i - 1];
-            const int dx = (p.x > prev.x) ? 1 : (p.x < prev.x) ? -1 : 0;
-            const int dy = (p.y > prev.y) ? 1 : (p.y < prev.y) ? -1 : 0;
-            if (dx != 0 && dy != 0) {
-                const int ax = prev.x + dx;
-                const int ay = prev.y;
-                const int bx = prev.x;
-                const int by = prev.y + dy;
-
-                if (dung.inBounds(ax, ay) && dung.inBounds(bx, by) &&
-                    dung.blocksProjectiles(ax, ay) && dung.blocksProjectiles(bx, by)) {
-                    hitWall = true;
-                    hitWallTile = TileType::Wall;
-                    stopIdx = i;
-                    break;
-                }
-            }
+        if (projectileCornerBlocked(dung, line[i - 1], p)) {
+            hitWall = true;
+            hitWallTile = TileType::Wall;
+            stopIdx = i;
+            break;
         }
 
         // Solid terrain blocks projectiles.

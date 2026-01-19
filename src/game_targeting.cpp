@@ -1,31 +1,9 @@
 #include "game_internal.hpp"
 
 #include "combat_rules.hpp"
+#include "projectile_utils.hpp"
 
 namespace {
-
-static std::vector<Vec2i> bresenhamLineLocal(Vec2i a, Vec2i b) {
-    std::vector<Vec2i> pts;
-    int x0 = a.x, y0 = a.y, x1 = b.x, y1 = b.y;
-
-    int dx = std::abs(x1 - x0);
-    int dy = std::abs(y1 - y0);
-    int sx = (x0 < x1) ? 1 : -1;
-    int sy = (y0 < y1) ? 1 : -1;
-    int err = dx - dy;
-
-    while (true) {
-        pts.push_back({x0, y0});
-        if (x0 == x1 && y0 == y1) break;
-        int e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x0 += sx; }
-        if (e2 <  dx) { err += dx; y0 += sy; }
-        if (pts.size() > 512) break;
-    }
-    return pts;
-}
-
-
 static bool isTargetCandidateHostile(const Game& g, const Entity& e) {
     if (e.id == g.player().id) return false;
     if (e.hp <= 0) return false;
@@ -80,42 +58,6 @@ static std::string summarizeNames(const std::vector<std::string>& names, size_t 
         ss << " +" << (n - m);
     }
     return ss.str();
-}
-
-static bool projectileCornerBlocked(const Dungeon& dung, const Vec2i& prev, const Vec2i& p) {
-    const int dx = (p.x > prev.x) ? 1 : (p.x < prev.x) ? -1 : 0;
-    const int dy = (p.y > prev.y) ? 1 : (p.y < prev.y) ? -1 : 0;
-    if (dx == 0 || dy == 0) return false;
-
-    const int ax = prev.x + dx;
-    const int ay = prev.y;
-    const int bx = prev.x;
-    const int by = prev.y + dy;
-
-    if (!dung.inBounds(ax, ay) || !dung.inBounds(bx, by)) return false;
-    return dung.blocksProjectiles(ax, ay) && dung.blocksProjectiles(bx, by);
-}
-
-static bool hasClearProjectileLine(const Dungeon& dung, const Vec2i& src, const Vec2i& dst, int range) {
-    std::vector<Vec2i> line = bresenhamLineLocal(src, dst);
-    if (line.size() <= 1) return false;
-
-    if (range > 0 && static_cast<int>(line.size()) > range + 1) {
-        // Out of range.
-        return false;
-    }
-
-    for (size_t i = 1; i < line.size(); ++i) {
-        const Vec2i p = line[i];
-        if (!dung.inBounds(p.x, p.y)) return false;
-
-        if (projectileCornerBlocked(dung, line[i - 1], p)) return false;
-
-        // Terrain blocks the shot unless it's the intended destination.
-        if (dung.blocksProjectiles(p.x, p.y) && p != dst) return false;
-    }
-
-    return true;
 }
 
 static int hitChancePercent(int attackBonus, int targetAC) {
@@ -340,8 +282,10 @@ void Game::cycleTargetCursor(int dir) {
         if (range > 0 && dist > range) continue;
 
         if (!dung.hasLineOfSight(src.x, src.y, e.pos.x, e.pos.y)) continue;
+
         // Skip targets that are visible but not actually shootable (blocked by cover/corners).
-        if (!hasClearProjectileLine(dung, src, e.pos, range)) continue;
+        const std::vector<Vec2i> line = Game::bresenhamLine(src, e.pos);
+        if (!hasClearProjectileLine(dung, line, e.pos, range)) continue;
 
         cands.push_back(e.pos);
     }

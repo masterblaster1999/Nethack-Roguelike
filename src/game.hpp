@@ -556,6 +556,9 @@ enum class Action : uint8_t {
 
     // LOOK helper (append-only)
     ToggleHearingPreview, // Toggle the hearing/audibility heatmap overlay (Look-mode helper)
+
+    // LOOK helper (append-only)
+    ToggleScentPreview, // Toggle the scent trail preview overlay (Look-mode helper)
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -1672,6 +1675,13 @@ bool clearItemCallLabel(ItemKind k);
     void toggleHearingPreview();
     void adjustHearingPreviewVolume(int delta);
 
+    // Scent preview overlay (LOOK helper; UI-only): visualize your lingering scent trail
+    // (useful for planning around smell-tracking monsters and sneak mode).
+    bool isScentPreviewOpen() const { return scentPreviewOpen; }
+    int scentPreviewCutoff() const { return scentPreviewCutoff_; }
+    void toggleScentPreview();
+    void adjustScentPreviewCutoff(int delta);
+
     // Minimap / stats overlays
     bool isMinimapOpen() const { return minimapOpen; }
     bool isStatsOpen() const { return statsOpen; }
@@ -2113,6 +2123,11 @@ private:
 	    std::vector<int> hearingPreviewDominantListenerIndex_;
     std::vector<int> hearingPreviewMinReq;
     std::vector<int> hearingPreviewFootstepVol;
+
+    // Scent preview (UI-only; not serialized): visualize the player's lingering scent trail
+    // as a heatmap + flow arrows in LOOK mode.
+    bool scentPreviewOpen = false;
+    int scentPreviewCutoff_ = 24; // 0..255 minimum scent intensity to render (adjustable via [ ])
 
     // Minimap / stats overlays
     bool minimapOpen = false;

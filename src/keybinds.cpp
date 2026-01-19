@@ -371,6 +371,9 @@ KeyBinds KeyBinds::defaults() {
     // LOOK helper: show an "audibility map" of where your footsteps would be heard
     add(Action::ToggleHearingPreview, SDLK_h, KMOD_CTRL);
 
+    // LOOK helper: visualize your lingering scent trail (for smell-tracking monsters)
+    add(Action::ToggleScentPreview, SDLK_s, KMOD_CTRL);
+
     add(Action::ToggleViewMode, SDLK_F7);
     add(Action::ToggleVoxelSprites, SDLK_F8);
 
@@ -533,6 +536,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::ToggleSoundPreview,
             Action::ToggleThreatPreview,
             Action::ToggleHearingPreview,
+            Action::ToggleScentPreview,
             Action::ToggleViewMode,
             Action::ToggleVoxelSprites,
             Action::ToggleFullscreen,
@@ -568,6 +572,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::ToggleSoundPreview,
         Action::ToggleThreatPreview,
         Action::ToggleHearingPreview,
+        Action::ToggleScentPreview,
         Action::ToggleViewMode,
         Action::ToggleVoxelSprites,
         Action::ToggleFullscreen,

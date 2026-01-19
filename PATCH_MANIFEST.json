@@ -1,15 +1,13 @@
 {
-  "patch_id": "round86_patch",
-  "previous_patch_id": "round85_patch",
-  "round": 86,
-  "date": "2026-01-18",
+  "patch_id": "round89_patch",
+  "previous_patch_id": "round88_patch",
+  "round": 89,
+  "date": "2026-01-19",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Added a new LOOK lens: Hearing Preview (audibility heatmap).",
-    "Hearing Preview marks explored tiles where your footsteps would be audible to currently visible hostile listeners (visibility-gated; no unseen-enemy leaks).",
-    "Default keybind: Ctrl+H (bind_hearing_preview); [ / ] adjusts a volume bias to simulate louder/quieter actions.",
-    "Help overlay now lists LOOK lenses (sound / hearing / threat).",
-    "Docs: added docs/HEARING_PREVIEW.md and updated settings docs to include the new action."
+    "Added `bonusItemSpawns`: a new procgen hint channel for guaranteed setpiece ground-item drops (keys/lockpicks/etc.), applied after generic room loot to avoid collisions and counted toward key/lockpick guarantees.",
+    "Extended the vault prefab glyph set with `K` (spawn a key) and `R` (spawn a lockpick), enabling deterministic lock-and-key micro-puzzles and tool caches.",
+    "Added new vault prefabs (Keyed Inner Vault + Secret Tools Cache) and enhanced dead-end stash closets to sometimes drop a small tools/gold find when no chest rolls."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -17,8 +15,10 @@
     "SETTINGS.md",
     "docs/3D_TURNTABLE_PREVIEW.md",
     "docs/HEARING_PREVIEW.md",
+    "docs/SCENT_PREVIEW.md",
     "docs/ISO_TERRAIN_VOXELS.md",
     "docs/PROCEDURAL_ANIMATION.md",
+    "docs/PROCGEN_ITEM_HOOKS.md",
     "docs/REACTIVE_FIELDS.md",
     "docs/SETTINGS.md",
     "src/action_info.hpp",
@@ -46,6 +46,7 @@
     "src/monster_pathing.hpp",
     "src/pathfinding.cpp",
     "src/pathfinding.hpp",
+    "src/projectile_utils.hpp",
     "src/render.cpp",
     "src/render.hpp",
     "src/settings.cpp",
@@ -58,7 +59,7 @@
     "src/threat_field.hpp",
     "src/vtuber_gen.hpp"
   ],
-  "timestamp_utc": "2026-01-18T00:00:00Z",
-  "description": "Adds a new LOOK lens: Hearing Preview (audibility heatmap) that marks explored tiles where your footsteps would be audible to currently visible hostiles. Includes default keybind (Ctrl+H), help overlay entry, and docs.",
-  "timestamp": "2026-01-18T00:00:00Z"
+  "timestamp_utc": "2026-01-19T00:00:00Z",
+  "description": "Expands dungeon procedural generation with a small but powerful new capability: setpieces can now request exact ground-item spawns via `bonusItemSpawns`, letting procedural features reliably place keys/lockpicks/rewards outside of rooms. The vault prefab system gained `K`/`R` item glyphs and new prefabs that use them for a self-contained keyed inner-vault micro-puzzle and a secret tool cache. Dead-end stash closets also occasionally provide a small utility reward when they do not spawn a chest.",
+  "timestamp": "2026-01-19T00:00:00Z"
 }

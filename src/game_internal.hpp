@@ -1153,6 +1153,8 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
     // Acoustic preview helper (UI-only). Keep a consistent bind across presets.
     ok &= updateIniKey(settingsPath, "bind_sound_preview", "ctrl+n");
     ok &= updateIniKey(settingsPath, "bind_threat_preview", "ctrl+t");
+    ok &= updateIniKey(settingsPath, "bind_hearing_preview", "ctrl+h");
+    ok &= updateIniKey(settingsPath, "bind_scent_preview", "ctrl+s");
     game.setControlPreset(preset);
 
     if (ok) {

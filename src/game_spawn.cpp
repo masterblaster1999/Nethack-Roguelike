@@ -1753,6 +1753,26 @@ void Game::spawnItems() {
         }
             }
 
+    // Procgen may request specific guaranteed ground items (e.g. a key inside a keyed
+    // vault prefab, or a utility drop in a dead-end stash closet).
+    // Apply them after the generic per-room rolls so we can avoid collisions.
+    for (const BonusItemSpawn& req : dung.bonusItemSpawns) {
+        const Vec2i pos = req.pos;
+        if (!dung.inBounds(pos.x, pos.y)) continue;
+        if (dung.at(pos.x, pos.y).type != TileType::Floor) continue;
+        if (entityAt(pos.x, pos.y)) continue;
+        if (hasGroundAt(pos)) continue;
+
+        const int cnt = std::max(1, req.count);
+        if (req.kind == ItemKind::Key) {
+            dropKeyAt(pos, cnt);
+        } else if (req.kind == ItemKind::Lockpick) {
+            dropLockpickAt(pos, cnt);
+        } else {
+            dropItemAt(req.kind, pos, cnt);
+        }
+    }
+
     // Guarantee at least one key on any floor that contains locked doors.
     if (hasLockedDoor && keysPlacedThisFloor <= 0) {
         std::vector<const Room*> candidates;

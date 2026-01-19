@@ -1326,7 +1326,6 @@ bool Game::evadeStep() {
     const bool haveHearing = (!hf.listeners.empty() && !hf.minRequiredVolume.empty());
 
     const int W = std::max(1, dung.width);
-    const int H = std::max(1, dung.height);
 
     auto idxOf = [&](int x, int y) -> size_t {
         return static_cast<size_t>(y * W + x);

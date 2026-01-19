@@ -231,6 +231,9 @@ void Game::beginLook() {
     hearingPreviewMinReq.clear();
     hearingPreviewFootstepVol.clear();
 
+    // UI-only helper: scent preview is scoped to LOOK mode.
+    scentPreviewOpen = false;
+
     looking = true;
     lookPos = player().pos;
 }
@@ -251,6 +254,7 @@ void Game::endLook() {
 	hearingPreviewDominantListenerIndex_.clear();
     hearingPreviewMinReq.clear();
     hearingPreviewFootstepVol.clear();
+    scentPreviewOpen = false;
 }
 
 void Game::beginLookAt(Vec2i p) {
@@ -346,6 +350,8 @@ void Game::toggleSoundPreview() {
 	        hearingPreviewDominantListenerIndex_.clear();
         hearingPreviewMinReq.clear();
         hearingPreviewFootstepVol.clear();
+
+        scentPreviewOpen = false;
     }
 
     soundPreviewOpen = !soundPreviewOpen;
@@ -468,6 +474,8 @@ void Game::toggleHearingPreview() {
         threatPreviewOpen = false;
         threatPreviewSrcs.clear();
         threatPreviewDist.clear();
+
+        scentPreviewOpen = false;
     }
 
     hearingPreviewOpen = !hearingPreviewOpen;
@@ -492,6 +500,45 @@ void Game::adjustHearingPreviewVolume(int delta) {
 }
 
 
+// Scent trail preview (LOOK helper): visualize your lingering scent gradient.
+void Game::toggleScentPreview() {
+    // UI-only planning helper; it never consumes a turn.
+    if (!looking) {
+        beginLook();
+    }
+
+    // Keep LOOK helpers mutually exclusive for clarity.
+    if (!scentPreviewOpen) {
+        soundPreviewOpen = false;
+        soundPreviewDist.clear();
+
+        threatPreviewOpen = false;
+        threatPreviewSrcs.clear();
+        threatPreviewDist.clear();
+
+        hearingPreviewOpen = false;
+        hearingPreviewListeners_.clear();
+        hearingPreviewDominantListenerIndex_.clear();
+        hearingPreviewMinReq.clear();
+        hearingPreviewFootstepVol.clear();
+    }
+
+    scentPreviewOpen = !scentPreviewOpen;
+    if (!scentPreviewOpen) {
+        return;
+    }
+
+    // Default cutoff: show "trackable" scent (matches AI heuristics) rather than very faint traces.
+    scentPreviewCutoff_ = std::clamp(scentPreviewCutoff_, 0, 255);
+    if (scentPreviewCutoff_ == 0) scentPreviewCutoff_ = 24;
+}
+
+void Game::adjustScentPreviewCutoff(int delta) {
+    if (!scentPreviewOpen) return;
+    scentPreviewCutoff_ = std::clamp(scentPreviewCutoff_ + delta, 0, 255);
+}
+
+
 
 void Game::toggleThreatPreview() {
     // This is a UI-only planning helper; it never consumes a turn.
@@ -509,6 +556,9 @@ void Game::toggleThreatPreview() {
 	        hearingPreviewDominantListenerIndex_.clear();
         hearingPreviewMinReq.clear();
         hearingPreviewFootstepVol.clear();
+    
+
+        scentPreviewOpen = false;
     }
 
     threatPreviewOpen = !threatPreviewOpen;
@@ -867,7 +917,6 @@ std::string Game::lookInfoText() const {
         int heard = 0;
         if (soundPreviewVol > 0 && !soundPreviewDist.empty()) {
             const int W = dung.width;
-            auto idx = [&](int x, int y) { return y * W + x; };
             for (const auto& m : ents) {
                 if (m.id == playerId_) continue;
                 if (m.hp <= 0) continue;
@@ -893,7 +942,6 @@ std::string Game::lookInfoText() const {
         s += " | HEARING PREVIEW";
 
         const int W = dung.width;
-        auto idx = [&](int x, int y) { return y * W + x; };
 
         int stepBase = playerFootstepNoiseVolumeAt(lookPos);
         if (!hearingPreviewFootstepVol.empty() && W > 0 && (int)hearingPreviewFootstepVol.size() >= W * dung.height) {
@@ -957,6 +1005,47 @@ std::string Game::lookInfoText() const {
         }
 
         s += "  ([ ] ADJUST)";
+    }
+    if (scentPreviewOpen) {
+        s += " | SCENT PREVIEW";
+
+        const int W = dung.width;
+
+        const uint8_t hereU = scentAt(lookPos.x, lookPos.y);
+        const int here = static_cast<int>(hereU);
+
+        s += " HERE " + std::to_string(here);
+        s += " CUTOFF " + std::to_string(scentPreviewCutoff_);
+
+        // Indicate the local gradient direction (where a smell-tracking monster would tend to move).
+        if (W > 0 && dung.height > 0 && here > 0) {
+            struct D { int dx; int dy; const char* name; };
+            const D dirs[4] = { {0,-1,"N"}, {1,0,"E"}, {0,1,"S"}, {-1,0,"W"} };
+
+            int best = here;
+            const char* bestName = nullptr;
+
+            for (const auto& d : dirs) {
+                const int nx = lookPos.x + d.dx;
+                const int ny = lookPos.y + d.dy;
+                if (!dung.inBounds(nx, ny)) continue;
+                // Only consider explored tiles so the UI doesn't imply knowledge behind walls.
+                if (!dung.at(nx, ny).explored) continue;
+                const int v = static_cast<int>(scentAt(nx, ny));
+                if (v > best) {
+                    best = v;
+                    bestName = d.name;
+                }
+            }
+
+            // Require a small margin so noisy flat areas don't spam directions.
+            if (bestName && best >= here + 8) {
+                s += " FLOW ";
+                s += bestName;
+            }
+        }
+
+        s += "  ([ ] FILTER)";
     }
     if (threatPreviewOpen) {
         s += " | THREAT PREVIEW HORIZON " + std::to_string(threatPreviewMaxCost) + "  ([ ] ADJUST)";

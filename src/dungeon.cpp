@@ -47,6 +47,8 @@ void fillWalls(Dungeon& d) {
         t.explored = false;
     }
     d.rooms.clear();
+    d.bonusLootSpots.clear();
+    d.bonusItemSpawns.clear();
     d.stairsUp = {-1, -1};
     d.stairsDown = {-1, -1};
     d.hasCavernLake = false;
@@ -9685,29 +9687,48 @@ bool maybeCarveDeadEndClosets(Dungeon& d, RNG& rng, int depth, GenKind g) {
         }
 
         // Bonus cache: usually a chest deep inside the closet (spawned via bonusLootSpots).
+        // If we don't roll a chest, sometimes leave a small utility item (key/lockpick/gold).
         // Secret closets are slightly more likely to be rewarding.
         const float chestChance = secretDoor ? 0.92f : 0.78f;
-        if (rng.chance(chestChance)) {
-            Vec2i best{-1, -1};
-            int bestScore = -1;
 
-            for (int yy = ry; yy < ry + rh; ++yy) {
-                for (int xx = rx; xx < rx + rw; ++xx) {
-                    if (!d.inBounds(xx, yy)) continue;
-                    if (d.at(xx, yy).type != TileType::Floor) continue;
+        Vec2i best{-1, -1};
+        int bestScore = -1;
 
-                    const int score = std::abs(xx - entry.x) + std::abs(yy - entry.y);
-                    if (score > bestScore) {
-                        bestScore = score;
-                        best = {xx, yy};
-                    } else if (score == bestScore && bestScore >= 0 && rng.chance(0.35f)) {
-                        best = {xx, yy};
-                    }
+        for (int yy = ry; yy < ry + rh; ++yy) {
+            for (int xx = rx; xx < rx + rw; ++xx) {
+                if (!d.inBounds(xx, yy)) continue;
+                if (d.at(xx, yy).type != TileType::Floor) continue;
+
+                const int score = std::abs(xx - entry.x) + std::abs(yy - entry.y);
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = {xx, yy};
+                } else if (score == bestScore && bestScore >= 0 && rng.chance(0.35f)) {
+                    best = {xx, yy};
                 }
             }
+        }
 
-            if (d.inBounds(best.x, best.y)) {
+        if (d.inBounds(best.x, best.y)) {
+            if (rng.chance(chestChance)) {
                 d.bonusLootSpots.push_back(best);
+            } else {
+                // Occasionally: a little "tools" drop so dead-end exploration still pays off.
+                const float toolChance = secretDoor ? 0.55f : 0.35f;
+                if (rng.chance(toolChance)) {
+                    ItemKind kind = ItemKind::Gold;
+                    int count = rng.range(15, 45);
+
+                    if (depth >= 4 && rng.chance(0.45f)) {
+                        kind = ItemKind::Lockpick;
+                        count = 1;
+                    } else if (rng.chance(0.35f)) {
+                        kind = ItemKind::Key;
+                        count = 1;
+                    }
+
+                    d.bonusItemSpawns.push_back({best, kind, count});
+                }
             }
         }
 
@@ -9937,6 +9958,14 @@ static bool applyPrefabAt(Dungeon& d, const PrefabVariant& v, int x0, int y0) {
                     d.at(wx, wy).type = TileType::Floor;
                     d.bonusLootSpots.push_back({wx, wy});
                     break;
+                case 'K':
+                    d.at(wx, wy).type = TileType::Floor;
+                    d.bonusItemSpawns.push_back({{wx, wy}, ItemKind::Key, 1});
+                    break;
+                case 'R':
+                    d.at(wx, wy).type = TileType::Floor;
+                    d.bonusItemSpawns.push_back({{wx, wy}, ItemKind::Lockpick, 1});
+                    break;
                 default:
                     // Unknown char: treat as wall (no-op).
                     break;
@@ -10093,11 +10122,35 @@ bool maybePlaceVaultPrefabs(Dungeon& d, RNG& rng, int depth, GenKind g) {
         "####+####",
     };
 
+    // A 2-step micro-puzzle: the key is reachable immediately, but the treasure is
+    // behind an *internal* locked door. This creates a tiny "lock-and-key" beat
+    // without requiring the player to scour the entire floor.
+    static const char* const kKeyedInnerVault9x7[] = {
+        "#########",
+        "#..P.T.P#",
+        "#.......#",
+        "####L####",
+        "#..K....#",
+        "#.......#",
+        "####+####",
+    };
+
+    // Secret door tool cache (teaches searching; rewards with lockpicks).
+    static const char* const kSecretTools5[] = {
+        "#####",
+        "#...#",
+        "#.R.#",
+        "#.T.#",
+        "##s##",
+    };
+
     static const PrefabDef kPrefabs[] = {
         { "Secret cache (tiny)",           5, 5, kSecretCache5,        1, 4 },
+        { "Secret tool cache",             5, 5, kSecretTools5,        1, 2 },
         { "Secret pillar shrine",          7, 7, kPillarShrine7,       2, 3 },
-        { "Locked micro-vault",            7, 7, kLockedVault7,        4, 3 },
+        { "Keyed inner vault",             9, 7, kKeyedInnerVault9x7,  2, 3 },
         { "Boulder-bridge loot room",      9, 7, kBoulderBridge9x7,    3, 2 },
+        { "Locked micro-vault",            7, 7, kLockedVault7,        4, 3 },
     };
 
     auto pickWeightedPrefab = [&]() -> const PrefabDef* {
@@ -12770,6 +12823,7 @@ void generateSurfaceCamp(Dungeon& d, RNG& rng) {
     fillWalls(d);
     d.rooms.clear();
     d.bonusLootSpots.clear();
+    d.bonusItemSpawns.clear();
     d.hasCavernLake = false;
     d.hasWarrens = false;
     d.secretShortcutCount = 0;
@@ -16153,6 +16207,7 @@ static int countDeadEnds(const Dungeon& d) {
 static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, DungeonBranch branch, int depth, int maxDepth, GenKind g, uint32_t worldSeed, const EndlessStratumInfo& stratum) {
     [[maybe_unused]] const EndlessStratumTheme theme = stratum.theme;
     d.bonusLootSpots.clear();
+    d.bonusItemSpawns.clear();
     fillWalls(d);
 
     switch (g) {
@@ -16457,6 +16512,7 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     if (tiles.size() != expect) tiles.assign(expect, Tile{});
 
     bonusLootSpots.clear();
+    bonusItemSpawns.clear();
 
     secretShortcutCount = 0;
     lockedShortcutCount = 0;

@@ -3,6 +3,7 @@
 #include "corridor_braid.hpp"
 #include "terrain_sculpt.hpp"
 #include "pathfinding.hpp"
+#include "wfc.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -10,6 +11,7 @@
 #include <functional>
 #include <limits>
 #include <queue>
+#include <string>
 #include <utility>
 
 namespace {
@@ -6665,6 +6667,398 @@ static void applySymmetricRoomFurnishings(Dungeon& d, RNG& rng, int depth) {
     d.symmetryRoomCount = furnished;
     d.symmetryObstacleCount = obstacles;
 }
+
+// ------------------------------------------------------------
+// WFC-based room furnishing (constraint-driven micro-patterns)
+//
+// This pass uses a lightweight Wave Function Collapse solver to stamp
+// recognizable "motifs" (colonnades / rubble clusters / broken zigzags)
+// inside a couple of large *normal* rooms.
+//
+// Key constraints:
+//  - Deterministic: all choices are driven by the dungeon RNG.
+//  - Connectivity safe: reserve door-to-anchor spines + validate both room
+//    interior connectivity and global stairs connectivity (rollback on fail).
+//  - Low density: operates on a coarse grid so obstacles stay readable.
+// ------------------------------------------------------------
+
+enum class WfcFurnishTile : uint8_t {
+    Floor  = 0,
+    Pillar = 1,
+    Boulder = 2,
+    Chasm  = 3,
+};
+
+static int wfcFurnishTileFromChar(char c) {
+    switch (c) {
+        case '#': return static_cast<int>(WfcFurnishTile::Pillar);
+        case 'o': return static_cast<int>(WfcFurnishTile::Boulder);
+        case '~': return static_cast<int>(WfcFurnishTile::Chasm);
+        default:  return static_cast<int>(WfcFurnishTile::Floor);
+    }
+}
+
+static std::vector<std::string> rot90(const std::vector<std::string>& g) {
+    if (g.empty() || g[0].empty()) return g;
+    const int h = static_cast<int>(g.size());
+    const int w = static_cast<int>(g[0].size());
+    std::vector<std::string> out(static_cast<size_t>(w), std::string(static_cast<size_t>(h), '.'));
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            out[static_cast<size_t>(x)][static_cast<size_t>((h - 1) - y)] = g[static_cast<size_t>(y)][static_cast<size_t>(x)];
+        }
+    }
+    return out;
+}
+
+static std::vector<std::string> flipH(const std::vector<std::string>& g) {
+    if (g.empty() || g[0].empty()) return g;
+    const int h = static_cast<int>(g.size());
+    const int w = static_cast<int>(g[0].size());
+    std::vector<std::string> out = g;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            out[static_cast<size_t>(y)][static_cast<size_t>(x)] = g[static_cast<size_t>(y)][static_cast<size_t>((w - 1) - x)];
+        }
+    }
+    return out;
+}
+
+static void buildWfcFurnishRules(std::vector<uint32_t> allow[4]) {
+    constexpr int nTiles = 4;
+    for (int dir = 0; dir < 4; ++dir) allow[dir].assign(nTiles, 0u);
+
+    auto addSample = [&](const std::vector<std::string>& g) {
+        if (g.empty() || g[0].empty()) return;
+        const int h = static_cast<int>(g.size());
+        const int w = static_cast<int>(g[0].size());
+        for (int y = 1; y < h; ++y) {
+            if (static_cast<int>(g[static_cast<size_t>(y)].size()) != w) return; // must be rectangular
+        }
+
+        auto at = [&](int x, int y) -> int {
+            // Wrap so the sample behaves like a repeating pattern.
+            x = (x % w + w) % w;
+            y = (y % h + h) % h;
+            return wfcFurnishTileFromChar(g[static_cast<size_t>(y)][static_cast<size_t>(x)]);
+        };
+
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const int a = at(x, y);
+                const int bx = at(x + 1, y);
+                const int bxn = at(x - 1, y);
+                const int by = at(x, y + 1);
+                const int byn = at(x, y - 1);
+
+                allow[0][static_cast<size_t>(a)] |= (1u << static_cast<uint32_t>(bx));
+                allow[1][static_cast<size_t>(a)] |= (1u << static_cast<uint32_t>(bxn));
+                allow[2][static_cast<size_t>(a)] |= (1u << static_cast<uint32_t>(by));
+                allow[3][static_cast<size_t>(a)] |= (1u << static_cast<uint32_t>(byn));
+            }
+        }
+    };
+
+    auto addSampleWithSym = [&](const std::vector<std::string>& base) {
+        std::vector<std::string> g = base;
+        for (int r = 0; r < 4; ++r) {
+            addSample(g);
+            addSample(flipH(g));
+            g = rot90(g);
+        }
+    };
+
+    // Motif samples (coarse-grid). Characters:
+    //  '.' floor, '#' pillar, 'o' boulder.
+    // Chasm is handled by explicit rules below.
+
+    // Colonnade stripes.
+    addSampleWithSym({
+        "...........",
+        "..#..#..#..",
+        "..#..#..#..",
+        "..#..#..#..",
+        "..#..#..#..",
+        "...........",
+        "..#..#..#..",
+        "..#..#..#..",
+        "..#..#..#..",
+        "..#..#..#..",
+        "...........",
+    });
+
+    // Rubble blobs.
+    addSampleWithSym({
+        "...........",
+        "....o......",
+        "...ooo.....",
+        "....oo.....",
+        "...........",
+        "..o....o...",
+        ".ooo..ooo..",
+        "..o....o...",
+        "...........",
+        ".....oo....",
+        "...........",
+    });
+
+    // Broken zig-zag walls (pillars) with gaps.
+    addSampleWithSym({
+        "...........",
+        "..###......",
+        ".....###...",
+        "..###......",
+        ".....###...",
+        "..###......",
+        ".....###...",
+        "..###......",
+        "...........",
+        "...###.....",
+        "...........",
+    });
+
+    const uint32_t all = wfc::allMask(nTiles);
+    const uint32_t floorBit = 1u << static_cast<uint32_t>(WfcFurnishTile::Floor);
+    const uint32_t chasmBit = 1u << static_cast<uint32_t>(WfcFurnishTile::Chasm);
+
+    // Safety: fill any missing adjacency with "anything" to avoid accidental unsat.
+    for (int dir = 0; dir < 4; ++dir) {
+        for (int t = 0; t < nTiles; ++t) {
+            if (allow[dir][static_cast<size_t>(t)] == 0u) allow[dir][static_cast<size_t>(t)] = all;
+        }
+    }
+
+    // Floor is permissive.
+    for (int dir = 0; dir < 4; ++dir) {
+        allow[dir][static_cast<size_t>(WfcFurnishTile::Floor)] = all;
+    }
+
+    // Chasm: only surrounded by floor on the coarse grid.
+    for (int dir = 0; dir < 4; ++dir) {
+        allow[dir][static_cast<size_t>(WfcFurnishTile::Chasm)] = floorBit;
+
+        // Keep chasm symmetric: only floors may allow chasms as neighbors.
+        allow[dir][static_cast<size_t>(WfcFurnishTile::Pillar)] &= ~chasmBit;
+        allow[dir][static_cast<size_t>(WfcFurnishTile::Boulder)] &= ~chasmBit;
+    }
+}
+
+static bool tryWfcFurnishRoom(Dungeon& d, const Room& r, RNG& rng, int depth, int& outPlaced) {
+    outPlaced = 0;
+
+    if (r.type != RoomType::Normal) return false;
+    if (r.w < 12 || r.h < 10) return false;
+
+    if (r.contains(d.stairsUp.x, d.stairsUp.y)) return false;
+    if (r.contains(d.stairsDown.x, d.stairsDown.y)) return false;
+
+    // Require a clean interior (rooms already shaped/decorated are already memorable).
+    for (int y = r.y + 1; y < r.y2() - 1; ++y) {
+        for (int x = r.x + 1; x < r.x2() - 1; ++x) {
+            if (!d.inBounds(x, y)) continue;
+            if (d.at(x, y).type != TileType::Floor) return false;
+        }
+    }
+
+    std::vector<Vec2i> doors;
+    std::vector<Vec2i> doorInside;
+    buildRoomDoorInfo(d, r, doors, doorInside);
+    if (doors.empty()) return false;
+
+    const Vec2i anchor = pickRoomInteriorAnchor(d, r);
+
+    // Keep door tiles + interior door tiles, and reserve door-to-anchor spines.
+    std::vector<Vec2i> keepPts;
+    keepPts.reserve(128);
+    for (const Vec2i& p : doors) appendKeepPoint(keepPts, d, r, p, 0);
+    for (const Vec2i& p : doorInside) appendKeepPoint(keepPts, d, r, p, 1);
+    for (const Vec2i& p : doorInside) {
+        if (!d.inBounds(p.x, p.y)) continue;
+        if (!r.contains(p.x, p.y)) continue;
+        appendKeepLPath(keepPts, d, r, p, anchor, rng.chance(0.5f));
+    }
+
+    std::vector<uint8_t> keep;
+    buildRoomKeepMask(d, keepPts, keep);
+
+    const int minX = r.x + 2;
+    const int maxX = r.x2() - 3;
+    const int minY = r.y + 2;
+    const int maxY = r.y2() - 3;
+    if (minX > maxX || minY > maxY) return false;
+
+    // WFC works on a coarse lattice so we don't over-clutter.
+    int step = 2;
+    const int interiorArea = (maxX - minX + 1) * (maxY - minY + 1);
+    if (interiorArea > 900) step = 3;
+
+    // Build rules once.
+    static bool rulesBuilt = false;
+    static std::vector<uint32_t> allow[4];
+    if (!rulesBuilt) {
+        buildWfcFurnishRules(allow);
+        rulesBuilt = true;
+    }
+
+    constexpr int nTiles = 4;
+    const uint32_t floorBit = 1u << static_cast<uint32_t>(WfcFurnishTile::Floor);
+    const uint32_t pillarBit = 1u << static_cast<uint32_t>(WfcFurnishTile::Pillar);
+    const uint32_t boulderBit = 1u << static_cast<uint32_t>(WfcFurnishTile::Boulder);
+    const uint32_t chasmBit = 1u << static_cast<uint32_t>(WfcFurnishTile::Chasm);
+
+    // Slightly more chasm variety deeper, but keep it rare.
+    const bool allowChasm = (depth >= 6) && rng.chance(0.22f);
+
+    // Tile weights: goal is ~25-35% obstacles on the coarse grid (~6-9% per-tile).
+    const float dd = static_cast<float>(std::clamp(depth, 0, 12));
+    std::vector<float> weights(static_cast<size_t>(nTiles), 0.0f);
+    weights[static_cast<size_t>(WfcFurnishTile::Floor)] = 100.0f;
+    weights[static_cast<size_t>(WfcFurnishTile::Pillar)] = 16.0f + 1.4f * dd;
+    weights[static_cast<size_t>(WfcFurnishTile::Boulder)] = 12.0f + 1.2f * dd;
+    weights[static_cast<size_t>(WfcFurnishTile::Chasm)] = allowChasm ? (1.0f + 0.25f * std::max(0.0f, dd - 6.0f)) : 0.0f;
+
+    // Try a few layouts (different coarse offsets) to avoid unlucky contradictions.
+    const int maxAttempts = 5;
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+        int startX = minX + rng.range(0, step - 1);
+        int startY = minY + rng.range(0, step - 1);
+        if (startX > maxX) startX = minX;
+        if (startY > maxY) startY = minY;
+
+        const int gw = (maxX - startX) / step + 1;
+        const int gh = (maxY - startY) / step + 1;
+        if (gw <= 0 || gh <= 0) continue;
+        if (gw * gh > 800) continue;
+
+        auto idx = [&](int cx, int cy) -> size_t { return static_cast<size_t>(cy * gw + cx); };
+
+        std::vector<uint32_t> domains(static_cast<size_t>(gw * gh), floorBit | pillarBit | boulderBit);
+
+        for (int cy = 0; cy < gh; ++cy) {
+            for (int cx = 0; cx < gw; ++cx) {
+                const int x = startX + cx * step;
+                const int y = startY + cy * step;
+                if (!d.inBounds(x, y) || !r.contains(x, y)) {
+                    domains[idx(cx, cy)] = floorBit;
+                    continue;
+                }
+
+                const size_t ii = static_cast<size_t>(y * d.width + x);
+                if (!keep.empty() && ii < keep.size() && keep[ii] != 0) {
+                    domains[idx(cx, cy)] = floorBit;
+                    continue;
+                }
+
+                if (isStairsTile(d, x, y)) {
+                    domains[idx(cx, cy)] = floorBit;
+                    continue;
+                }
+
+                // Chasm only far from entrances/anchor.
+                if (allowChasm) {
+                    int mind = std::abs(x - anchor.x) + std::abs(y - anchor.y);
+                    for (const Vec2i& p : doorInside) {
+                        mind = std::min(mind, std::abs(x - p.x) + std::abs(y - p.y));
+                    }
+                    if (mind >= 7) {
+                        domains[idx(cx, cy)] |= chasmBit;
+                    }
+                }
+            }
+        }
+
+        std::vector<uint8_t> sol;
+        wfc::SolveStats stats;
+        const bool ok = wfc::solve(gw, gh, nTiles, allow, weights, rng, domains, sol, /*maxRestarts=*/10, &stats);
+        (void)stats;
+        if (!ok) continue;
+
+        std::vector<TileChange> changes;
+        changes.reserve(static_cast<size_t>((gw * gh) / 2));
+
+        int placed = 0;
+        for (int cy = 0; cy < gh; ++cy) {
+            for (int cx = 0; cx < gw; ++cx) {
+                const int x = startX + cx * step;
+                const int y = startY + cy * step;
+                if (!d.inBounds(x, y) || !r.contains(x, y)) continue;
+                const size_t ii = static_cast<size_t>(y * d.width + x);
+                if (!keep.empty() && ii < keep.size() && keep[ii] != 0) continue;
+
+                const uint8_t t = sol[idx(cx, cy)];
+                if (t == static_cast<uint8_t>(WfcFurnishTile::Pillar)) {
+                    trySetTile(d, x, y, TileType::Pillar, changes);
+                } else if (t == static_cast<uint8_t>(WfcFurnishTile::Boulder)) {
+                    trySetTile(d, x, y, TileType::Boulder, changes);
+                } else if (t == static_cast<uint8_t>(WfcFurnishTile::Chasm)) {
+                    trySetTile(d, x, y, TileType::Chasm, changes);
+                }
+            }
+        }
+
+        placed = static_cast<int>(changes.size());
+        if (placed < 6) {
+            // Too subtle; try again.
+            undoChanges(d, changes);
+            continue;
+        }
+
+        // Validate both local (room) connectivity and global stairs connectivity.
+        if (!roomInteriorConnectedSingleComponent(d, r, doorInside) || !stairsConnected(d)) {
+            undoChanges(d, changes);
+            continue;
+        }
+
+        outPlaced = placed;
+        return true;
+    }
+
+    return false;
+}
+
+static void applyWfcRoomFurnishings(Dungeon& d, RNG& rng, int depth) {
+    if (d.rooms.empty()) return;
+
+    // Ramp chance with depth; deeper floors benefit from more micro-structure.
+    float p = 0.22f + 0.04f * std::min(depth, 10);
+    p = std::clamp(p, 0.18f, 0.70f);
+    if (!rng.chance(p)) return;
+
+    std::vector<int> candidates;
+    candidates.reserve(d.rooms.size());
+
+    for (size_t i = 0; i < d.rooms.size(); ++i) {
+        const Room& r = d.rooms[i];
+        if (r.type != RoomType::Normal) continue;
+        if (isThemedRoom(r.type)) continue;
+        if (r.contains(d.stairsUp.x, d.stairsUp.y)) continue;
+        if (r.contains(d.stairsDown.x, d.stairsDown.y)) continue;
+        if (r.w < 12 || r.h < 10) continue;
+        candidates.push_back(static_cast<int>(i));
+    }
+
+    if (candidates.empty()) return;
+
+    // Shuffle deterministically.
+    for (int i = static_cast<int>(candidates.size()) - 1; i > 0; --i) {
+        const int j = rng.range(0, i);
+        std::swap(candidates[static_cast<size_t>(i)], candidates[static_cast<size_t>(j)]);
+    }
+
+    const int maxRooms = std::clamp(1 + depth / 10, 1, 2);
+    int target = std::min(maxRooms, static_cast<int>(candidates.size()));
+    if (target > 1 && rng.chance(0.55f)) target = 1;
+
+    int furnished = 0;
+    for (int ri : candidates) {
+        if (furnished >= target) break;
+        if (ri < 0 || ri >= static_cast<int>(d.rooms.size())) continue;
+        int placed = 0;
+        if (tryWfcFurnishRoom(d, d.rooms[static_cast<size_t>(ri)], rng, depth, placed)) {
+            furnished++;
+        }
+    }
+}
 // ------------------------------------------------------------
 // Global fissure / ravine feature
 //
@@ -10063,6 +10457,362 @@ static bool tryPlaceVaultPrefab(Dungeon& d, RNG& rng, int depth, const PrefabDef
     return false;
 }
 
+
+// ------------------------------------------------------------
+// Procedural vault prefab: a tiny perfect-maze cache
+//
+// We already have a small library of hand-authored vault templates above.
+// This generator adds a *dynamic* option that creates a solvable micro-maze
+// pocket carved into solid wall. It is always optional and never gates the
+// stairs path.
+//
+// Technique: classic recursive-backtracker perfect maze on a coarse cell grid,
+// then we place a treasure marker at the farthest reachable dead-end.
+// ------------------------------------------------------------
+static bool buildPrefabVariantFromGrid(const std::vector<std::string>& base,
+                                      int w, int h,
+                                      int rot90cw, bool mirrorX,
+                                      PrefabVariant& out) {
+    int w2 = 0;
+    int h2 = 0;
+    auto g = transformPrefabGrid(base, w, h, rot90cw, mirrorX, w2, h2);
+
+    // Validate: boundary must be solid wall except for exactly ONE entrance door.
+    int doorCount = 0;
+    int doorX = -1;
+    int doorY = -1;
+    Vec2i outside{0, 0};
+    char doorChar = '+';
+
+    for (int y = 0; y < h2; ++y) {
+        for (int x = 0; x < w2; ++x) {
+            const bool boundary = (x == 0 || y == 0 || x == (w2 - 1) || y == (h2 - 1));
+            if (!boundary) continue;
+
+            const char c = g[static_cast<size_t>(y)][static_cast<size_t>(x)];
+
+            if (isPrefabDoorChar(c)) {
+                // Avoid corner doors (ambiguous outside direction).
+                if ((x == 0 || x == (w2 - 1)) && (y == 0 || y == (h2 - 1))) return false;
+
+                doorCount += 1;
+                doorX = x;
+                doorY = y;
+                doorChar = c;
+
+                if (x == 0) outside = {-1, 0};
+                else if (x == (w2 - 1)) outside = {1, 0};
+                else if (y == 0) outside = {0, -1};
+                else outside = {0, 1};
+            } else if (c != '#') {
+                // Any boundary floor/chasm/etc would create unintended extra connections.
+                return false;
+            }
+        }
+    }
+
+    if (doorCount != 1) return false;
+    if (doorX < 0 || doorY < 0) return false;
+
+    out.def = nullptr;
+    out.w = w2;
+    out.h = h2;
+    out.grid = std::move(g);
+    out.doorX = doorX;
+    out.doorY = doorY;
+    out.outsideDir = outside;
+    out.doorChar = doorChar;
+    out.valid = true;
+    return true;
+}
+
+static std::vector<std::string> makeMazeVaultBase(RNG& rng, int w, int h, char doorChar, int depth,
+                                                 int& outDoorX, int& outDoorY) {
+    std::vector<std::string> g(static_cast<size_t>(h), std::string(static_cast<size_t>(w), '#'));
+
+    // Entrance door on the bottom edge in the base orientation.
+    outDoorY = h - 1;
+    outDoorX = w / 2;
+    if ((outDoorX & 1) == 0) outDoorX = std::clamp(outDoorX - 1, 1, w - 2);
+    outDoorX = std::clamp(outDoorX, 1, w - 2);
+    g[static_cast<size_t>(outDoorY)][static_cast<size_t>(outDoorX)] = doorChar;
+
+    // Coarse cell grid: cell centers live on odd coordinates.
+    const int cellsX = std::max(1, (w - 1) / 2);
+    const int cellsY = std::max(1, (h - 1) / 2);
+
+    std::vector<uint8_t> vis(static_cast<size_t>(cellsX * cellsY), 0);
+
+    auto cidx = [&](int cx, int cy) -> size_t { return static_cast<size_t>(cy * cellsX + cx); };
+    auto cellX = [&](int cx) -> int { return 1 + cx * 2; };
+    auto cellY = [&](int cy) -> int { return 1 + cy * 2; };
+
+    auto carveCell = [&](int cx, int cy) {
+        const int x = cellX(cx);
+        const int y = cellY(cy);
+        if (x >= 1 && x < (w - 1) && y >= 1 && y < (h - 1)) {
+            g[static_cast<size_t>(y)][static_cast<size_t>(x)] = '.';
+        }
+    };
+
+    auto carveBetween = [&](int ax, int ay, int bx, int by) {
+        const int x1 = cellX(ax);
+        const int y1 = cellY(ay);
+        const int x2 = cellX(bx);
+        const int y2 = cellY(by);
+        const int wx = (x1 + x2) / 2;
+        const int wy = (y1 + y2) / 2;
+        if (wx >= 1 && wx < (w - 1) && wy >= 1 && wy < (h - 1)) {
+            g[static_cast<size_t>(wy)][static_cast<size_t>(wx)] = '.';
+        }
+    };
+
+    // Start from the cell directly inside the entrance.
+    const int startCx = std::clamp((outDoorX - 1) / 2, 0, cellsX - 1);
+    const int startCy = std::clamp(cellsY - 1, 0, cellsY - 1);
+
+    std::vector<std::pair<int, int>> st;
+    st.reserve(static_cast<size_t>(cellsX * cellsY));
+
+    st.push_back({startCx, startCy});
+    vis[cidx(startCx, startCy)] = 1;
+    carveCell(startCx, startCy);
+
+    const int dirs[4][2] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+    while (!st.empty()) {
+        const int cx = st.back().first;
+        const int cy = st.back().second;
+
+        int opts[4];
+        int optN = 0;
+        for (int di = 0; di < 4; ++di) {
+            const int nx = cx + dirs[di][0];
+            const int ny = cy + dirs[di][1];
+            if (nx < 0 || ny < 0 || nx >= cellsX || ny >= cellsY) continue;
+            if (vis[cidx(nx, ny)]) continue;
+            opts[optN++] = di;
+        }
+
+        if (optN <= 0) {
+            st.pop_back();
+            continue;
+        }
+
+        const int pick = opts[rng.range(0, optN - 1)];
+        const int nx = cx + dirs[pick][0];
+        const int ny = cy + dirs[pick][1];
+
+        vis[cidx(nx, ny)] = 1;
+        carveCell(nx, ny);
+        carveBetween(cx, cy, nx, ny);
+        st.push_back({nx, ny});
+    }
+
+    // Ensure the tile just inside the door is open.
+    const int sx = outDoorX;
+    const int sy = outDoorY - 1;
+    if (sy >= 0 && sy < h) {
+        g[static_cast<size_t>(sy)][static_cast<size_t>(sx)] = '.';
+    }
+
+    // BFS on the tile grid to find farthest reachable floors.
+    auto passable = [&](int x, int y) -> bool {
+        if (x < 0 || y < 0 || x >= w || y >= h) return false;
+        return g[static_cast<size_t>(y)][static_cast<size_t>(x)] != '#';
+    };
+
+    std::vector<int> dist(static_cast<size_t>(w * h), -1);
+    auto tidx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
+    std::deque<Vec2i> q;
+
+    if (passable(sx, sy)) {
+        dist[tidx(sx, sy)] = 0;
+        q.push_back({sx, sy});
+    }
+
+    while (!q.empty()) {
+        const Vec2i p = q.front();
+        q.pop_front();
+        const int cd = dist[tidx(p.x, p.y)];
+
+        for (int di = 0; di < 4; ++di) {
+            const int nx = p.x + dirs[di][0];
+            const int ny = p.y + dirs[di][1];
+            if (!passable(nx, ny)) continue;
+            const size_t ii = tidx(nx, ny);
+            if (dist[ii] >= 0) continue;
+            dist[ii] = cd + 1;
+            q.push_back({nx, ny});
+        }
+    }
+
+    // Pick a farthest interior '.' tile as treasure.
+    int bestD = -1;
+    std::vector<Vec2i> best;
+
+    for (int y = 1; y < h - 1; ++y) {
+        for (int x = 1; x < w - 1; ++x) {
+            if (g[static_cast<size_t>(y)][static_cast<size_t>(x)] != '.') continue;
+            const int d0 = dist[tidx(x, y)];
+            if (d0 <= 0) continue;
+
+            if (d0 > bestD) {
+                bestD = d0;
+                best.clear();
+                best.push_back({x, y});
+            } else if (d0 == bestD) {
+                best.push_back({x, y});
+            }
+        }
+    }
+
+    if (!best.empty()) {
+        const Vec2i t = best[static_cast<size_t>(rng.range(0, static_cast<int>(best.size()) - 1))];
+        g[static_cast<size_t>(t.y)][static_cast<size_t>(t.x)] = 'T';
+    }
+
+    // Bonus: place a tool (lockpick/key) in a random dead end deeper in the maze.
+    std::vector<Vec2i> dead;
+    for (int y = 1; y < h - 1; ++y) {
+        for (int x = 1; x < w - 1; ++x) {
+            if (g[static_cast<size_t>(y)][static_cast<size_t>(x)] != '.') continue;
+            const int d0 = dist[tidx(x, y)];
+            if (d0 < 0) continue;
+
+            int nPass = 0;
+            for (int di = 0; di < 4; ++di) {
+                if (passable(x + dirs[di][0], y + dirs[di][1])) nPass += 1;
+            }
+            if (nPass <= 1 && d0 >= 3) dead.push_back({x, y});
+        }
+    }
+
+    if (!dead.empty() && rng.chance(0.70f)) {
+        const Vec2i p = dead[static_cast<size_t>(rng.range(0, static_cast<int>(dead.size()) - 1))];
+        const char tool = (rng.chance(depth >= 4 ? 0.65f : 0.35f)) ? 'R' : 'K';
+        g[static_cast<size_t>(p.y)][static_cast<size_t>(p.x)] = tool;
+    }
+
+    return g;
+}
+
+static bool tryPlaceProceduralMazeVaultPrefab(Dungeon& d, RNG& rng, int depth, GenKind g) {
+    (void)g;
+
+    // Size: keep it small enough to fit into dense wall pockets, but add occasional variety.
+    int w = 7;
+    int h = 7;
+    if (depth >= 6 && rng.chance(0.55f)) w = 9;
+    if (depth >= 8 && rng.chance(0.40f)) h = 9;
+
+    // Entrance style: deeper floors trend toward secret/locked finds.
+    char doorChar = '+';
+    const float pLocked = (depth >= 7) ? 0.10f : 0.0f;
+    const float pSecret = std::clamp(0.18f + 0.05f * static_cast<float>(std::max(0, depth - 2)), 0.18f, 0.70f);
+    if (pLocked > 0.0f && rng.chance(pLocked)) doorChar = 'L';
+    else if (rng.chance(pSecret)) doorChar = 's';
+
+    int baseDoorX = 0;
+    int baseDoorY = 0;
+    const auto base = makeMazeVaultBase(rng, w, h, doorChar, depth, baseDoorX, baseDoorY);
+
+    // Build rotated/mirrored variants so we can attach to any corridor-facing wall.
+    std::vector<PrefabVariant> variants;
+    variants.reserve(8);
+    for (int rot = 0; rot < 4; ++rot) {
+        for (int mirror = 0; mirror < 2; ++mirror) {
+            PrefabVariant v;
+            if (buildPrefabVariantFromGrid(base, w, h, rot, mirror != 0, v)) {
+                variants.push_back(std::move(v));
+            }
+        }
+    }
+    if (variants.empty()) return false;
+
+    const Vec2i dirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+    auto tooCloseToStairsDoor = [&](int x, int y) -> bool {
+        const int du = (d.inBounds(d.stairsUp.x, d.stairsUp.y))
+            ? (std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y))
+            : 9999;
+        const int dd = (d.inBounds(d.stairsDown.x, d.stairsDown.y))
+            ? (std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y))
+            : 9999;
+        return du <= 4 || dd <= 4;
+    };
+
+    auto hasBonusItemAt = [&](const Vec2i& p) -> bool {
+        for (const auto& it : d.bonusItemSpawns) {
+            if (it.pos.x == p.x && it.pos.y == p.y) return true;
+        }
+        return false;
+    };
+
+    const int maxTries = 500;
+    for (int tries = 0; tries < maxTries; ++tries) {
+        const int x = rng.range(2, d.width - 3);
+        const int y = rng.range(2, d.height - 3);
+
+        if (!d.inBounds(x, y)) continue;
+        if (d.at(x, y).type != TileType::Wall) continue;
+        if (tooCloseToStairsDoor(x, y)) continue;
+
+        // Avoid clustering doors; these should feel like tucked-away finds.
+        if (anyDoorInRadius(d, x, y, 2)) continue;
+
+        int adjFloors = 0;
+        Vec2i outDir{0, 0};
+        for (const Vec2i& dv : dirs) {
+            const int nx = x + dv.x;
+            const int ny = y + dv.y;
+            if (!d.inBounds(nx, ny)) continue;
+            if (d.at(nx, ny).type == TileType::Floor) {
+                adjFloors += 1;
+                outDir = dv;
+            }
+        }
+        if (adjFloors != 1) continue;
+
+        const int fx = x + outDir.x;
+        const int fy = y + outDir.y;
+        if (!d.inBounds(fx, fy)) continue;
+        if (d.at(fx, fy).type != TileType::Floor) continue;
+
+        // Avoid attaching directly into special rooms (shops/shrines/etc).
+        if (const Room* rr = findRoomContaining(d, fx, fy)) {
+            if (rr->type != RoomType::Normal) continue;
+        }
+
+        // Pick a variant whose entrance faces the corridor direction.
+        std::vector<int> matches;
+        matches.reserve(variants.size());
+        for (int i = 0; i < static_cast<int>(variants.size()); ++i) {
+            if (variants[static_cast<size_t>(i)].outsideDir == outDir) matches.push_back(i);
+        }
+        if (matches.empty()) continue;
+
+        const int start = rng.range(0, static_cast<int>(matches.size()) - 1);
+        for (int k = 0; k < static_cast<int>(matches.size()); ++k) {
+            const PrefabVariant& v = variants[static_cast<size_t>(matches[static_cast<size_t>((start + k) % matches.size())])];
+
+            const int x0 = x - v.doorX;
+            const int y0 = y - v.doorY;
+
+            if (!applyPrefabAt(d, v, x0, y0)) continue;
+
+            // If this is a locked entrance, drop a key right outside so the micro-vault is always solvable.
+            if (v.doorChar == 'L' && d.inBounds(fx, fy) && !hasBonusItemAt({fx, fy})) {
+                d.bonusItemSpawns.push_back({{fx, fy}, ItemKind::Key, 1});
+            }
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool maybePlaceVaultPrefabs(Dungeon& d, RNG& rng, int depth, GenKind g) {
     d.vaultPrefabCount = 0;
 
@@ -10170,16 +10920,48 @@ bool maybePlaceVaultPrefabs(Dungeon& d, RNG& rng, int depth, GenKind g) {
         return &kPrefabs[0];
     };
 
+    // Mix in procedural maze-vaults for extra variety (still rare).
+    float pProc = 0.0f;
+    if (depth >= 2) pProc = 0.22f;
+    if (depth >= 6) pProc = 0.32f;
+    if (depth >= 9) pProc = 0.38f;
+    if (g == GenKind::Cavern) pProc *= 0.60f;
+    pProc = std::clamp(pProc, 0.0f, 0.45f);
+
     int placed = 0;
     for (int i = 0; i < want; ++i) {
         bool ok = false;
         // Give each slot a few attempts to find a fit on dense/odd maps.
         for (int attempt = 0; attempt < 4 && !ok; ++attempt) {
+            bool didProc = false;
+
+            // First: sometimes try a fully procedural micro-vault (maze cache).
+            if (pProc > 0.0f && rng.chance(pProc)) {
+                didProc = true;
+                if (tryPlaceProceduralMazeVaultPrefab(d, rng, depth, g)) {
+                    d.vaultPrefabCount += 1;
+                    ok = true;
+                    break;
+                }
+            }
+
+            // Fallback: hand-authored prefab library.
             const PrefabDef* def = pickWeightedPrefab();
             if (!def) break;
             if (tryPlaceVaultPrefab(d, rng, depth, *def)) {
                 d.vaultPrefabCount += 1;
                 ok = true;
+                break;
+            }
+
+            // If we didn't roll a procedural attempt and the static attempt failed,
+            // try the procedural one as a last chance (helps on maps with little wall mass).
+            if (!didProc && pProc > 0.0f && rng.chance(0.35f)) {
+                if (tryPlaceProceduralMazeVaultPrefab(d, rng, depth, g)) {
+                    d.vaultPrefabCount += 1;
+                    ok = true;
+                    break;
+                }
             }
         }
         if (ok) placed += 1;
@@ -16269,6 +17051,10 @@ static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, DungeonBranch br
     // Symmetric furnishings: mirrored pillar/boulder patterns in select rooms,
     // with a reserved navigation spine between doorways. (Always safe: rolls back on failure.)
     applySymmetricRoomFurnishings(d, rng, depth);
+
+    // WFC furnishings: constraint-driven micro-patterns on a coarse grid (colonnades / rubble)
+    // with the same safety guarantees (reserved door-to-anchor spines + rollback if needed).
+    applyWfcRoomFurnishings(d, rng, depth);
 
     // Corridor polish pass: widen a few hallway junctions/segments into small hubs/great halls.
     (void)maybeCarveCorridorHubsAndHalls(d, rng, depth, (g == GenKind::RoomsBsp || g == GenKind::RoomsGraph || g == GenKind::Mines));

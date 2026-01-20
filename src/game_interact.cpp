@@ -125,6 +125,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     // Closed door: opening consumes a turn.
     if (!phasing && dung.isDoorClosed(nx, ny)) {
         dung.openDoor(nx, ny);
+        onDoorOpened({nx, ny}, e.id == playerId_);
         if (e.kind == EntityKind::Player) {
             pushMsg("YOU OPEN THE DOOR.");
             // Opening doors is noisy; monsters may investigate.
@@ -163,6 +164,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
                 // Smash -> door becomes open in one action.
                 dung.unlockDoor(nx, ny);
                 dung.openDoor(nx, ny);
+                onDoorOpened({nx, ny}, false);
 
                 if (vis) {
                     std::ostringstream ss;
@@ -186,6 +188,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         if (consumeKeys(1)) {
             dung.unlockDoor(nx, ny);
             dung.openDoor(nx, ny);
+            onDoorOpened({nx, ny}, true);
             pushMsg("YOU UNLOCK THE DOOR.", MessageKind::System, true);
             emitNoise({nx, ny}, isSneaking() ? 9 : 12);
             return true;
@@ -202,6 +205,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
             if (rng.chance(p)) {
                 dung.unlockDoor(nx, ny);
                 dung.openDoor(nx, ny);
+                onDoorOpened({nx, ny}, true);
                 pushMsg("YOU PICK THE LOCK.", MessageKind::Success, true);
             } else {
                 pushMsg("YOU FAIL TO PICK THE LOCK.", MessageKind::Warning, true);
@@ -653,6 +657,59 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
             break;
         }
 
+        case TrapKind::CorrosiveGas: {
+            // Lingering corrosive gas cloud. This trap creates a persistent, tile-based hazard
+            // that slowly diffuses and dissipates over time.
+            const size_t expect = static_cast<size_t>(dung.width * dung.height);
+            if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
+
+            // Apply an immediate corrosion hit to the victim (the cloud will keep it topped up).
+            const int turns = rng.range(3, 6) + std::min(3, depth_ / 4);
+            victim.effects.corrosionTurns = std::max(victim.effects.corrosionTurns, turns);
+
+            // Seed the gas intensity in a small radius around the trap.
+            const uint8_t baseStrength = static_cast<uint8_t>(clampi(9 + depth_ / 4, 9, 13));
+            constexpr int radius = 2;
+
+            std::vector<uint8_t> mask;
+            dung.computeFovMask(pos.x, pos.y, radius, mask);
+
+            const int minX = std::max(0, pos.x - radius);
+            const int maxX = std::min(dung.width - 1, pos.x + radius);
+            const int minY = std::max(0, pos.y - radius);
+            const int maxY = std::min(dung.height - 1, pos.y + radius);
+
+            for (int y = minY; y <= maxY; ++y) {
+                for (int x = minX; x <= maxX; ++x) {
+                    const int dx = std::abs(x - pos.x);
+                    const int dy = std::abs(y - pos.y);
+                    const int dist = std::max(dx, dy);
+                    if (dist > radius) continue;
+
+                    const size_t i = static_cast<size_t>(y * dung.width + x);
+                    if (i >= mask.size()) continue;
+                    if (mask[i] == 0u) continue;
+                    if (!dung.isWalkable(x, y)) continue;
+
+                    const int s = static_cast<int>(baseStrength) - dist * 2;
+                    if (s <= 0) continue;
+                    const uint8_t ss = static_cast<uint8_t>(s);
+                    if (corrosiveGas_[i] < ss) corrosiveGas_[i] = ss;
+                }
+            }
+
+            if (isPlayer) {
+                pushMsg("A HISSING CLOUD OF ACRID VAPOR ERUPTS!", MessageKind::Warning, true);
+            } else if (tileVisible) {
+                std::ostringstream ss;
+                ss << kindName(victim.kind) << " IS CAUGHT IN A HISSING CLOUD OF ACRID VAPOR!";
+                pushMsg(ss.str(), MessageKind::Warning, false);
+            }
+
+            emitNoise(pos, 8);
+            break;
+        }
+
 
         case TrapKind::LetheMist: {
             // Lethe mist: a single-use burst of forgetfulness.
@@ -871,6 +928,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
                     if (rng.chance(smashP)) {
                         if (tt == TileType::DoorLocked) dung.unlockDoor(nxt.x, nxt.y);
                         dung.openDoor(nxt.x, nxt.y);
+                        onDoorOpened(nxt, false);
                         if (dung.at(nxt.x, nxt.y).visible) {
                             pushMsg("A DOOR BURSTS OPEN!", MessageKind::System, false);
                         }
@@ -1537,6 +1595,7 @@ bool Game::disarmTrap() {
             case TrapKind::TrapDoor: return "TRAP DOOR";
             case TrapKind::LetheMist: return "LETHE MIST";
             case TrapKind::PoisonGas: return "POISON GAS";
+            case TrapKind::CorrosiveGas: return "CORROSIVE GAS";
         }
         return "TRAP";
     };
@@ -1562,6 +1621,8 @@ bool Game::disarmTrap() {
         if (tk == TrapKind::Alarm) chance *= 0.90f;
         if (tk == TrapKind::Web) chance *= 0.95f;
         if (tk == TrapKind::ConfusionGas) chance *= 0.97f;
+        if (tk == TrapKind::PoisonGas) chance *= 0.92f;
+        if (tk == TrapKind::CorrosiveGas) chance *= 0.90f;
 
 
         if (rng.chance(chance)) {
@@ -1591,6 +1652,7 @@ bool Game::disarmTrap() {
         if (tk == TrapKind::Web) setOffChance += 0.04f;
         if (tk == TrapKind::ConfusionGas) setOffChance += 0.03f;
         if (tk == TrapKind::PoisonGas) setOffChance += 0.03f;
+        if (tk == TrapKind::CorrosiveGas) setOffChance += 0.04f;
 
         if (rng.chance(setOffChance)) {
             pushMsg("YOU SET OFF THE CHEST TRAP!", MessageKind::Warning, true);
@@ -1673,6 +1735,12 @@ bool Game::disarmTrap() {
                 pushMsg("YOU ARE POISONED!", MessageKind::Warning, true);
                 break;
             }
+            case TrapKind::CorrosiveGas: {
+                // A burst of acrid vapor.
+                p.effects.corrosionTurns = std::max(p.effects.corrosionTurns, rng.range(3, 6));
+                pushMsg("A HISSING CLOUD OF ACRID VAPOR ERUPTS!", MessageKind::Warning, true);
+                break;
+            }
 
                 default:
                     break;
@@ -1700,6 +1768,7 @@ bool Game::disarmTrap() {
     if (tr.kind == TrapKind::RollingBoulder) chance *= 0.80f;
     if (tr.kind == TrapKind::TrapDoor) chance *= 0.82f;
     if (tr.kind == TrapKind::PoisonGas) chance *= 0.85f;
+    if (tr.kind == TrapKind::CorrosiveGas) chance *= 0.82f;
 
     if (tr.kind == TrapKind::LetheMist) chance *= 0.83f;
 
@@ -1730,6 +1799,7 @@ bool Game::disarmTrap() {
     if (tr.kind == TrapKind::Web) setOffChance = 0.20f;
     if (tr.kind == TrapKind::ConfusionGas) setOffChance = 0.18f;
     if (tr.kind == TrapKind::PoisonGas) setOffChance = 0.18f;
+    if (tr.kind == TrapKind::CorrosiveGas) setOffChance = 0.20f;
     if (tr.kind == TrapKind::RollingBoulder) setOffChance = 0.22f;
     if (tr.kind == TrapKind::TrapDoor) setOffChance = 0.24f;
     if (tr.kind == TrapKind::LetheMist) setOffChance = 0.23f;
@@ -2122,6 +2192,13 @@ bool Game::kickInDirection(int dx, int dy) {
                     emitNoise(tgt, 8);
                     break;
                 }
+                case TrapKind::CorrosiveGas: {
+                    const int turns = rng.range(6, 10) + std::min(6, depth_ / 2);
+                    p.effects.corrosionTurns = std::max(p.effects.corrosionTurns, turns);
+                    pushMsg("A HISSING CLOUD OF ACRID VAPOR BURSTS FROM THE CHEST!", MessageKind::Warning, true);
+                    emitNoise(tgt, 8);
+                    break;
+                }
                 default:
                     break;
             }
@@ -2161,6 +2238,7 @@ bool Game::kickInDirection(int dx, int dy) {
     Tile& t = dung.at(tgt.x, tgt.y);
     if (t.type == TileType::DoorClosed) {
         dung.openDoor(tgt.x, tgt.y);
+        onDoorOpened(tgt, true);
         pushMsg("YOU KICK OPEN THE DOOR.", MessageKind::Info, true);
         emitNoise(tgt, 14);
         return true;
@@ -2173,6 +2251,7 @@ bool Game::kickInDirection(int dx, int dy) {
         if (rng.chance(chance)) {
             dung.unlockDoor(tgt.x, tgt.y);
             dung.openDoor(tgt.x, tgt.y);
+            onDoorOpened(tgt, true);
             pushMsg("YOU SMASH THE LOCKED DOOR OPEN!", MessageKind::Success, true);
         } else {
             pushMsg("THE LOCKED DOOR HOLDS.", MessageKind::Warning, true);

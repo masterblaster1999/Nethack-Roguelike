@@ -22,6 +22,7 @@ int autoMoveTrapPenalty(TrapKind kind) {
         case TrapKind::Spike: return 80;
         case TrapKind::ConfusionGas: return 60;
         case TrapKind::PoisonGas: return 75;
+        case TrapKind::CorrosiveGas: return 85;
         case TrapKind::LetheMist: return 70;
         case TrapKind::Alarm: return 50;
         case TrapKind::Teleport: return 40;
@@ -286,6 +287,12 @@ bool Game::stepAutoMove() {
 
     if (poisonGasAt(player().pos.x, player().pos.y) > 0u) {
         pushMsg("AUTO-MOVE STOPPED (YOU ARE IN POISON GAS).", MessageKind::Warning);
+        stopAutoMove(true);
+        return false;
+    }
+
+    if (corrosiveGasAt(player().pos.x, player().pos.y) > 0u) {
+        pushMsg("AUTO-MOVE STOPPED (YOU ARE IN CORROSIVE GAS).", MessageKind::Warning);
         stopAutoMove(true);
         return false;
     }
@@ -770,6 +777,8 @@ Vec2i Game::findNearestExploreFrontier() const {
         if (fireAt(x, y) > 0u) return false;
         if (confusionGasAt(x, y) > 0u) return false;
         if (poisonGasAt(x, y) > 0u) return false;
+        if (corrosiveGasAt(x, y) > 0u) return false;
+        if (corrosiveGasAt(x, y) > 0u) return false;
 
         for (int dir = 0; dir < 8; ++dir) {
             const int nx = x + dirs[dir][0];
@@ -786,6 +795,8 @@ Vec2i Game::findNearestExploreFrontier() const {
         if (fireAt(x, y) > 0u) return false;
         if (confusionGasAt(x, y) > 0u) return false;
         if (poisonGasAt(x, y) > 0u) return false;
+        if (corrosiveGasAt(x, y) > 0u) return false;
+        if (corrosiveGasAt(x, y) > 0u) return false;
 
         const TileType tt = dung.at(x, y).type;
         const bool passable = dung.isPassable(x, y) || (canUnlockDoors && tt == TileType::DoorLocked);
@@ -891,6 +902,7 @@ Vec2i Game::findNearestExploreFrontier() const {
             if (fireAt(x, y) > 0u) return false;
             if (confusionGasAt(x, y) > 0u) return false;
             if (poisonGasAt(x, y) > 0u) return false;
+            if (corrosiveGasAt(x, y) > 0u) return false;
 
             for (int dir = 0; dir < 8; ++dir) {
                 const int nx = x + dirs[dir][0];
@@ -1010,6 +1022,7 @@ Vec2i Game::findNearestExploreSearchSpot() const {
         if (fireAt(x, y) > 0u) return false;
         if (confusionGasAt(x, y) > 0u) return false;
         if (poisonGasAt(x, y) > 0u) return false;
+        if (corrosiveGasAt(x, y) > 0u) return false;
 
         if (const Entity* occ = entityAt(x, y)) {
             if (occ->id != playerId_ && !occ->friendly) return false;
@@ -1027,6 +1040,7 @@ Vec2i Game::findNearestExploreSearchSpot() const {
         if (fireAt(x, y) > 0u) return false;
         if (confusionGasAt(x, y) > 0u) return false;
         if (poisonGasAt(x, y) > 0u) return false;
+        if (corrosiveGasAt(x, y) > 0u) return false;
 
         const int ii = idxOf(x, y);
         const int tried = (ii >= 0 && static_cast<size_t>(ii) < autoExploreSearchTriedTurns.size())
@@ -1274,6 +1288,8 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
         if (cg > 0u) cost += 12 + static_cast<int>(cg) / 32;
         const uint8_t pg = poisonGasAt(x, y);
         if (pg > 0u) cost += 16 + static_cast<int>(pg) / 32;
+        const uint8_t ag = corrosiveGasAt(x, y);
+        if (ag > 0u) cost += 18 + static_cast<int>(ag) / 32;
 
         if (allowKnownTraps && !trapPenalty.empty()) {
             cost += trapPenalty[idxOf(x, y)];
@@ -1391,6 +1407,9 @@ bool Game::evadeStep() {
 
         const uint8_t pg = poisonGasAt(resPos.x, resPos.y);
         if (pg > 0u) score -= 380 + static_cast<int>(pg) * 4;
+
+        const uint8_t ag = corrosiveGasAt(resPos.x, resPos.y);
+        if (ag > 0u) score -= 420 + static_cast<int>(ag) * 4;
 
         // Known traps: strongly avoided, but not hard-blocked.
         if (moves) {

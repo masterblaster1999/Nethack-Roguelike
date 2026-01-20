@@ -9,6 +9,12 @@
 
 namespace {
 
+inline int corrosionPenalty(const Entity& e) {
+    if (e.effects.corrosionTurns <= 0) return 0;
+    // Matches player-side penalty (game.cpp): mild but meaningful.
+    return clampi(1 + e.effects.corrosionTurns / 4, 1, 3);
+}
+
 const char* kindName(EntityKind k) {
     switch (k) {
         case EntityKind::Player: return "YOU";
@@ -89,7 +95,7 @@ int targetAC(const Game& game, const Entity& e) {
     // Note: for monsters, "armor" currently increases damage reduction but does not
     // make them harder to hit (AC still comes from baseDef). This keeps fights readable
     // while still letting gear matter.
-    const int def = (e.kind == EntityKind::Player) ? game.playerDefense() : e.baseDef;
+    const int def = (e.kind == EntityKind::Player) ? game.playerDefense() : (e.baseDef - corrosionPenalty(e));
     return 10 + def;
 }
 
@@ -97,7 +103,7 @@ int targetAC(const Game& game, const Entity& e) {
 int damageReduction(const Game& game, const Entity& e) {
     // Monsters: base DEF represents hide/toughness. Equipped armor (if any) adds DR.
     if (e.kind != EntityKind::Player) {
-        int dr = std::max(0, e.baseDef);
+        int dr = std::max(0, e.baseDef - corrosionPenalty(e));
 
         if (monsterCanEquipArmor(e.kind) && e.gearArmor.id != 0 && isArmor(e.gearArmor.kind)) {
             const Item& a = e.gearArmor;

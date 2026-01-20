@@ -44,6 +44,7 @@ inline int trapPenaltyForMonsterPathing(TrapKind k) {
         case TrapKind::PoisonDart:     return 14;
         case TrapKind::Spike:          return 14;
         case TrapKind::PoisonGas:      return 13;
+        case TrapKind::CorrosiveGas:   return 14;
         case TrapKind::ConfusionGas:   return 12;
         case TrapKind::Web:            return 10;
         case TrapKind::LetheMist:      return 9;
@@ -138,6 +139,11 @@ inline int monsterStepCostForCaps(const Game& g, int x, int y, int caps, const s
     const uint8_t pg = g.poisonGasAt(x, y);
     if (pg > 0u) {
         cost += 7 + static_cast<int>(pg) / 32; // +7..+14
+    }
+
+    const uint8_t ag = g.corrosiveGasAt(x, y);
+    if (ag > 0u) {
+        cost += 8 + static_cast<int>(ag) / 32; // +8..+15
     }
 
     if (discoveredTrapPenalty && !discoveredTrapPenalty->empty()) {

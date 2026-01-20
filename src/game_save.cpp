@@ -1059,7 +1059,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 52u; // v52: conduct counters (pacifist/foodless/illiterate/etc)
+constexpr uint32_t SAVE_VERSION = 53u; // v53: corrosive gas field + corrosion effect
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -1298,6 +1298,10 @@ void writeEntity(std::ostream& out, const Entity& e) {
     int32_t hallucinationTurns = e.effects.hallucinationTurns;
     writePod(out, hallucinationTurns);
 
+    // v53+: corrosion
+    int32_t corrosionTurns = e.effects.corrosionTurns;
+    writePod(out, corrosionTurns);
+
     // v14+: ranged ammo count (ammo-based ranged monsters)
     int32_t ammoCount = e.rangedAmmoCount;
     writePod(out, ammoCount);
@@ -1394,6 +1398,8 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
 
     int32_t hallucinationTurns = 0;
 
+    int32_t corrosionTurns = 0;
+
     int32_t stolenGold = 0;
 
     Item pocketConsumable;
@@ -1478,6 +1484,10 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
 
         if (version >= 35u) {
             if (!readPod(in, hallucinationTurns)) return false;
+        }
+
+        if (version >= 53u) {
+            if (!readPod(in, corrosionTurns)) return false;
         }
     }
 
@@ -1599,6 +1609,7 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     e.effects.levitationTurns = levitationTurns;
     e.effects.fearTurns = fearTurns;
     e.effects.hallucinationTurns = hallucinationTurns;
+    e.effects.corrosionTurns = corrosionTurns;
 
 
     if (version >= 17u) {
@@ -2063,6 +2074,20 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
             for (uint32_t gi = 0; gi < gasCount; ++gi) {
                 uint8_t v = 0u;
                 if (gi < st.poisonGas.size()) v = st.poisonGas[static_cast<size_t>(gi)];
+                writePod(mem, v);
+            }
+        }
+
+        // Corrosive gas field (v53+)
+        // Stored as a per-tile intensity map.
+        if constexpr (SAVE_VERSION >= 53u) {
+            const uint32_t expected = tileCount;
+            uint32_t gasCount = static_cast<uint32_t>(st.corrosiveGas.size());
+            if (gasCount != expected) gasCount = expected;
+            writePod(mem, gasCount);
+            for (uint32_t gi = 0; gi < gasCount; ++gi) {
+                uint8_t v = 0u;
+                if (gi < st.corrosiveGas.size()) v = st.corrosiveGas[static_cast<size_t>(gi)];
                 writePod(mem, v);
             }
         }
@@ -2914,6 +2939,31 @@ bool Game::loadFromFile(const std::string& path, bool reportErrors) {
                     }
                 } else {
                     st.poisonGas = std::move(gasTmp);
+                }
+            }
+
+            // Corrosive gas field (v53+)
+            st.corrosiveGas.clear();
+            if (ver >= 53u) {
+                uint32_t gasCount = 0;
+                if (!readPod(in, gasCount)) return fail();
+                std::vector<uint8_t> gasTmp;
+                gasTmp.assign(gasCount, 0u);
+                for (uint32_t gi = 0; gi < gasCount; ++gi) {
+                    uint8_t v = 0u;
+                    if (!readPod(in, v)) return fail();
+                    gasTmp[gi] = v;
+                }
+
+                // Normalize size to the dungeon tile count when possible.
+                if (tileCount > 0) {
+                    st.corrosiveGas.assign(tileCount, 0u);
+                    const uint32_t copyN = std::min(gasCount, tileCount);
+                    for (uint32_t i = 0; i < copyN; ++i) {
+                        st.corrosiveGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
+                    }
+                } else {
+                    st.corrosiveGas = std::move(gasTmp);
                 }
             }
 

@@ -1329,7 +1329,8 @@ void Game::spawnItems() {
         if (r < 72) return TrapKind::Web;
         if (depth_ >= 4) {
             if (r < 84) return TrapKind::ConfusionGas;
-            if (r < 92) return TrapKind::PoisonGas;
+            if (r < 91) return TrapKind::PoisonGas;
+            if (depth_ >= 6 && r < 95) return TrapKind::CorrosiveGas;
             return TrapKind::Teleport;
         }
         if (r < 90) return TrapKind::ConfusionGas;
@@ -2065,8 +2066,9 @@ void Game::spawnTraps() {
         if (r < 56) return TrapKind::PoisonDart;
         if (r < 74) return TrapKind::Web;
         if (r < 86) return TrapKind::ConfusionGas;
-        if (r < 92) return TrapKind::PoisonGas;
-        if (r < 95) return TrapKind::LetheMist;
+        if (r < 91) return TrapKind::PoisonGas;
+        if (depth_ >= 8 && r < 94) return TrapKind::CorrosiveGas;
+        if (r < 96) return TrapKind::LetheMist;
         return TrapKind::Teleport;
     };
 
@@ -2321,9 +2323,10 @@ void Game::spawnTraps() {
         if (r < 44) return TrapKind::Web;
         if (r < 60) return TrapKind::ConfusionGas;
         if (r < 72) return TrapKind::PoisonDart;
-        if (r < 80) return TrapKind::PoisonGas;
-        if (r < 86) return TrapKind::LetheMist;
-        if (r < 90) return TrapKind::Teleport;
+        if (r < 78) return TrapKind::PoisonGas;
+        if (depth_ >= 8 && r < 82) return TrapKind::CorrosiveGas;
+        if (r < 88) return TrapKind::LetheMist;
+        if (r < 92) return TrapKind::Teleport;
         return TrapKind::RollingBoulder;
     };
 
@@ -2510,8 +2513,9 @@ void Game::spawnTraps() {
             else if (roll < 64) tk = TrapKind::Alarm;
             else if (roll < 80) tk = TrapKind::Web;
             else if (roll < 86) tk = TrapKind::ConfusionGas;
-            else if (roll < 90) tk = TrapKind::PoisonGas;
-            else if (roll < 92) tk = TrapKind::LetheMist;
+            else if (roll < 89) tk = TrapKind::PoisonGas;
+            else if (roll < 91) tk = TrapKind::CorrosiveGas;
+            else if (roll < 93) tk = TrapKind::LetheMist;
             else if (roll < 96) tk = TrapKind::RollingBoulder;
             else if (depth_ != DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
@@ -2531,8 +2535,9 @@ void Game::spawnTraps() {
             else if (roll < 76) tk = TrapKind::Alarm;
             else if (roll < 86) tk = TrapKind::Web;
             else if (roll < 90) tk = TrapKind::ConfusionGas;
-            else if (roll < 93) tk = TrapKind::PoisonGas;
-            else if (roll < 95) tk = TrapKind::LetheMist;
+            else if (roll < 92) tk = TrapKind::PoisonGas;
+            else if (depth_ >= 8 && roll < 94) tk = TrapKind::CorrosiveGas;
+            else if (roll < 96) tk = TrapKind::LetheMist;
             else if (roll < 97) tk = TrapKind::RollingBoulder;
             else if (depth_ != DUNGEON_MAX_DEPTH && roll < 99) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
@@ -2587,7 +2592,8 @@ void Game::spawnTraps() {
             t.pos = p;
             t.discovered = false;
             // Bias toward alarm/poison on doors (fits the theme), with occasional gas traps.
-            if (depth_ >= 4 && rng.chance(0.10f)) t.kind = TrapKind::PoisonGas;
+            if (depth_ >= 8 && rng.chance(0.05f)) t.kind = TrapKind::CorrosiveGas;
+            else if (depth_ >= 4 && rng.chance(0.10f)) t.kind = TrapKind::PoisonGas;
             else if (rng.chance(0.10f)) t.kind = TrapKind::ConfusionGas;
             else t.kind = rng.chance(0.55f) ? TrapKind::Alarm : TrapKind::PoisonDart;
             trapsCur.push_back(t);
@@ -2612,8 +2618,9 @@ void Game::spawnTraps() {
             t.pos = p;
             t.discovered = false;
             const int roll = rng.range(0, 99);
-            if (roll < 45) t.kind = TrapKind::ConfusionGas;
-            else if (roll < 62) t.kind = TrapKind::PoisonGas;
+            if (roll < 42) t.kind = TrapKind::ConfusionGas;
+            else if (roll < 56) t.kind = TrapKind::PoisonGas;
+            else if (depth_ >= 8 && roll < 70) t.kind = TrapKind::CorrosiveGas;
             else if (roll < 88) t.kind = TrapKind::PoisonDart;
             else if (roll < 95) t.kind = TrapKind::Alarm;
             else t.kind = TrapKind::Teleport;
@@ -2621,9 +2628,640 @@ void Game::spawnTraps() {
         }
     }
 
+    // Procedural field hazards: labs can spawn persistent chemical spill fields.
+    spawnChemicalHazards();
+
     // Consume generator hints (bonus cache locations) now that traps have been placed.
     dung.bonusLootSpots.clear();
 
+}
+
+void Game::spawnChemicalHazards() {
+    if (atHomeCamp()) return;
+    if (dung.rooms.empty()) return;
+
+    const size_t n = static_cast<size_t>(dung.width * dung.height);
+    if (n == 0) return;
+
+    // Ensure hazard fields are sized.
+    if (confusionGas_.size() != n) confusionGas_.assign(n, 0u);
+    if (poisonGas_.size() != n) poisonGas_.assign(n, 0u);
+    if (corrosiveGas_.size() != n) corrosiveGas_.assign(n, 0u);
+    if (fireField_.size() != n) fireField_.assign(n, 0u);
+
+    auto idx = [&](int x, int y) -> size_t {
+        return static_cast<size_t>(y * dung.width + x);
+    };
+
+    // Use an isolated RNG stream so chemical hazards do not perturb other generation
+    // (monsters/items/traps remain stable for a given level seed).
+    RNG crng(hashCombine(levelGenSeed(LevelId{branch_, depth_}), 0xC4EFC0DEu));
+
+    // Safety: don't spawn spill fields right on top of arrivals / stairs.
+    auto safeTile = [&](int x, int y) -> bool {
+        if (!dung.inBounds(x, y)) return false;
+        if (!dung.isWalkable(x, y)) return false;
+        const Vec2i p{x, y};
+        if (p == dung.stairsUp || p == dung.stairsDown) return false;
+        if (manhattan(p, dung.stairsUp) <= 4) return false;
+        if (manhattan(p, dung.stairsDown) <= 4) return false;
+        if (manhattan(p, player().pos) <= 6) return false;
+        return true;
+    };
+
+    // Local variant that uses the isolated RNG stream.
+    auto randomFreeTileInRoomChem = [&](const Room& r) -> Vec2i {
+        int loX = r.x + 1;
+        int hiX = r.x + r.w - 2;
+        int loY = r.y + 1;
+        int hiY = r.y + r.h - 2;
+        if (hiX < loX) { loX = r.x; hiX = r.x + r.w - 1; }
+        if (hiY < loY) { loY = r.y; hiY = r.y + r.h - 1; }
+
+        Vec2i best{r.cx(), r.cy()};
+        int bestScore = -999999;
+
+        for (int it = 0; it < 200; ++it) {
+            const int x = crng.range(loX, hiX);
+            const int y = crng.range(loY, hiY);
+            if (!dung.inBounds(x, y)) continue;
+            if (!dung.isWalkable(x, y)) continue;
+
+            const Vec2i p{x, y};
+            int score = 0;
+            score -= manhattan(p, Vec2i{r.cx(), r.cy()});
+            if (safeTile(x, y)) score += 1000;
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = p;
+            }
+
+            if (safeTile(x, y)) return p;
+        }
+
+        return best;
+    };
+
+    auto clampf = [&](float v, float lo, float hi) -> float {
+        if (v < lo) return lo;
+        if (v > hi) return hi;
+        return v;
+    };
+
+    enum class ChemTheme : uint8_t {
+        Noxious = 0,  // confusion gas
+        Toxic,        // poison gas
+        Acidic,       // corrosive gas
+        Mixed,        // corrosive + poison (reacts into confusion)
+        Volatile,     // poison + embers (fire)
+    };
+
+    struct RDParams {
+        float da;
+        float db;
+        float feed;
+        float kill;
+    };
+
+    // A few Gray-Scott reaction-diffusion presets that produce distinct "spill" patterns.
+    // (Values loosely based on classic parameter sets.)
+    const RDParams presets[] = {
+        {1.0f, 0.50f, 0.0367f, 0.0649f},
+        {1.0f, 0.50f, 0.0300f, 0.0620f},
+        {1.0f, 0.50f, 0.0220f, 0.0510f},
+        {1.0f, 0.50f, 0.0460f, 0.0630f},
+    };
+
+    auto runReactionDiffusion = [&](int w, int h, const RDParams& p, int iters, std::vector<float>& A, std::vector<float>& B) {
+        const int W = std::max(1, w);
+        const int H = std::max(1, h);
+        const size_t N = static_cast<size_t>(W * H);
+        if (A.size() != N) A.assign(N, 1.0f);
+        if (B.size() != N) B.assign(N, 0.0f);
+
+        std::vector<float> nA(N, 1.0f);
+        std::vector<float> nB(N, 0.0f);
+
+        auto at = [&](const std::vector<float>& v, int x, int y) -> float {
+            x = clampi(x, 0, W - 1);
+            y = clampi(y, 0, H - 1);
+            return v[static_cast<size_t>(y * W + x)];
+        };
+
+        constexpr float dt = 1.0f;
+
+        for (int it = 0; it < iters; ++it) {
+            for (int y = 0; y < H; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    const size_t i = static_cast<size_t>(y * W + x);
+                    const float a = A[i];
+                    const float b = B[i];
+
+                    // 9-sample Laplacian (standard RD stencil).
+                    const float lapA =
+                        -a
+                        + 0.20f * (at(A, x - 1, y) + at(A, x + 1, y) + at(A, x, y - 1) + at(A, x, y + 1))
+                        + 0.05f * (at(A, x - 1, y - 1) + at(A, x + 1, y - 1) + at(A, x - 1, y + 1) + at(A, x + 1, y + 1));
+
+                    const float lapB =
+                        -b
+                        + 0.20f * (at(B, x - 1, y) + at(B, x + 1, y) + at(B, x, y - 1) + at(B, x, y + 1))
+                        + 0.05f * (at(B, x - 1, y - 1) + at(B, x + 1, y - 1) + at(B, x - 1, y + 1) + at(B, x + 1, y + 1));
+
+                    const float reaction = a * b * b;
+
+                    float na = a + (p.da * lapA - reaction + p.feed * (1.0f - a)) * dt;
+                    float nb = b + (p.db * lapB + reaction - (p.kill + p.feed) * b) * dt;
+
+                    nA[i] = clampf(na, 0.0f, 1.0f);
+                    nB[i] = clampf(nb, 0.0f, 1.0f);
+                }
+            }
+
+            A.swap(nA);
+            B.swap(nB);
+        }
+    };
+
+    auto chooseTheme = [&]() -> ChemTheme {
+        // Deeper floors bias toward nastier chemistry.
+        int r = crng.range(0, 99);
+        if (depth_ >= 8 && r < 16) return ChemTheme::Mixed;
+        if (depth_ >= 6 && r < 36) return ChemTheme::Acidic;
+        if (depth_ >= 5 && r >= 92) return ChemTheme::Volatile;
+        if (r < 55) return ChemTheme::Toxic;
+        return ChemTheme::Noxious;
+    };
+
+    int labsSeeded = 0;
+    const int labBudget = (depth_ >= 6 && crng.chance(0.40f)) ? 2 : 1;
+
+    for (const Room& r : dung.rooms) {
+        if (labsSeeded >= labBudget) break;
+        if (r.type != RoomType::Laboratory) continue;
+
+        // Avoid seeding hazards in/near the start room.
+        const Vec2i c{r.cx(), r.cy()};
+        const int distStart = manhattan(c, player().pos);
+        float chance = 0.18f + 0.02f * static_cast<float>(std::min(depth_, 12));
+        if (distStart <= 10) chance *= 0.35f;
+        if (r.w * r.h >= 70) chance += 0.06f;
+        chance = clampf(chance, 0.08f, 0.55f);
+        if (!crng.chance(chance)) continue;
+
+        const ChemTheme theme = chooseTheme();
+
+        // Work on the room interior (skip the perimeter tiles so doors remain less "spammy").
+        const int x0 = r.x + 1;
+        const int y0 = r.y + 1;
+        const int iw = std::max(1, r.w - 2);
+        const int ih = std::max(1, r.h - 2);
+
+        // If the room is tiny, fall back to a simple blob spill.
+        const bool tiny = (iw * ih) < 12;
+
+        std::vector<float> A;
+        std::vector<float> B;
+
+        if (!tiny) {
+            // Seed B with a few droplets.
+            A.assign(static_cast<size_t>(iw * ih), 1.0f);
+            B.assign(static_cast<size_t>(iw * ih), 0.0f);
+
+            const int presetIdx = crng.range(0, static_cast<int>(sizeof(presets) / sizeof(presets[0])) - 1);
+            const RDParams pset = presets[static_cast<size_t>(presetIdx)];
+
+            const int seeds = clampi(2 + (iw * ih > 60 ? 1 : 0), 1, 5);
+            const int padX = std::max(0, iw / 4);
+            const int padY = std::max(0, ih / 4);
+            const int loX = padX;
+            const int hiX = std::max(loX, iw - 1 - padX);
+            const int loY = padY;
+            const int hiY = std::max(loY, ih - 1 - padY);
+
+            for (int s = 0; s < seeds; ++s) {
+                const int sx = crng.range(loX, hiX);
+                const int sy = crng.range(loY, hiY);
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int xx = clampi(sx + dx, 0, iw - 1);
+                        const int yy = clampi(sy + dy, 0, ih - 1);
+                        const size_t i = static_cast<size_t>(yy * iw + xx);
+                        B[i] = 1.0f;
+                        A[i] = 0.0f;
+                    }
+                }
+            }
+
+            // A touch of noise so different labs don't converge on the same stable pattern.
+            for (size_t i = 0; i < B.size(); ++i) {
+                const float n01 = crng.next01();
+                if (n01 < 0.08f) {
+                    B[i] = clampf(B[i] + (0.05f + 0.12f * crng.next01()), 0.0f, 1.0f);
+                }
+            }
+
+            const int iters = 18 + crng.range(0, 14);
+            runReactionDiffusion(iw, ih, pset, iters, A, B);
+        }
+
+        // Compute min/max for dynamic range normalization.
+        float minB = 1.0f;
+        float maxB = 0.0f;
+        if (!tiny) {
+            for (float v : B) {
+                if (v < minB) minB = v;
+                if (v > maxB) maxB = v;
+            }
+        }
+
+        const int maxI = clampi(9 + depth_ / 2, 9, 16);
+
+        auto addField = [&](std::vector<uint8_t>& field, size_t gi, uint8_t v) {
+            if (gi >= field.size()) return;
+            if (field[gi] < v) field[gi] = v;
+        };
+
+        if (tiny || maxB <= minB + 0.0001f) {
+            // Simple radial spill (tiny labs or degenerate RD output).
+            const Vec2i seed = randomFreeTileInRoomChem(r);
+            if (!safeTile(seed.x, seed.y)) continue;
+
+            const int radius = 2 + (crng.chance(0.20f) ? 1 : 0);
+            for (int yy = seed.y - radius; yy <= seed.y + radius; ++yy) {
+                for (int xx = seed.x - radius; xx <= seed.x + radius; ++xx) {
+                    if (!safeTile(xx, yy)) continue;
+                    const int dist = std::max(std::abs(xx - seed.x), std::abs(yy - seed.y));
+                    int s = maxI - dist * 4;
+                    if (s < 2) continue;
+                    const uint8_t v = static_cast<uint8_t>(clampi(s, 0, 255));
+                    const size_t gi = idx(xx, yy);
+
+                    switch (theme) {
+                        case ChemTheme::Noxious:  addField(confusionGas_, gi, v); break;
+                        case ChemTheme::Toxic:    addField(poisonGas_, gi, v); break;
+                        case ChemTheme::Acidic:   addField(corrosiveGas_, gi, v); break;
+                        case ChemTheme::Mixed:
+                            addField(corrosiveGas_, gi, v);
+                            if (dist <= 1) addField(poisonGas_, gi, static_cast<uint8_t>(clampi(s - 1, 0, 255)));
+                            break;
+                        case ChemTheme::Volatile:
+                            addField(poisonGas_, gi, v);
+                            if (dist == 0) addField(fireField_, gi, static_cast<uint8_t>(clampi(7 + s / 3, 0, 255)));
+                            break;
+                    }
+                }
+            }
+
+            ++labsSeeded;
+            continue;
+        }
+
+        // Reaction-diffusion spill mapping.
+        for (int yy = 0; yy < ih; ++yy) {
+            for (int xx = 0; xx < iw; ++xx) {
+                const int wx = x0 + xx;
+                const int wy = y0 + yy;
+                if (!safeTile(wx, wy)) continue;
+
+                const size_t li = static_cast<size_t>(yy * iw + xx);
+                const float b = (li < B.size()) ? B[li] : 0.0f;
+                float bn = (b - minB) / (maxB - minB);
+                bn = clampf(bn, 0.0f, 1.0f);
+
+                // Emphasize peaks so the spill has clear "hot" spots.
+                bn = bn * bn;
+
+                int s = static_cast<int>(bn * static_cast<float>(maxI));
+                if (s < 2) continue;
+
+                const uint8_t v = static_cast<uint8_t>(clampi(s, 0, 255));
+                const size_t gi = idx(wx, wy);
+
+                switch (theme) {
+                    case ChemTheme::Noxious:
+                        addField(confusionGas_, gi, v);
+                        break;
+
+                    case ChemTheme::Toxic:
+                        addField(poisonGas_, gi, v);
+                        break;
+
+                    case ChemTheme::Acidic:
+                        addField(corrosiveGas_, gi, v);
+                        break;
+
+                    case ChemTheme::Mixed:
+                        // Concentrated acid cores with a toxic fringe that tends to react into confusion later.
+                        addField(corrosiveGas_, gi, v);
+                        if (bn > 0.28f && bn < 0.72f) {
+                            const uint8_t pv = static_cast<uint8_t>(clampi(s - 1, 0, 255));
+                            addField(poisonGas_, gi, pv);
+                        }
+                        break;
+
+                    case ChemTheme::Volatile:
+                        // Toxic vapor with occasional embers that can trigger flash ignition when dense.
+                        addField(poisonGas_, gi, v);
+                        if (bn > 0.78f) {
+                            const uint8_t fv = static_cast<uint8_t>(clampi(6 + s / 2, 0, 255));
+                            addField(fireField_, gi, fv);
+                        }
+                        break;
+                }
+            }
+        }
+
+        ++labsSeeded;
+    }
+}
+
+
+// ----------------------------------------------------------------------------
+// Field chemistry: laboratory doors with procedural seals
+// ----------------------------------------------------------------------------
+
+namespace {
+
+// Identify the two "sides" of a door (the two opposite walkable tiles it connects).
+// This is used for gas leakage / pressure puffs when doors open.
+static bool doorOpposingSides(const Dungeon& d, Vec2i door, Vec2i& aOut, Vec2i& bOut) {
+    auto walk = [&](int x, int y) -> bool {
+        return d.inBounds(x, y) && d.isWalkable(x, y);
+    };
+
+    const bool ew = walk(door.x - 1, door.y) && walk(door.x + 1, door.y);
+    const bool ns = walk(door.x, door.y - 1) && walk(door.x, door.y + 1);
+
+    if (!ew && !ns) return false;
+
+    // Most doors are unambiguous.
+    if (ew && !ns) {
+        aOut = {door.x - 1, door.y};
+        bOut = {door.x + 1, door.y};
+        return true;
+    }
+    if (ns && !ew) {
+        aOut = {door.x, door.y - 1};
+        bOut = {door.x, door.y + 1};
+        return true;
+    }
+
+    // Rare ambiguous case (both pairs walkable): infer orientation by nearby blocking tiles.
+    auto blocks = [&](int x, int y) -> bool {
+        if (!d.inBounds(x, y)) return true;
+        const TileType tt = d.at(x, y).type;
+        return (tt == TileType::Wall || tt == TileType::Pillar || tt == TileType::DoorSecret);
+    };
+
+    const bool bu = blocks(door.x, door.y - 1);
+    const bool bd = blocks(door.x, door.y + 1);
+    const bool bl = blocks(door.x - 1, door.y);
+    const bool br = blocks(door.x + 1, door.y);
+
+    // If the door sits in a vertical wall (up+down blocked), it connects left-right.
+    if (bu && bd && !bl && !br) {
+        aOut = {door.x - 1, door.y};
+        bOut = {door.x + 1, door.y};
+        return true;
+    }
+    // If the door sits in a horizontal wall (left+right blocked), it connects up-down.
+    if (bl && br && !bu && !bd) {
+        aOut = {door.x, door.y - 1};
+        bOut = {door.x, door.y + 1};
+        return true;
+    }
+
+    // Fallback: prefer the pair that looks "more corridor-like".
+    // (We bias toward the side tiles that themselves have fewer open neighbors.)
+    static const std::array<Vec2i, 4> dirs = {{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
+    auto openness = [&](Vec2i p) -> int {
+        int s = 0;
+        for (const auto& dxy : dirs) {
+            if (walk(p.x + dxy.x, p.y + dxy.y)) s++;
+        }
+        return s;
+    };
+
+    const Vec2i aEW{door.x - 1, door.y};
+    const Vec2i bEW{door.x + 1, door.y};
+    const Vec2i aNS{door.x, door.y - 1};
+    const Vec2i bNS{door.x, door.y + 1};
+
+    const int openEW = openness(aEW) + openness(bEW);
+    const int openNS = openness(aNS) + openness(bNS);
+
+    if (openNS > openEW) {
+        aOut = aNS;
+        bOut = bNS;
+    } else {
+        aOut = aEW;
+        bOut = bEW;
+    }
+
+    return true;
+}
+
+static Vec2i stepBeyond(Vec2i from, Vec2i toward) {
+    return Vec2i{toward.x + (toward.x - from.x), toward.y + (toward.y - from.y)};
+}
+
+} // namespace
+
+Game::DoorSealKind Game::doorSealKindAt(int x, int y) const {
+    if (!dung.inBounds(x, y)) return DoorSealKind::Normal;
+
+    const TileType tt = dung.at(x, y).type;
+    if (tt != TileType::DoorClosed && tt != TileType::DoorLocked && tt != TileType::DoorOpen) {
+        return DoorSealKind::Normal;
+    }
+
+    // Only special-case lab doors (keeps the rest of the game feeling familiar).
+    Vec2i a{0, 0}, b{0, 0};
+    if (!doorOpposingSides(dung, {x, y}, a, b)) return DoorSealKind::Normal;
+
+    const RoomType ra = roomTypeAt(dung, a);
+    const RoomType rb = roomTypeAt(dung, b);
+    if (ra != RoomType::Laboratory && rb != RoomType::Laboratory) return DoorSealKind::Normal;
+
+    // Deterministic per-level + per-position.
+    uint32_t s = levelGenSeed(LevelId{branch_, depth_});
+    s = hashCombine(s, 0xD005EA1u);
+    s = hashCombine(s, static_cast<uint32_t>(x));
+    s = hashCombine(s, static_cast<uint32_t>(y));
+
+    const uint32_t h = hash32(s);
+    const int roll = static_cast<int>(h % 100u);
+
+    // Rough distribution for lab doors:
+    // - Airlock: tight seal (no seepage while closed; strong pressure puff when opened).
+    // - Vented: slow seepage even while closed.
+    const int airlockPct = 20;
+    const int ventedPct = 34;
+
+    if (roll < airlockPct) return DoorSealKind::Airlock;
+    if (roll < airlockPct + ventedPct) return DoorSealKind::Vented;
+    return DoorSealKind::Normal;
+}
+
+void Game::onDoorOpened(Vec2i doorPos, bool openerIsPlayer) {
+    if (!dung.inBounds(doorPos.x, doorPos.y)) return;
+
+    // Find the two connected sides.
+    Vec2i a{0, 0}, b{0, 0};
+    if (!doorOpposingSides(dung, doorPos, a, b)) return;
+
+    const int w = dung.width;
+    const int h = dung.height;
+    const size_t expect = static_cast<size_t>(w * h);
+    if (expect == 0) return;
+
+    // Ensure arrays exist (safety for older saves / edge cases).
+    if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+    if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+    if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
+
+    auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
+    auto scoreAt = [&](Vec2i p) -> int {
+        const size_t i = idx2(p.x, p.y);
+        int s = 0;
+        if (i < poisonGas_.size()) s += static_cast<int>(poisonGas_[i]);
+        if (i < corrosiveGas_.size()) s += static_cast<int>(corrosiveGas_[i]);
+        if (i < confusionGas_.size()) s += static_cast<int>(confusionGas_[i]) / 2; // magical haze is "lighter"
+        return s;
+    };
+
+    int sa = scoreAt(a);
+    int sb = scoreAt(b);
+    if (sa == 0 && sb == 0) return;
+
+    Vec2i src = a;
+    Vec2i dst = b;
+    int sSrc = sa;
+    int sDst = sb;
+    if (sb > sa) {
+        src = b;
+        dst = a;
+        sSrc = sb;
+        sDst = sa;
+    }
+
+    // If the sides are already similar, don't bother.
+    if (sSrc - sDst < 6) return;
+
+    const DoorSealKind seal = doorSealKindAt(doorPos.x, doorPos.y);
+    float mult = 1.0f;
+    int maxPuff = 28;
+    if (seal == DoorSealKind::Airlock) {
+        mult = 1.70f;
+        maxPuff = 44;
+    } else if (seal == DoorSealKind::Vented) {
+        mult = 0.85f;
+        maxPuff = 22;
+    }
+
+    auto inWalk = [&](Vec2i p) -> bool {
+        return dung.inBounds(p.x, p.y) && dung.isWalkable(p.x, p.y);
+    };
+
+    auto puffOne = [&](std::vector<uint8_t>& f, int minDiff, int baseMax) -> int {
+        if (f.size() != expect) return 0;
+
+        const size_t iSrc = idx2(src.x, src.y);
+        const size_t iDst = idx2(dst.x, dst.y);
+        const size_t iDoor = idx2(doorPos.x, doorPos.y);
+
+        const int vSrc = static_cast<int>(f[iSrc]);
+        const int vDst = static_cast<int>(f[iDst]);
+        if (vSrc <= vDst + minDiff) return 0;
+
+        const int diff = vSrc - vDst;
+        int want = static_cast<int>(static_cast<float>(diff) * 0.45f * mult);
+        want = std::clamp(want, 1, baseMax);
+
+        // Pull volume from the source side (and one tile deeper if available).
+        Vec2i src2 = stepBeyond(doorPos, src);
+        const bool hasSrc2 = inWalk(src2);
+        const size_t iSrc2 = hasSrc2 ? idx2(src2.x, src2.y) : iSrc;
+
+        int pulled = 0;
+        int rem = want;
+
+        const int take0 = std::min(rem, static_cast<int>(f[iSrc]));
+        if (take0 > 0) {
+            f[iSrc] = static_cast<uint8_t>(static_cast<int>(f[iSrc]) - take0);
+            pulled += take0;
+            rem -= take0;
+        }
+
+        if (rem > 0 && hasSrc2) {
+            const int take1 = std::min(rem, static_cast<int>(f[iSrc2]));
+            if (take1 > 0) {
+                f[iSrc2] = static_cast<uint8_t>(static_cast<int>(f[iSrc2]) - take1);
+                pulled += take1;
+                rem -= take1;
+            }
+        }
+
+        if (pulled <= 0) return 0;
+
+        // Distribute into the doorway + destination side.
+        Vec2i dst2 = stepBeyond(doorPos, dst);
+        const bool hasDst2 = inWalk(dst2);
+        const size_t iDst2 = hasDst2 ? idx2(dst2.x, dst2.y) : iDst;
+
+        const int toDoor = pulled / 3; // ~33%
+        const int toSide = pulled - toDoor;
+        const int toSide2 = hasDst2 ? (toSide / 2) : 0;
+        const int toSide1 = toSide - toSide2;
+
+        auto add = [&](size_t i, int amt) {
+            if (amt <= 0) return;
+            const int nv = std::clamp(static_cast<int>(f[i]) + amt, 0, 255);
+            f[i] = static_cast<uint8_t>(nv);
+        };
+
+        add(iDoor, toDoor);
+        add(iDst, toSide1);
+        if (toSide2 > 0) add(iDst2, toSide2);
+
+        return pulled;
+    };
+
+    const int movedPoison = puffOne(poisonGas_, 6, maxPuff);
+    const int movedCorrosive = puffOne(corrosiveGas_, 6, maxPuff);
+    const int movedConfusion = puffOne(confusionGas_, 6, maxPuff);
+
+    const int movedTotal = movedPoison + movedCorrosive + movedConfusion;
+    if (movedTotal <= 0) return;
+
+    // Message if the event is relevant to the player.
+    bool relevant = openerIsPlayer;
+    if (!relevant) {
+        if (dung.inBounds(doorPos.x, doorPos.y) && dung.at(doorPos.x, doorPos.y).visible) relevant = true;
+        const Vec2i pp = player().pos;
+        const int dx = std::abs(pp.x - doorPos.x);
+        const int dy = std::abs(pp.y - doorPos.y);
+        if (std::max(dx, dy) <= 1) relevant = true;
+    }
+
+    if (relevant && movedTotal >= 12) {
+        std::string msg;
+        if (seal == DoorSealKind::Airlock) {
+            msg = "THE AIRLOCK WHOOSHES OPEN! ";
+        }
+
+        if (movedCorrosive >= movedPoison && movedCorrosive >= movedConfusion) {
+            msg += "CORROSIVE FUMES BURST OUT!";
+        } else if (movedPoison >= movedConfusion) {
+            msg += "TOXIC VAPORS POUR OUT!";
+        } else {
+            msg += "A STRANGE VAPOR SWIRLS OUT!";
+        }
+
+        pushMsg(msg, MessageKind::Warning, false);
+    }
 }
 
 void Game::applyEndOfTurnEffects() {
@@ -2636,6 +3274,36 @@ void Game::applyEndOfTurnEffects() {
     const int windStr = windStrength();
     const Vec2i upWind = {-wind.x, -wind.y};
 
+    // Ensure the terrain material cache is populated for this floor so the
+    // hazard simulation can query materialAtCached() cheaply and deterministically.
+    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
+    // Substrate chemistry helpers: porous materials absorb fumes; smooth sealed
+    // surfaces let vapors drift a little farther.
+    auto gasAbsorb = [&](TerrainMaterial m) -> int {
+        switch (m) {
+            case TerrainMaterial::Moss:
+            case TerrainMaterial::Dirt:
+            case TerrainMaterial::Wood:
+            case TerrainMaterial::Bone:
+                return 1;
+            default:
+                return 0;
+        }
+    };
+
+    auto gasSlick = [&](TerrainMaterial m) -> int {
+        switch (m) {
+            case TerrainMaterial::Metal:
+            case TerrainMaterial::Crystal:
+            case TerrainMaterial::Obsidian:
+            case TerrainMaterial::Marble:
+                return 1;
+            default:
+                return 0;
+        }
+    };
+
 
     // ------------------------------------------------------------
     // Field chemistry: fire / gas reactions
@@ -2643,18 +3311,20 @@ void Game::applyEndOfTurnEffects() {
     // Fire can burn away lingering gas clouds, and dense poison vapors
     // can occasionally ignite into a brief flash-fire explosion. This
     // adds emergent interactions between hazards without introducing
-    // any new persistent field types.
+    // a separate simulation system (it operates directly on existing
+    // per-tile hazard fields).
     // ------------------------------------------------------------
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
         if (expect > 0) {
             if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
             if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+            if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
             if (fireField_.size() != expect) fireField_.assign(expect, 0u);
         }
 
         // Only do any work if there is any overlap potential.
-        if (!fireField_.empty() && (!poisonGas_.empty() || !confusionGas_.empty())) {
+        {
             const int w = dung.width;
             const int h = dung.height;
             auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
@@ -2673,6 +3343,8 @@ void Game::applyEndOfTurnEffects() {
                     const uint8_t f = fireField_[i];
                     if (f == 0u) continue;
 
+                    const uint8_t aPre = (i < corrosiveGas_.size()) ? corrosiveGas_[i] : 0u;
+
                     // Confusion gas is not meant to be explosive; fire simply
                     // cleans it up a bit.
                     if (i < confusionGas_.size() && confusionGas_[i] > 0u) {
@@ -2681,102 +3353,125 @@ void Game::applyEndOfTurnEffects() {
                         confusionGas_[i] = (g > static_cast<uint8_t>(burn)) ? static_cast<uint8_t>(g - static_cast<uint8_t>(burn)) : 0u;
                     }
 
-                    if (i >= poisonGas_.size()) continue;
-                    uint8_t g = poisonGas_[i];
-                    const uint8_t gPre = g;
-                    if (g == 0u) continue;
-
                     // Poison vapors are combustible: fire consumes them quickly.
-                    {
-                        const int burn = 2 + static_cast<int>(f) / 4;
-                        g = (g > static_cast<uint8_t>(burn)) ? static_cast<uint8_t>(g - static_cast<uint8_t>(burn)) : 0u;
-                        poisonGas_[i] = g;
+                    uint8_t gPre = 0u;
+                    if (i < poisonGas_.size()) {
+                        uint8_t g = poisonGas_[i];
+                        gPre = g;
 
-                        // A little extra flame when vapor burns.
                         if (g > 0u) {
-                            const uint8_t boosted = static_cast<uint8_t>(std::min(255, std::max<int>(static_cast<int>(f), static_cast<int>(g) + 2)));
-                            fireField_[i] = boosted;
-                        }
-                    }
+                            const int burn = 2 + static_cast<int>(f) / 4;
+                            g = (g > static_cast<uint8_t>(burn)) ? static_cast<uint8_t>(g - static_cast<uint8_t>(burn)) : 0u;
+                            poisonGas_[i] = g;
 
-                    // Rare flash ignition (dense gas + strong flame).
-                    if (ignitions >= MAX_IGNITIONS) continue;
+                            // A little extra flame when vapor burns.
+                            if (g > 0u) {
+                                const uint8_t boosted = static_cast<uint8_t>(std::min(255, std::max<int>(static_cast<int>(f), static_cast<int>(g) + 2)));
+                                fireField_[i] = boosted;
+                            }
 
-                    // We base the ignition chance on the *pre-burn* gas level to
-                    // keep it intuitive: fresh, dense gas clouds are the risk.
-                    const uint8_t g0 = gPre;
-                    if (f >= 9u && g0 >= 10u) {
-                        float chance = 0.10f;
-                        chance += 0.02f * static_cast<float>(g0 - 10u);
-                        chance += 0.015f * static_cast<float>(f - 9u);
-                        chance = std::min(0.28f, std::max(0.0f, chance));
+                            // Rare flash ignition (dense gas + strong flame).
+                            if (ignitions < MAX_IGNITIONS) {
+                                // We base the ignition chance on the *pre-burn* gas level to
+                                // keep it intuitive: fresh, dense gas clouds are the risk.
+                                const uint8_t g0 = gPre;
+                                if (f >= 9u && g0 >= 10u) {
+                                    float chance = 0.10f;
+                                    chance += 0.02f * static_cast<float>(g0 - 10u);
+                                    chance += 0.015f * static_cast<float>(f - 9u);
+                                    chance = std::min(0.28f, std::max(0.0f, chance));
 
-                        if (rng.chance(chance)) {
-                            ++ignitions;
+                                    if (rng.chance(chance)) {
+                                        ++ignitions;
 
-                            const int radius = (g0 >= 12u && rng.chance(0.25f)) ? 2 : 1;
+                                        const int radius = (g0 >= 12u && rng.chance(0.25f)) ? 2 : 1;
 
-                            std::vector<uint8_t> mask;
-                            dung.computeFovMask(x, y, radius, mask);
+                                        std::vector<uint8_t> mask;
+                                        dung.computeFovMask(x, y, radius, mask);
 
-                            const int minX = std::max(0, x - radius);
-                            const int maxX = std::min(w - 1, x + radius);
-                            const int minY = std::max(0, y - radius);
-                            const int maxY = std::min(h - 1, y + radius);
+                                        const int minX = std::max(0, x - radius);
+                                        const int maxX = std::min(w - 1, x + radius);
+                                        const int minY = std::max(0, y - radius);
+                                        const int maxY = std::min(h - 1, y + radius);
 
-                            // A flash fire is loud.
-                            emitNoise({x, y}, 16);
+                                        // A flash fire is loud.
+                                        emitNoise({x, y}, 16);
 
-                            for (int yy = minY; yy <= maxY; ++yy) {
-                                for (int xx = minX; xx <= maxX; ++xx) {
-                                    const size_t j = idx2(xx, yy);
-                                    if (j >= mask.size() || mask[j] == 0u) continue;
+                                        for (int yy = minY; yy <= maxY; ++yy) {
+                                            for (int xx = minX; xx <= maxX; ++xx) {
+                                                const size_t j = idx2(xx, yy);
+                                                if (j >= mask.size() || mask[j] == 0u) continue;
 
-                                    // Consume poison gas in the blast.
-                                    if (j < poisonGas_.size()) poisonGas_[j] = 0u;
+                                                // Consume poison gas in the blast.
+                                                if (j < poisonGas_.size()) poisonGas_[j] = 0u;
 
-                                    // Fire lingers in the blast area on walkable tiles.
-                                    if (dung.isWalkable(xx, yy)) {
-                                        const int dist = std::max(std::abs(xx - x), std::abs(yy - y));
-                                        const int base = 10 + static_cast<int>(g0) / 2 + static_cast<int>(f) / 2;
-                                        const int s = std::max(2, base - dist * 3);
-                                        const uint8_t su = static_cast<uint8_t>(clampi(s, 0, 255));
-                                        if (j < fireField_.size() && fireField_[j] < su) fireField_[j] = su;
-                                    }
+                                                // Fire lingers in the blast area on walkable tiles.
+                                                if (dung.isWalkable(xx, yy)) {
+                                                    const int dist = std::max(std::abs(xx - x), std::abs(yy - y));
+                                                    const int base = 10 + static_cast<int>(g0) / 2 + static_cast<int>(f) / 2;
+                                                    const int s = std::max(2, base - dist * 3);
+                                                    const uint8_t su = static_cast<uint8_t>(clampi(s, 0, 255));
+                                                    if (j < fireField_.size() && fireField_[j] < su) fireField_[j] = su;
+                                                }
 
-                                    // Damage entities caught in the blast; also ignite them.
-                                    if (Entity* e = entityAtMut(xx, yy)) {
-                                        if (e->hp > 0) {
-                                            const int dist = std::max(std::abs(xx - x), std::abs(yy - y));
-                                            int dmg = rng.range(2, 4) + static_cast<int>(g0) / 6 + static_cast<int>(f) / 8;
-                                            dmg = std::max(0, dmg - dist);
+                                                // Damage entities caught in the blast; also ignite them.
+                                                if (Entity* e = entityAtMut(xx, yy)) {
+                                                    if (e->hp > 0) {
+                                                        const int dist = std::max(std::abs(xx - x), std::abs(yy - y));
+                                                        int dmg = rng.range(2, 4) + static_cast<int>(g0) / 6 + static_cast<int>(f) / 8;
+                                                        dmg = std::max(0, dmg - dist);
 
-                                            if (dmg > 0) {
-                                                e->hp -= dmg;
-                                                const bool vis = (dung.inBounds(xx, yy) && dung.at(xx, yy).visible);
-                                                if (e->id == playerId_) {
-                                                    playerHit = true;
-                                                    if (e->hp <= 0) {
-                                                        pushMsg("YOU ARE INCINERATED BY IGNITING VAPORS.", MessageKind::Combat, false);
-                                                        if (endCause_.empty()) endCause_ = "INCINERATED BY IGNITING VAPORS";
-                                                        gameOver = true;
-                                                        return;
+                                                        if (dmg > 0) {
+                                                            e->hp -= dmg;
+                                                            const bool vis = (dung.inBounds(xx, yy) && dung.at(xx, yy).visible);
+                                                            if (e->id == playerId_) {
+                                                                playerHit = true;
+                                                                if (e->hp <= 0) {
+                                                                    pushMsg("YOU ARE INCINERATED BY IGNITING VAPORS.", MessageKind::Combat, false);
+                                                                    if (endCause_.empty()) endCause_ = "INCINERATED BY IGNITING VAPORS";
+                                                                    gameOver = true;
+                                                                    return;
+                                                                }
+                                                            } else if (vis && e->hp <= 0) {
+                                                                std::ostringstream ss;
+                                                                ss << kindName(e->kind) << " IS INCINERATED.";
+                                                                pushMsg(ss.str(), MessageKind::Combat, false);
+                                                            }
+                                                        }
+
+                                                        const int burnTurns = clampi(2 + static_cast<int>(g0) / 4, 2, 10);
+                                                        if (e->effects.burnTurns < burnTurns) e->effects.burnTurns = burnTurns;
                                                     }
-                                                } else if (vis && e->hp <= 0) {
-                                                    std::ostringstream ss;
-                                                    ss << kindName(e->kind) << " IS INCINERATED.";
-                                                    pushMsg(ss.str(), MessageKind::Combat, false);
                                                 }
                                             }
-
-                                            const int burnTurns = clampi(2 + static_cast<int>(g0) / 4, 2, 10);
-                                            if (e->effects.burnTurns < burnTurns) e->effects.burnTurns = burnTurns;
                                         }
+
+                                        if (dung.inBounds(x, y) && dung.at(x, y).visible) anyVisible = true;
                                     }
                                 }
                             }
+                        }
+                    }
 
-                            if (dung.inBounds(x, y) && dung.at(x, y).visible) anyVisible = true;
+                    // Corrosive vapors are not explosive, but heat can aerosolize them into
+                    // acrid smoke and slightly quench flames.
+                    if (aPre > 0u && i < corrosiveGas_.size()) {
+                        const int burn = 1 + static_cast<int>(f) / 7;
+                        const uint8_t b = static_cast<uint8_t>(burn);
+                        corrosiveGas_[i] = (aPre > b) ? static_cast<uint8_t>(aPre - b) : 0u;
+
+                        // Dense acid + open flame -> brief toxic smoke (adds poison gas after the burn step).
+                        if (aPre >= 10u && f >= 8u && i < poisonGas_.size()) {
+                            const int add = 1 + static_cast<int>(aPre) / 7;
+                            const int nv = static_cast<int>(poisonGas_[i]) + add;
+                            poisonGas_[i] = static_cast<uint8_t>(clampi(nv, 0, 255));
+                        }
+
+                        // Acid slightly damps flames when dense.
+                        if (aPre >= 12u && i < fireField_.size()) {
+                            if ((turnCount & 1u) == 0u && fireField_[i] > 0u) {
+                                fireField_[i] = static_cast<uint8_t>(fireField_[i] - 1u);
+                            }
                         }
                     }
                 }
@@ -2785,7 +3480,50 @@ void Game::applyEndOfTurnEffects() {
             if (ignitions > 0 && (anyVisible || playerHit)) {
                 pushMsg("TOXIC VAPORS IGNITE!", MessageKind::Warning, playerHit);
             }
+
+            // Pass 2: corrosive + poison can react into an irritant haze.
+            // (This is non-explosive; it mostly converts some of the mixture into confusion gas.)
+            constexpr int MAX_MIX_MSGS = 6;
+            int strongMixes = 0;
+            bool mixVisible = false;
+            bool playerMixed = false;
+
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const size_t i = idx2(x, y);
+                    if (i >= poisonGas_.size() || i >= corrosiveGas_.size() || i >= confusionGas_.size()) continue;
+
+                    const uint8_t pg = poisonGas_[i];
+                    const uint8_t ag = corrosiveGas_[i];
+                    if (pg == 0u || ag == 0u) continue;
+
+                    const int m = (pg < ag) ? static_cast<int>(pg) : static_cast<int>(ag);
+                    if (m < 4) continue;
+
+                    int react = 1 + m / 8;
+                    react = clampi(react, 1, 4);
+
+                    poisonGas_[i] = (pg > static_cast<uint8_t>(react)) ? static_cast<uint8_t>(pg - static_cast<uint8_t>(react)) : 0u;
+                    corrosiveGas_[i] = (ag > static_cast<uint8_t>(react)) ? static_cast<uint8_t>(ag - static_cast<uint8_t>(react)) : 0u;
+
+                    const int add = react + m / 10;
+                    const int nv = static_cast<int>(confusionGas_[i]) + add;
+                    confusionGas_[i] = static_cast<uint8_t>(clampi(nv, 0, 255));
+
+                    // Only message on strong reactions in view to avoid spam.
+                    if (m >= 10 && strongMixes < MAX_MIX_MSGS) {
+                        ++strongMixes;
+                        if (dung.inBounds(x, y) && dung.at(x, y).visible) mixVisible = true;
+                        if (p.pos.x == x && p.pos.y == y) playerMixed = true;
+                    }
+                }
+            }
+
+            if (strongMixes > 0 && (mixVisible || playerMixed)) {
+                pushMsg("CHEMICAL FUMES REACT!", MessageKind::Warning, playerMixed);
+            }
         }
+
     }
 
     // ------------------------------------------------------------
@@ -2891,6 +3629,57 @@ void Game::applyEndOfTurnEffects() {
         }
     }
 
+    // ------------------------------------------------------------
+    // Environmental fields: Corrosive Gas (persistent, tile-based)
+    //
+    // Corrosive vapors are stored as an intensity map (0..255). Entities standing
+    // in vapor have their corrosion duration "topped up" each turn.
+    // ------------------------------------------------------------
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
+
+        auto gasIdx = [&](int x, int y) -> size_t {
+            return static_cast<size_t>(y * dung.width + x);
+        };
+        auto gasAt = [&](int x, int y) -> uint8_t {
+            if (!dung.inBounds(x, y)) return 0u;
+            const size_t i = gasIdx(x, y);
+            if (i >= corrosiveGas_.size()) return 0u;
+            return corrosiveGas_[i];
+        };
+
+        auto applyGasTo = [&](Entity& e, bool isPlayer) {
+            const uint8_t g = gasAt(e.pos.x, e.pos.y);
+            if (g == 0u) return;
+
+            // Corrosive gas is slightly "heavier" than poison: shorter, sharper exposure.
+            int minTurns = 2 + static_cast<int>(g) / 3;
+            minTurns = clampi(minTurns, 2, 8);
+
+            const int before = e.effects.corrosionTurns;
+            if (before < minTurns) e.effects.corrosionTurns = minTurns;
+
+            // Message only on first exposure (avoids log spam while standing in vapor).
+            if (before == 0 && e.effects.corrosionTurns > 0) {
+                if (isPlayer) {
+                    pushMsg("ACRID VAPORS BURN YOUR SKIN!", MessageKind::Warning, true);
+                } else if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) {
+                    std::ostringstream ss;
+                    ss << kindName(e.kind) << " IS SPLASHED BY ACRID VAPORS!";
+                    pushMsg(ss.str(), MessageKind::Info, false);
+                }
+            }
+        };
+
+        applyGasTo(p, true);
+        for (auto& m : ents) {
+            if (m.id == playerId_) continue;
+            if (m.hp <= 0) continue;
+            applyGasTo(m, false);
+        }
+    }
+
 // ------------------------------------------------------------
     // Environmental fields: Fire (persistent, tile-based)
     //
@@ -2971,6 +3760,27 @@ void Game::applyEndOfTurnEffects() {
 
         if (p.effects.burnTurns == 0) {
             pushMsg(effectEndMessage(EffectKind::Burn), MessageKind::System, true);
+        }
+    }
+
+    // Corrosion: stinging damage over time + defense penalty while active.
+    if (p.effects.corrosionTurns > 0) {
+        p.effects.corrosionTurns = std::max(0, p.effects.corrosionTurns - 1);
+
+        // Corrosion is intentionally a little slower than poison/burn.
+        // We key the tick off turnCount so it's deterministic across save/load.
+        if ((turnCount & 1u) == 0u) {
+            p.hp -= 1;
+            if (p.hp <= 0) {
+                pushMsg("YOU ARE DISSOLVED BY CORROSIVE VAPORS.", MessageKind::Combat, false);
+                if (endCause_.empty()) endCause_ = "DISSOLVED BY CORROSIVE VAPORS";
+                gameOver = true;
+                return;
+            }
+        }
+
+        if (p.effects.corrosionTurns == 0) {
+            pushMsg(effectEndMessage(EffectKind::Corrosion), MessageKind::System, true);
         }
     }
 
@@ -3118,8 +3928,8 @@ void Game::applyEndOfTurnEffects() {
     }
 
     // Natural regeneration (slow baseline healing).
-    // Intentionally disabled while poisoned to keep poison meaningful.
-    if (p.effects.poisonTurns > 0 || p.effects.burnTurns > 0 || p.hp >= p.hpMax) {
+    // Intentionally disabled while taking sustained damage to keep DOT hazards meaningful.
+    if (p.effects.poisonTurns > 0 || p.effects.burnTurns > 0 || p.effects.corrosionTurns > 0 || p.hp >= p.hpMax) {
         naturalRegenCounter = 0;
     } else if (p.effects.regenTurns <= 0) {
         // Faster natural regen as you level.
@@ -3460,6 +4270,29 @@ void Game::applyEndOfTurnEffects() {
             }
         }
 
+        // Corrosion: stinging damage over time + defense penalty while active.
+        if (m.effects.corrosionTurns > 0) {
+            const bool vis = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+            m.effects.corrosionTurns = std::max(0, m.effects.corrosionTurns - 1);
+
+            // Corrosion ticks every other turn (slower than poison/burn).
+            if ((turnCount & 1u) == 0u) {
+                m.hp -= 1;
+            }
+
+            if (m.hp <= 0) {
+                if (vis) {
+                    std::ostringstream ss;
+                    ss << kindName(m.kind) << " DISSOLVES.";
+                    pushMsg(ss.str(), MessageKind::Combat, false);
+                }
+            } else if (m.effects.corrosionTurns == 0 && vis) {
+                std::ostringstream ss;
+                ss << kindName(m.kind) << " SHAKES OFF THE CORROSION.";
+                pushMsg(ss.str(), MessageKind::System, false);
+            }
+        }
+
         // Regeneration potion (or similar): heals 1 HP per turn while active.
         if (m.effects.regenTurns > 0) {
             m.effects.regenTurns = std::max(0, m.effects.regenTurns - 1);
@@ -3600,6 +4433,11 @@ void Game::applyEndOfTurnEffects() {
 
     // Update confusion gas cloud diffusion/decay.
     // This is a cheap per-turn diffusion on the small map grid.
+    //
+    // Substrate chemistry:
+    //  - Porous surfaces (moss/dirt/wood/bone) absorb fumes faster.
+    //  - Smooth sealed surfaces (metal/crystal/obsidian/marble) let vapor drift a bit farther.
+    //  - Chasms behave like open pits: heavy fumes tend to sink; light vapors disperse.
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
         if (expect > 0 && confusionGas_.size() != expect) {
@@ -3615,8 +4453,9 @@ void Game::applyEndOfTurnEffects() {
             auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
             auto passable = [&](int x, int y) -> bool {
                 if (!dung.inBounds(x, y)) return false;
-                // Keep gas on walkable tiles (floors, open doors, stairs).
-                return dung.isWalkable(x, y);
+                const TileType tt = dung.at(x, y).type;
+                // Vapor can drift over chasms (open pits) even though they are not walkable.
+                return dung.isWalkable(x, y) || (tt == TileType::Chasm);
             };
 
             constexpr Vec2i kDirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
@@ -3628,8 +4467,15 @@ void Game::applyEndOfTurnEffects() {
                     if (s == 0u) continue;
                     if (!passable(x, y)) continue;
 
+                    const TileType tt = dung.at(x, y).type;
+                    const TerrainMaterial mat = dung.materialAtCached(x, y);
+
+                    int decay = 1 + gasAbsorb(mat);
+                    // Light haze disperses quickly over open pits.
+                    if (tt == TileType::Chasm) decay += 1;
+
                     // Always decay in place.
-                    const uint8_t self = (s > 0u) ? static_cast<uint8_t>(s - 1u) : 0u;
+                    const uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
                     if (next[i] < self) next[i] = self;
 
                     // Spread to neighbors with extra decay.
@@ -3637,28 +4483,39 @@ void Game::applyEndOfTurnEffects() {
                     // Wind bias: downwind tiles get a slightly "stronger" spread, while upwind tiles
                     // dissipate a bit faster. This makes gas feel like it's drifting through corridors.
                     if (s >= 3u) {
-                        const uint8_t baseSpread = static_cast<uint8_t>(s - 2u);
+                        int base = static_cast<int>(s) - 2;
+                        base -= gasAbsorb(mat);
+                        base += gasSlick(mat); // smooth surfaces let vapor slide a little farther
+                        base = std::clamp(base, 0, static_cast<int>(s));
+
                         for (const Vec2i& d : kDirs) {
                             const int nx = x + d.x;
                             const int ny = y + d.y;
                             if (!passable(nx, ny)) continue;
 
-                            uint8_t spread = baseSpread;
+                            int spread = base;
+
                             if (windStr > 0) {
                                 if (d.x == wind.x && d.y == wind.y) {
-                                    int sp = static_cast<int>(baseSpread) + windStr;
-                                    if (sp > static_cast<int>(s)) sp = static_cast<int>(s);
-                                    spread = static_cast<uint8_t>(sp);
+                                    spread = std::min(static_cast<int>(s), spread + windStr);
                                 } else if (d.x == upWind.x && d.y == upWind.y) {
-                                    int sp = static_cast<int>(baseSpread) - windStr;
-                                    if (sp < 0) sp = 0;
-                                    spread = static_cast<uint8_t>(sp);
+                                    spread = std::max(0, spread - windStr);
                                 }
                             }
 
-                            if (spread == 0u) continue;
+                            const TileType nt = dung.at(nx, ny).type;
+
+                            // Light vapor prefers to "rise out" of chasms and resists sinking into them.
+                            if (nt == TileType::Chasm && tt != TileType::Chasm) {
+                                spread = std::max(0, spread - 2);
+                            } else if (tt == TileType::Chasm && nt != TileType::Chasm) {
+                                spread = std::min(static_cast<int>(s), spread + 2);
+                            }
+
+                            if (spread <= 0) continue;
                             const size_t j = idx2(nx, ny);
-                            if (next[j] < spread) next[j] = spread;
+                            const uint8_t su = static_cast<uint8_t>(std::clamp(spread, 0, 255));
+                            if (next[j] < su) next[j] = su;
                         }
                     }
                 }
@@ -3686,8 +4543,9 @@ void Game::applyEndOfTurnEffects() {
             auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
             auto passable = [&](int x, int y) -> bool {
                 if (!dung.inBounds(x, y)) return false;
-                // Keep gas on walkable tiles (floors, open doors, stairs).
-                return dung.isWalkable(x, y);
+                const TileType tt = dung.at(x, y).type;
+                // Heavy-ish gas can drift over open pits.
+                return dung.isWalkable(x, y) || (tt == TileType::Chasm);
             };
 
             constexpr Vec2i kDirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
@@ -3699,44 +4557,216 @@ void Game::applyEndOfTurnEffects() {
                     if (s == 0u) continue;
                     if (!passable(x, y)) continue;
 
+                    const TileType tt = dung.at(x, y).type;
+                    const TerrainMaterial mat = dung.materialAtCached(x, y);
+
+                    const int decay = 1 + gasAbsorb(mat);
+
                     // Always decay in place.
-                    const uint8_t self = (s > 0u) ? static_cast<uint8_t>(s - 1u) : 0u;
+                    const uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
                     if (next[i] < self) next[i] = self;
 
                     // Spread to neighbors with extra decay (more dissipative than confusion gas).
                     //
                     // Wind bias: poison gas stays localized, but still drifts downwind in corridors.
                     if (s >= 4u) {
-                        const uint8_t baseSpread = static_cast<uint8_t>(s - 3u);
+                        int base = static_cast<int>(s) - 3;
+                        base -= gasAbsorb(mat);
+                        base += gasSlick(mat); // sealed surfaces let fumes "slide" a bit
+                        base = std::clamp(base, 0, static_cast<int>(s));
+
                         for (const Vec2i& d : kDirs) {
                             const int nx = x + d.x;
                             const int ny = y + d.y;
                             if (!passable(nx, ny)) continue;
 
-                            uint8_t spread = baseSpread;
+                            int spread = base;
+
                             if (windStr > 0) {
                                 // Slightly weaker than confusion gas so poison doesn't become too "flowy".
                                 const int bonus = std::max(1, windStr - 1);
                                 if (d.x == wind.x && d.y == wind.y) {
-                                    int sp = static_cast<int>(baseSpread) + bonus;
-                                    if (sp > static_cast<int>(s)) sp = static_cast<int>(s);
-                                    spread = static_cast<uint8_t>(sp);
+                                    spread = std::min(static_cast<int>(s), spread + bonus);
                                 } else if (d.x == upWind.x && d.y == upWind.y) {
-                                    int sp = static_cast<int>(baseSpread) - bonus;
-                                    if (sp < 0) sp = 0;
-                                    spread = static_cast<uint8_t>(sp);
+                                    spread = std::max(0, spread - bonus);
                                 }
                             }
 
-                            if (spread == 0u) continue;
+                            const TileType nt = dung.at(nx, ny).type;
+
+                            // Poison vapors are heavier than haze: they tend to sink into pits and stay there.
+                            if (nt == TileType::Chasm && tt != TileType::Chasm) {
+                                spread = std::min(static_cast<int>(s), spread + 2);
+                            } else if (tt == TileType::Chasm && nt != TileType::Chasm) {
+                                spread = std::max(0, spread - 2);
+                            }
+
+                            if (spread <= 0) continue;
                             const size_t j = idx2(nx, ny);
-                            if (next[j] < spread) next[j] = spread;
+                            const uint8_t su = static_cast<uint8_t>(std::clamp(spread, 0, 255));
+                            if (next[j] < su) next[j] = su;
                         }
                     }
                 }
             }
 
             poisonGas_.swap(next);
+        }
+    }
+
+
+    // Update corrosive gas cloud diffusion/decay.
+    // Corrosive vapors are heavier and stay more localized than poison.
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (expect > 0 && corrosiveGas_.size() != expect) {
+            corrosiveGas_.assign(expect, 0u);
+        }
+
+        if (!corrosiveGas_.empty()) {
+            const int w = dung.width;
+            const int h = dung.height;
+            const size_t n = static_cast<size_t>(w * h);
+
+            std::vector<uint8_t> next(n, uint8_t{0});
+            auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
+            auto passable = [&](int x, int y) -> bool {
+                if (!dung.inBounds(x, y)) return false;
+                const TileType tt = dung.at(x, y).type;
+                // Acid fumes can drift over open pits.
+                return dung.isWalkable(x, y) || (tt == TileType::Chasm);
+            };
+
+            constexpr Vec2i kDirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const size_t i = idx2(x, y);
+                    const uint8_t s = corrosiveGas_[i];
+                    if (s == 0u) continue;
+                    if (!passable(x, y)) continue;
+
+                    const TileType tt = dung.at(x, y).type;
+                    const TerrainMaterial mat = dung.materialAtCached(x, y);
+
+                    const int decay = 1 + gasAbsorb(mat);
+
+                    // Always decay in place.
+                    const uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
+                    if (next[i] < self) next[i] = self;
+
+                    // Spread is more dissipative than poison gas.
+                    // Wind bias is weaker: this vapor tends to cling.
+                    if (s >= 5u) {
+                        int base = static_cast<int>(s) - 4;
+                        base -= gasAbsorb(mat);
+
+                        // Corrosive vapor is sticky on some substrates (it condenses rather than drifting).
+                        if (mat == TerrainMaterial::Metal || mat == TerrainMaterial::Obsidian || mat == TerrainMaterial::Basalt) {
+                            base -= 1;
+                        }
+
+                        base = std::clamp(base, 0, static_cast<int>(s));
+
+                        for (const Vec2i& d : kDirs) {
+                            const int nx = x + d.x;
+                            const int ny = y + d.y;
+                            if (!passable(nx, ny)) continue;
+
+                            int spread = base;
+
+                            if (windStr > 0) {
+                                const int bonus = std::max(0, windStr - 2);
+                                if (d.x == wind.x && d.y == wind.y) {
+                                    spread = std::min(static_cast<int>(s), spread + bonus);
+                                } else if (d.x == upWind.x && d.y == upWind.y) {
+                                    spread = std::max(0, spread - bonus);
+                                }
+                            }
+
+                            const TileType nt = dung.at(nx, ny).type;
+
+                            // Acid fumes are the heaviest: they strongly pool into pits.
+                            if (nt == TileType::Chasm && tt != TileType::Chasm) {
+                                spread = std::min(static_cast<int>(s), spread + 3);
+                            } else if (tt == TileType::Chasm && nt != TileType::Chasm) {
+                                spread = std::max(0, spread - 3);
+                            }
+
+                            if (spread <= 0) continue;
+                            const size_t j = idx2(nx, ny);
+                            const uint8_t su = static_cast<uint8_t>(std::clamp(spread, 0, 255));
+                            if (next[j] < su) next[j] = su;
+                        }
+                    }
+                }
+            }
+
+            corrosiveGas_.swap(next);
+        }
+    }
+
+
+    // ------------------------------------------------------------
+    // Field chemistry: vented laboratory doors leak fumes even while closed.
+    //
+    // This keeps gas hazards from being perfectly binary (sealed / not sealed)
+    // and creates interesting pressure build-up behind airtight airlocks.
+    // ------------------------------------------------------------
+    {
+        const int w = dung.width;
+        const int h = dung.height;
+        const size_t expect = static_cast<size_t>(w * h);
+
+        if (expect > 0 && poisonGas_.size() == expect && corrosiveGas_.size() == expect) {
+            auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
+
+            auto leakAcrossVentedDoors = [&](std::vector<uint8_t>& f, int minDiff, int div, int maxLeak) {
+                if (f.size() != expect) return;
+
+                std::vector<int16_t> delta(expect, 0);
+
+                for (int y = 0; y < h; ++y) {
+                    for (int x = 0; x < w; ++x) {
+                        const TileType tt = dung.at(x, y).type;
+                        if (tt != TileType::DoorClosed && tt != TileType::DoorLocked) continue;
+
+                        if (doorSealKindAt(x, y) != DoorSealKind::Vented) continue;
+
+                        Vec2i a{0, 0}, b{0, 0};
+                        if (!doorOpposingSides(dung, {x, y}, a, b)) continue;
+
+                        const size_t ia = idx2(a.x, a.y);
+                        const size_t ib = idx2(b.x, b.y);
+                        const int va = static_cast<int>(f[ia]);
+                        const int vb = static_cast<int>(f[ib]);
+                        const int diff = va - vb;
+                        const int ad = std::abs(diff);
+                        if (ad < minDiff) continue;
+
+                        int amt = ad / div;
+                        if (amt < 1) amt = 1;
+                        if (amt > maxLeak) amt = maxLeak;
+
+                        if (diff > 0) {
+                            delta[ia] -= static_cast<int16_t>(amt);
+                            delta[ib] += static_cast<int16_t>(amt);
+                        } else {
+                            delta[ib] -= static_cast<int16_t>(amt);
+                            delta[ia] += static_cast<int16_t>(amt);
+                        }
+                    }
+                }
+
+                for (size_t i = 0; i < expect; ++i) {
+                    const int nv = std::clamp(static_cast<int>(f[i]) + static_cast<int>(delta[i]), 0, 255);
+                    f[i] = static_cast<uint8_t>(nv);
+                }
+            };
+
+            // Poison vapor is lighter/more mobile than acid fumes.
+            leakAcrossVentedDoors(poisonGas_, 8, 24, 6);
+            leakAcrossVentedDoors(corrosiveGas_, 8, 26, 5);
         }
     }
 

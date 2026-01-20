@@ -8925,6 +8925,30 @@ SpritePixels generateEffectIcon(EffectKind kind, int frame, int pxSize) {
             setPx(s, 8, 8, Color{20, 20, 30, 255});
             break;
         }
+        case EffectKind::Corrosion: {
+            // Acid droplet + pitted metal motif.
+            Color c = pulse(Color{255, 235, 120, 255}, 18);
+            Color c2 = pulse(Color{200, 255, 140, 255}, 12);
+            Color dk{50, 35, 10, 255};
+
+            const int cx = 8 + wobX;
+            const int cy = 6 + wobY;
+
+            // Droplet (shimmering).
+            circle(s, cx, cy, 3, mul(c, 0.85f));
+            circle(s, cx, cy + 1, 3, c);
+            line(s, cx, cy + 3, cx, 13, c2);
+
+            // Pitted "holes" that animate by shifting a pixel.
+            const int ox = (frame == 1) ? 1 : 0;
+            setPx(s, 5 + ox, 11, dk);
+            setPx(s, 11 - ox, 12, dk);
+            setPx(s, 9, 10, dk);
+            // A small highlight on the droplet.
+            setPx(s, cx - 1, cy, add(c, 25, 25, 25));
+            setPx(s, cx, cy - 1, add(c2, 20, 20, 20));
+            break;
+        }
         default:
             break;
     }

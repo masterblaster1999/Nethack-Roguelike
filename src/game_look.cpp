@@ -637,6 +637,17 @@ if (!hallu) {
 
 ss << baseDesc;
 
+    // Lab door seal tags (visible doors only; avoids spoiling secret doors).
+    if (t.visible && (t.type == TileType::DoorClosed || t.type == TileType::DoorLocked || t.type == TileType::DoorOpen)) {
+        const DoorSealKind seal = doorSealKindAt(p.x, p.y);
+        if (seal == DoorSealKind::Airlock) {
+            ss << " | AIRLOCK";
+        } else if (seal == DoorSealKind::Vented) {
+            ss << " | VENTED";
+        }
+    }
+
+
     // Branch-aware stair destination hints.
     // This keeps look/inspect readable now that multiple branches can share the same numeric depth.
     if (t.type == TileType::StairsUp) {
@@ -675,6 +686,7 @@ ss << baseDesc;
             case TrapKind::TrapDoor: ss << "TRAP DOOR"; break;
             case TrapKind::LetheMist: ss << "LETHE MIST"; break;
             case TrapKind::PoisonGas: ss << "POISON GAS"; break;
+            case TrapKind::CorrosiveGas: ss << "CORROSIVE GAS"; break;
         }
         break;
     }
@@ -683,14 +695,21 @@ ss << baseDesc;
     if (t.visible) {
         const uint8_t cg = confusionGasAt(p.x, p.y);
         const uint8_t pg = poisonGasAt(p.x, p.y);
+        const uint8_t ag = corrosiveGasAt(p.x, p.y);
         const uint8_t ff = fireAt(p.x, p.y);
 
         if (cg > 0u) ss << " | CONFUSION GAS";
         if (pg > 0u) ss << " | POISON GAS";
+        if (ag > 0u) ss << " | CORROSIVE GAS";
         if (ff > 0u) ss << " | FIRE";
 
-        // Field chemistry hint: poison gas + fire can occasionally ignite into a flash-fire.
+        // Heavy fumes tend to pool in open pits (chasms).
+        if (t.type == TileType::Chasm && (pg > 0u || ag > 0u)) ss << " | FUMES SETTLE";
+
+        // Field chemistry hints: some hazard combinations can produce emergent reactions.
         if (pg > 0u && ff > 0u) ss << " | IGNITION RISK";
+        if (pg > 0u && ag > 0u) ss << " | REACTIVE FUMES";
+        if (ag > 0u && ff > 0u) ss << " | TOXIC SMOKE";
     }
 
     // Player map marker / note (persistent on this floor).

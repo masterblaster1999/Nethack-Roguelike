@@ -477,6 +477,13 @@ bool Game::openChestAtPlayer() {
                 emitNoise(pos, 8);
                 break;
             }
+            case TrapKind::CorrosiveGas: {
+                const int turns = rng.range(6, 10) + std::min(6, depth_ / 2);
+                p.effects.corrosionTurns = std::max(p.effects.corrosionTurns, turns);
+                pushMsg("A HISSING CLOUD OF ACRID VAPOR BURSTS FROM THE CHEST!", MessageKind::Warning, true);
+                emitNoise(pos, 8);
+                break;
+            }
             default:
                 break;
         }
@@ -1629,6 +1636,7 @@ bool Game::useSelected() {
                 if (dung.isDoorLocked(x, y)) {
                     dung.unlockDoor(x, y);
                     dung.openDoor(x, y);
+                    onDoorOpened({x, y}, true);
                     opened++;
                 }
             }

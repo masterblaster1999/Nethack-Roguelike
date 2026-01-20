@@ -902,6 +902,12 @@ int Game::playerDefense() const {
     def += ringDefenseBonus();
     // Temporary shielding buff
     if (player().effects.shieldTurns > 0) def += 2;
+
+    // Corrosion reduces effective protection (represents pitted armor / burned skin).
+    if (player().effects.corrosionTurns > 0) {
+        const int p = clampi(1 + player().effects.corrosionTurns / 4, 1, 3);
+        def -= p;
+    }
     return def;
 }
 
@@ -1654,6 +1660,7 @@ void Game::newGame(uint32_t seed) {
     engravings_.clear();
     confusionGas_.clear();
     poisonGas_.clear();
+    corrosiveGas_.clear();
     fireField_.clear();
     scentField_.clear();
     inv.clear();
@@ -2089,6 +2096,7 @@ void Game::storeCurrentLevel() {
     st.chestContainers = chestContainers_;
     st.confusionGas = confusionGas_;
     st.poisonGas = poisonGas_;
+    st.corrosiveGas = corrosiveGas_;
     st.fireField = fireField_;
     st.scentField = scentField_;
     st.monsters.clear();
@@ -2131,6 +2139,9 @@ bool Game::restoreLevel(LevelId id) {
 
     poisonGas_ = it->second.poisonGas;
     if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+
+    corrosiveGas_ = it->second.corrosiveGas;
+    if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
 
     fireField_ = it->second.fireField;
     if (fireField_.size() != expect) fireField_.assign(expect, 0u);
@@ -2185,6 +2196,9 @@ bool Game::restoreOverworldChunk(int x, int y) {
 
     poisonGas_ = it->second.poisonGas;
     if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+
+    corrosiveGas_ = it->second.corrosiveGas;
+    if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
 
     fireField_ = it->second.fireField;
     if (fireField_.size() != expect) fireField_.assign(expect, 0u);
@@ -2327,6 +2341,7 @@ bool Game::tryOverworldStep(int dx, int dy) {
         chestContainers_.clear();
         confusionGas_.clear();
         poisonGas_.clear();
+        corrosiveGas_.clear();
         fireField_.clear();
         scentField_.clear();
 
@@ -2342,6 +2357,7 @@ bool Game::tryOverworldStep(int dx, int dy) {
 
         confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        corrosiveGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
@@ -3201,6 +3217,7 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         chestContainers_.clear();
         confusionGas_.clear();
         poisonGas_.clear();
+        corrosiveGas_.clear();
         fireField_.clear();
         scentField_.clear();
 
@@ -3227,6 +3244,7 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
 
         confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        corrosiveGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
@@ -3710,6 +3728,8 @@ static void hashEffects(Hash64& hh, const Effects& ef) {
     hh.addI32(ef.burnTurns);
     hh.addI32(ef.levitationTurns);
     hh.addI32(ef.fearTurns);
+    hh.addI32(ef.hallucinationTurns);
+    hh.addI32(ef.corrosionTurns);
 }
 
 static void hashEntity(Hash64& hh, const Entity& e) {
@@ -3845,6 +3865,9 @@ static void hashLevelState(Hash64& hh, const LevelState& ls) {
     hh.addU32(static_cast<uint32_t>(ls.poisonGas.size()));
     for (uint8_t v : ls.poisonGas) hh.addU8(v);
 
+    hh.addU32(static_cast<uint32_t>(ls.corrosiveGas.size()));
+    for (uint8_t v : ls.corrosiveGas) hh.addU8(v);
+
     hh.addU32(static_cast<uint32_t>(ls.fireField.size()));
     for (uint8_t v : ls.fireField) hh.addU8(v);
 
@@ -3966,6 +3989,9 @@ uint64_t Game::determinismHash() const {
 
     hh.addU32(static_cast<uint32_t>(poisonGas_.size()));
     for (uint8_t v : poisonGas_) hh.addU8(v);
+
+    hh.addU32(static_cast<uint32_t>(corrosiveGas_.size()));
+    for (uint8_t v : corrosiveGas_) hh.addU8(v);
 
     hh.addU32(static_cast<uint32_t>(fireField_.size()));
     for (uint8_t v : fireField_) hh.addU8(v);

@@ -5977,6 +5977,87 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
     }
 
 
+    // Draw corrosive gas (visible tiles only). This is a persistent, tile-based hazard
+    // spawned by Corrosive Gas traps.
+    {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+        const bool haveGasTex = isoView ? (gasVarIso[0][0] != nullptr) : (gasVar[0][0] != nullptr);
+
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                const Tile& t = d.at(x, y);
+                if (!t.visible) continue;
+
+                const uint8_t g = game.corrosiveGasAt(x, y);
+                if (g == 0u) continue;
+
+                const uint8_t m = lightMod(x, y);
+
+                // Slightly stronger minimum alpha so it reads clearly.
+                int a = 86 + static_cast<int>(g) * 14;
+                a = (a * static_cast<int>(m)) / 255;
+                a = std::max(40, std::min(240, a));
+
+                // Subtle shimmer (deterministic per tile/frame).
+                a = std::max(40, std::min(250, a + (static_cast<int>((frame + x * 7 + y * 13) % 9) - 4)));
+
+                SDL_Rect r = tileDst(x, y);
+
+                if (haveGasTex) {
+                    const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
+                                                   static_cast<uint32_t>(y)) ^ 0xA51Du;
+                    const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(GAS_VARS));
+
+                    const FrameBlend fb = sampleFrameBlend(210u, h ^ 0xAC1D1C0u);
+                    const uint8_t w1 = fb.w1;
+                    const uint8_t w0 = static_cast<uint8_t>(255u - w1);
+
+                    const bool useIso = isoView && (gasVarIso[0][0] != nullptr);
+                    const auto* gset = useIso ? &gasVarIso : &gasVar;
+
+                    SDL_Texture* g0 = (*gset)[vi][static_cast<size_t>(fb.f0)];
+                    SDL_Texture* g1 = (*gset)[vi][static_cast<size_t>(fb.f1)];
+
+                    if (g0 || g1) {
+                        // Multiply a "signature" yellow-green by the tile lighting/tint.
+                        const Color lmod = tileColorMod(x, y, /*visible=*/true);
+                        const Color base{255, 235, 120, 255};
+
+                        const uint8_t mr = static_cast<uint8_t>((static_cast<int>(base.r) * lmod.r) / 255);
+                        const uint8_t mg = static_cast<uint8_t>((static_cast<int>(base.g) * lmod.g) / 255);
+                        const uint8_t mb = static_cast<uint8_t>((static_cast<int>(base.b) * lmod.b) / 255);
+
+                        auto drawOne = [&](SDL_Texture* tex, uint8_t alpha) {
+                            if (!tex || alpha == 0u) return;
+                            SDL_SetTextureColorMod(tex, mr, mg, mb);
+                            SDL_SetTextureAlphaMod(tex, alpha);
+                            SDL_RenderCopy(renderer, tex, nullptr, &r);
+                            SDL_SetTextureColorMod(tex, 255, 255, 255);
+                            SDL_SetTextureAlphaMod(tex, 255);
+                        };
+
+                        const int a0i = (a * static_cast<int>(w0)) / 255;
+                        const int a1i = (a * static_cast<int>(w1)) / 255;
+                        const uint8_t a0 = static_cast<uint8_t>(std::clamp(a0i, 0, 255));
+                        const uint8_t a1 = static_cast<uint8_t>(std::clamp(a1i, 0, 255));
+
+                        drawOne(g0, a0);
+                        drawOne(g1, a1);
+                        continue;
+                    }
+                }
+
+                // Fallback: simple tinted quad.
+                SDL_SetRenderDrawColor(renderer, 220, 200, 90, static_cast<uint8_t>(a));
+                SDL_RenderFillRect(renderer, &r);
+            }
+        }
+
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    }
+
+
     // Draw fire field (visible tiles only). This is a persistent, tile-based hazard
     // spawned primarily by Fireball explosions.
     {
@@ -6076,6 +6157,7 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
             case TrapKind::Web:       r = 140; g = 180; b = 255; break;
             case TrapKind::ConfusionGas: r = 200; g = 120; b = 255; break;
             case TrapKind::PoisonGas: r = 90; g = 220; b = 90; break;
+            case TrapKind::CorrosiveGas: r = 220; g = 200; b = 90; break;
             case TrapKind::RollingBoulder: r = 200; g = 170; b = 90; break;
             case TrapKind::TrapDoor: r = 180; g = 130; b = 90; break;
             case TrapKind::LetheMist: r = 160; g = 160; b = 210; break;
@@ -8965,6 +9047,7 @@ void Renderer::drawMinimapOverlay(const Game& game) {
             case TrapKind::TrapDoor:       r = 150; g = 150; b = 150; break;
             case TrapKind::LetheMist:      r = 140; g = 255; b = 255; break;
             case TrapKind::PoisonGas:      r = 90;  g = 220; b = 90;  break;
+            case TrapKind::CorrosiveGas:   r = 220; g = 200; b = 90;  break;
             default: break;
         }
 

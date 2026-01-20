@@ -905,6 +905,9 @@ enum class TrapKind : uint8_t {
 
     // Persistent hazard cloud (append-only)
     PoisonGas,
+
+    // Persistent hazard cloud (append-only)
+    CorrosiveGas,
 };
 
 struct Trap {
@@ -1134,6 +1137,9 @@ struct LevelState {
     // Persistent toxic vapor / poison gas field.
     std::vector<uint8_t> poisonGas;
 
+    // Persistent corrosive vapor / acid mist field.
+    std::vector<uint8_t> corrosiveGas;
+
 
     // Persistent flames / embers left behind by explosions and other fire sources.
     std::vector<uint8_t> fireField;
@@ -1264,6 +1270,10 @@ public:
     // Persistent poison gas on the current level (0..255 intensity).
     // 0 means no gas. Only meaningful on in-bounds tiles.
     uint8_t poisonGasAt(int x, int y) const;
+
+    // Persistent corrosive vapor on the current level (0..255 intensity).
+    // 0 means no vapor. Only meaningful on in-bounds tiles.
+    uint8_t corrosiveGasAt(int x, int y) const;
 
 
     // Persistent fire field on the current level (0..255 intensity).
@@ -2008,6 +2018,7 @@ private:
     // Stored as per-tile intensities (0..255).
     std::vector<uint8_t> confusionGas_;
     std::vector<uint8_t> poisonGas_;
+    std::vector<uint8_t> corrosiveGas_;
     std::vector<uint8_t> fireField_;
     std::vector<uint8_t> scentField_;
 
@@ -2519,6 +2530,7 @@ private:
     void spawnMonsters();
     void spawnItems();
     void spawnTraps();
+    void spawnChemicalHazards();
     void spawnFountains();
     void spawnAltars();
 
@@ -2601,6 +2613,27 @@ private:
     // (walls/secret doors block; doors muffle) so noise doesn't "teleport"
     // through solid rock.
     void emitNoise(Vec2i pos, int volume);
+
+    // ------------------------------------------------------------
+    // Lab doors can have procedurally generated seals.
+    //
+    // This is used by field-chemistry hazards:
+    // - Vented doors slowly leak gas even when closed.
+    // - Airlock doors stay sealed when closed, but produce a stronger
+    //   pressure "puff" when opened.
+    //
+    // The seal kind is deterministic per level/door tile and is NOT
+    // serialized; it is derived from the level seed + position.
+    // ------------------------------------------------------------
+    enum class DoorSealKind : uint8_t {
+        Normal = 0,
+        Vented,
+        Airlock,
+    };
+
+    DoorSealKind doorSealKindAt(int x, int y) const;
+    void onDoorOpened(Vec2i doorPos, bool openerIsPlayer);
+
     void applyEndOfTurnEffects();
     void updateScentMap();
     Vec2i randomFreeTileInRoom(const Room& r, int tries = 200);

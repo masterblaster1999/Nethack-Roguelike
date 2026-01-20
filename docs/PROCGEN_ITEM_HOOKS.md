@@ -44,3 +44,4 @@ These glyphs let prefabs express small, deterministic micro-puzzles (e.g., a rea
 
 - New prefabs can add additional glyphs if desired.
 - Non-prefab procgen passes can directly push `BonusItemSpawn` requests for deterministic rewards in procedurally carved spaces.
+- Annex key-gate micro-dungeons (Round 92) use this hook to place a key inside the annex when an internal locked gate is generated.

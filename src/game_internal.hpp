@@ -2335,6 +2335,28 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             game.pushSystemMessage(ss.str());
         }
 
+        // RoomsGraph ("ruins") generator debug stats (Poisson placement + Delaunay graph).
+        // Only shown when this floor actually used the rooms-graph generator.
+        if (d.roomsGraphPoissonPointCount > 0 || d.roomsGraphDelaunayEdgeCount > 0) {
+            std::ostringstream ss;
+            ss << "RUINSGEN";
+            ss << " | POISSON " << d.roomsGraphPoissonPointCount;
+            ss << " | PLACED " << d.roomsGraphPoissonRoomCount;
+            if (d.roomsGraphDelaunayEdgeCount > 0) ss << " | DT " << d.roomsGraphDelaunayEdgeCount;
+            if (d.roomsGraphLoopEdgeCount > 0) ss << " | LOOPS " << d.roomsGraphLoopEdgeCount;
+            game.pushSystemMessage(ss.str());
+        }
+
+        // Cavern generator debug stats: metaballs variant telemetry.
+        // Only shown when this floor actually used metaballs.
+        if (d.cavernMetaballsUsed) {
+            std::ostringstream ss;
+            ss << "CAVERNGEN";
+            ss << " | METABALLS " << d.cavernMetaballBlobCount;
+            if (d.cavernMetaballKeptTiles > 0) ss << " | KEPT " << d.cavernMetaballKeptTiles;
+            game.pushSystemMessage(ss.str());
+        }
+
         {
             int treasure = 0;
             int lair = 0;
@@ -2615,6 +2637,19 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
                 ss << " | CHASM " << d.riftCacheChasmCount;
             } else {
                 ss << "POCKET CACHES 0";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            if (d.annexCount > 0 || d.annexKeyGateCount > 0 || d.annexWfcCount > 0 || d.annexFractalCount > 0) {
+                ss << "ANNEXES " << d.annexCount;
+                if (d.annexKeyGateCount > 0) ss << " | KEYGATES " << d.annexKeyGateCount;
+                if (d.annexWfcCount > 0) ss << " | WFC " << d.annexWfcCount;
+                if (d.annexFractalCount > 0) ss << " | FRACTAL " << d.annexFractalCount;
+            } else {
+                ss << "ANNEXES 0";
             }
             game.pushSystemMessage(ss.str());
         }

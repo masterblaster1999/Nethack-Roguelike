@@ -3461,6 +3461,11 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
             }
         }
 
+        // Cavern hint: metaballs caverns have a smoother, organic silhouette (implicit surface).
+        if (goingDown && dung.cavernMetaballsUsed) {
+            pushMsg("THE CAVERN WALLS CURVE AS IF MOLDED FROM LIQUID STONE.", MessageKind::System, true);
+        }
+
         // Special floor callout: the procedural mines floors are about winding tunnels,
         // loops, and small chambers (less "architected" than BSP rooms).
         if (goingDown && (depth_ == Dungeon::MINES_DEPTH || depth_ == Dungeon::DEEP_MINES_DEPTH)) {
@@ -3513,6 +3518,20 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         // Hint: annex micro-dungeons are optional side areas behind (usually) hidden doors.
         if (goingDown && dung.annexCount > 0) {
             pushMsg("YOU HEAR A HOLLOW ECHO BEHIND THE STONE.", MessageKind::System, true);
+        }
+
+        // Hint: fractal annexes feel like branching roots/coral tunnels.
+        if (goingDown && dung.annexFractalCount > 0) {
+            pushMsg("YOU HEAR A THOUSAND BRANCHING ECHOES UNDERFOOT.", MessageKind::System, true);
+        }
+
+        // Hint: WFC annexes have a distinct "manufactured" / shifting-lattice feel.
+        if (goingDown && dung.annexWfcCount > 0) {
+            pushMsg("THE STONE SEEMS TO REARRANGE ITSELF IN STRANGE PATTERNS.", MessageKind::System, true);
+        }
+
+        if (goingDown && dung.annexKeyGateCount > 0) {
+            pushMsg("YOU HEAR THE CLICK OF A LOCK DEEP WITHIN.", MessageKind::System, true);
         }
 
         // Special floor callout: the Sokoban puzzle floor teaches/spotlights the

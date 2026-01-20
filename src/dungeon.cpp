@@ -69,6 +69,9 @@ void fillWalls(Dungeon& d) {
     d.corridorBraidCount = 0;
     d.deadEndClosetCount = 0;
     d.annexCount = 0;
+    d.annexKeyGateCount = 0;
+    d.annexWfcCount = 0;
+    d.annexFractalCount = 0;
     d.stairsBypassLoopCount = 0;
     d.stairsBridgeCount = 0;
     d.stairsRedundancyOk = false;
@@ -79,6 +82,12 @@ void fillWalls(Dungeon& d) {
     d.genPickChosenIndex = 0;
     d.genPickScore = 0;
     d.genPickSeed = 0;
+
+    d.roomsGraphPoissonPointCount = 0;
+    d.roomsGraphPoissonRoomCount = 0;
+    d.roomsGraphDelaunayEdgeCount = 0;
+    d.roomsGraphLoopEdgeCount = 0;
+
     d.biomeZoneCount = 0;
     d.biomePillarZoneCount = 0;
     d.biomeRubbleZoneCount = 0;
@@ -9012,6 +9021,10 @@ enum class AnnexStyle : uint8_t {
     MiniCavern = 1,
     // New: a tiny packed-room + corridors annex style (mini "ruins" dungeon).
     MiniRuins = 2,
+    // New: a constraint-driven annex style (WFC on a coarse connectivity lattice).
+    MiniWfc = 3,
+    // New: a stochastic fractal annex style (L-system / turtle branching).
+    MiniFractal = 4,
 };
 
 struct AnnexGrid {
@@ -9065,6 +9078,292 @@ static Vec2i annexFarthestFloor(const AnnexGrid& g, Vec2i start) {
     }
 
     return best;
+}
+
+struct AnnexKeyGatePlan {
+    Vec2i gate{ -1, -1 };   // tile that becomes an internal locked door
+    Vec2i key{ -1, -1 };    // key spawn position (entry-side)
+    Vec2i loot{ -1, -1 };   // chest spawn position (gated side)
+    int gatedComponentSize = 0;
+};
+
+// Plan a small internal lock-and-key micro-puzzle inside an annex.
+//
+// We look for an *articulation point* (cut-vertex) in the annex walk graph
+// such that locking that tile splits the annex into:
+//   - an entry-side region containing the entrance
+//   - a gated region big enough to feel meaningful
+//
+// We then place:
+//   - a locked door at the articulation tile
+//   - a key somewhere in the entry-side region
+//   - the annex chest reward in the gated region
+//
+// This is fully optional content: annexes never gate stairs traversal.
+static bool annexPlanKeyGate(const AnnexGrid& g, RNG& rng, Vec2i entry, AnnexKeyGatePlan& out) {
+    out = {};
+    const int W = g.w;
+    const int H = g.h;
+    if (W <= 0 || H <= 0) return false;
+    if (!g.inBounds(entry.x, entry.y)) return false;
+    if (g.at(entry.x, entry.y) == 0u) return false;
+
+    auto idx = [&](int x, int y) -> int { return y * W + x; };
+
+    auto passable = [&](int x, int y) -> bool {
+        return g.inBounds(x, y) && g.at(x, y) != 0u;
+    };
+
+    auto selectable = [&](int x, int y) -> bool {
+        // Avoid picking internal door markers as key/loot anchors.
+        return g.inBounds(x, y) && g.at(x, y) == 1u;
+    };
+
+    static const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    // Distance map from entry (treat any non-wall cell as passable).
+    std::vector<int> dist0(static_cast<size_t>(W * H), -1);
+    {
+        std::deque<Vec2i> q;
+        q.push_back(entry);
+        dist0[static_cast<size_t>(idx(entry.x, entry.y))] = 0;
+
+        while (!q.empty()) {
+            const Vec2i p = q.front();
+            q.pop_front();
+            const int d0 = dist0[static_cast<size_t>(idx(p.x, p.y))];
+
+            for (const auto& dv : dirs) {
+                const int nx = p.x + dv[0];
+                const int ny = p.y + dv[1];
+                if (!passable(nx, ny)) continue;
+                const int ii = idx(nx, ny);
+                if (dist0[static_cast<size_t>(ii)] >= 0) continue;
+                dist0[static_cast<size_t>(ii)] = d0 + 1;
+                q.push_back({nx, ny});
+            }
+        }
+    }
+
+    // Compute a rough size + farthest distance so we can clamp gate placement.
+    int reachable = 0;
+    int maxD = 0;
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const int ii = idx(x, y);
+            const int d0 = dist0[static_cast<size_t>(ii)];
+            if (d0 < 0) continue;
+            reachable += 1;
+            if (d0 > maxD) maxD = d0;
+        }
+    }
+
+    // Too small / too trivial: skip.
+    if (reachable < 60 || maxD < 14) return false;
+
+    // --- Articulation points (Tarjan) on the reachable subgraph ---
+    std::vector<int> disc(static_cast<size_t>(W * H), -1);
+    std::vector<int> low(static_cast<size_t>(W * H), -1);
+    std::vector<int> parent(static_cast<size_t>(W * H), -1);
+    std::vector<uint8_t> art(static_cast<size_t>(W * H), 0u);
+
+    int time = 0;
+
+    std::function<void(int)> dfs = [&](int v) {
+        disc[static_cast<size_t>(v)] = low[static_cast<size_t>(v)] = ++time;
+        const int vx = v % W;
+        const int vy = v / W;
+
+        int children = 0;
+        for (const auto& dv : dirs) {
+            const int nx = vx + dv[0];
+            const int ny = vy + dv[1];
+            if (!passable(nx, ny)) continue;
+            const int u = idx(nx, ny);
+            if (dist0[static_cast<size_t>(u)] < 0) continue; // unreachable
+
+            if (disc[static_cast<size_t>(u)] < 0) {
+                parent[static_cast<size_t>(u)] = v;
+                children += 1;
+                dfs(u);
+                low[static_cast<size_t>(v)] = std::min(low[static_cast<size_t>(v)], low[static_cast<size_t>(u)]);
+
+                if (parent[static_cast<size_t>(v)] < 0 && children > 1) art[static_cast<size_t>(v)] = 1u;
+                if (parent[static_cast<size_t>(v)] >= 0 && low[static_cast<size_t>(u)] >= disc[static_cast<size_t>(v)]) art[static_cast<size_t>(v)] = 1u;
+            } else if (u != parent[static_cast<size_t>(v)]) {
+                low[static_cast<size_t>(v)] = std::min(low[static_cast<size_t>(v)], disc[static_cast<size_t>(u)]);
+            }
+        }
+    };
+
+    dfs(idx(entry.x, entry.y));
+
+    // BFS helper: build a distance map from entry while treating one tile as blocked.
+    auto bfsExcluding = [&](int blockIdx, std::vector<int>& outDist) {
+        outDist.assign(static_cast<size_t>(W * H), -1);
+        if (blockIdx == idx(entry.x, entry.y)) return;
+
+        std::deque<Vec2i> q;
+        q.push_back(entry);
+        outDist[static_cast<size_t>(idx(entry.x, entry.y))] = 0;
+
+        while (!q.empty()) {
+            const Vec2i p = q.front();
+            q.pop_front();
+            const int d0 = outDist[static_cast<size_t>(idx(p.x, p.y))];
+
+            for (const auto& dv : dirs) {
+                const int nx = p.x + dv[0];
+                const int ny = p.y + dv[1];
+                if (!passable(nx, ny)) continue;
+                const int ii = idx(nx, ny);
+                if (ii == blockIdx) continue;
+                if (outDist[static_cast<size_t>(ii)] >= 0) continue;
+                outDist[static_cast<size_t>(ii)] = d0 + 1;
+                q.push_back({nx, ny});
+            }
+        }
+    };
+
+    // Candidate search.
+    AnnexKeyGatePlan best;
+    int bestScore = -1;
+
+    const int entryIdx = idx(entry.x, entry.y);
+
+    for (int y = 1; y < H - 1; ++y) {
+        for (int x = 1; x < W - 1; ++x) {
+            const int gateIdx = idx(x, y);
+            if (gateIdx == entryIdx) continue;
+            if (art[static_cast<size_t>(gateIdx)] == 0u) continue;
+            if (!selectable(x, y)) continue;
+
+            const int gateDist = dist0[static_cast<size_t>(gateIdx)];
+            if (gateDist < 8) continue;
+            if (gateDist > maxD - 6) continue;
+
+            // Prefer corridor-ish tiles: degree 2 is ideal; degree 3 acceptable.
+            int deg = 0;
+            for (const auto& dv : dirs) {
+                const int nx = x + dv[0];
+                const int ny = y + dv[1];
+                if (passable(nx, ny)) deg += 1;
+            }
+            if (deg < 2 || deg > 3) continue;
+
+            // Compute the entry-side component if the gate were blocked.
+            std::vector<int> distA;
+            bfsExcluding(gateIdx, distA);
+            if (distA[static_cast<size_t>(entryIdx)] < 0) continue;
+
+            // Pick a key location in the entry-side component.
+            Vec2i key{-1, -1};
+            int keyD = -1;
+            for (int yy = 1; yy < H - 1; ++yy) {
+                for (int xx = 1; xx < W - 1; ++xx) {
+                    const int ii = idx(xx, yy);
+                    const int d0 = distA[static_cast<size_t>(ii)];
+                    if (d0 < 0) continue;
+                    if (!selectable(xx, yy)) continue;
+                    if (d0 < 4) continue;
+                    if (std::abs(xx - x) + std::abs(yy - y) < 2) continue;
+                    if (d0 > keyD) {
+                        keyD = d0;
+                        key = {xx, yy};
+                    }
+                }
+            }
+            if (keyD < 0) continue;
+
+            // Explore gated-side components (neighbors not reachable from entry without the gate).
+            std::vector<uint8_t> seen(static_cast<size_t>(W * H), 0u);
+            int bestComp = 0;
+            int bestLootD = -1;
+            Vec2i bestLoot{-1, -1};
+
+            for (const auto& dv : dirs) {
+                const int sx = x + dv[0];
+                const int sy = y + dv[1];
+                if (!passable(sx, sy)) continue;
+                const int si = idx(sx, sy);
+                if (si == gateIdx) continue;
+                if (distA[static_cast<size_t>(si)] >= 0) continue; // entry-side
+                if (seen[static_cast<size_t>(si)] != 0u) continue;
+
+                int compSize = 0;
+                int lootD = -1;
+                Vec2i loot{-1, -1};
+
+                std::deque<Vec2i> q;
+                q.push_back({sx, sy});
+                seen[static_cast<size_t>(si)] = 1u;
+
+                while (!q.empty()) {
+                    const Vec2i p = q.front();
+                    q.pop_front();
+
+                    const int pi = idx(p.x, p.y);
+                    compSize += 1;
+
+                    // Choose loot anchor by deepest original distance from entry.
+                    const int dOrig = dist0[static_cast<size_t>(pi)];
+                    if (dOrig >= 0 && selectable(p.x, p.y) && dOrig > lootD) {
+                        lootD = dOrig;
+                        loot = p;
+                    }
+
+                    for (const auto& dv2 : dirs) {
+                        const int nx = p.x + dv2[0];
+                        const int ny = p.y + dv2[1];
+                        if (!passable(nx, ny)) continue;
+                        const int ni = idx(nx, ny);
+                        if (ni == gateIdx) continue;
+                        if (distA[static_cast<size_t>(ni)] >= 0) continue; // don't cross into entry-side
+                        if (seen[static_cast<size_t>(ni)] != 0u) continue;
+                        seen[static_cast<size_t>(ni)] = 1u;
+                        q.push_back({nx, ny});
+                    }
+                }
+
+                // Require a meaningful gated region.
+                if (compSize < 18) continue;
+                if (lootD < 0) continue;
+
+                if (compSize > bestComp || (compSize == bestComp && lootD > bestLootD)) {
+                    bestComp = compSize;
+                    bestLootD = lootD;
+                    bestLoot = loot;
+                }
+            }
+
+            if (bestComp <= 0 || bestLootD < 0) continue;
+
+            // Candidate score.
+            int score = bestComp * 120 + bestLootD * 14 + gateDist * 6;
+            if (deg == 3) score -= 180; // prefer corridor chokepoints
+            // Deterministic jitter to avoid always picking the same gate on symmetric grids.
+            score += ((x * 17 + y * 31) & 7);
+
+            // Slight randomness among close candidates.
+            score += static_cast<int>(rng.range(0, 3));
+
+            if (score > bestScore) {
+                bestScore = score;
+                best.gate = {x, y};
+                best.key = key;
+                best.loot = bestLoot;
+                best.gatedComponentSize = bestComp;
+            }
+        }
+    }
+
+    if (bestScore < 0) return false;
+    if (!g.inBounds(best.gate.x, best.gate.y)) return false;
+    if (!g.inBounds(best.key.x, best.key.y)) return false;
+    if (!g.inBounds(best.loot.x, best.loot.y)) return false;
+
+    out = best;
+    return true;
 }
 
 static bool annexGenPerfectMaze(AnnexGrid& g, RNG& rng, Vec2i entry) {
@@ -9162,6 +9461,640 @@ static bool annexGenPerfectMaze(AnnexGrid& g, RNG& rng, Vec2i entry) {
     }
 
     return true;
+}
+
+
+// ------------------------------------------------------------
+// Annex fractal layout (stochastic L-system / turtle branching)
+//
+// This annex style generates a compact, highly-branching pocket-dungeon by
+// interpreting a small stochastic L-system (classic turtle + stack grammar)
+// onto the annex grid. Compared to the perfect maze and CA cavern styles,
+// this produces a readable "coral" of corridors with lots of micro-choices
+// and a strong sense of local structure without needing room rectangles.
+// ------------------------------------------------------------
+
+static bool annexGenFractalAnnex(AnnexGrid& g, RNG& rng, Vec2i entry, int depth) {
+    if (g.w < 13 || g.h < 13) return false;
+
+    // Start with walls; carve only within the interior ring so the annex
+    // always has a solid boundary.
+    std::fill(g.cell.begin(), g.cell.end(), uint8_t{0});
+
+    if (!g.inBounds(entry.x, entry.y)) return false;
+
+    // Direction encoding: 0=E,1=S,2=W,3=N.
+    const Vec2i dirs[4] = {{1,0},{0,1},{-1,0},{0,-1}};
+
+    auto inInterior = [&](int x, int y) -> bool {
+        return x > 0 && y > 0 && x < g.w - 1 && y < g.h - 1;
+    };
+
+    auto carve = [&](int x, int y) {
+        if (!inInterior(x, y)) return;
+        g.at(x, y) = 1u;
+    };
+
+    // Guess the initial heading based on where the entry tile sits near the pocket border.
+    int dir = 0;
+    if (entry.x <= 1) dir = 0;
+    else if (entry.x >= g.w - 2) dir = 2;
+    else if (entry.y <= 1) dir = 1;
+    else if (entry.y >= g.h - 2) dir = 3;
+    else dir = rng.range(0, 3);
+
+    // Build a small stochastic L-system string.
+    // Grammar:
+    //   F: step forward + carve
+    //   +: turn right 90
+    //   -: turn left 90
+    //   [: push turtle state
+    //   ]: pop turtle state
+    int iters = 3;
+    if (depth >= 6 && rng.chance(0.55f)) iters = 4;
+
+    const size_t maxLen = 9000;
+    std::string s = "F";
+    for (int it = 0; it < iters; ++it) {
+        std::string out;
+        out.reserve(std::min(maxLen, s.size() * 6));
+        for (char c : s) {
+            if (c == 'F') {
+                const int r = rng.range(0, 99);
+                // Bias toward the classic branching rule, with a few simpler variants
+                // to keep density under control on small pockets.
+                if (r < 42) {
+                    out += "F[+F]F[-F]F";
+                } else if (r < 66) {
+                    out += "F[+F]FF";
+                } else if (r < 90) {
+                    out += "F[-F]FF";
+                } else {
+                    out += "FF";
+                }
+            } else {
+                out.push_back(c);
+            }
+            if (out.size() >= maxLen) break;
+        }
+        s.swap(out);
+        if (s.size() >= maxLen) break;
+    }
+
+    struct TurtleState { Vec2i pos; int dir = 0; };
+    std::vector<TurtleState> st;
+    st.reserve(64);
+
+    Vec2i pos = entry;
+    carve(pos.x, pos.y);
+
+    // Interpret the L-system into carved corridors.
+    const int maxSteps = std::max(200, (g.w * g.h) * 6);
+    int steps = 0;
+
+    for (char c : s) {
+        if (steps >= maxSteps) break;
+
+        switch (c) {
+            case 'F': {
+                // Attempt a forward step; if it would exit the interior ring,
+                // rotate a bit and retry to keep the pattern inside bounds.
+                for (int k = 0; k < 4; ++k) {
+                    const Vec2i np{pos.x + dirs[dir].x, pos.y + dirs[dir].y};
+                    if (inInterior(np.x, np.y)) {
+                        pos = np;
+                        carve(pos.x, pos.y);
+
+                        // Occasional thickening to avoid an overly 1-tile "wire" look.
+                        if (depth >= 4 && rng.chance(0.12f)) {
+                            const int side = (dir + (rng.chance(0.5f) ? 1 : 3)) & 3;
+                            const Vec2i sp{pos.x + dirs[side].x, pos.y + dirs[side].y};
+                            carve(sp.x, sp.y);
+                        }
+                        break;
+                    }
+                    dir = (dir + (rng.chance(0.5f) ? 1 : 3)) & 3;
+                }
+                steps += 1;
+            } break;
+            case '+': dir = (dir + 1) & 3; break;
+            case '-': dir = (dir + 3) & 3; break;
+            case '[': {
+                if (st.size() < 256) st.push_back({pos, dir});
+            } break;
+            case ']': {
+                if (!st.empty()) {
+                    TurtleState t = st.back();
+                    st.pop_back();
+                    pos = t.pos;
+                    dir = t.dir;
+                }
+            } break;
+            default: break;
+        }
+    }
+
+    // Ensure the entry area is open so the annex doesn't feel immediately cramped.
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            carve(entry.x + dx, entry.y + dy);
+        }
+    }
+
+    // Compute degree on carved tiles (4-neighborhood).
+    auto isFloor = [&](int x, int y) -> bool {
+        return g.inBounds(x, y) && g.at(x, y) != 0u;
+    };
+
+    auto deg4 = [&](int x, int y) -> int {
+        int c = 0;
+        c += isFloor(x + 1, y) ? 1 : 0;
+        c += isFloor(x - 1, y) ? 1 : 0;
+        c += isFloor(x, y + 1) ? 1 : 0;
+        c += isFloor(x, y - 1) ? 1 : 0;
+        return c;
+    };
+
+    // Inflate some junctions into tiny chambers.
+    float pChamber = 0.18f + 0.02f * static_cast<float>(std::clamp(depth - 4, 0, 12));
+    pChamber = std::clamp(pChamber, 0.16f, 0.45f);
+
+    int chambers = 0;
+    const int chamberCap = std::clamp((g.w * g.h) / 45, 3, 10);
+
+    for (int y = 2; y < g.h - 2; ++y) {
+        for (int x = 2; x < g.w - 2; ++x) {
+            if (g.at(x, y) == 0u) continue;
+            if (deg4(x, y) < 3) continue;
+            if (!rng.chance(pChamber)) continue;
+
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    carve(x + dx, y + dy);
+                }
+            }
+
+            chambers += 1;
+            if (chambers >= chamberCap) break;
+        }
+        if (chambers >= chamberCap) break;
+    }
+
+    // Bud a few alcoves off dead-ends so tip exploration is rewarding.
+    float pAlcove = 0.26f + 0.02f * static_cast<float>(std::clamp(depth - 3, 0, 12));
+    pAlcove = std::clamp(pAlcove, 0.22f, 0.52f);
+
+    for (int y = 2; y < g.h - 2; ++y) {
+        for (int x = 2; x < g.w - 2; ++x) {
+            if (g.at(x, y) == 0u) continue;
+            if (deg4(x, y) != 1) continue;
+            if (!rng.chance(pAlcove)) continue;
+
+            // Find the single neighbor and extend away from it.
+            Vec2i nb{-1, -1};
+            if (isFloor(x + 1, y)) nb = {x + 1, y};
+            else if (isFloor(x - 1, y)) nb = {x - 1, y};
+            else if (isFloor(x, y + 1)) nb = {x, y + 1};
+            else if (isFloor(x, y - 1)) nb = {x, y - 1};
+
+            if (nb.x < 0) continue;
+
+            const Vec2i out{ x - (nb.x - x), y - (nb.y - y) };
+            carve(out.x, out.y);
+
+            if (depth >= 7 && rng.chance(0.40f)) {
+                const Vec2i out2{ out.x - (nb.x - x), out.y - (nb.y - y) };
+                carve(out2.x, out2.y);
+            }
+        }
+    }
+
+    // Sanity: ensure we carved a meaningful amount of walkable space.
+    int floors = 0;
+    for (int y = 1; y < g.h - 1; ++y) {
+        for (int x = 1; x < g.w - 1; ++x) {
+            if (g.at(x, y) != 0u) floors += 1;
+        }
+    }
+
+    const int minFloors = std::max(40, (g.w * g.h) / 6);
+    if (floors < minFloors) return false;
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// Annex WFC layout (constraint-driven "pipe network")
+//
+// Unlike the room-furnishing WFC pass (which only places obstacles), this
+// generator uses WFC to synthesize an entire *walkable* micro-dungeon.
+//
+// We run WFC on a coarse lattice where each cell chooses a connectivity tile
+// (dead-end / corner / straight / tee / cross / empty). The connectivity bits
+// must match across neighbors (a Wang-tile style constraint). The resulting
+// graph is then stamped into the AnnexGrid as 1-tile corridors on odd coords,
+// and we "inflate" a few junctions into tiny chambers so it doesn't read as
+// purely plumbing.
+// ------------------------------------------------------------
+
+enum class AnnexWfcConnTile : uint8_t {
+    Empty = 0,
+    DeadN,
+    DeadE,
+    DeadS,
+    DeadW,
+    StraightH,
+    StraightV,
+    CornerNE,
+    CornerES,
+    CornerSW,
+    CornerWN,
+    TeeN,   // missing N (E+S+W)
+    TeeE,   // missing E (N+S+W)
+    TeeS,   // missing S (N+E+W)
+    TeeW,   // missing W (N+E+S)
+    Cross,
+};
+
+static bool annexGenWfcAnnex(AnnexGrid& g, RNG& rng, Vec2i entry, int depth) {
+    // Expect odd dimensions so cell centers are on odd coordinates.
+    if (g.w < 17 || g.h < 11) return false;
+    if ((g.w % 2) == 0 || (g.h % 2) == 0) return false;
+
+    std::fill(g.cell.begin(), g.cell.end(), uint8_t{0});
+
+    const int cellW = (g.w - 1) / 2;
+    const int cellH = (g.h - 1) / 2;
+    if (cellW < 4 || cellH < 3) return false;
+
+    constexpr uint8_t N = 1u;
+    constexpr uint8_t E = 2u;
+    constexpr uint8_t S = 4u;
+    constexpr uint8_t W = 8u;
+
+    // Tile index -> connectivity mask.
+    constexpr uint8_t masks[16] = {
+        0u,        // Empty
+        N, E, S, W, // Dead-ends
+        uint8_t(E | W), // StraightH
+        uint8_t(N | S), // StraightV
+        uint8_t(N | E), // CornerNE
+        uint8_t(E | S), // CornerES
+        uint8_t(S | W), // CornerSW
+        uint8_t(W | N), // CornerWN
+        uint8_t(E | S | W), // TeeN
+        uint8_t(N | S | W), // TeeE
+        uint8_t(N | E | W), // TeeS
+        uint8_t(N | E | S), // TeeW
+        uint8_t(N | E | S | W), // Cross
+    };
+
+    auto pop4 = [&](uint8_t m) -> int {
+        int c = 0;
+        c += (m & N) ? 1 : 0;
+        c += (m & E) ? 1 : 0;
+        c += (m & S) ? 1 : 0;
+        c += (m & W) ? 1 : 0;
+        return c;
+    };
+
+    auto idx = [&](int cx, int cy) -> size_t { return static_cast<size_t>(cy * cellW + cx); };
+    auto cellToPos = [&](int cx, int cy) -> Vec2i { return {1 + cx * 2, 1 + cy * 2}; };
+
+    // Clamp entry to a valid cell center.
+    int startCx = std::clamp((entry.x - 1) / 2, 0, cellW - 1);
+    int startCy = std::clamp((entry.y - 1) / 2, 0, cellH - 1);
+
+    // Build adjacency rules once.
+    static bool rulesBuilt = false;
+    static std::vector<uint32_t> allow[4];
+    if (!rulesBuilt) {
+        constexpr int nTiles = 16;
+        for (int dir = 0; dir < 4; ++dir) allow[dir].assign(nTiles, 0u);
+
+        for (int a = 0; a < nTiles; ++a) {
+            const uint8_t ma = masks[a];
+            for (int b = 0; b < nTiles; ++b) {
+                const uint8_t mb = masks[b];
+
+                // Dir ordering is defined by wfc.hpp: 0=+X,1=-X,2=+Y,3=-Y.
+                const bool okE = ((ma & E) != 0u) == ((mb & W) != 0u);
+                const bool okW = ((ma & W) != 0u) == ((mb & E) != 0u);
+                const bool okS = ((ma & S) != 0u) == ((mb & N) != 0u);
+                const bool okN = ((ma & N) != 0u) == ((mb & S) != 0u);
+
+                if (okE) allow[0][static_cast<size_t>(a)] |= (1u << static_cast<uint32_t>(b));
+                if (okW) allow[1][static_cast<size_t>(a)] |= (1u << static_cast<uint32_t>(b));
+                if (okS) allow[2][static_cast<size_t>(a)] |= (1u << static_cast<uint32_t>(b));
+                if (okN) allow[3][static_cast<size_t>(a)] |= (1u << static_cast<uint32_t>(b));
+            }
+        }
+
+        rulesBuilt = true;
+    }
+
+    constexpr int nTiles = 16;
+    const uint32_t full = wfc::allMask(nTiles);
+
+    // Depth-controlled weights (higher depth -> more junctions / fewer dead-ends).
+    const float dd = static_cast<float>(std::clamp(depth - 4, 0, 12));
+    const float wEmpty = std::clamp(64.0f - 2.0f * dd, 34.0f, 72.0f);
+    const float wDead = std::clamp(18.0f - 0.6f * dd, 8.0f, 20.0f);
+    const float wStraight = 22.0f + 0.2f * dd;
+    const float wCorner = 22.0f + 0.2f * dd;
+    const float wTee = 7.0f + 1.25f * dd;
+    const float wCross = 2.0f + 0.6f * dd;
+
+    std::vector<float> weights(static_cast<size_t>(nTiles), 0.0f);
+    for (int t = 0; t < nTiles; ++t) {
+        const uint8_t m = masks[t];
+        if (t == static_cast<int>(AnnexWfcConnTile::Empty)) {
+            weights[static_cast<size_t>(t)] = wEmpty;
+            continue;
+        }
+
+        const int deg = pop4(m);
+        if (deg == 1) weights[static_cast<size_t>(t)] = wDead;
+        else if (deg == 2) {
+            const bool straight = (m == (N | S)) || (m == (E | W));
+            weights[static_cast<size_t>(t)] = straight ? wStraight : wCorner;
+        } else if (deg == 3) {
+            weights[static_cast<size_t>(t)] = wTee;
+        } else {
+            weights[static_cast<size_t>(t)] = wCross;
+        }
+    }
+
+    // Per-cell initial domains with border constraints.
+    std::vector<uint32_t> domains(static_cast<size_t>(cellW * cellH), full);
+    for (int cy = 0; cy < cellH; ++cy) {
+        for (int cx = 0; cx < cellW; ++cx) {
+            uint8_t forbid = 0u;
+            if (cx == 0) forbid |= W;
+            if (cx == cellW - 1) forbid |= E;
+            if (cy == 0) forbid |= N;
+            if (cy == cellH - 1) forbid |= S;
+
+            uint32_t dom = full;
+            for (int t = 0; t < nTiles; ++t) {
+                if ((masks[t] & forbid) != 0u) {
+                    dom &= ~(1u << static_cast<uint32_t>(t));
+                }
+            }
+
+            domains[idx(cx, cy)] = dom;
+        }
+    }
+
+    // Entry must be walkable (non-empty).
+    domains[idx(startCx, startCy)] &= ~(1u << static_cast<uint32_t>(AnnexWfcConnTile::Empty));
+
+    auto inCellBounds = [&](int cx, int cy) { return cx >= 0 && cy >= 0 && cx < cellW && cy < cellH; };
+
+    const int wantMin = std::max(10, (cellW * cellH) / 3);
+    const int maxAttempts = 18;
+
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+        std::vector<uint8_t> sol;
+        wfc::SolveStats stats;
+        const bool ok = wfc::solve(cellW, cellH, nTiles, allow, weights, rng, domains, sol, /*maxRestarts=*/18, &stats);
+        (void)stats;
+        if (!ok) continue;
+
+        // Flood-fill the entry-connected component on the coarse graph.
+        std::vector<int> dist(static_cast<size_t>(cellW * cellH), -1);
+        std::deque<Vec2i> q;
+
+        const uint8_t startMask = masks[sol[idx(startCx, startCy)]];
+        if (startMask == 0u) continue;
+
+        dist[idx(startCx, startCy)] = 0;
+        q.push_back({startCx, startCy});
+
+        auto oppBit = [&](int dir) -> uint8_t {
+            switch (dir) {
+                case 0: return W; // east neighbor must have W
+                case 1: return E;
+                case 2: return N;
+                default: return S;
+            }
+        };
+
+        const int dcx[4] = {1, -1, 0, 0};
+        const int dcy[4] = {0, 0, 1, -1};
+        const uint8_t bitOut[4] = {E, W, S, N};
+
+        while (!q.empty()) {
+            const Vec2i cur = q.front();
+            q.pop_front();
+
+            const int cd = dist[idx(cur.x, cur.y)];
+            const uint8_t m = masks[sol[idx(cur.x, cur.y)]];
+
+            for (int dir = 0; dir < 4; ++dir) {
+                if ((m & bitOut[dir]) == 0u) continue;
+                const int nx = cur.x + dcx[dir];
+                const int ny = cur.y + dcy[dir];
+                if (!inCellBounds(nx, ny)) continue;
+                const uint8_t nm = masks[sol[idx(nx, ny)]];
+                if (nm == 0u) continue;
+                if ((nm & oppBit(dir)) == 0u) continue;
+                if (dist[idx(nx, ny)] >= 0) continue;
+                dist[idx(nx, ny)] = cd + 1;
+                q.push_back({nx, ny});
+            }
+        }
+
+        int nodes = 0;
+        int branches = 0;
+        int maxD = 0;
+        for (int cy = 0; cy < cellH; ++cy) {
+            for (int cx = 0; cx < cellW; ++cx) {
+                const int d0 = dist[idx(cx, cy)];
+                if (d0 < 0) continue;
+                nodes += 1;
+                maxD = std::max(maxD, d0);
+                const int deg = pop4(masks[sol[idx(cx, cy)]]);
+                if (deg >= 3) branches += 1;
+            }
+        }
+
+        if (nodes < wantMin) continue;
+        if (depth >= 5 && branches == 0) continue;
+        if (maxD < 4) continue;
+
+        // Prefer at least one cycle on deep floors (but don't hard-require it).
+        if (depth >= 8 && nodes >= wantMin + 4 && rng.chance(0.65f)) {
+            int edges = 0;
+            for (int cy = 0; cy < cellH; ++cy) {
+                for (int cx = 0; cx < cellW; ++cx) {
+                    if (dist[idx(cx, cy)] < 0) continue;
+                    const uint8_t m = masks[sol[idx(cx, cy)]];
+                    if ((m & E) != 0u && inCellBounds(cx + 1, cy) && dist[idx(cx + 1, cy)] >= 0) edges += 1;
+                    if ((m & S) != 0u && inCellBounds(cx, cy + 1) && dist[idx(cx, cy + 1)] >= 0) edges += 1;
+                }
+            }
+            const int cycles = edges - (nodes - 1);
+            if (cycles < 1) continue;
+        }
+
+        // Stamp the entry-connected component into the annex grid.
+        for (int cy = 0; cy < cellH; ++cy) {
+            for (int cx = 0; cx < cellW; ++cx) {
+                if (dist[idx(cx, cy)] < 0) continue;
+                const Vec2i p = cellToPos(cx, cy);
+                if (!g.inBounds(p.x, p.y)) continue;
+                g.at(p.x, p.y) = 1u;
+            }
+        }
+
+        for (int cy = 0; cy < cellH; ++cy) {
+            for (int cx = 0; cx < cellW; ++cx) {
+                if (dist[idx(cx, cy)] < 0) continue;
+                const uint8_t m = masks[sol[idx(cx, cy)]];
+                const Vec2i p = cellToPos(cx, cy);
+                if ((m & E) != 0u && inCellBounds(cx + 1, cy) && dist[idx(cx + 1, cy)] >= 0) {
+                    if (g.inBounds(p.x + 1, p.y)) g.at(p.x + 1, p.y) = 1u;
+                }
+                if ((m & S) != 0u && inCellBounds(cx, cy + 1) && dist[idx(cx, cy + 1)] >= 0) {
+                    if (g.inBounds(p.x, p.y + 1)) g.at(p.x, p.y + 1) = 1u;
+                }
+            }
+        }
+
+        // Ensure the entry area is open.
+        if (g.inBounds(entry.x, entry.y)) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int nx = entry.x + dx;
+                    const int ny = entry.y + dy;
+                    if (nx <= 0 || ny <= 0 || nx >= g.w - 1 || ny >= g.h - 1) continue;
+                    g.at(nx, ny) = 1u;
+                }
+            }
+            g.at(entry.x, entry.y) = 1u;
+        }
+
+        // Inflate some junctions into tiny chambers (for readability / loot staging).
+        float pChamber = 0.15f + 0.02f * static_cast<float>(std::clamp(depth - 4, 0, 12));
+        pChamber = std::clamp(pChamber, 0.12f, 0.40f);
+
+        for (int cy = 0; cy < cellH; ++cy) {
+            for (int cx = 0; cx < cellW; ++cx) {
+                if (dist[idx(cx, cy)] < 0) continue;
+                const uint8_t m = masks[sol[idx(cx, cy)]];
+                if (pop4(m) < 3) continue;
+                if (!rng.chance(pChamber)) continue;
+
+                const Vec2i p = cellToPos(cx, cy);
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int nx = p.x + dx;
+                        const int ny = p.y + dy;
+                        if (nx <= 0 || ny <= 0 || nx >= g.w - 1 || ny >= g.h - 1) continue;
+                        g.at(nx, ny) = 1u;
+                    }
+                }
+            }
+        }
+
+        // Carve a few tiny alcoves beyond dead-ends.
+        float pAlcove = 0.22f + 0.02f * static_cast<float>(std::clamp(depth - 3, 0, 12));
+        pAlcove = std::clamp(pAlcove, 0.18f, 0.45f);
+
+        for (int cy = 0; cy < cellH; ++cy) {
+            for (int cx = 0; cx < cellW; ++cx) {
+                if (dist[idx(cx, cy)] < 0) continue;
+                const uint8_t m = masks[sol[idx(cx, cy)]];
+                if (pop4(m) != 1) continue;
+                if (!rng.chance(pAlcove)) continue;
+
+                const Vec2i p = cellToPos(cx, cy);
+                int ax = p.x;
+                int ay = p.y;
+
+                if ((m & N) != 0u) ay += 1;
+                else if ((m & S) != 0u) ay -= 1;
+                else if ((m & E) != 0u) ax -= 1;
+                else if ((m & W) != 0u) ax += 1;
+
+                if (ax <= 0 || ay <= 0 || ax >= g.w - 1 || ay >= g.h - 1) continue;
+                g.at(ax, ay) = 1u;
+
+                if (depth >= 7 && rng.chance(0.45f)) {
+                    // A second tile deeper into the alcove.
+                    int bx = ax;
+                    int by = ay;
+                    if ((m & N) != 0u) by += 1;
+                    else if ((m & S) != 0u) by -= 1;
+                    else if ((m & E) != 0u) bx -= 1;
+                    else if ((m & W) != 0u) bx += 1;
+                    if (bx > 0 && by > 0 && bx < g.w - 1 && by < g.h - 1) {
+                        g.at(bx, by) = 1u;
+                    }
+                }
+            }
+        }
+
+        // Optional: sprinkle 0-2 internal door markers on straight corridor tiles.
+        // (Only meaningful if the caller converts cell==2 into Door tiles.)
+        int wantDoors = 0;
+        if (rng.chance(0.55f)) wantDoors = 1;
+        if (depth >= 9 && rng.chance(0.25f)) wantDoors += 1;
+        wantDoors = std::clamp(wantDoors, 0, 2);
+
+        if (wantDoors > 0) {
+            std::vector<Vec2i> cands;
+            cands.reserve(static_cast<size_t>((g.w * g.h) / 8));
+
+            auto isFloor = [&](int x, int y) -> bool {
+                return g.inBounds(x, y) && g.at(x, y) != 0u;
+            };
+
+            for (int y = 2; y < g.h - 2; ++y) {
+                for (int x = 2; x < g.w - 2; ++x) {
+                    if (g.at(x, y) != 1u) continue; // don't stack door markers
+                    if (std::abs(x - entry.x) + std::abs(y - entry.y) <= 2) continue;
+
+                    const bool L = isFloor(x - 1, y);
+                    const bool R = isFloor(x + 1, y);
+                    const bool U = isFloor(x, y - 1);
+                    const bool D = isFloor(x, y + 1);
+                    const int deg = (L ? 1 : 0) + (R ? 1 : 0) + (U ? 1 : 0) + (D ? 1 : 0);
+                    if (deg != 2) continue;
+                    if ((L && R && !U && !D) || (U && D && !L && !R)) {
+                        cands.push_back({x, y});
+                    }
+                }
+            }
+
+            // Shuffle deterministically.
+            for (int i = static_cast<int>(cands.size()) - 1; i > 0; --i) {
+                const int j = rng.range(0, i);
+                std::swap(cands[static_cast<size_t>(i)], cands[static_cast<size_t>(j)]);
+            }
+
+            std::vector<Vec2i> placed;
+            placed.reserve(static_cast<size_t>(wantDoors));
+
+            for (const Vec2i& p : cands) {
+                if (static_cast<int>(placed.size()) >= wantDoors) break;
+
+                bool near = false;
+                for (const Vec2i& q : placed) {
+                    if (chebyshev(p, q) <= 1) { near = true; break; }
+                }
+                if (near) continue;
+
+                g.at(p.x, p.y) = 2u;
+                placed.push_back(p);
+            }
+        }
+
+        return true;
+    }
+
+    return false;
 }
 
 static bool annexGenSmallCavern(AnnexGrid& g, RNG& rng, Vec2i entry, int depth) {
@@ -9597,6 +10530,9 @@ static bool annexGenMiniRuins(AnnexGrid& g, RNG& rng, Vec2i entry, int depth) {
 
 bool maybeCarveAnnexMicroDungeon(Dungeon& d, RNG& rng, int depth, GenKind g) {
     d.annexCount = 0;
+    d.annexKeyGateCount = 0;
+    d.annexWfcCount = 0;
+    d.annexFractalCount = 0;
 
     // NOTE: special floors (camp/sokoban/finale) are handled by early returns in Dungeon::generate.
 
@@ -9718,6 +10654,31 @@ bool maybeCarveAnnexMicroDungeon(Dungeon& d, RNG& rng, int depth, GenKind g) {
 
     auto chooseStyle = [&]() -> AnnexStyle {
         // Contrast the main floor generator a bit for variety.
+        // MiniWfc is a constraint-driven annex that tends to read as "manufactured".
+        float pWfc = 0.07f + 0.03f * static_cast<float>(std::clamp(depth - 5, 0, 12));
+        if (g == GenKind::Catacombs) pWfc += 0.16f;
+        if (g == GenKind::RoomsGraph) pWfc += 0.10f;
+        if (g == GenKind::RoomsBsp) pWfc += 0.08f;
+        if (g == GenKind::Mines) pWfc += 0.05f;
+        if (g == GenKind::Maze) pWfc -= 0.10f;
+        if (g == GenKind::Cavern || g == GenKind::Warrens) pWfc -= 0.12f;
+        pWfc = std::clamp(pWfc, 0.03f, 0.45f);
+
+        if (rng.chance(pWfc)) return AnnexStyle::MiniWfc;
+
+        // MiniFractal is a branchy L-system annex; it reads well on organic floors and
+        // adds dense micro-choices without feeling like a strict maze.
+        float pFractal = 0.08f + 0.02f * static_cast<float>(std::clamp(depth - 4, 0, 12));
+        if (g == GenKind::Cavern || g == GenKind::Warrens) pFractal += 0.16f;
+        if (g == GenKind::Catacombs) pFractal += 0.06f;
+        if (g == GenKind::RoomsGraph) pFractal -= 0.04f;
+        if (g == GenKind::RoomsBsp) pFractal -= 0.02f;
+        if (g == GenKind::Maze) pFractal -= 0.10f;
+        if (g == GenKind::Mines) pFractal -= 0.03f;
+        pFractal = std::clamp(pFractal, 0.03f, 0.38f);
+
+        if (rng.chance(pFractal)) return AnnexStyle::MiniFractal;
+
         // MiniRuins is a packed-rooms annex; it fits best on more structured floors.
         float pRuins = 0.18f + 0.03f * static_cast<float>(std::clamp(depth - 4, 0, 12));
         if (g == GenKind::Catacombs) pRuins += 0.14f;
@@ -9753,6 +10714,18 @@ bool maybeCarveAnnexMicroDungeon(Dungeon& d, RNG& rng, int depth, GenKind g) {
         // Slightly larger pockets for caverns (they look better when roomy).
         if (style == AnnexStyle::MiniCavern) {
             len = makeOdd(len + 2);
+            span = makeOdd(span + 2);
+        }
+
+        // MiniWfc benefits from a touch more area so junction chambers have room.
+        if (style == AnnexStyle::MiniWfc) {
+            len = makeOdd(len + 3);
+            span = makeOdd(span + 1);
+        }
+
+        // MiniFractal wants a bit more breathing room so the branching pattern has space.
+        if (style == AnnexStyle::MiniFractal) {
+            len = makeOdd(len + 3);
             span = makeOdd(span + 2);
         }
 
@@ -9808,9 +10781,40 @@ bool maybeCarveAnnexMicroDungeon(Dungeon& d, RNG& rng, int depth, GenKind g) {
         bool ok = false;
         if (style == AnnexStyle::MiniMaze) ok = annexGenPerfectMaze(grid, rng, entryRel);
         else if (style == AnnexStyle::MiniCavern) ok = annexGenSmallCavern(grid, rng, entryRel, depth);
-        else ok = annexGenMiniRuins(grid, rng, entryRel, depth);
+        else if (style == AnnexStyle::MiniRuins) ok = annexGenMiniRuins(grid, rng, entryRel, depth);
+        else if (style == AnnexStyle::MiniFractal) ok = annexGenFractalAnnex(grid, rng, entryRel, depth);
+        else ok = annexGenWfcAnnex(grid, rng, entryRel, depth);
 
         if (!ok) return false;
+
+        const TileType entranceDoorType = chooseDoorType();
+
+        // Optional: some annexes get an internal lock-and-key micro-puzzle.
+        // We keep this rare, and avoid stacking it on top of a locked entrance door so the
+        // annex doesn't demand multiple keys.
+        AnnexKeyGatePlan keyGate;
+        bool hasKeyGate = false;
+
+        // Default reward location: farthest floor tile from the entry within the annex grid.
+        // If an internal key-gate is planned, we will override this with a gated-side target.
+        Vec2i farRel = annexFarthestFloor(grid, entryRel);
+
+        if (entranceDoorType != TileType::DoorLocked && (style == AnnexStyle::MiniMaze || style == AnnexStyle::MiniRuins || style == AnnexStyle::MiniWfc || style == AnnexStyle::MiniFractal)) {
+            float pGate = 0.08f + 0.03f * static_cast<float>(std::clamp(depth - 5, 0, 12));
+            if (style == AnnexStyle::MiniMaze) pGate += 0.08f;
+            if (style == AnnexStyle::MiniWfc) pGate += 0.05f;
+            if (style == AnnexStyle::MiniFractal) pGate += 0.07f;
+            if (g == GenKind::Catacombs) pGate += 0.06f;
+            if (g == GenKind::Mines) pGate += 0.04f;
+            pGate = std::clamp(pGate, 0.05f, 0.40f);
+
+            if (rng.chance(pGate)) {
+                hasKeyGate = annexPlanKeyGate(grid, rng, entryRel, keyGate);
+                if (hasKeyGate && grid.inBounds(keyGate.loot.x, keyGate.loot.y)) {
+                    farRel = keyGate.loot;
+                }
+            }
+        }
 
         // Stamp the interior floors into the dungeon; keep the pocket border ring as solid wall.
         for (int yy = 1; yy < rh - 1; ++yy) {
@@ -9819,8 +10823,9 @@ bool maybeCarveAnnexMicroDungeon(Dungeon& d, RNG& rng, int depth, GenKind g) {
                 carveFloor(d, rx + xx, ry + yy);
             }
         }
-        // Mini-ruins: translate internal door markers (cell==2) into actual door tiles.
-        if (style == AnnexStyle::MiniRuins) {
+        // Mini-ruins (+WFC annexes): translate internal door markers (cell==2) into actual door tiles.
+        if (style == AnnexStyle::MiniRuins || style == AnnexStyle::MiniWfc) {
+            const float pOpen = (style == AnnexStyle::MiniRuins) ? 0.35f : 0.25f;
             for (int yy = 1; yy < rh - 1; ++yy) {
                 for (int xx = 1; xx < rw - 1; ++xx) {
                     if (grid.at(xx, yy) != 2u) continue;
@@ -9832,19 +10837,38 @@ bool maybeCarveAnnexMicroDungeon(Dungeon& d, RNG& rng, int depth, GenKind g) {
                     // Only place doors on plain floor (avoid overwriting special overlays).
                     if (d.at(gx, gy).type != TileType::Floor) continue;
 
-                    // Some doors are broken open to sell the "ruins" vibe.
-                    d.at(gx, gy).type = rng.chance(0.35f) ? TileType::DoorOpen : TileType::DoorClosed;
+                    // Some doors are broken open to sell the "ruins" / "bulkhead" vibe.
+                    d.at(gx, gy).type = rng.chance(pOpen) ? TileType::DoorOpen : TileType::DoorClosed;
                 }
             }
         }
 
 
-        // Place the door tile.
-        d.at(c.door.x, c.door.y).type = chooseDoorType();
+        // Place the entrance door tile.
+        d.at(c.door.x, c.door.y).type = entranceDoorType;
+
+        // Apply the internal key gate (locked door + key) if we planned one.
+        if (hasKeyGate) {
+            bool applied = false;
+
+            const Vec2i gate{rx + keyGate.gate.x, ry + keyGate.gate.y};
+            if (d.inBounds(gate.x, gate.y) && d.at(gate.x, gate.y).type == TileType::Floor) {
+                d.at(gate.x, gate.y).type = TileType::DoorLocked;
+                applied = true;
+            }
+
+            const Vec2i keyPos{rx + keyGate.key.x, ry + keyGate.key.y};
+            if (d.inBounds(keyPos.x, keyPos.y) && d.at(keyPos.x, keyPos.y).type == TileType::Floor) {
+                d.bonusItemSpawns.push_back({keyPos, ItemKind::Key, 1});
+                applied = true;
+            }
+
+            if (applied) d.annexKeyGateCount += 1;
+        }
 
         // Reward: a chest deep inside the annex (spawns via bonusLootSpots).
-        // Choose the farthest reachable floor tile from the entry.
-        Vec2i farRel = annexFarthestFloor(grid, entryRel);
+        // Default: farthest reachable floor tile from the entry.
+        // If an internal key gate is present, farRel was overridden to target the gated side.
         if (grid.inBounds(farRel.x, farRel.y)) {
             const Vec2i loot{rx + farRel.x, ry + farRel.y};
             if (d.inBounds(loot.x, loot.y) && d.at(loot.x, loot.y).type == TileType::Floor) {
@@ -9870,6 +10894,8 @@ bool maybeCarveAnnexMicroDungeon(Dungeon& d, RNG& rng, int depth, GenKind g) {
         }
 
         d.annexCount += 1;
+        if (style == AnnexStyle::MiniWfc) d.annexWfcCount += 1;
+        if (style == AnnexStyle::MiniFractal) d.annexFractalCount += 1;
         return true;
     };
 
@@ -11735,15 +12761,332 @@ bool carveCorridorWander(Dungeon& d,
 }
 
 
+// -----------------------------------------------------------------------------
+// Poisson-disc sampling + Delaunay triangulation helpers
+//
+// Used by the RoomsGraph (\"ruins\") generator to place room centers with a
+// blue-noise distribution and to build a sparse planar adjacency graph.
+// -----------------------------------------------------------------------------
+static std::vector<Vec2i> poissonDiscSample2D(RNG& rng, int minX, int minY, int maxX, int maxY, float minDist, int k = 30) {
+    std::vector<Vec2i> out;
+    if (minDist <= 0.0f) return out;
+    if (minX > maxX || minY > maxY) return out;
+
+    // Acceleration grid cell size (Bridson): r / sqrt(2).
+    const float cellSize = minDist / std::sqrt(2.0f);
+    if (!(cellSize > 0.0f)) return out;
+
+    const int domW = (maxX - minX + 1);
+    const int domH = (maxY - minY + 1);
+    const int gridW = std::max(1, static_cast<int>(std::ceil(static_cast<float>(domW) / cellSize)));
+    const int gridH = std::max(1, static_cast<int>(std::ceil(static_cast<float>(domH) / cellSize)));
+
+    std::vector<int> grid(static_cast<size_t>(gridW * gridH), -1);
+    std::vector<int> active;
+    active.reserve(64);
+
+    auto inGrid = [&](int gx, int gy) {
+        return gx >= 0 && gy >= 0 && gx < gridW && gy < gridH;
+    };
+
+    auto gridIndex = [&](int gx, int gy) -> size_t {
+        return static_cast<size_t>(gy * gridW + gx);
+    };
+
+    auto gridPos = [&](int x, int y) -> Vec2i {
+        const float fx = static_cast<float>(x - minX) / cellSize;
+        const float fy = static_cast<float>(y - minY) / cellSize;
+        return { static_cast<int>(std::floor(fx)), static_cast<int>(std::floor(fy)) };
+    };
+
+    auto fits = [&](int x, int y) -> bool {
+        if (x < minX || x > maxX || y < minY || y > maxY) return false;
+
+        const Vec2i gp = gridPos(x, y);
+        const int gx = gp.x;
+        const int gy = gp.y;
+        if (!inGrid(gx, gy)) return false;
+
+        const float r2 = minDist * minDist;
+
+        // With cellSize=r/sqrt(2), checking +/-2 cells is sufficient.
+        for (int yy = gy - 2; yy <= gy + 2; ++yy) {
+            for (int xx = gx - 2; xx <= gx + 2; ++xx) {
+                if (!inGrid(xx, yy)) continue;
+                const int pi = grid[gridIndex(xx, yy)];
+                if (pi < 0) continue;
+                const Vec2i& p = out[static_cast<size_t>(pi)];
+                const float dx = static_cast<float>(x - p.x);
+                const float dy = static_cast<float>(y - p.y);
+                if (dx * dx + dy * dy < r2) return false;
+            }
+        }
+
+        return true;
+    };
+
+    // Seed a first sample.
+    const int sx = rng.range(minX, maxX);
+    const int sy = rng.range(minY, maxY);
+    out.push_back({sx, sy});
+    active.push_back(0);
+    {
+        const Vec2i gp = gridPos(sx, sy);
+        if (inGrid(gp.x, gp.y)) grid[gridIndex(gp.x, gp.y)] = 0;
+    }
+
+    const float twoPi = 6.283185307179586f;
+
+    while (!active.empty()) {
+        const int ai = rng.range(0, static_cast<int>(active.size()) - 1);
+        const int baseIdx = active[static_cast<size_t>(ai)];
+        const Vec2i base = out[static_cast<size_t>(baseIdx)];
+
+        bool found = false;
+        for (int attempt = 0; attempt < k; ++attempt) {
+            const float ang = rng.next01() * twoPi;
+            const float rad = minDist * (1.0f + rng.next01()); // [r, 2r)
+
+            const float fx = static_cast<float>(base.x) + std::cos(ang) * rad;
+            const float fy = static_cast<float>(base.y) + std::sin(ang) * rad;
+            const int x = static_cast<int>(std::lround(fx));
+            const int y = static_cast<int>(std::lround(fy));
+
+            if (!fits(x, y)) continue;
+
+            const int newIdx = static_cast<int>(out.size());
+            out.push_back({x, y});
+            active.push_back(newIdx);
+
+            const Vec2i gp = gridPos(x, y);
+            if (inGrid(gp.x, gp.y)) grid[gridIndex(gp.x, gp.y)] = newIdx;
+
+            found = true;
+            break;
+        }
+
+        if (!found) {
+            // Retire this active sample.
+            active[static_cast<size_t>(ai)] = active.back();
+            active.pop_back();
+        }
+    }
+
+    // De-duplicate after rounding (rare).
+    std::sort(out.begin(), out.end(), [](const Vec2i& a, const Vec2i& b) {
+        if (a.y != b.y) return a.y < b.y;
+        return a.x < b.x;
+    });
+    out.erase(std::unique(out.begin(), out.end(), [](const Vec2i& a, const Vec2i& b) {
+        return a.x == b.x && a.y == b.y;
+    }), out.end());
+
+    return out;
+}
+
+struct DelaunayTri {
+    int a = 0;
+    int b = 0;
+    int c = 0;
+    double cx = 0.0;
+    double cy = 0.0;
+    double r2 = 0.0;
+};
+
+static bool computeCircumcircle(const Vec2i& A, const Vec2i& B, const Vec2i& C, double& outCx, double& outCy, double& outR2) {
+    const double ax = static_cast<double>(A.x);
+    const double ay = static_cast<double>(A.y);
+    const double bx = static_cast<double>(B.x);
+    const double by = static_cast<double>(B.y);
+    const double cx = static_cast<double>(C.x);
+    const double cy = static_cast<double>(C.y);
+
+    const double d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    if (std::fabs(d) < 1e-12) return false;
+
+    const double a2 = ax * ax + ay * ay;
+    const double b2 = bx * bx + by * by;
+    const double c2 = cx * cx + cy * cy;
+
+    outCx = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d;
+    outCy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d;
+
+    const double dx = outCx - ax;
+    const double dy = outCy - ay;
+    outR2 = dx * dx + dy * dy;
+    return true;
+}
+
+static std::vector<std::pair<int, int>> delaunayEdges2D(const std::vector<Vec2i>& pts) {
+    std::vector<std::pair<int, int>> out;
+    const int n = static_cast<int>(pts.size());
+    if (n < 2) return out;
+    if (n == 2) {
+        out.push_back({0, 1});
+        return out;
+    }
+
+    // Build a super-triangle that encloses all points.
+    int minX = pts[0].x;
+    int minY = pts[0].y;
+    int maxX = pts[0].x;
+    int maxY = pts[0].y;
+    for (int i = 1; i < n; ++i) {
+        minX = std::min(minX, pts[static_cast<size_t>(i)].x);
+        minY = std::min(minY, pts[static_cast<size_t>(i)].y);
+        maxX = std::max(maxX, pts[static_cast<size_t>(i)].x);
+        maxY = std::max(maxY, pts[static_cast<size_t>(i)].y);
+    }
+
+    const double dx = static_cast<double>(maxX - minX);
+    const double dy = static_cast<double>(maxY - minY);
+    const double delta = std::max(dx, dy);
+    const double midx = static_cast<double>(minX + maxX) * 0.5;
+    const double midy = static_cast<double>(minY + maxY) * 0.5;
+
+    // Very large triangle.
+    Vec2i p0{ static_cast<int>(std::lround(midx - 20.0 * delta)), static_cast<int>(std::lround(midy - 1.0 * delta)) };
+    Vec2i p1{ static_cast<int>(std::lround(midx)),                  static_cast<int>(std::lround(midy + 20.0 * delta)) };
+    Vec2i p2{ static_cast<int>(std::lround(midx + 20.0 * delta)), static_cast<int>(std::lround(midy - 1.0 * delta)) };
+
+    std::vector<Vec2i> allPts = pts;
+    allPts.push_back(p0);
+    allPts.push_back(p1);
+    allPts.push_back(p2);
+
+    const int s0 = n;
+    const int s1 = n + 1;
+    const int s2 = n + 2;
+
+    std::vector<DelaunayTri> tris;
+    tris.reserve(static_cast<size_t>(n) * 8);
+
+    {
+        double ccx = 0.0, ccy = 0.0, r2 = 0.0;
+        if (!computeCircumcircle(allPts[static_cast<size_t>(s0)], allPts[static_cast<size_t>(s1)], allPts[static_cast<size_t>(s2)], ccx, ccy, r2)) {
+            // Degenerate super-triangle should never happen; bail.
+            return out;
+        }
+        tris.push_back({s0, s1, s2, ccx, ccy, r2});
+    }
+
+    auto inCircumcircle = [&](const DelaunayTri& t, const Vec2i& p) {
+        const double px = static_cast<double>(p.x);
+        const double py = static_cast<double>(p.y);
+        const double dx = t.cx - px;
+        const double dy = t.cy - py;
+        const double dist2 = dx * dx + dy * dy;
+        return dist2 <= t.r2 * 1.0000000001; // small epsilon
+    };
+
+    for (int pi = 0; pi < n; ++pi) {
+        const Vec2i p = allPts[static_cast<size_t>(pi)];
+
+        std::vector<std::pair<int, int>> edgeBuf;
+        edgeBuf.reserve(64);
+
+        // Mark triangles whose circumcircle contains p.
+        std::vector<uint8_t> bad(tris.size(), 0);
+        for (size_t ti = 0; ti < tris.size(); ++ti) {
+            if (inCircumcircle(tris[ti], p)) {
+                bad[ti] = 1;
+                const DelaunayTri& t = tris[ti];
+                auto addEdge = [&](int u, int v) {
+                    if (u > v) std::swap(u, v);
+                    edgeBuf.push_back({u, v});
+                };
+                addEdge(t.a, t.b);
+                addEdge(t.b, t.c);
+                addEdge(t.c, t.a);
+            }
+        }
+
+        // Remove bad triangles.
+        if (!edgeBuf.empty()) {
+            std::vector<DelaunayTri> keep;
+            keep.reserve(tris.size());
+            for (size_t ti = 0; ti < tris.size(); ++ti) {
+                if (!bad[ti]) keep.push_back(tris[ti]);
+            }
+            tris.swap(keep);
+
+            // Boundary edges are those that appear exactly once.
+            std::sort(edgeBuf.begin(), edgeBuf.end(), [](const auto& a, const auto& b) {
+                if (a.first != b.first) return a.first < b.first;
+                return a.second < b.second;
+            });
+
+            std::vector<std::pair<int, int>> boundary;
+            for (size_t i = 0; i < edgeBuf.size();) {
+                size_t j = i + 1;
+                while (j < edgeBuf.size() && edgeBuf[j] == edgeBuf[i]) ++j;
+                if (j - i == 1) boundary.push_back(edgeBuf[i]);
+                i = j;
+            }
+
+            // Stitch new triangles from boundary edges to p.
+            for (const auto& e : boundary) {
+                const int a = e.first;
+                const int b = e.second;
+                const int c = pi;
+
+                double ccx = 0.0, ccy = 0.0, r2 = 0.0;
+                if (!computeCircumcircle(allPts[static_cast<size_t>(a)], allPts[static_cast<size_t>(b)], allPts[static_cast<size_t>(c)], ccx, ccy, r2)) {
+                    continue;
+                }
+                tris.push_back({a, b, c, ccx, ccy, r2});
+            }
+        }
+    }
+
+    // Collect unique edges from triangles not touching super vertices.
+    std::vector<std::pair<int, int>> edges;
+    edges.reserve(static_cast<size_t>(n) * 4);
+
+    auto addEdge = [&](int u, int v) {
+        if (u < 0 || v < 0) return;
+        if (u >= n || v >= n) return;
+        if (u == v) return;
+        if (u > v) std::swap(u, v);
+        edges.push_back({u, v});
+    };
+
+    for (const DelaunayTri& t : tris) {
+        if (t.a >= n || t.b >= n || t.c >= n) continue;
+        addEdge(t.a, t.b);
+        addEdge(t.b, t.c);
+        addEdge(t.c, t.a);
+    }
+
+    std::sort(edges.begin(), edges.end(), [](const auto& a, const auto& b) {
+        if (a.first != b.first) return a.first < b.first;
+        return a.second < b.second;
+    });
+    edges.erase(std::unique(edges.begin(), edges.end(), [](const auto& a, const auto& b) {
+        return a.first == b.first && a.second == b.second;
+    }), edges.end());
+
+    out = std::move(edges);
+    return out;
+}
+
+
 
 void generateRoomsGraph(Dungeon& d, RNG& rng, int depth) {
     // "Ruins" room generator:
-    // - Randomly pack non-overlapping rectangular rooms (light Poisson-ish spacing)
-    // - Connect them with a minimum spanning tree (guaranteed global connectivity)
-    // - Add a few extra edges for loops (more interesting navigation / flanking)
+    // - Poisson-disc sample candidate room centers (blue-noise distribution)
+    // - Stamp non-overlapping rectangular rooms around those centers
+    // - Connect them using Delaunay triangulation -> MST (guaranteed global connectivity)
+    // - Add a few extra Delaunay edges for loops (more interesting navigation / flanking)
     // - Add some corridor branches for treasure pockets / dead ends
     //
     // This complements the BSP generator by producing less hierarchical, more "scattered" layouts.
+
+    // Debug stats for #mapstats. (Kept 0 when this generator falls back.)
+    d.roomsGraphPoissonPointCount = 0;
+    d.roomsGraphPoissonRoomCount = 0;
+    d.roomsGraphDelaunayEdgeCount = 0;
+    d.roomsGraphLoopEdgeCount = 0;
 
     // Needs some breathing room; fall back gracefully on tiny maps (unit tests, etc).
     if (d.width < 22 || d.height < 16) {
@@ -11765,55 +13108,113 @@ void generateRoomsGraph(Dungeon& d, RNG& rng, int depth) {
     // Avoid clumping: enforce a minimum center distance. Keep it modest so placement
     // doesn't fail on small maps.
     const int minDim = std::max(1, std::min(d.width, d.height));
-    const int minCenterDist = std::clamp((minDim / 6) + 6, 8, 14);
+    const int baseMinCenterDist = std::clamp((minDim / 6) + 6, 8, 14);
 
     const int margin = 2;
-    int attempts = target * 160;
 
-    auto centerOk = [&](int cx, int cy) -> bool {
-        for (const Room& r : d.rooms) {
-            const int md = std::abs(cx - r.cx()) + std::abs(cy - r.cy());
-            if (md < minCenterDist) return false;
+    // -----------------------------------------------------------------
+    // 1) Place rooms: Poisson-disc sample centers, then stamp rectangles.
+    // -----------------------------------------------------------------
+    const int domMinX = 3;
+    const int domMinY = 3;
+    const int domMaxX = d.width - 4;
+    const int domMaxY = d.height - 4;
+
+    std::vector<Vec2i> sites;
+    int minDist = baseMinCenterDist;
+
+    // If we sample too few sites for the current map size/target, relax the spacing and retry.
+    for (int pass = 0; pass < 3; ++pass) {
+        sites = poissonDiscSample2D(rng, domMinX, domMinY, domMaxX, domMaxY, static_cast<float>(minDist), 30);
+        if (static_cast<int>(sites.size()) >= target) break;
+
+        // Only relax if we're meaningfully under target (keeps distribution stable on small maps).
+        if (static_cast<int>(sites.size()) < std::max(4, target / 2)) {
+            minDist = std::max(6, minDist - 2);
+        } else {
+            break;
         }
-        return true;
+    }
+
+    d.roomsGraphPoissonPointCount = static_cast<int>(sites.size());
+
+    // Shuffle sites for variety (otherwise Poisson expansion order can bias patterns a bit).
+    for (int i = static_cast<int>(sites.size()) - 1; i > 0; --i) {
+        const int j = rng.range(0, i);
+        std::swap(sites[static_cast<size_t>(i)], sites[static_cast<size_t>(j)]);
+    }
+
+    auto tryPlaceRoomAround = [&](const Vec2i& c) -> bool {
+        // More tries than the old generator because we're respecting an external center distribution.
+        const int tries = 14;
+
+        for (int t = 0; t < tries; ++t) {
+            // Room sizes: slightly larger than mines chambers; more "architected" feel.
+            int rw = rng.range(5, 15);
+            int rh = rng.range(5, 11);
+
+            // Deeper: occasionally allow bigger rooms for set-piece fights.
+            if (depth >= 5 && rng.chance(0.35f)) rw = rng.range(8, 18);
+            if (depth >= 5 && rng.chance(0.35f)) rh = rng.range(6, 13);
+
+            // Clamp for small maps.
+            rw = std::min(rw, d.width - 6);
+            rh = std::min(rh, d.height - 6);
+            if (rw < 4 || rh < 4) continue;
+
+            // Small center jitter keeps rooms from looking stamped-on-grid.
+            const int jx = rng.range(-2, 2);
+            const int jy = rng.range(-2, 2);
+
+            int rx = c.x - rw / 2 + jx;
+            int ry = c.y - rh / 2 + jy;
+
+            // Keep within safe bounds.
+            const int maxRx = std::max(2, d.width - rw - 3);
+            const int maxRy = std::max(2, d.height - rh - 3);
+            rx = std::clamp(rx, 2, maxRx);
+            ry = std::clamp(ry, 2, maxRy);
+
+            bool ok = true;
+            for (const Room& r : d.rooms) {
+                if (rectsOverlap(r, rx, ry, rw, rh, margin)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) continue;
+
+            carveRect(d, rx, ry, rw, rh, TileType::Floor);
+            d.rooms.push_back({rx, ry, rw, rh, RoomType::Normal});
+            return true;
+        }
+
+        return false;
     };
 
-    while (static_cast<int>(d.rooms.size()) < target && attempts-- > 0) {
-        // Room sizes: slightly larger than mines chambers; more "architected" feel.
-        int rw = rng.range(5, 15);
-        int rh = rng.range(5, 11);
-
-        // Deeper: occasionally allow bigger rooms for set-piece fights.
-        if (depth >= 5 && rng.chance(0.35f)) rw = rng.range(8, 18);
-        if (depth >= 5 && rng.chance(0.35f)) rh = rng.range(6, 13);
-
-        // Clamp for small maps.
-        rw = std::min(rw, d.width - 6);
-        rh = std::min(rh, d.height - 6);
-        if (rw < 4 || rh < 4) continue;
-
-        const int rx = rng.range(2, std::max(2, d.width - rw - 3));
-        const int ry = rng.range(2, std::max(2, d.height - rh - 3));
-
-        const int cx = rx + rw / 2;
-        const int cy = ry + rh / 2;
-        if (!centerOk(cx, cy)) continue;
-
-        bool ok = true;
-        for (const Room& r : d.rooms) {
-            if (rectsOverlap(r, rx, ry, rw, rh, margin)) {
-                ok = false;
-                break;
-            }
-        }
-        if (!ok) continue;
-
-        carveRect(d, rx, ry, rw, rh, TileType::Floor);
-        d.rooms.push_back({rx, ry, rw, rh, RoomType::Normal});
+    // Primary placement: attempt rooms at Poisson sites.
+    for (const Vec2i& s : sites) {
+        if (static_cast<int>(d.rooms.size()) >= target) break;
+        (void)tryPlaceRoomAround(s);
     }
+
+    // Opportunistic fill: try a small number of random centers (keeps room count stable across seeds).
+    int fillAttempts = std::max(0, (target - static_cast<int>(d.rooms.size())) * 160);
+    while (static_cast<int>(d.rooms.size()) < target && fillAttempts-- > 0) {
+        Vec2i c{ rng.range(domMinX, domMaxX), rng.range(domMinY, domMaxY) };
+        (void)tryPlaceRoomAround(c);
+    }
+
+    d.roomsGraphPoissonRoomCount = static_cast<int>(d.rooms.size());
 
     // If placement failed badly, fall back to a safer generator.
     if (d.rooms.size() < 4) {
+        // Clear stats: this level is effectively BSP, not ruins-graph.
+        d.roomsGraphPoissonPointCount = 0;
+        d.roomsGraphPoissonRoomCount = 0;
+        d.roomsGraphDelaunayEdgeCount = 0;
+        d.roomsGraphLoopEdgeCount = 0;
+
         fillWalls(d);
         generateBspRooms(d, rng);
         return;
@@ -11836,16 +13237,63 @@ void generateRoomsGraph(Dungeon& d, RNG& rng, int depth) {
     };
 
     const int n = static_cast<int>(d.rooms.size());
-    std::vector<Edge> edges;
-    edges.reserve(static_cast<size_t>(n * (n - 1) / 2));
 
-    for (int i = 0; i < n; ++i) {
-        const Vec2i ca{ d.rooms[static_cast<size_t>(i)].cx(), d.rooms[static_cast<size_t>(i)].cy() };
-        for (int j = i + 1; j < n; ++j) {
-            const Vec2i cb{ d.rooms[static_cast<size_t>(j)].cx(), d.rooms[static_cast<size_t>(j)].cy() };
-            const int w = std::abs(ca.x - cb.x) + std::abs(ca.y - cb.y);
-            edges.push_back({i, j, w});
+    // Centers used for graph construction (use actual room centers after stamping).
+    std::vector<Vec2i> centers;
+    centers.reserve(d.rooms.size());
+    for (const Room& r : d.rooms) centers.push_back({r.cx(), r.cy()});
+
+    // -----------------------------------------------------------------
+    // 2) Connect rooms: Delaunay triangulation -> MST (+ extra loops)
+    // -----------------------------------------------------------------
+    std::vector<Edge> edges;
+
+    auto buildCompleteGraph = [&]() {
+        edges.clear();
+        edges.reserve(static_cast<size_t>(n * (n - 1) / 2));
+        for (int i = 0; i < n; ++i) {
+            const Vec2i ca = centers[static_cast<size_t>(i)];
+            for (int j = i + 1; j < n; ++j) {
+                const Vec2i cb = centers[static_cast<size_t>(j)];
+                const int w = std::abs(ca.x - cb.x) + std::abs(ca.y - cb.y);
+                edges.push_back({i, j, w});
+            }
         }
+    };
+
+    auto graphConnected = [&](const std::vector<Edge>& ed) -> bool {
+        if (n <= 1) return true;
+        DSU tdsu(n);
+        for (const Edge& e : ed) (void)tdsu.unite(e.a, e.b);
+        const int root = tdsu.find(0);
+        for (int i = 1; i < n; ++i) {
+            if (tdsu.find(i) != root) return false;
+        }
+        return true;
+    };
+
+    // Candidate edges from Delaunay triangulation (sparse planar adjacency graph).
+    const auto dtEdges = delaunayEdges2D(centers);
+    edges.reserve(dtEdges.size());
+    for (const auto& e : dtEdges) {
+        const int a = e.first;
+        const int b = e.second;
+        if (a < 0 || b < 0 || a >= n || b >= n || a == b) continue;
+        const Vec2i ca = centers[static_cast<size_t>(a)];
+        const Vec2i cb = centers[static_cast<size_t>(b)];
+        const int w = std::abs(ca.x - cb.x) + std::abs(ca.y - cb.y);
+        edges.push_back({a, b, w});
+    }
+
+    bool usedDelaunay = !edges.empty() && edges.size() >= static_cast<size_t>(n - 1) && graphConnected(edges);
+    if (!usedDelaunay) {
+        buildCompleteGraph();
+    }
+
+    if (usedDelaunay) {
+        d.roomsGraphDelaunayEdgeCount = static_cast<int>(edges.size());
+    } else {
+        d.roomsGraphDelaunayEdgeCount = 0;
     }
 
     std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) {
@@ -11865,6 +13313,20 @@ void generateRoomsGraph(Dungeon& d, RNG& rng, int depth) {
             connectRooms(d, d.rooms[static_cast<size_t>(e.a)], d.rooms[static_cast<size_t>(e.b)], rng, inRoom);
             usedEdge[ei] = 1;
             used++;
+        }
+    }
+
+    // Very rare: if something went wrong and we didn't fully connect, patch-connect components with shortest remaining edges.
+    if (used < n - 1) {
+        for (size_t guard = 0; guard < edges.size() && used < n - 1; ++guard) {
+            for (size_t ei = 0; ei < edges.size() && used < n - 1; ++ei) {
+                const Edge& e = edges[ei];
+                if (dsu.unite(e.a, e.b)) {
+                    connectRooms(d, d.rooms[static_cast<size_t>(e.a)], d.rooms[static_cast<size_t>(e.b)], rng, inRoom);
+                    usedEdge[ei] = 1;
+                    used++;
+                }
+            }
         }
     }
 
@@ -11892,6 +13354,8 @@ void generateRoomsGraph(Dungeon& d, RNG& rng, int depth) {
             break;
         }
     }
+
+    d.roomsGraphLoopEdgeCount = loops;
 
     // Branch corridors (dead ends) for optional treasure pockets / escape routes.
     const int branches = std::max(6, n * 2);
@@ -11939,7 +13403,7 @@ void generateRoomsGraph(Dungeon& d, RNG& rng, int depth) {
 
             carveFloor(d, cx, cy);
 
-            // Stop if we accidentally connected to existing space; keep it "branchy".
+            // Stop if we accidentally connected to existing space; keep it branchy.
             if (tt == TileType::Floor && step >= 1) break;
         }
     }
@@ -12266,7 +13730,292 @@ void generateMines(Dungeon& d, RNG& rng, int depth) {
 }
 
 
+// ------------------------------------------------------------
+// Cavern generator variants
+//
+// The default cavern generator uses a classic cellular automata smooth+largest-component pass.
+// This round adds an alternate "metaball" cavern mode:
+//   1) Sample a handful of blob centers with radii.
+//   2) Evaluate an implicit field f(x,y) = Σ (r_i^2 / (d^2 + 1)).
+//   3) Threshold by quantile to hit a stable target floor coverage.
+//
+// This produces smoother, more organic cave silhouettes with fewer grid artifacts,
+// while keeping the same robustness guarantees (largest component + fallback).
+// ------------------------------------------------------------
+
+static bool generateCavernMetaballsBase(Dungeon& d, RNG& rng, int depth, int& outBlobCount, int& outKept) {
+    outBlobCount = 0;
+    outKept = 0;
+
+    const int W = d.width;
+    const int H = d.height;
+    const int area = std::max(1, W * H);
+
+    // Blob count: scales with area; gently increases with depth.
+    // Default map: ~9 blobs.
+    const float base = static_cast<float>(area) / 750.0f;
+    int blobs = static_cast<int>(std::lround(base));
+    blobs += std::min(6, std::max(0, depth - 3)) / 2;
+    blobs = std::clamp(blobs, 6, 18);
+
+    struct Blob {
+        float cx = 0.0f;
+        float cy = 0.0f;
+        float r = 0.0f;
+        float r2 = 0.0f;
+    };
+
+    std::vector<Blob> bs;
+    bs.reserve(static_cast<size_t>(blobs));
+
+    auto frand = [&](float lo, float hi) -> float {
+        return lo + (hi - lo) * rng.next01();
+    };
+
+    // Deeper caves trend slightly tighter.
+    const float tight = static_cast<float>(std::max(0, depth - 3));
+    const float rMin = std::clamp(6.0f - 0.15f * tight, 4.5f, 6.5f);
+    const float rMax = std::clamp(15.0f - 0.25f * tight, 11.0f, 15.5f);
+
+    for (int i = 0; i < blobs; ++i) {
+        const float cx = frand(2.0f, static_cast<float>(W - 3));
+        const float cy = frand(2.0f, static_cast<float>(H - 3));
+        const float r = frand(rMin, rMax);
+        bs.push_back({cx, cy, r, r * r});
+    }
+
+    outBlobCount = blobs;
+
+    std::vector<float> field(static_cast<size_t>(W * H), 0.0f);
+    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * W + x); };
+
+    // Evaluate implicit field over interior.
+    for (int y = 1; y < H - 1; ++y) {
+        for (int x = 1; x < W - 1; ++x) {
+            float v = 0.0f;
+            const float fx = static_cast<float>(x) + 0.5f;
+            const float fy = static_cast<float>(y) + 0.5f;
+            for (const Blob& b : bs) {
+                const float dx = fx - b.cx;
+                const float dy = fy - b.cy;
+                const float d2 = dx * dx + dy * dy;
+                v += b.r2 / (d2 + 1.0f);
+            }
+            field[idx(x, y)] = v;
+        }
+    }
+
+    // Pick a threshold by quantile so we get a stable floor coverage fraction.
+    // Slightly tighter deeper.
+    float floorFrac = 0.56f;
+    if (depth >= 4) floorFrac -= 0.03f;
+    if (depth >= 7) floorFrac -= 0.03f;
+    floorFrac = std::clamp(floorFrac, 0.44f, 0.60f);
+
+    std::vector<float> vals;
+    vals.reserve(static_cast<size_t>((W - 2) * (H - 2)));
+    for (int y = 1; y < H - 1; ++y) {
+        for (int x = 1; x < W - 1; ++x) {
+            vals.push_back(field[idx(x, y)]);
+        }
+    }
+    if (vals.empty()) return false;
+
+    const size_t cut = static_cast<size_t>(
+        std::clamp<int>(
+            static_cast<int>(std::lround((1.0f - floorFrac) * static_cast<float>(vals.size() - 1))),
+            0,
+            static_cast<int>(vals.size() - 1)
+        )
+    );
+
+    std::nth_element(vals.begin(), vals.begin() + static_cast<std::vector<float>::difference_type>(cut), vals.end());
+    const float thr = vals[cut];
+
+    for (int y = 1; y < H - 1; ++y) {
+        for (int x = 1; x < W - 1; ++x) {
+            d.at(x, y).type = (field[idx(x, y)] >= thr) ? TileType::Floor : TileType::Wall;
+        }
+    }
+
+    // Gentle smoothing pass to remove tiny pinholes.
+    auto wallCount8 = [&](int x, int y) {
+        int c = 0;
+        for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -1; ox <= 1; ++ox) {
+                if (ox == 0 && oy == 0) continue;
+                int nx = x + ox;
+                int ny = y + oy;
+                if (!d.inBounds(nx, ny)) { c++; continue; }
+                if (d.at(nx, ny).type == TileType::Wall) c++;
+            }
+        }
+        return c;
+    };
+
+    std::vector<TileType> next(static_cast<size_t>(W * H), TileType::Wall);
+
+    const int iters = 2;
+    for (int it = 0; it < iters; ++it) {
+        for (int y = 1; y < H - 1; ++y) {
+            for (int x = 1; x < W - 1; ++x) {
+                int wc = wallCount8(x, y);
+                TileType cur = d.at(x, y).type;
+                if (wc >= 5) next[idx(x, y)] = TileType::Wall;
+                else if (wc <= 2) next[idx(x, y)] = TileType::Floor;
+                else next[idx(x, y)] = cur;
+            }
+        }
+        for (int y = 1; y < H - 1; ++y) {
+            for (int x = 1; x < W - 1; ++x) {
+                d.at(x, y).type = next[idx(x, y)];
+            }
+        }
+    }
+
+    // Keep the largest connected floor region (4-neighborhood).
+    std::vector<int> comp(static_cast<size_t>(W * H), -1);
+    std::vector<int> compSize;
+    compSize.reserve(64);
+
+    auto isFloor = [&](int x, int y) {
+        return d.at(x, y).type == TileType::Floor;
+    };
+
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+    int compIdx = 0;
+    for (int y = 1; y < H - 1; ++y) {
+        for (int x = 1; x < W - 1; ++x) {
+            if (!isFloor(x, y)) continue;
+            size_t ii = idx(x, y);
+            if (comp[ii] != -1) continue;
+
+            // BFS
+            int count = 0;
+            std::deque<Vec2i> q;
+            q.push_back({x, y});
+            comp[ii] = compIdx;
+            while (!q.empty()) {
+                Vec2i p = q.front();
+                q.pop_front();
+                count++;
+                for (auto& dv : dirs) {
+                    int nx = p.x + dv[0];
+                    int ny = p.y + dv[1];
+                    if (!d.inBounds(nx, ny)) continue;
+                    if (!isFloor(nx, ny)) continue;
+                    size_t jj = idx(nx, ny);
+                    if (comp[jj] != -1) continue;
+                    comp[jj] = compIdx;
+                    q.push_back({nx, ny});
+                }
+            }
+            compSize.push_back(count);
+            compIdx++;
+        }
+    }
+
+    if (compSize.empty()) return false;
+
+    int bestComp = 0;
+    for (int i = 1; i < static_cast<int>(compSize.size()); ++i) {
+        if (compSize[static_cast<size_t>(i)] > compSize[static_cast<size_t>(bestComp)]) bestComp = i;
+    }
+
+    int kept = 0;
+    for (int y = 1; y < H - 1; ++y) {
+        for (int x = 1; x < W - 1; ++x) {
+            if (!isFloor(x, y)) continue;
+            if (comp[idx(x, y)] != bestComp) {
+                d.at(x, y).type = TileType::Wall;
+            } else {
+                kept++;
+            }
+        }
+    }
+
+    outKept = kept;
+    if (kept < area / 6) return false;
+
+    return true;
+}
+
+static void finishCavernRoomsAndStairs(Dungeon& d, RNG& rng) {
+    d.rooms.clear();
+
+    // Start chamber on a floor tile nearest the center (robust for odd cave shapes).
+    const Vec2i center{ d.width / 2, d.height / 2 };
+    Vec2i best = center;
+    int bestMd = std::numeric_limits<int>::max();
+
+    for (int y = 1; y < d.height - 1; ++y) {
+        for (int x = 1; x < d.width - 1; ++x) {
+            if (d.at(x, y).type != TileType::Floor) continue;
+            const int md = std::abs(x - center.x) + std::abs(y - center.y);
+            if (md < bestMd) {
+                bestMd = md;
+                best = {x, y};
+            }
+        }
+    }
+
+    if (bestMd == std::numeric_limits<int>::max()) {
+        // Shouldn't happen if caller ensured a kept region, but be defensive.
+        best = {1, 1};
+    }
+
+    const int sw = rng.range(6, 8);
+    const int sh = rng.range(5, 7);
+    int sx = clampi(best.x - sw / 2, 1, d.width - sw - 1);
+    int sy = clampi(best.y - sh / 2, 1, d.height - sh - 1);
+    carveRect(d, sx, sy, sw, sh, TileType::Floor);
+    d.rooms.push_back({sx, sy, sw, sh, RoomType::Normal});
+
+    // Extra chambers scattered through the cavern to create "landmarks".
+    const int extraRooms = rng.range(6, 10);
+    for (int i = 0; i < extraRooms; ++i) {
+        Vec2i p = d.randomFloor(rng, true);
+        int rw = rng.range(4, 8);
+        int rh = rng.range(4, 7);
+        int rx = clampi(p.x - rw / 2, 1, d.width - rw - 1);
+        int ry = clampi(p.y - rh / 2, 1, d.height - rh - 1);
+        carveRect(d, rx, ry, rw, rh, TileType::Floor);
+        d.rooms.push_back({rx, ry, rw, rh, RoomType::Normal});
+    }
+
+    // Place stairs using distance on passable tiles.
+    const Room& startRoom = d.rooms.front();
+    d.stairsUp = { startRoom.cx(), startRoom.cy() };
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
+
+    auto dist = bfsDistanceMap(d, d.stairsUp);
+    d.stairsDown = farthestPassableTile(d, dist, rng);
+    if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) d.stairsDown = {d.width - 2, d.height - 2};
+}
+
 void generateCavern(Dungeon& d, RNG& rng, int depth) {
+    // Reset telemetry (not serialized).
+    d.cavernMetaballsUsed = false;
+    d.cavernMetaballBlobCount = 0;
+    d.cavernMetaballKeptTiles = 0;
+
+    // Sometimes use metaballs to form a smoother, more organic cave silhouette.
+    // Keep early floors slightly more predictable by requiring depth >= 3.
+    const float pMeta = std::min(0.70f, 0.35f + 0.04f * static_cast<float>(std::max(0, depth - 3)));
+
+    if (depth >= 3 && rng.chance(pMeta)) {
+        int blobs = 0;
+        int kept = 0;
+        if (generateCavernMetaballsBase(d, rng, depth, blobs, kept)) {
+            d.cavernMetaballsUsed = true;
+            d.cavernMetaballBlobCount = blobs;
+            d.cavernMetaballKeptTiles = kept;
+            finishCavernRoomsAndStairs(d, rng);
+            return;
+        }
+        // Failed (rare): fall back to cellular automata below.
+    }
+
     // Cellular automata cavern generator.
     // Start with noisy walls/floors, smooth, then keep the largest connected region.
     const float baseFloor = 0.58f;
@@ -12388,38 +14137,7 @@ void generateCavern(Dungeon& d, RNG& rng, int depth) {
         return;
     }
 
-    d.rooms.clear();
-
-    // Start chamber near the center.
-    const int cx = d.width / 2;
-    const int cy = d.height / 2;
-    const int sw = rng.range(6, 8);
-    const int sh = rng.range(5, 7);
-    int sx = clampi(cx - sw / 2, 1, d.width - sw - 1);
-    int sy = clampi(cy - sh / 2, 1, d.height - sh - 1);
-    carveRect(d, sx, sy, sw, sh, TileType::Floor);
-    d.rooms.push_back({sx, sy, sw, sh, RoomType::Normal});
-
-    // Extra chambers scattered through the cavern to create "landmarks".
-    const int extraRooms = rng.range(6, 10);
-    for (int i = 0; i < extraRooms; ++i) {
-        Vec2i p = d.randomFloor(rng, true);
-        int rw = rng.range(4, 8);
-        int rh = rng.range(4, 7);
-        int rx = clampi(p.x - rw / 2, 1, d.width - rw - 1);
-        int ry = clampi(p.y - rh / 2, 1, d.height - rh - 1);
-        carveRect(d, rx, ry, rw, rh, TileType::Floor);
-        d.rooms.push_back({rx, ry, rw, rh, RoomType::Normal});
-    }
-
-    // Place stairs using distance on passable tiles.
-    const Room& startRoom = d.rooms.front();
-    d.stairsUp = { startRoom.cx(), startRoom.cy() };
-    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
-
-    auto dist = bfsDistanceMap(d, d.stairsUp);
-    d.stairsDown = farthestPassableTile(d, dist, rng);
-    if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) d.stairsDown = {d.width - 2, d.height - 2};
+    finishCavernRoomsAndStairs(d, rng);
 }
 
 void generateMaze(Dungeon& d, RNG& rng, int depth) {
@@ -17316,6 +19034,9 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     deadEndClosetCount = 0;
     corridorBraidCount = 0;
     annexCount = 0;
+    annexKeyGateCount = 0;
+    annexWfcCount = 0;
+    annexFractalCount = 0;
     stairsBypassLoopCount = 0;
     stairsBridgeCount = 0;
     stairsRedundancyOk = false;
@@ -17326,6 +19047,11 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     genPickChosenIndex = 0;
     genPickScore = 0;
     genPickSeed = 0;
+
+    roomsGraphPoissonPointCount = 0;
+    roomsGraphPoissonRoomCount = 0;
+    roomsGraphDelaunayEdgeCount = 0;
+    roomsGraphLoopEdgeCount = 0;
 
     biomeZoneCount = 0;
     biomePillarZoneCount = 0;

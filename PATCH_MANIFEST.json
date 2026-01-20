@@ -1,11 +1,11 @@
 {
-  "patch_id": "round91_patch",
-  "previous_patch_id": "round90_patch",
-  "round": 91,
-  "date": "2026-01-19",
+  "patch_id": "round96_patch",
+  "previous_patch_id": "round95_patch",
+  "round": 96,
+  "date": "2026-01-20",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Fixed MSVC build errors/warnings in renderer + procedural spritegen: exposed Renderer::FRAMES publicly for non-member flipbook consumers, declared resampleSpriteToSize() in spritegen.hpp, added rand01(uint32_t) hash-to-float helper, corrected pointInIsoDiamond() argument ordering, and added ScoreEntry.conducts (recorded + persisted in scores CSV)."
+    "Procedural generation: adds an alternate Cavern generator mode based on metaballs/implicit surfaces (quantile-thresholded field) for smoother, more organic cave silhouettes; exposes telemetry via Dungeon stats and #mapstats (CAVERNGEN | METABALLS / KEPT)."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -17,6 +17,10 @@
     "docs/ISO_TERRAIN_VOXELS.md",
     "docs/PROCEDURAL_ANIMATION.md",
     "docs/PROCGEN_ITEM_HOOKS.md",
+    "docs/PROCGEN_ANNEX_WFC.md",
+    "docs/PROCGEN_ANNEX_FRACTAL.md",
+    "docs/PROCGEN_ROOMS_POISSON_DELAUNAY.md",
+    "docs/PROCGEN_CAVERN_METABALLS.md",
     "docs/REACTIVE_FIELDS.md",
     "docs/SETTINGS.md",
     "src/action_info.hpp",
@@ -60,7 +64,7 @@
     "src/threat_field.hpp",
     "src/vtuber_gen.hpp"
   ],
-  "timestamp_utc": "2026-01-19T00:00:00Z",
-  "description": "Fixes MSVC build errors/warnings in render.cpp/spritegen* by exposing the renderer's frame-count constant, adding missing declarations/helpers (resampleSpriteToSize, rand01), correcting an isometric point-in-diamond call signature, and extending the scoreboard schema to include conduct tags.",
-  "timestamp": "2026-01-19T00:00:00Z"
+  "timestamp_utc": "2026-01-20T00:00:00Z",
+  "description": "Introduces a metaball/implicit-surface cavern variant: sample blob centers/radii, evaluate a soft field f(x,y)=\u03a3(r^2/(d^2+1)), quantile-threshold to target floor coverage, smooth lightly, then keep the largest connected component (fallbacks preserved). Adds CAVERNGEN #mapstats telemetry and a subtle arrival hint.",
+  "timestamp": "2026-01-20T00:00:00Z"
 }

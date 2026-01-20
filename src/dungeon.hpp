@@ -253,6 +253,10 @@ mutable std::vector<uint8_t> materialCache;
     std::vector<BonusItemSpawn> bonusItemSpawns;
     // Generator flags (not serialized): used for callouts/tests.
     bool hasCavernLake = false;
+    // Not serialized: cavern generator variant telemetry (Cavern floors).
+    bool cavernMetaballsUsed = false;
+    int cavernMetaballBlobCount = 0;
+    int cavernMetaballKeptTiles = 0;
     bool hasWarrens = false; // Organic burrow/tunnel generator.
     int secretShortcutCount = 0;
     // Not serialized: visible locked shortcut doors (DoorLocked) connecting adjacent corridors.
@@ -282,6 +286,12 @@ mutable std::vector<uint8_t> materialCache;
     int corridorBraidCount = 0;
     // Not serialized: optional "annex" micro-dungeons carved into wall pockets (mini-maze/cavern side areas).
     int annexCount = 0;
+    // Not serialized: annex key-gate micro-puzzles (internal locked door + key inside annex).
+    int annexKeyGateCount = 0;
+    // Not serialized: annex Wave Function Collapse layouts (constraint-driven micro-dungeons).
+    int annexWfcCount = 0;
+    // Not serialized: annex fractal micro-dungeons (stochastic L-system / turtle branching layouts).
+    int annexFractalCount = 0;
     // Not serialized: stairs-path connectivity analysis + weaving.
     // We compute how "tree-like" the passable graph is between the stairs, and
     // (optionally) carve a few tiny bypass loops around critical corridor bridges
@@ -308,6 +318,13 @@ mutable std::vector<uint8_t> materialCache;
     int genPickChosenIndex = 0;
     int genPickScore = 0;
     uint32_t genPickSeed = 0;
+
+    // Not serialized: RoomsGraph ("ruins") generator stats.
+    // These are useful for debugging/tuning the Poisson-disc + Delaunay pipeline.
+    int roomsGraphPoissonPointCount = 0;   // number of Poisson-disc sampled candidate centers
+    int roomsGraphPoissonRoomCount = 0;    // number of rooms actually placed from those centers
+    int roomsGraphDelaunayEdgeCount = 0;   // number of Delaunay edges used as the connection graph
+    int roomsGraphLoopEdgeCount = 0;       // number of extra loop edges added beyond the MST
 
     // Not serialized: biome-zone theming (Voronoi-style regions) for more coherent floor "flavors".
     // This is a lightweight post-pass that groups walkable space into a few contiguous regions and

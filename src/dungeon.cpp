@@ -55,6 +55,13 @@ void fillWalls(Dungeon& d) {
     d.stairsDown = {-1, -1};
     d.hasCavernLake = false;
     d.hasWarrens = false;
+    d.mazeAlgorithm = MazeAlgorithm::None;
+    d.mazeChamberCount = 0;
+    d.mazeBreakCount = 0;
+    d.mazeWilsonWalkCount = 0;
+    d.mazeWilsonStepCount = 0;
+    d.mazeWilsonLoopEraseCount = 0;
+    d.mazeWilsonMaxPathLen = 0;
     d.secretShortcutCount = 0;
     d.lockedShortcutCount = 0;
     d.corridorHubCount = 0;
@@ -14141,8 +14148,25 @@ void generateCavern(Dungeon& d, RNG& rng, int depth) {
 }
 
 void generateMaze(Dungeon& d, RNG& rng, int depth) {
+    // Maze floors are "perfect maze" corridors on an odd-cell lattice,
+    // with a handful of carved chambers and strategic doors for LOS play.
+    //
+    // Round 97: add Wilson's algorithm (loop-erased random walks) as an
+    // alternate perfect-maze generator. This produces a *uniform spanning tree*
+    // over the grid cells, giving a notably different corridor texture vs.
+    // the classic recursive backtracker.
+
     (void)depth;
-    // Perfect maze (recursive backtracker) carved on odd coordinates.
+
+    // Telemetry reset (also cleared in Dungeon::generate()).
+    d.mazeAlgorithm = MazeAlgorithm::None;
+    d.mazeChamberCount = 0;
+    d.mazeBreakCount = 0;
+    d.mazeWilsonWalkCount = 0;
+    d.mazeWilsonStepCount = 0;
+    d.mazeWilsonLoopEraseCount = 0;
+    d.mazeWilsonMaxPathLen = 0;
+
     const int cellW = (d.width - 1) / 2;
     const int cellH = (d.height - 1) / 2;
     if (cellW <= 1 || cellH <= 1) {
@@ -14155,51 +14179,192 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
     };
     auto cidx = [&](int cx, int cy) { return static_cast<size_t>(cy * cellW + cx); };
 
-    std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), 0);
-    std::vector<Vec2i> stack;
-    stack.reserve(static_cast<size_t>(cellW * cellH));
+    // Pick the perfect-maze algorithm.
+    // Bias Wilson a little more at deeper depths so mazes keep feeling fresh.
+    float pWilson = 0.38f;
+    if (depth > 1) {
+        const int t = std::clamp(depth - 2, 0, 7);
+        pWilson = std::clamp(0.38f + 0.05f * static_cast<float>(t), 0.38f, 0.72f);
+    }
+    const bool useWilson = rng.chance(pWilson);
+    d.mazeAlgorithm = useWilson ? MazeAlgorithm::Wilson : MazeAlgorithm::Backtracker;
 
-    const int startCx = cellW / 2;
-    const int startCy = cellH / 2;
-    stack.push_back({startCx, startCy});
-    vis[cidx(startCx, startCy)] = 1;
-    Vec2i sp = cellToPos(startCx, startCy);
-    d.at(sp.x, sp.y).type = TileType::Floor;
+    // ---------------------------
+    // 1) Carve a perfect maze
+    // ---------------------------
 
-    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+    const int dirs4[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
 
-    while (!stack.empty()) {
-        Vec2i cur = stack.back();
-
-        // Collect unvisited neighbors.
-        std::vector<Vec2i> neigh;
-        neigh.reserve(4);
-        for (auto& dv : dirs) {
-            int nx = cur.x + dv[0];
-            int ny = cur.y + dv[1];
-            if (nx < 0 || ny < 0 || nx >= cellW || ny >= cellH) continue;
-            if (vis[cidx(nx, ny)] != 0) continue;
-            neigh.push_back({nx, ny});
-        }
-
-        if (neigh.empty()) {
-            stack.pop_back();
-            continue;
-        }
-
-        Vec2i nxt = neigh[static_cast<size_t>(rng.range(0, static_cast<int>(neigh.size()) - 1))];
-        Vec2i a = cellToPos(cur.x, cur.y);
-        Vec2i b = cellToPos(nxt.x, nxt.y);
+    auto carveEdge = [&](int aCx, int aCy, int bCx, int bCy) {
+        Vec2i a = cellToPos(aCx, aCy);
+        Vec2i b = cellToPos(bCx, bCy);
         Vec2i mid{ (a.x + b.x) / 2, (a.y + b.y) / 2 };
-        d.at(mid.x, mid.y).type = TileType::Floor;
-        d.at(b.x, b.y).type = TileType::Floor;
-        vis[cidx(nxt.x, nxt.y)] = 1;
-        stack.push_back(nxt);
+        if (d.inBounds(a.x, a.y)) d.at(a.x, a.y).type = TileType::Floor;
+        if (d.inBounds(mid.x, mid.y)) d.at(mid.x, mid.y).type = TileType::Floor;
+        if (d.inBounds(b.x, b.y)) d.at(b.x, b.y).type = TileType::Floor;
+    };
+
+    if (!useWilson) {
+        // Classic recursive backtracker on the cell grid.
+        std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), 0);
+        std::vector<Vec2i> stack;
+        stack.reserve(static_cast<size_t>(cellW * cellH));
+
+        const int startCx = cellW / 2;
+        const int startCy = cellH / 2;
+        stack.push_back({startCx, startCy});
+        vis[cidx(startCx, startCy)] = 1;
+        Vec2i sp = cellToPos(startCx, startCy);
+        d.at(sp.x, sp.y).type = TileType::Floor;
+
+        while (!stack.empty()) {
+            Vec2i cur = stack.back();
+
+            // Collect unvisited neighbors.
+            std::vector<Vec2i> neigh;
+            neigh.reserve(4);
+            for (auto& dv : dirs4) {
+                int nx = cur.x + dv[0];
+                int ny = cur.y + dv[1];
+                if (nx < 0 || ny < 0 || nx >= cellW || ny >= cellH) continue;
+                if (vis[cidx(nx, ny)] != 0) continue;
+                neigh.push_back({nx, ny});
+            }
+
+            if (neigh.empty()) {
+                stack.pop_back();
+                continue;
+            }
+
+            Vec2i nxt = neigh[static_cast<size_t>(rng.range(0, static_cast<int>(neigh.size()) - 1))];
+            carveEdge(cur.x, cur.y, nxt.x, nxt.y);
+            vis[cidx(nxt.x, nxt.y)] = 1;
+            stack.push_back(nxt);
+        }
+
+    } else {
+        // Wilson's algorithm: build a uniform spanning tree using loop-erased random walks.
+        //
+        // Implementation notes:
+        //  - We store the current walk as a vector<int> of cell indices.
+        //  - posInPath[cell] stores its index in the current path, or -1 if not present.
+        //  - When the walk revisits a cell already in the path, we erase the loop by
+        //    truncating the vector back to that index.
+
+        const int nCells = cellW * cellH;
+        auto idxToCxCy = [&](int idx) -> Vec2i { return { idx % cellW, idx / cellW }; };
+
+        std::vector<uint8_t> inTree(static_cast<size_t>(nCells), 0);
+        std::vector<int> posInPath(static_cast<size_t>(nCells), -1);
+
+        // Choose a root in (slightly) random central-ish area.
+        const int rootCx = clampi(cellW / 2 + rng.range(-1, 1), 0, cellW - 1);
+        const int rootCy = clampi(cellH / 2 + rng.range(-1, 1), 0, cellH - 1);
+        const int rootIdx = static_cast<int>(cidx(rootCx, rootCy));
+        inTree[static_cast<size_t>(rootIdx)] = 1;
+        Vec2i rp = cellToPos(rootCx, rootCy);
+        d.at(rp.x, rp.y).type = TileType::Floor;
+
+        // Random processing order for start cells (Fisher-Yates).
+        std::vector<int> order(static_cast<size_t>(nCells), 0);
+        for (int i = 0; i < nCells; ++i) order[static_cast<size_t>(i)] = i;
+        for (int i = nCells - 1; i > 0; --i) {
+            const int j = rng.range(0, i);
+            std::swap(order[static_cast<size_t>(i)], order[static_cast<size_t>(j)]);
+        }
+
+        std::vector<int> path;
+        std::vector<int> touched;
+        path.reserve(static_cast<size_t>(nCells));
+        touched.reserve(static_cast<size_t>(nCells / 8));
+
+        auto randomNeighbor = [&](int idx) -> int {
+            Vec2i c = idxToCxCy(idx);
+            // Try a few times to pick a valid step without building a full neighbor list.
+            for (int t = 0; t < 8; ++t) {
+                const int k = rng.range(0, 3);
+                const int nx = c.x + dirs4[k][0];
+                const int ny = c.y + dirs4[k][1];
+                if (nx < 0 || ny < 0 || nx >= cellW || ny >= cellH) continue;
+                return static_cast<int>(cidx(nx, ny));
+            }
+            // Fallback (should be rare): brute-force collect.
+            std::vector<int> nbs;
+            nbs.reserve(4);
+            for (int k = 0; k < 4; ++k) {
+                const int nx = c.x + dirs4[k][0];
+                const int ny = c.y + dirs4[k][1];
+                if (nx < 0 || ny < 0 || nx >= cellW || ny >= cellH) continue;
+                nbs.push_back(static_cast<int>(cidx(nx, ny)));
+            }
+            return nbs.empty() ? idx : nbs[static_cast<size_t>(rng.range(0, static_cast<int>(nbs.size()) - 1))];
+        };
+
+        for (int startIdx : order) {
+            if (inTree[static_cast<size_t>(startIdx)] != 0) continue;
+
+            path.clear();
+            touched.clear();
+
+            int cur = startIdx;
+            while (inTree[static_cast<size_t>(cur)] == 0) {
+                // Add cur to the path.
+                const int ppos = posInPath[static_cast<size_t>(cur)];
+                if (ppos == -1) {
+                    posInPath[static_cast<size_t>(cur)] = static_cast<int>(path.size());
+                    path.push_back(cur);
+                    touched.push_back(cur);
+                    if (static_cast<int>(path.size()) > d.mazeWilsonMaxPathLen) d.mazeWilsonMaxPathLen = static_cast<int>(path.size());
+                }
+
+                const int nxt = randomNeighbor(cur);
+                d.mazeWilsonStepCount += 1;
+                cur = nxt;
+
+                // Loop erasure: if we stepped onto a cell already in the current path,
+                // truncate back to it.
+                if (inTree[static_cast<size_t>(cur)] == 0) {
+                    const int seen = posInPath[static_cast<size_t>(cur)];
+                    if (seen != -1) {
+                        // Remove all vertices after 'seen'.
+                        const int oldN = static_cast<int>(path.size());
+                        for (int i = seen + 1; i < oldN; ++i) {
+                            const int v = path[static_cast<size_t>(i)];
+                            posInPath[static_cast<size_t>(v)] = -1;
+                        }
+                        const int erased = oldN - (seen + 1);
+                        if (erased > 0) d.mazeWilsonLoopEraseCount += erased;
+                        path.resize(static_cast<size_t>(seen + 1));
+                    }
+                }
+            }
+
+            // cur is now in the tree; commit the loop-erased path.
+            const int hit = cur;
+            for (size_t i = 0; i < path.size(); ++i) {
+                const int aIdx = path[i];
+                const int bIdx = (i + 1 < path.size()) ? path[i + 1] : hit;
+
+                Vec2i a = idxToCxCy(aIdx);
+                Vec2i b = idxToCxCy(bIdx);
+                carveEdge(a.x, a.y, b.x, b.y);
+
+                inTree[static_cast<size_t>(aIdx)] = 1;
+            }
+
+            d.mazeWilsonWalkCount += 1;
+
+            // Clear temporary marks.
+            for (int v : touched) posInPath[static_cast<size_t>(v)] = -1;
+        }
     }
 
-    // Add a few loops (break walls) so the maze isn't a strict tree.
-    const int breaks = std::max(6, (cellW * cellH) / 6);
-    for (int i = 0; i < breaks; ++i) {
+    // ---------------------------
+    // 2) Add loops (break walls)
+    // ---------------------------
+    const int breaksTarget = std::max(6, (cellW * cellH) / 6);
+    int breaksDone = 0;
+    for (int i = 0; i < breaksTarget; ++i) {
         int x = rng.range(2, d.width - 3);
         int y = rng.range(2, d.height - 3);
         if (d.at(x, y).type != TileType::Wall) continue;
@@ -14209,7 +14374,13 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
         bool vert  = (d.at(x, y - 1).type == TileType::Floor && d.at(x, y + 1).type == TileType::Floor);
         if (!(horiz || vert)) continue;
         d.at(x, y).type = TileType::Floor;
+        breaksDone++;
     }
+    d.mazeBreakCount = breaksDone;
+
+    // ---------------------------
+    // 3) Chambers + stairs
+    // ---------------------------
 
     // Carve a start chamber on top of an existing corridor near the center.
     Vec2i best = { d.width / 2, d.height / 2 };
@@ -14227,6 +14398,7 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
     if (bestDist >= 1e9) {
         fillWalls(d);
         generateBspRooms(d, rng);
+        d.mazeAlgorithm = MazeAlgorithm::None;
         return;
     }
 
@@ -14238,7 +14410,7 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
     carveRect(d, sx, sy, sw, sh, TileType::Floor);
     d.rooms.push_back({sx, sy, sw, sh, RoomType::Normal});
 
-    // Additional chambers
+    // Additional chambers.
     const int extraRooms = rng.range(5, 8);
     for (int i = 0; i < extraRooms; ++i) {
         Vec2i p = d.randomFloor(rng, true);
@@ -14249,8 +14421,9 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
         carveRect(d, rx, ry, rw, rh, TileType::Floor);
         d.rooms.push_back({rx, ry, rw, rh, RoomType::Normal});
     }
+    d.mazeChamberCount = static_cast<int>(d.rooms.size());
 
-    // Stairs
+    // Stairs.
     const Room& startRoom = d.rooms.front();
     d.stairsUp = { startRoom.cx(), startRoom.cy() };
     if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) d.stairsUp = {1, 1};
@@ -14273,6 +14446,7 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
     // without turning every intersection into a door cluster.
     placeStrategicCorridorDoors(d, rng, inRoom, 0.95f);
 }
+
 
 
 // Organic "warrens" floor: narrow burrows carved by biased random walkers,
@@ -19042,6 +19216,15 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     stairsRedundancyOk = false;
     hasCavernLake = false;
     hasWarrens = false;
+
+    mazeAlgorithm = MazeAlgorithm::None;
+    mazeChamberCount = 0;
+    mazeBreakCount = 0;
+    mazeWilsonWalkCount = 0;
+    mazeWilsonStepCount = 0;
+    mazeWilsonLoopEraseCount = 0;
+    mazeWilsonMaxPathLen = 0;
+
 
     genPickAttempts = 1;
     genPickChosenIndex = 0;

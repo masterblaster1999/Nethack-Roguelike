@@ -2357,6 +2357,24 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             game.pushSystemMessage(ss.str());
         }
 
+        // Maze generator debug stats: backtracker vs Wilson (loop-erased random walks).
+        // Only shown when the floor used the Maze gen kind.
+        if (d.mazeAlgorithm != MazeAlgorithm::None) {
+            std::ostringstream ss;
+            ss << "MAZEGEN";
+            ss << " | " << mazeAlgorithmName(d.mazeAlgorithm);
+            if (d.mazeChamberCount > 0) ss << " | CHAMBERS " << d.mazeChamberCount;
+            if (d.mazeBreakCount > 0) ss << " | BREAKS " << d.mazeBreakCount;
+            if (d.mazeAlgorithm == MazeAlgorithm::Wilson) {
+                ss << " | WALKS " << d.mazeWilsonWalkCount;
+                ss << " | STEPS " << d.mazeWilsonStepCount;
+                if (d.mazeWilsonLoopEraseCount > 0) ss << " | ERASED " << d.mazeWilsonLoopEraseCount;
+                if (d.mazeWilsonMaxPathLen > 0) ss << " | MAXPATH " << d.mazeWilsonMaxPathLen;
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
+
         {
             int treasure = 0;
             int lair = 0;

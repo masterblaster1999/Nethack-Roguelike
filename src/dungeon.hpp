@@ -29,6 +29,21 @@ inline const char* endlessStratumThemeName(EndlessStratumTheme t) {
     }
 }
 
+enum class MazeAlgorithm : uint8_t {
+    None = 0,
+    Backtracker,
+    Wilson,
+};
+
+inline const char* mazeAlgorithmName(MazeAlgorithm a) {
+    switch (a) {
+        case MazeAlgorithm::Backtracker: return "BACKTRACKER";
+        case MazeAlgorithm::Wilson:      return "WILSON";
+        default:                         return "NONE";
+    }
+}
+
+
 enum class TileType : uint8_t {
     Wall = 0,
     Floor,
@@ -257,6 +272,15 @@ mutable std::vector<uint8_t> materialCache;
     bool cavernMetaballsUsed = false;
     int cavernMetaballBlobCount = 0;
     int cavernMetaballKeptTiles = 0;
+    // Not serialized: maze generator telemetry (Maze floors).
+    MazeAlgorithm mazeAlgorithm = MazeAlgorithm::None;
+    int mazeChamberCount = 0;
+    int mazeBreakCount = 0;
+    // Not serialized: Wilson's algorithm stats (only when mazeAlgorithm==Wilson).
+    int mazeWilsonWalkCount = 0;
+    int mazeWilsonStepCount = 0;
+    int mazeWilsonLoopEraseCount = 0;
+    int mazeWilsonMaxPathLen = 0;
     bool hasWarrens = false; // Organic burrow/tunnel generator.
     int secretShortcutCount = 0;
     // Not serialized: visible locked shortcut doors (DoorLocked) connecting adjacent corridors.

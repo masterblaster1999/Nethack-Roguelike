@@ -3466,6 +3466,12 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
             pushMsg("THE CAVERN WALLS CURVE AS IF MOLDED FROM LIQUID STONE.", MessageKind::System, true);
         }
 
+        // Maze hint: Wilson's algorithm mazes (uniform spanning trees) tend to feel
+        // uncannily 'even' compared to backtracker mazes.
+        if (goingDown && dung.mazeAlgorithm == MazeAlgorithm::Wilson) {
+            pushMsg("THE PASSAGES TWIST WITH AN UNCANNY, EVEN CHANCE.", MessageKind::System, true);
+        }
+
         // Special floor callout: the procedural mines floors are about winding tunnels,
         // loops, and small chambers (less "architected" than BSP rooms).
         if (goingDown && (depth_ == Dungeon::MINES_DEPTH || depth_ == Dungeon::DEEP_MINES_DEPTH)) {

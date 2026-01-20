@@ -1,11 +1,11 @@
 {
-  "patch_id": "round96_patch",
-  "previous_patch_id": "round95_patch",
-  "round": 96,
+  "patch_id": "round97_patch",
+  "previous_patch_id": "round96_patch",
+  "round": 97,
   "date": "2026-01-20",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Procedural generation: adds an alternate Cavern generator mode based on metaballs/implicit surfaces (quantile-thresholded field) for smoother, more organic cave silhouettes; exposes telemetry via Dungeon stats and #mapstats (CAVERNGEN | METABALLS / KEPT)."
+    "Procedural generation: maze floors can now optionally use Wilson\u2019s algorithm (loop-erased random walks) to build a uniform spanning tree before the existing braiding/chamber pass; adds Maze telemetry and #mapstats line (MAZEGEN | WILSON / ...)."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -21,6 +21,7 @@
     "docs/PROCGEN_ANNEX_FRACTAL.md",
     "docs/PROCGEN_ROOMS_POISSON_DELAUNAY.md",
     "docs/PROCGEN_CAVERN_METABALLS.md",
+    "docs/PROCGEN_MAZE_WILSON.md",
     "docs/REACTIVE_FIELDS.md",
     "docs/SETTINGS.md",
     "src/action_info.hpp",
@@ -65,6 +66,6 @@
     "src/vtuber_gen.hpp"
   ],
   "timestamp_utc": "2026-01-20T00:00:00Z",
-  "description": "Introduces a metaball/implicit-surface cavern variant: sample blob centers/radii, evaluate a soft field f(x,y)=\u03a3(r^2/(d^2+1)), quantile-threshold to target floor coverage, smooth lightly, then keep the largest connected component (fallbacks preserved). Adds CAVERNGEN #mapstats telemetry and a subtle arrival hint.",
+  "description": "Adds a new Maze procgen variant powered by Wilson\u2019s algorithm (loop-erased random walks) to generate a uniform spanning tree over the maze cell grid. The generator then applies the existing wall-break braiding, chamber carving, BFS stairs placement, and strategic corridor door placement. Exposes non-serialized Dungeon telemetry (mazeAlgorithm + Wilson stats) and prints MAZEGEN lines in #mapstats; includes a subtle arrival hint.",
   "timestamp": "2026-01-20T00:00:00Z"
 }

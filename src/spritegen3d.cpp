@@ -2825,9 +2825,11 @@ SpritePixels renderIsoTerrainBlockVoxel(IsoTerrainBlockKind kind, uint32_t seed,
     outPx = clampOutPx(outPx);
     // Keep in sync with the renderer's animation flipbook frame count.
     constexpr int kAnimFrames = 4;
-    if (kAnimFrames > 0) {
-        frame = frame % kAnimFrames;
+    if constexpr (kAnimFrames > 0) {
+        frame %= kAnimFrames;
         if (frame < 0) frame += kAnimFrames;
+    } else {
+        frame = 0;
     }
 
     const int detailScale = voxelDetailScaleForOutPx(outPx, isoRaytrace);

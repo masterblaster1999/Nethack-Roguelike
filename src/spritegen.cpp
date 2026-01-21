@@ -2875,34 +2875,295 @@ case ItemKind::Arrow: {
             break;
         }
         
-case ItemKind::BountyContract: {
-    // A parchment contract with a wax seal.
-    Color paper = add({230, 220, 185, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
-    Color paperDark = mul(paper, 0.75f);
-    Color ink = add({40, 35, 30, 255}, rng.range(-6,6), rng.range(-6,6), rng.range(-6,6));
-    Color seal = add({170, 45, 55, 255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
-    Color sealDark = mul(seal, 0.70f);
+        case ItemKind::BountyContract: {
+            // A parchment contract with a wax seal.
+            Color paper = add({230, 220, 185, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color paperDark = mul(paper, 0.75f);
+            Color ink = add({40, 35, 30, 255}, rng.range(-6,6), rng.range(-6,6), rng.range(-6,6));
+            Color seal = add({170, 45, 55, 255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
+            Color sealDark = mul(seal, 0.70f);
+            
+            // Scroll body
+            outlineRect(s, 4, 5, 8, 10, paperDark);
+            rect(s, 5, 6, 6, 8, paper);
+            
+            // Paper curl highlights
+            line(s, 4, 5, 11, 5, paperDark);
+            line(s, 4, 14, 11, 14, paperDark);
+            
+            // Ink lines
+            for (int y = 7; y <= 11; y += 2) {
+                line(s, 6, y, 10, y, ink);
+            }
+            
+            // Wax seal
+            circle(s, 8, 13, 2, sealDark);
+            circle(s, 8, 13, 1, seal);
+            
+            // Tiny glint
+            if (frame % 2 == 1) setPx(s, 9, 12, {255,255,255,110});
+            break;
+        }
 
-    // Scroll body
-    outlineRect(s, 4, 5, 8, 10, paperDark);
-    rect(s, 5, 6, 6, 8, paper);
+        case ItemKind::Chest: {
+            Color wood = add({150, 95, 55, 255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
+            Color woodDark = mul(wood, 0.72f);
+            Color woodLight = mul(wood, 1.08f);
+            Color metal = add({205, 205, 220, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color metalDark = mul(metal, 0.75f);
 
-    // Paper curl highlights
-    line(s, 4, 5, 11, 5, paperDark);
-    line(s, 4, 14, 11, 14, paperDark);
+            // Lid
+            outlineRect(s, 3, 4, 10, 4, woodDark);
+            rect(s, 4, 5, 8, 2, wood);
+            line(s, 4, 5, 11, 5, woodLight);
 
-    // Ink lines
-    for (int y = 7; y <= 11; y += 2) {
-        line(s, 6, y, 10, y, ink);
+            // Body
+            outlineRect(s, 3, 7, 10, 7, woodDark);
+            rect(s, 4, 8, 8, 5, wood);
+            // Grain
+            for (int x = 4; x <= 11; x += 2) {
+                line(s, x, 8, x, 12, mul(wood, 0.90f));
+            }
+
+            // Metal bands + latch
+            line(s, 5, 7, 5, 13, metalDark);
+            line(s, 10, 7, 10, 13, metalDark);
+            line(s, 3, 10, 12, 10, metalDark);
+            rect(s, 7, 10, 2, 3, metal);
+            setPx(s, 8, 12, metalDark);
+
+            // Subtle glint
+            if (frame % 2 == 1) setPx(s, 11, 6, {255,255,255,110});
+            break;
+        }
+
+        case ItemKind::ChestOpen: {
+            // An open chest (decorative). Interior is dark with a little treasure sparkle.
+            Color wood = add({150, 95, 55, 255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
+            Color woodDark = mul(wood, 0.70f);
+            Color interior = {35, 28, 22, 255};
+            Color metal = add({205, 205, 220, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color gold = add({235, 200, 70, 255}, rng.range(-8,8), rng.range(-8,8), rng.range(-8,8));
+
+            // Base box
+            outlineRect(s, 3, 8, 10, 6, woodDark);
+            rect(s, 4, 9, 8, 4, wood);
+            rect(s, 4, 9, 8, 2, interior);
+
+            // Lid swung open (simple trapezoid)
+            line(s, 3, 8, 12, 4, woodDark);
+            line(s, 4, 7, 12, 3, wood);
+            line(s, 4, 6, 11, 3, mul(wood, 0.95f));
+            // Hinges
+            setPx(s, 4, 8, metal);
+            setPx(s, 11, 5, metal);
+
+            // A few coins
+            setPx(s, 6, 11, gold);
+            setPx(s, 8, 11, mul(gold, 0.85f));
+            setPx(s, 10, 12, gold);
+            if (frame % 2 == 1) setPx(s, 9, 10, {255,255,255,140});
+            break;
+        }
+
+        default: {
+            // Category-based fallback so new items always render something distinct.
+            const uint8_t kind8 = static_cast<uint8_t>(kind);
+            const uint8_t app = static_cast<uint8_t>(kind8 * 37u + 11u);
+
+            if (isPotionKind(kind)) {
+                drawPotionAppearance(s, seed, rng, app, frame);
+                break;
+            }
+            if (isScrollKind(kind)) {
+                drawScrollAppearance(s, seed, rng, app, frame);
+                break;
+            }
+            if (isRingKind(kind)) {
+                drawRingAppearance(s, seed, rng, app, frame);
+                break;
+            }
+            if (isWandKind(kind)) {
+                drawWandAppearance(s, seed, rng, app, frame);
+                break;
+            }
+
+            if (isSpellbookKind(kind)) {
+                Color cover{140, 80, 60, 255};
+                Color rune{235, 235, 245, 255};
+                switch (kind) {
+                    case ItemKind::SpellbookMagicMissile: cover = {70, 120, 230, 255}; rune = {235, 245, 255, 255}; break;
+                    case ItemKind::SpellbookBlink:        cover = {155, 95, 235, 255}; rune = {190, 255, 255, 255}; break;
+                    case ItemKind::SpellbookMinorHeal:    cover = {200, 70, 80, 255};  rune = {255, 245, 245, 255}; break;
+                    case ItemKind::SpellbookDetectTraps:  cover = {165, 120, 80, 255}; rune = {255, 230, 170, 255}; break;
+                    case ItemKind::SpellbookFireball:     cover = {185, 55, 55, 255};  rune = {255, 200, 120, 255}; break;
+                    case ItemKind::SpellbookStoneskin:    cover = {125, 125, 135, 255}; rune = {235, 225, 205, 255}; break;
+                    case ItemKind::SpellbookHaste:        cover = {70, 170, 95, 255};  rune = {255, 255, 190, 255}; break;
+                    case ItemKind::SpellbookInvisibility: cover = {90, 90, 130, 255};  rune = {210, 235, 255, 255}; break;
+                    case ItemKind::SpellbookPoisonCloud:  cover = {70, 110, 65, 255};  rune = {210, 160, 255, 255}; break;
+                    default: break;
+                }
+                drawSpellbook(cover, rune);
+                break;
+            }
+
+            if (isCorpseKind(kind)) {
+                // Simple lumpy corpse sprite (varies subtly by kind).
+                const uint32_t h = hashCombine(seed, 0xC0F1E5u ^ static_cast<uint32_t>(kind8));
+                RNG crng(hash32(h));
+                Color flesh = add({120, 75, 60, 255}, crng.range(-20,20), crng.range(-20,20), crng.range(-20,20));
+                Color dark = mul(flesh, 0.70f);
+                circle(s, 8, 11, 4, flesh);
+                circle(s, 6, 10, 2, flesh);
+                circle(s, 10, 10, 2, flesh);
+                // Dark underside
+                line(s, 5, 13, 11, 13, dark);
+                // Bone hint
+                setPx(s, 7, 11, {230,230,230,255});
+                setPx(s, 8, 11, {245,245,245,255});
+                setPx(s, 9, 11, {230,230,230,255});
+                break;
+            }
+
+            if (isCaptureSphereKind(kind)) {
+                const bool full = isCaptureSphereFullKind(kind);
+                const bool mega = (kind == ItemKind::MegaSphere || kind == ItemKind::MegaSphereFull);
+                Color shell = mega ? Color{95, 150, 255, 255} : Color{95, 210, 190, 255};
+                Color shellDark = mul(shell, 0.70f);
+                Color core = mega ? Color{255, 235, 120, 220} : Color{235, 120, 200, 220};
+                circle(s, 8, 9, 5, shellDark);
+                circle(s, 8, 9, 4, shell);
+                // Highlight
+                circle(s, 7, 8, 2, mul(shell, 1.08f));
+                if (full) {
+                    circle(s, 9, 10, 2, core);
+                    setPx(s, 9, 10, {255,255,255,120});
+                } else {
+                    // Hollow center
+                    circle(s, 8, 10, 2, {0,0,0,0});
+                }
+                if (frame % 2 == 1) setPx(s, 11, 7, {255,255,255,110});
+                break;
+            }
+
+            if (kind == ItemKind::Torch || kind == ItemKind::TorchLit) {
+                Color wood = add({140, 95, 55, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+                Color cloth = add({190, 190, 175, 255}, rng.range(-8,8), rng.range(-8,8), rng.range(-8,8));
+                // Handle
+                line(s, 8, 5, 8, 14, wood);
+                line(s, 7, 6, 7, 13, mul(wood, 0.85f));
+                // Wrap
+                rect(s, 7, 5, 3, 2, cloth);
+                if (kind == ItemKind::TorchLit) {
+                    Color flame = add({255, 170, 60, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+                    Color flameHi = {255, 245, 190, 220};
+                    circle(s, 8, 3, 2, flame);
+                    setPx(s, 8, 2, flameHi);
+                    if (frame % 2 == 1) setPx(s, 9, 3, {255,255,255,130});
+                } else {
+                    // Unlit head
+                    setPx(s, 8, 3, mul(cloth, 0.75f));
+                }
+                break;
+            }
+
+            if (kind == ItemKind::FishingRod) {
+                Color wood = add({150, 100, 55, 255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
+                Color lineC = {220, 220, 235, 180};
+                line(s, 4, 13, 11, 4, wood);
+                line(s, 5, 13, 11, 5, mul(wood, 0.82f));
+                // Fishing line + hook
+                line(s, 11, 4, 12, 8, lineC);
+                setPx(s, 12, 9, {200,200,210,220});
+                break;
+            }
+            if (kind == ItemKind::Fish) {
+                Color body = add({120, 170, 205, 255}, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
+                Color dark = mul(body, 0.75f);
+                // Body oval
+                circle(s, 8, 10, 3, body);
+                rect(s, 6, 9, 6, 3, body);
+                // Tail
+                setPx(s, 5, 10, dark);
+                setPx(s, 4, 9, dark);
+                setPx(s, 4, 11, dark);
+                // Eye
+                setPx(s, 10, 9, {30,30,35,255});
+                if (frame % 2 == 1) setPx(s, 9, 8, {255,255,255,110});
+                break;
+            }
+
+            if (kind == ItemKind::GardenHoe) {
+                Color wood = add({140, 95, 55, 255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
+                Color metal = add({205, 205, 220, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+                // Handle
+                line(s, 7, 4, 9, 14, wood);
+                // Blade
+                rect(s, 10, 8, 3, 2, metal);
+                rect(s, 9, 9, 4, 1, mul(metal, 0.85f));
+                break;
+            }
+            if (kind == ItemKind::Seed) {
+                Color seedC = add({200, 175, 120, 255}, rng.range(-15,15), rng.range(-15,15), rng.range(-15,15));
+                // A few kernels
+                setPx(s, 7, 10, seedC);
+                setPx(s, 9, 11, mul(seedC, 0.90f));
+                setPx(s, 8, 12, mul(seedC, 0.85f));
+                setPx(s, 10, 10, seedC);
+                break;
+            }
+            if (kind == ItemKind::TilledSoil) {
+                Color soil = add({110, 80, 55, 255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));
+                Color soilDark = mul(soil, 0.75f);
+                outlineRect(s, 4, 8, 8, 6, soilDark);
+                rect(s, 5, 9, 6, 4, soil);
+                // Furrows
+                for (int x = 6; x <= 10; x += 2) {
+                    line(s, x, 9, x, 12, soilDark);
+                }
+                break;
+            }
+            if (kind == ItemKind::CropSprout || kind == ItemKind::CropGrowing || kind == ItemKind::CropMature || kind == ItemKind::CropProduce) {
+                Color leaf = add({85, 200, 110, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+                Color stem = mul(leaf, 0.75f);
+                Color fruit = add({235, 120, 80, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+                // Stem
+                line(s, 8, 12, 8, 8, stem);
+                // Leaves / growth stage
+                setPx(s, 7, 9, leaf);
+                setPx(s, 9, 9, leaf);
+                if (kind == ItemKind::CropGrowing || kind == ItemKind::CropMature || kind == ItemKind::CropProduce) {
+                    setPx(s, 6, 10, leaf);
+                    setPx(s, 10, 10, leaf);
+                }
+                if (kind == ItemKind::CropMature || kind == ItemKind::CropProduce) {
+                    setPx(s, 7, 8, leaf);
+                    setPx(s, 9, 8, leaf);
+                }
+                if (kind == ItemKind::CropProduce) {
+                    // Fruit/produce
+                    circle(s, 8, 12, 1, fruit);
+                    setPx(s, 9, 11, mul(fruit, 0.85f));
+                }
+                break;
+            }
+
+            // Generic mystery token with a hashed rune glyph.
+            Color plate = add({120, 125, 135, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));
+            Color plateEdge = mul(plate, 0.70f);
+            outlineRect(s, 4, 5, 8, 8, plateEdge);
+            rect(s, 5, 6, 6, 6, plate);
+            Color ink = {35, 35, 40, 235};
+            const uint32_t hh = hashCombine(seed, 0x51A11Fu ^ static_cast<uint32_t>(kind8));
+            uint16_t mask = static_cast<uint16_t>((hash32(hh) >> 1) & 0x7FFFu);
+            if (mask == 0) mask = 0x1555u; // avoid blank glyph
+            drawRuneGlyph(s, 6, 7, mask, ink);
+            if (frame % 2 == 1) setPx(s, 10, 6, {255,255,255,110});
+            break;
+        }
     }
 
-    // Wax seal
-    circle(s, 8, 13, 2, sealDark);
-    circle(s, 8, 13, 1, seal);
-
-    // Tiny glint
-    if (frame % 2 == 1) setPx(s, 9, 12, {255,255,255,110});
-    break;
+    finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+    return use3d ? render3d(s)
+                 : resampleSpriteToSize(s, pxSize);
 }
-
-case ItemKind::Chest:

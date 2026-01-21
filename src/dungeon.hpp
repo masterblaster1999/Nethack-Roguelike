@@ -236,14 +236,12 @@ public:
     static constexpr int DEFAULT_W = 105;
     static constexpr int DEFAULT_H = 66;
 
-    // Special floors: fixed-depth handcrafted / alternate generators.
-    // These are expressed here so game logic (callouts) and tests can share them.
-    static constexpr int SOKOBAN_DEPTH = 3;      // Sokoban-style boulder bridge puzzle floor
-    static constexpr int GROTTO_DEPTH = 4;      // Cavern-like floor with a subterranean lake feature
-    static constexpr int ROGUE_LEVEL_DEPTH = 6;  // Classic 3x3-room Rogue homage
-    static constexpr int MINES_DEPTH = 2;        // Procedural mines: winding tunnels + small chambers
-    static constexpr int DEEP_MINES_DEPTH = 7;   // Second mines-style floor deeper in the run
-    static constexpr int CATACOMBS_DEPTH = 8;   // Grid-of-rooms + maze corridors (tomb/catacomb feel)
+	// Themed floors: fixed depths that bias generation style.
+	// These are still fully procedural; they're pacing anchors for run variety.
+	static constexpr int MINES_DEPTH = 2;        // Procedural mines: winding tunnels + small chambers
+	static constexpr int GROTTO_DEPTH = 4;       // Cavern-like floor with a subterranean lake feature
+	static constexpr int DEEP_MINES_DEPTH = 7;   // Second mines-style floor deeper in the run
+	static constexpr int CATACOMBS_DEPTH = 8;    // Grid-of-rooms + maze corridors (tomb/catacomb feel)
 
     int width = 0;
     int height = 0;

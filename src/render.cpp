@@ -7169,6 +7169,11 @@ void Renderer::drawHud(const Game& game) {
         }
     };
 
+    if (game.isFishingFightActive()) {
+        pushWrappedControl(game.fishingFightStatusText(), important);
+        pushWrappedControl(game.fishingFightControlText(), yellow);
+    }
+
     pushWrappedControl(
         "MOVE: WASD/ARROWS/NUMPAD | SPACE/. WAIT | R REST | N SNEAK (STEALTH) | < > STAIRS",
         gray
@@ -7440,8 +7445,11 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     int x = bg.x + pad;
     int y = bg.y + pad;
 
-    drawText5x7(renderer, x, y, scale, yellow, "INVENTORY");
-    drawText5x7(renderer, x + 160, y, scale, gray, "(ENTER: use/equip, D: drop, ESC: close)");
+    const bool invCraft = game.isInventoryCraftMode();
+    drawText5x7(renderer, x, y, scale, yellow, invCraft ? "INVENTORY (CRAFTING)" : "INVENTORY");
+    drawText5x7(renderer, x + 160, y, scale, gray,
+        invCraft ? "(ENTER: pick ingredient, ESC: clear/exit, D: drop)"
+                 : "(ENTER: use/equip, D: drop, ESC: close)");
     if (game.encumbranceEnabled()) {
         std::stringstream ws;
         ws << "WT: " << game.inventoryWeight() << "/" << game.carryCapacity();
@@ -7774,6 +7782,16 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             drawText5x7(renderer, ix, iy, scale, c, fitToChars(s, 32));
             iy += 18;
         };
+
+        // Crafting preview (when crafting mode is active)
+        if (invCraft) {
+            statLine("CRAFTING", yellow);
+            const auto& lines = game.inventoryCraftPreviewLines();
+            for (const auto& l : lines) {
+                statLine(l, gray);
+            }
+            iy += 6;
+        }
 
 		// Type / stats
 		auto ammoLabel = [](AmmoKind a) -> const char* {

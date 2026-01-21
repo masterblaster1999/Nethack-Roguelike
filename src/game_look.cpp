@@ -739,22 +739,36 @@ ss << baseDesc;
                 ss << " | YOU";
             } else {
                 const EntityKind showKind = hallucinatedEntityKind(*this, *e);
-                std::string label = kindName(showKind);
 
-    // Procedural monster variants: surface rank + affixes (unless hallucinating).
-    if (!hallu && e && e->id != player().id) {
-        if (e->procRank != ProcMonsterRank::Normal || e->procAffixMask != 0u) {
-            label = kindName(e->kind);
-            const int tier = procRankTier(e->procRank);
-            if (tier > 0) {
-                label = std::string(procMonsterRankName(e->procRank)) + " " + label;
-            }
-            const std::string aff = procMonsterAffixList(e->procAffixMask);
-            if (!aff.empty()) {
-                label += " (" + aff + ")";
-            }
-        }
-    }
+                // Base creature label (hallucination hides true kind and proc modifiers).
+                std::string kindLabel = kindName(showKind);
+                if (!hallu) {
+                    kindLabel = kindName(e->kind);
+
+                    // Procedural monster variants: surface rank + affixes.
+                    const uint32_t affMask = (e->procAffixMask & ~petgen::PET_TRAIT_MASK);
+                    if (e->procRank != ProcMonsterRank::Normal || affMask != 0u) {
+                        const int tier = procRankTier(e->procRank);
+                        if (tier > 0) {
+                            kindLabel = std::string(procMonsterRankName(e->procRank)) + " " + kindLabel;
+                        }
+                        const std::string aff = procMonsterAffixList(affMask);
+                        if (!aff.empty()) {
+                            kindLabel += " (" + aff + ")";
+                        }
+                    }
+                }
+
+                // Friendly companions show a given name to disambiguate multiple allies.
+                std::string label;
+                if (e->friendly) {
+                    label = petGivenNameFor(*e);
+                    label += " THE ";
+                    label += kindLabel;
+                } else {
+                    label = kindLabel;
+                }
+
                 if (e->friendly) {
                     label += " (ALLY";
                     switch (e->allyOrder) {
@@ -767,6 +781,13 @@ ss << baseDesc;
                     label += ")";
                 }
                 ss << " | " << label << " " << e->hp << "/" << e->hpMax;
+
+                if (!hallu && e->friendly) {
+                    const std::string tr = petgen::petTraitList(e->procAffixMask);
+                    if (!tr.empty()) {
+                        ss << " | TRAITS: " << tr;
+                    }
+                }
 
                 // Codex (per-run) stats: kills by kind + XP value.
                 const uint16_t kindKills = codexKills(showKind);

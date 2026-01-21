@@ -175,6 +175,37 @@ enum class ItemKind : uint8_t {
 
     // --- More collectibles (append-only) ---
     VtuberHoloCard,
+
+    // --- Capture spheres (append-only) ---
+    // Used for monster capture + companion recall/release.
+    CaptureSphere,
+    MegaSphere,
+    CaptureSphereFull,
+    MegaSphereFull,
+
+    // --- Fishing (append-only) ---
+    FishingRod,
+    Fish,
+
+    // --- Farming (append-only) ---
+    GardenHoe,
+    Seed,
+    // Stationary ground plot (tilling result).
+    TilledSoil,
+    // Stationary planted crop stages.
+    CropSprout,
+    CropGrowing,
+    CropMature,
+    // Harvested produce (consumable).
+    CropProduce,
+
+    // --- Crafting (append-only) ---
+    // A non-consumable tool used to combine ingredients into procedurally generated outputs.
+    CraftingKit,
+
+    // --- Bounties (append-only) ---
+    // A guild contract that tracks kills and pays out a deterministic reward.
+    BountyContract,
 };
 
 // Item "egos" (NetHack-style brands / special properties) applied to some gear.
@@ -213,10 +244,301 @@ inline int egoValueMultiplierPct(ItemEgo e) {
 }
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::VtuberHoloCard) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::BountyContract) + 1;
 
 inline bool isVtuberCollectible(ItemKind k) {
     return k == ItemKind::VtuberFigurine || k == ItemKind::VtuberHoloCard;
+}
+
+inline bool isCaptureSphereEmptyKind(ItemKind k) {
+    return k == ItemKind::CaptureSphere || k == ItemKind::MegaSphere;
+}
+
+inline bool isCaptureSphereFullKind(ItemKind k) {
+    return k == ItemKind::CaptureSphereFull || k == ItemKind::MegaSphereFull;
+}
+
+inline bool isCaptureSphereKind(ItemKind k) {
+    return isCaptureSphereEmptyKind(k) || isCaptureSphereFullKind(k);
+}
+
+// --- Fishing helpers (append-only) ---
+
+inline bool isFishingRodKind(ItemKind k) { return k == ItemKind::FishingRod; }
+inline bool isFishKind(ItemKind k) { return k == ItemKind::Fish; }
+
+// --- Crafting helpers (append-only) ---
+
+inline bool isCraftingKitKind(ItemKind k) { return k == ItemKind::CraftingKit; }
+
+// --- Bounty helpers (append-only) ---
+
+inline bool isBountyContractKind(ItemKind k) { return k == ItemKind::BountyContract; }
+
+// Items eligible as crafting ingredients.
+// We intentionally exclude a few "tool" / meta items so crafting stays focused on loot.
+inline bool isCraftIngredientKind(ItemKind k) {
+    if (k == ItemKind::CraftingKit) return false;
+    if (k == ItemKind::Gold) return false;
+    if (k == ItemKind::AmuletYendor) return false;
+    if (k == ItemKind::BountyContract) return false;
+
+    // Avoid sacrificing key utility systems for now.
+    if (k == ItemKind::FishingRod) return false;
+    if (k == ItemKind::GardenHoe) return false;
+    if (k == ItemKind::CaptureSphere || k == ItemKind::MegaSphere || k == ItemKind::CaptureSphereFull || k == ItemKind::MegaSphereFull) return false;
+
+    // Avoid containers (primarily ground/storage props).
+    if (k == ItemKind::Chest || k == ItemKind::ChestOpen) return false;
+
+    return true;
+}
+
+// --- Farming helpers (append-only) ---
+
+inline bool isGardenHoeKind(ItemKind k) { return k == ItemKind::GardenHoe; }
+inline bool isSeedKind(ItemKind k) { return k == ItemKind::Seed; }
+
+inline bool isFarmPlotKind(ItemKind k) { return k == ItemKind::TilledSoil; }
+inline bool isFarmPlantKind(ItemKind k) {
+    return k == ItemKind::CropSprout || k == ItemKind::CropGrowing || k == ItemKind::CropMature;
+}
+inline bool isCropProduceKind(ItemKind k) { return k == ItemKind::CropProduce; }
+inline bool isFarmKind(ItemKind k) {
+    return isGardenHoeKind(k) || isSeedKind(k) || isFarmPlotKind(k) || isFarmPlantKind(k) || isCropProduceKind(k);
+}
+
+// Crop metadata is packed into Item::enchant for farming items to avoid
+// changing the save format.
+//
+// bits 0..3  : variant (0..15)
+// bits 4..6  : rarity  (0..7)
+// bit  7     : shiny   (0/1)
+// bits 8..11 : quality (0..15) [produce only]
+inline int cropVariantFromEnchant(int enchant) { return enchant & 0xF; }
+inline int cropRarityFromEnchant(int enchant) { return (enchant >> 4) & 0x7; }
+inline bool cropIsShinyFromEnchant(int enchant) { return ((enchant >> 7) & 1) != 0; }
+inline int cropQualityFromEnchant(int enchant) { return (enchant >> 8) & 0xF; }
+
+inline int packCropMetaEnchant(int variant, int rarity, bool shiny) {
+    const int v = clampi(variant, 0, 15);
+    const int r = clampi(rarity, 0, 7);
+    const int s = shiny ? 1 : 0;
+    // Bit 12 is a tiny signature so callers can treat enchant==0 as "unset".
+    // (This keeps future migration painless while preserving old saves.)
+    return (v & 0xF) | ((r & 0x7) << 4) | ((s & 0x1) << 7) | (1 << 12);
+}
+
+inline int packCropProduceEnchant(int variant, int rarity, bool shiny, int quality) {
+    const int q = clampi(quality, 0, 15);
+    return packCropMetaEnchant(variant, rarity, shiny) | ((q & 0xF) << 8);
+}
+
+// Crop seeds are stored in Item::charges (int32 bits preserved), mirroring fish.
+inline uint32_t cropSeedFromCharges(int charges) { return static_cast<uint32_t>(charges); }
+
+// Tilled soil metadata is packed into Item::enchant.
+// bits 0..7  : fertility (0..100)
+// bits 8..11 : affinity code (0 = none; 1..15 = tagIndex+1)
+inline int tilledSoilFertilityFromEnchant(int enchant) { return enchant & 0xFF; }
+inline int tilledSoilAffinityFromEnchant(int enchant) {
+    const int code = (enchant >> 8) & 0xF;
+    return (code <= 0) ? -1 : (code - 1);
+}
+
+inline int packTilledSoilEnchant(int fertility, int affinityIdx) {
+    const int f = clampi(fertility, 0, 100);
+    // affinityIdx is -1 for none; otherwise 0..N-1.
+    const int code = (affinityIdx < 0) ? 0 : clampi(affinityIdx + 1, 1, 15);
+    return (f & 0xFF) | ((code & 0xF) << 8);
+}
+
+// Planted crop metadata packer for future use.
+// bits 0..3  : variant
+// bits 4..6  : rarity
+// bit  7     : shiny
+// bits 8..15 : fertility (0..100)
+// bits 16..19: affinity code (0 = none; 1..15 = tagIndex+1)
+inline int farmPlantFertilityFromEnchant(int enchant) { return (enchant >> 8) & 0xFF; }
+inline int farmPlantAffinityFromEnchant(int enchant) {
+    const int code = (enchant >> 16) & 0xF;
+    return (code <= 0) ? -1 : (code - 1);
+}
+
+inline int packFarmPlantEnchant(int variant, int rarity, bool shiny, int fertility, int affinityIdx) {
+    const int f = clampi(fertility, 0, 100);
+    const int code = (affinityIdx < 0) ? 0 : clampi(affinityIdx + 1, 1, 15);
+    return packCropMetaEnchant(variant, rarity, shiny) | ((f & 0xFF) << 8) | ((code & 0xF) << 16);
+}
+
+// Fish metadata is packed into Item::enchant for ItemKind::Fish to avoid
+// changing the save format.
+// bits 0..3  : sizeClass (0..15)
+// bits 4..6  : rarity    (0..7)
+// bit  7     : shiny     (0/1)
+inline int fishSizeClassFromEnchant(int enchant) { return enchant & 0xF; }
+inline int fishRarityFromEnchant(int enchant) { return (enchant >> 4) & 0x7; }
+inline bool fishIsShinyFromEnchant(int enchant) { return ((enchant >> 7) & 1) != 0; }
+
+inline int packFishEnchant(int sizeClass, int rarity, bool shiny) {
+    const int sc = clampi(sizeClass, 0, 15);
+    const int rr = clampi(rarity, 0, 7);
+    const int sh = shiny ? 1 : 0;
+    return (sc & 0xF) | ((rr & 0x7) << 4) | ((sh & 0x1) << 7);
+}
+
+// Fish seeds are stored in Item::charges (int32 bits preserved).
+inline uint32_t fishSeedFromCharges(int charges) { return static_cast<uint32_t>(charges); }
+
+// --- Bounty contract metadata (append-only) ---
+//
+// We pack contract state into Item::charges/enchant so saves remain compatible.
+//
+// Item::charges (32-bit):
+//   byte0: target EntityKind id
+//   byte1: required kill count (1..255)
+//   byte2: reward ItemKind id
+//   byte3: reward count (stack size / gold amount)
+//
+// Item::enchant:
+//   low 8 bits: current progress (kills credited)
+//
+inline int bountyTargetKindFromCharges(int charges) { return charges & 0xFF; }
+inline int bountyRequiredKillsFromCharges(int charges) { return (charges >> 8) & 0xFF; }
+inline int bountyRewardKindFromCharges(int charges) { return (charges >> 16) & 0xFF; }
+inline int bountyRewardCountFromCharges(int charges) { return (charges >> 24) & 0xFF; }
+
+inline int packBountyCharges(int targetKind, int requiredKills, int rewardKind, int rewardCount) {
+    const int t = clampi(targetKind, 0, 255);
+    const int r = clampi(requiredKills, 0, 255);
+    const int k = clampi(rewardKind, 0, 255);
+    const int c = clampi(rewardCount, 0, 255);
+    return (t & 0xFF) | ((r & 0xFF) << 8) | ((k & 0xFF) << 16) | ((c & 0xFF) << 24);
+}
+
+inline int bountyProgressFromEnchant(int enchant) { return enchant & 0xFF; }
+inline int withBountyProgress(int enchant, int progress) {
+    return (enchant & ~0xFF) | (clampi(progress, 0, 255) & 0xFF);
+}
+
+
+
+// Capture-sphere tuning (UI + balance).
+inline int captureSphereRange(ItemKind k) {
+    // A modest throw range; Mega has a small advantage.
+    return (k == ItemKind::MegaSphere || k == ItemKind::MegaSphereFull) ? 7 : 6;
+}
+
+inline float captureSphereCatchMultiplier(ItemKind k) {
+    // Mega spheres have a slightly higher catch rate.
+    return (k == ItemKind::MegaSphere || k == ItemKind::MegaSphereFull) ? 1.25f : 1.0f;
+}
+
+inline ItemKind captureSphereFilledKind(ItemKind emptyKind) {
+    return (emptyKind == ItemKind::MegaSphere) ? ItemKind::MegaSphereFull : ItemKind::CaptureSphereFull;
+}
+
+inline ItemKind captureSphereEmptyKind(ItemKind fullKind) {
+    return (fullKind == ItemKind::MegaSphereFull) ? ItemKind::MegaSphere : ItemKind::CaptureSphere;
+}
+
+// Capture-sphere metadata is packed into Item::charges to avoid changing the save format.
+// bits 0..7   : bond   (0..255; currently 0..99)
+// bits 8..15  : hp%    (0..100)
+// bits 16..23 : level  (0..255; 0 means "legacy/default to 1")
+// bits 24..31 : xp     (0..255; progress toward next level)
+inline int captureSphereBondFromCharges(int charges) { return charges & 0xFF; }
+inline int captureSphereHpPctFromCharges(int charges) { return (charges >> 8) & 0xFF; }
+inline int captureSphereLevelFromCharges(int charges) { return (charges >> 16) & 0xFF; }
+inline int captureSphereXpFromCharges(int charges) { return (charges >> 24) & 0xFF; }
+
+inline int packCaptureSphereCharges(int bond, int hpPct, int level, int xp) {
+    const int b  = (bond  < 0) ? 0 : (bond  > 255 ? 255 : bond);
+    const int hp = (hpPct < 0) ? 0 : (hpPct > 255 ? 255 : hpPct);
+    const int lv = (level < 0) ? 0 : (level > 255 ? 255 : level);
+    const int x  = (xp    < 0) ? 0 : (xp    > 255 ? 255 : xp);
+    return (b & 0xFF) | ((hp & 0xFF) << 8) | ((lv & 0xFF) << 16) | ((x & 0xFF) << 24);
+}
+
+// Legacy packer (bond + HP only). Leaves level/xp as 0 so older saves still decode.
+inline int packCaptureSphereCharges(int bond, int hpPct) {
+    return packCaptureSphereCharges(bond, hpPct, /*level=*/0, /*xp=*/0);
+}
+
+inline int withCaptureSphereBond(int charges, int bond) {
+    return packCaptureSphereCharges(
+        bond,
+        captureSphereHpPctFromCharges(charges),
+        captureSphereLevelFromCharges(charges),
+        captureSphereXpFromCharges(charges)
+    );
+}
+
+inline int withCaptureSphereHpPct(int charges, int hpPct) {
+    return packCaptureSphereCharges(
+        captureSphereBondFromCharges(charges),
+        hpPct,
+        captureSphereLevelFromCharges(charges),
+        captureSphereXpFromCharges(charges)
+    );
+}
+
+inline int withCaptureSphereLevel(int charges, int level) {
+    return packCaptureSphereCharges(
+        captureSphereBondFromCharges(charges),
+        captureSphereHpPctFromCharges(charges),
+        level,
+        captureSphereXpFromCharges(charges)
+    );
+}
+
+inline int withCaptureSphereXp(int charges, int xp) {
+    return packCaptureSphereCharges(
+        captureSphereBondFromCharges(charges),
+        captureSphereHpPctFromCharges(charges),
+        captureSphereLevelFromCharges(charges),
+        xp
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Captured companion progression tuning.
+// These are intentionally small so pets feel like "party members" without
+// eclipsing player gearing.
+// -----------------------------------------------------------------------------
+
+inline int captureSpherePetLevelCap() { return 30; }
+
+inline int captureSpherePetLevelOrDefault(int charges) {
+    const int lv = captureSphereLevelFromCharges(charges);
+    return (lv <= 0) ? 1 : lv;
+}
+
+inline int captureSpherePetXpOrZero(int charges) {
+    return captureSphereXpFromCharges(charges);
+}
+
+// XP needed to advance from `level` to `level+1`.
+// Kept <= 255 so we can pack progress into a single byte.
+inline int captureSpherePetXpToNext(int level) {
+    const int lv = clampi(level, 1, 255);
+    // Level 1->2 ~18xp; level 30->31 ~192xp.
+    return clampi(12 + lv * 6, 12, 220);
+}
+
+inline int captureSpherePetAtkBonus(int level) {
+    const int lv = clampi(level, 1, 255);
+    return (lv - 1) / 6; // +0..+4 by level 30
+}
+
+inline int captureSpherePetDefBonus(int level) {
+    const int lv = clampi(level, 1, 255);
+    return (lv - 1) / 7; // +0..+4 by level 30
+}
+
+inline int captureSpherePetHpBonus(int level) {
+    const int lv = clampi(level, 1, 255);
+    return (lv - 1) / 2; // +0..+14 by level 30
 }
 
 inline bool isChestKind(ItemKind k) {
@@ -281,6 +603,23 @@ inline bool isScrollKind(ItemKind k) {
         case ItemKind::ScrollEnchantRing:
             return true;
         case ItemKind::ScrollKnock:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool isSpellbookKind(ItemKind k) {
+    switch (k) {
+        case ItemKind::SpellbookMagicMissile:
+        case ItemKind::SpellbookBlink:
+        case ItemKind::SpellbookMinorHeal:
+        case ItemKind::SpellbookDetectTraps:
+        case ItemKind::SpellbookFireball:
+        case ItemKind::SpellbookStoneskin:
+        case ItemKind::SpellbookHaste:
+        case ItemKind::SpellbookInvisibility:
+        case ItemKind::SpellbookPoisonCloud:
             return true;
         default:
             return false;
@@ -364,6 +703,8 @@ struct GroundItem {
 // NOTE: flags are serialized; only add new bits at the end.
 inline constexpr uint8_t ITEM_FLAG_MIMIC_BAIT = 1u << 0;
 inline constexpr uint8_t ITEM_FLAG_ARTIFACT  = 1u << 1;
+// Stationary items cannot be picked up (used for ground-only props like plots).
+inline constexpr uint8_t ITEM_FLAG_STATIONARY = 1u << 2;
 
 inline bool itemIsMimicBait(const Item& it) { return (it.flags & ITEM_FLAG_MIMIC_BAIT) != 0; }
 inline void setItemMimicBait(Item& it, bool v) {
@@ -375,6 +716,12 @@ inline bool itemIsArtifact(const Item& it) { return (it.flags & ITEM_FLAG_ARTIFA
 inline void setItemArtifact(Item& it, bool v) {
     if (v) it.flags = static_cast<uint8_t>(it.flags | ITEM_FLAG_ARTIFACT);
     else   it.flags = static_cast<uint8_t>(it.flags & static_cast<uint8_t>(~ITEM_FLAG_ARTIFACT));
+}
+
+inline bool itemIsStationary(const Item& it) { return (it.flags & ITEM_FLAG_STATIONARY) != 0; }
+inline void setItemStationary(Item& it, bool v) {
+    if (v) it.flags = static_cast<uint8_t>(it.flags | ITEM_FLAG_STATIONARY);
+    else   it.flags = static_cast<uint8_t>(it.flags & static_cast<uint8_t>(~ITEM_FLAG_STATIONARY));
 }
 
 const ItemDef& itemDef(ItemKind k);

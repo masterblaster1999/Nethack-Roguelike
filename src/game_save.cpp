@@ -922,6 +922,29 @@ int Game::carryCapacity() const {
 
     const int strLike = std::max(1, p.baseAtk + playerMight());
     int cap = 80 + (strLike * 18) + (std::max(1, charLevel) * 6);
+
+    // PACK MULE companions slightly increase your effective carrying capacity when nearby.
+    // This is deliberately modest; it acts as a quality-of-life boon rather than an infinite stash.
+    int packBonus = 0;
+    for (const auto& e : ents) {
+        if (e.id == playerId_) continue;
+        if (e.hp <= 0) continue;
+        if (!e.friendly) continue;
+        if (!petgen::petHasTrait(e.procAffixMask, petgen::PetTrait::PackMule)) continue;
+
+        // Only count companions that are close enough to plausibly help carry.
+        const int dx = std::abs(e.pos.x - p.pos.x);
+        const int dy = std::abs(e.pos.y - p.pos.y);
+        const int cheb = std::max(dx, dy);
+        if (cheb > 8) continue;
+
+        // If they're ordered to STAY/GUARD elsewhere, they aren't helping carry your pack.
+        if (!(e.allyOrder == AllyOrder::Follow || e.allyOrder == AllyOrder::Fetch)) continue;
+
+        packBonus += 35;
+    }
+
+    cap += packBonus;
     cap = clampi(cap, 60, 9999);
     return cap;
 }
@@ -3269,6 +3292,10 @@ if (ver >= 33u) {
         invIdentifyMode = false;
         invEnchantRingMode = false;
         invPrompt_ = InvPromptKind::None;
+        invCraftMode = false;
+        invCraftFirstId_ = 0;
+        invCraftPreviewLines_.clear();
+        craftRecipeBook_.clear();
         chestOpen = false;
         chestOpenId = 0;
         chestSel = 0;

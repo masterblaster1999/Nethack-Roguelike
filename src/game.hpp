@@ -1409,6 +1409,9 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     // True when the inventory overlay is being used for a special prompt (e.g. choosing an item for Scroll of Identify).
     bool isInventoryIdentifyMode() const { return invIdentifyMode; }
     bool isInventoryEnchantRingMode() const { return invEnchantRingMode; }
+    bool isInventoryCraftMode() const { return invCraftMode; }
+    int inventoryCraftFirstId() const { return invCraftFirstId_; }
+    const std::vector<std::string>& inventoryCraftPreviewLines() const { return invCraftPreviewLines_; }
     int inventorySelection() const { return invSel; }
     bool isEquipped(int itemId) const;
     std::string equippedTag(int itemId) const; // e.g. "M", "R", "A", "1", "2"
@@ -1634,6 +1637,12 @@ bool clearItemCallLabel(ItemKind k);
     // (e.g., friendly-fire risk for ranged attacks / AoE spells).
     // Empty when there is no warning.
     std::string targetingWarningText() const;
+
+    // Fishing fight (UI-only): when a large/rare fish bites, you enter a short
+    // tension/progress interaction where you REEL (Enter) or give SLACK (Wait).
+    bool isFishingFightActive() const { return fishingFightActive_; }
+    std::string fishingFightStatusText() const;
+    std::string fishingFightControlText() const;
 
     // Kick prompt (directional)
     bool isKicking() const { return kicking; }
@@ -1925,6 +1934,20 @@ bool clearItemCallLabel(ItemKind k);
     // Convenience for UI layer
     void pushSystemMessage(const std::string& msg);
 
+    // Crafting
+    // Opens the inventory in a dedicated 2-ingredient crafting prompt (requires a Crafting Kit).
+    // This is UI-only until the player confirms a craft, at which point it consumes a turn.
+    void beginCrafting();
+
+    // Fishing
+    // Convenience: start fishing targeting using your first Fishing Rod (if any).
+    // Can be invoked via #fish.
+    void beginFishing();
+
+    // Print the per-run learned crafting recipe journal to the message log.
+    // (UI-only; not serialized)
+    void showCraftRecipes();
+
     // Auto-move / auto-explore
     bool isAutoActive() const { return autoMode != AutoMoveMode::None; }
     bool isAutoTraveling() const { return autoMode == AutoMoveMode::Travel; }
@@ -2055,6 +2078,24 @@ private:
     bool invIdentifyMode = false;
     bool invEnchantRingMode = false;
 
+
+    // Crafting prompt mode (UI-only; not serialized)
+    bool invCraftMode = false;
+    int invCraftFirstId_ = 0; // inventory item id of the first selected ingredient
+    std::vector<std::string> invCraftPreviewLines_; // UI-only crafting preview lines for renderer
+
+    struct CraftRecipeEntry {
+        uint32_t sig = 0u;                 // recipe signature (out.spriteSeed)
+        ItemKind outKind = ItemKind::Dagger;
+        uint32_t firstTurn = 0u;
+        int times = 0;
+        int tier = 0;
+        RoomType workstation = RoomType::Normal;
+        std::string tagA;
+        std::string tagB;
+    };
+    std::vector<CraftRecipeEntry> craftRecipeBook_; // UI-only; not serialized
+
     // Additional modal inventory prompts (e.g., shrine services that need a target item).
     enum class InvPromptKind : uint8_t {
         None = 0,
@@ -2089,9 +2130,43 @@ private:
     enum class TargetingMode : uint8_t {
         Ranged = 0,
         Spell,
+
+        // Capture spheres (UI-only; not serialized)
+        Capture,
+
+        // Fishing rod casting (UI-only; not serialized)
+        Fish,
     };
     TargetingMode targetingMode_ = TargetingMode::Ranged;
     SpellKind targetingSpell_ = SpellKind::MagicMissile;
+
+    // Capture spheres: store the inventory item id that initiated capture/release targeting.
+    // UI-only; not serialized.
+    int targetingCaptureItemId_ = 0;
+
+    // Fishing rods: store the inventory item id that initiated fishing targeting.
+    // UI-only; not serialized.
+    int targetingFishingRodItemId_ = 0;
+
+    // Fishing fight mini-mode (UI-only; not serialized). When you hook a large/rare fish,
+    // the game enters a short tension/progress interaction where you REEL (Enter) or
+    // give SLACK (Wait).
+    bool fishingFightActive_ = false;
+    int fishingFightRodItemId_ = 0;
+    Vec2i fishingFightWaterPos_{0,0};
+    uint32_t fishingFightFishSeed_ = 0u;
+    int fishingFightFishEnchant_ = 0;
+    int fishingFightFishWeight10_ = 0;
+    int fishingFightFishRarity_ = 0;
+    bool fishingFightFishShiny_ = false;
+    int fishingFightTension_ = 0;
+    int fishingFightProgress_ = 0;
+    int fishingFightSafeMin_ = 0;
+    int fishingFightSafeMax_ = 0;
+    int fishingFightTurnsLeft_ = 0;
+    int fishingFightPull_ = 0;
+    int fishingFightStep_ = 0;
+    std::string fishingFightLabel_;
 
     // Spells overlay (UI-only; not serialized)
     bool spellsOpen = false;
@@ -2425,6 +2500,12 @@ private:
     // with a stronger knockback profile.
     void attackMelee(Entity& attacker, Entity& defender, bool kick = false);
     void attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer, const Item* projectileTemplate = nullptr, bool wandPowered = false);
+    // Capture sphere pets: per-pet XP + bond progression is stored in the sphere item.
+    // Awarding is centralized so melee/ranged/AoE kills stay consistent.
+    void awardCapturedPetProgress(Entity& pet, int xpGain, int bondGain, bool showMsgs);
+
+    // Bounty contracts: progress is stored in Item::enchant and updated on qualifying kills.
+    void awardBountyProgress(EntityKind killedKind, bool showMsgs);
 
     void monsterTurn();
     void cleanupDead();
@@ -2443,6 +2524,23 @@ private:
     bool equipSelected();
     bool useSelected();
 
+    // Bounty helper: prints a summary of active bounty contracts in inventory.
+    void showBountyContracts();
+
+
+    // Crafting (Crafting Kit)
+    struct CraftComputed {
+        Item out;
+        std::string tagA;
+        std::string tagB;
+        int tier = 0;
+        RoomType workstation = RoomType::Normal;
+    };
+    CraftComputed computeCraftComputed(const Item& a0, const Item& b0) const;
+    void rebuildCraftingPreview();
+    void recordCraftRecipe(const CraftComputed& cc);
+    bool craftCombineById(int itemAId, int itemBId);
+
     // Spells
     void openSpells();
     void closeSpells();
@@ -2456,6 +2554,8 @@ private:
     // Targeting actions
     void beginTargeting();
     void beginSpellTargeting(SpellKind k);
+    void beginCaptureTargeting(int sphereItemId);
+    void beginFishingTargeting(int rodItemId);
     bool endTargeting(bool fire);
     void moveTargetCursor(int dx, int dy);
     void recomputeTargetLine();

@@ -6,6 +6,20 @@
 ### Added
 - Procedural terrain palette: per-run/per-floor HSL tints with room-style accents; configurable via settings and the new `#palette` command.
 - Procedural terrain materials: deterministic, depth-aware cellular-noise substrate (STONE/BRICK/BASALT/...) used for subtle tinting (scaled by proc_palette strength) and LOOK descriptions.
+- **Procedural companion behaviors**: new companion traits (**Scenthound**, **Shiny**, **Pack Mule**) with gameplay hooks (trap sniff pings, opportunistic gold fetching while following, and a modest carry-capacity bonus when nearby). LOOK and `#pet` status now surface companion names + traits.
+- **Capture spheres (Palworld/Pokemon-inspired)**: you can now capture eligible monsters into **Capture Spheres** / **Mega Spheres**, then **recall** or **release** them later; captured pals persist as items in your inventory.
+  - **Pet progression**: captured pals store **Level / XP / Bond / HP%** inside their sphere, gain XP from kills (plus a small party share when *you* kill), and receive modest stat growth as they level and bond.
+  - **Sphere economy**: empty spheres can now appear as rare treasure finds and are stocked in magic shops (with deeper floors occasionally offering Mega Spheres).
+- **Procedural fishing**: cast a **Fishing Rod** into **camp water basins** (overworld chasms) and **fountains** to reel in deterministic, procedurally generated fish.
+  - Fishing uses a per-tile **bite cadence** (learnable hot/cold windows) with a targeting preview that shows current bite status + catch chance.
+  - Caught fish are edible and can grant small buffs (or rare weird effects) based on their procedural bonus tag.
+  - **Big fish now fight back**: large/rare (and shiny) fish trigger a short, turn-based **tension / progress** reeling prompt (ENTER to REEL, . to give SLACK).
+  - Targeting preview now includes a **countdown** to the next bite window (and remaining window time when hot).
+- **Procedural farming foundations**: introduces deterministic crop/soil generation (names, rarity, yield/quality hooks) and adds farming item kinds (hoe, seeds, tilled soil, crop stages, produce) with save-compatible metadata packing.
+- **Procedural crafting foundations**: adds a **Crafting Kit** item kind and a deterministic, ingredient-driven crafting generator (`craftgen`) that maps two ingredients into a stable, procedurally chosen output.
+- **Procedural crafting mechanics**: the Crafting Kit is now usable to craft by selecting two ingredients in a dedicated inventory prompt; crafting in themed rooms acts like a location-based 'workstation' that can nudge item quality.
+- **Procedural bounties**: introduces **Bounty Contracts** (guild kill contracts) that track progress inside the item; complete the objective to redeem a deterministic reward (use `#bounty` to list active contracts).
+- **Crafting Insight**: inventory crafting now shows a live **workstation + recipe preview** and assigns each recipe a deterministic **sigil name**; use `#recipes` to list recipes you've learned this run.
 - Material acoustics + scent absorption: substrate materials now modulate **footstep/dig noise** and **scent trail decay/spread** (moss/dirt dampen; metal/crystal ring out).
 - **Procedural monster ecology (spawn theming)**: dungeon **terrain materials** and **room types** now apply mild, deterministic biases to the monster spawn tables — and certain affinity spawns can roll 1–2 nearby **nestmates** (shared groupId) — creating emergent ecology (spiders/snakes in dirt & moss, undead in marble/brick, kobolds in metal seams) without overriding content-mod spawn weights.
 - **Procedural monster variants**: rare monsters now roll a persistent **rank** (Elite/Champion/Mythic) plus 1-3 **affixes** at spawn.
@@ -300,7 +314,8 @@
 ### Changed
 - Procedural entity/projectile flipbooks: added sprite-space idle warps (slime squash & stretch, bat wing flap, snake slither, spider scuttle, wolf/dog tail wag) and replaced per-frame sprite shading jitter with a seamless looping shimmer; projectile arrow/rock now have 4-frame glint/tumble cues.
 - Procedural VFX flipbooks: **confusion/poison gas** and **fire** overlays now apply a lightweight **curl-noise flow warp** (divergence-free) before the existing domain-warp masks, producing more "advected" motion and richer turbulence in both top-down and isometric views.
-- **Dungeon length**: increased the default run from **20** to **25** floors (5 additional depths before the labyrinth and final sanctum).
+- **Dungeon length**: increased the default run from **20** to **25** floors.
+- **Dungeon generation**: the main branch is now **fully procedural** by default for depths **1–25** (no fixed handcrafted set-piece floors).
 - Extended command prompt: **TAB completion** now extends to the **longest common prefix** and lets you **cycle** through ambiguous matches by pressing **TAB** repeatedly (also works for pasted NetHack-style `#cmd` inputs).
 - Extended command prompt: upgraded to a proper **caret editor** (LEFT/RIGHT, HOME/END, DEL forward-delete) with familiar shell/Readline shortcuts: **Ctrl+A/E** home/end, **Ctrl+W** delete previous word, **Ctrl+U** clear to start, **Ctrl+K** clear to end; plus **Ctrl+L** clears the whole line (consistent with filter UIs).
 - Extended command prompt: TAB completion now shows an in-overlay **dropdown match list** with the active selection highlighted; added a default **Ctrl+P** binding to open the prompt when `#` is awkward on some layouts.

@@ -1,5 +1,7 @@
 #include "game.hpp"
 
+#include "pet_gen.hpp"
+
 #include "combat_rules.hpp"
 
 #include "grid_utils.hpp"
@@ -41,6 +43,25 @@ const char* kindName(EntityKind k) {
     }
 }
 
+
+// Procedural companions: deterministic display name (seeded from spriteSeed).
+static uint32_t petProfileSeedFor(const Entity& e) {
+    uint32_t s = e.spriteSeed;
+    if (s == 0u) {
+        const uint32_t a = static_cast<uint32_t>(e.id) ^ 0xBADC0DEu;
+        const uint32_t b = static_cast<uint32_t>(static_cast<uint8_t>(e.kind)) ^ 0xC0FFEEu;
+        s = hashCombine(a, b);
+        if (s == 0u) s = 1u;
+    }
+    return s;
+}
+
+static std::string petDisplayNameFor(const Entity& e) {
+    std::string out = petgen::petGivenName(petProfileSeedFor(e));
+    out += " THE ";
+    out += kindName(e.kind);
+    return out;
+}
 
 
 int smellFor(EntityKind k) {
@@ -299,7 +320,7 @@ void Game::monsterTurn() {
             const bool vis = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
             if (vis) {
                 std::ostringstream ss;
-                ss << "YOUR " << kindName(ally.kind) << " PICKS UP " << amt << " GOLD.";
+                ss << petDisplayNameFor(ally) << " PICKS UP " << amt << " GOLD.";
                 pushMsg(ss.str(), MessageKind::Loot, true);
             }
             return true;
@@ -337,7 +358,7 @@ void Game::monsterTurn() {
         const bool vis = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
         if (vis) {
             std::ostringstream ss;
-            ss << "YOUR " << kindName(ally.kind) << " PICKS UP " << displayItemName(it) << ".";
+            ss << petDisplayNameFor(ally) << " PICKS UP " << displayItemName(it) << ".";
             pushMsg(ss.str(), MessageKind::Loot, true);
         }
         return true;
@@ -354,7 +375,7 @@ void Game::monsterTurn() {
         const bool vis = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
         if (vis) {
             std::ostringstream ss;
-            ss << "YOUR " << kindName(ally.kind) << " BRINGS YOU " << amt << " GOLD.";
+            ss << petDisplayNameFor(ally) << " BRINGS YOU " << amt << " GOLD.";
             pushMsg(ss.str(), MessageKind::Loot, true);
         }
         return true;
@@ -374,7 +395,7 @@ void Game::monsterTurn() {
         const bool vis = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
         if (vis) {
             std::ostringstream ss;
-            ss << "YOUR " << kindName(ally.kind) << " BRINGS YOU " << displayItemName(it) << ".";
+            ss << petDisplayNameFor(ally) << " BRINGS YOU " << displayItemName(it) << ".";
             pushMsg(ss.str(), MessageKind::Loot, true);
         }
         return true;
@@ -399,7 +420,13 @@ void Game::monsterTurn() {
             }
 
             const int dist = manhattan(ally.pos, g.pos);
-            const int val = allyFetchDesire(g.item);
+            int val = allyFetchDesire(g.item);
+
+            // SHINY companions strongly prefer gold over generic loot.
+            if (g.item.kind == ItemKind::Gold && petgen::petHasTrait(ally.procAffixMask, petgen::PetTrait::Shiny)) {
+                val += 18 + std::min(60, std::max(0, g.item.count)) / 2;
+            }
+
             if (val <= 0) continue;
 
             if (best.x < 0) {
@@ -469,6 +496,43 @@ void Game::monsterTurn() {
                 if (m.allyHomePos.x >= 0) m.allyHomePos = {-1, -1};
             }
 
+            // SCENTHOUND: occasional passive trap detection around the companion.
+            // This does not consume the ally's action; it is a free sense ping.
+            if (petgen::petHasTrait(m.procAffixMask, petgen::PetTrait::Scenthound)) {
+                // Keep this modest so it feels like a helpful hint rather than a full detect-traps spell.
+                const int radius = 2;
+                if (rng.chance(0.18f)) {
+                    int bestIndex = -1;
+                    int bestDist = 999;
+                    for (size_t ti = 0; ti < trapsCur.size(); ++ti) {
+                        Trap& tr = trapsCur[ti];
+                        if (tr.discovered) continue;
+                        const int d = chebyshev(m.pos, tr.pos);
+                        if (d > radius) continue;
+                        if (d < bestDist) {
+                            bestDist = d;
+                            bestIndex = static_cast<int>(ti);
+                        }
+                    }
+
+                    if (bestIndex >= 0) {
+                        Trap& tr = trapsCur[static_cast<size_t>(bestIndex)];
+                        tr.discovered = true;
+
+                        // Only message if the revealed tile is in the player's current FOV to avoid confusion/spam.
+                        const bool vis = dung.inBounds(tr.pos.x, tr.pos.y) && dung.at(tr.pos.x, tr.pos.y).visible;
+                        if (vis) {
+                            std::ostringstream ss;
+                            ss << petDisplayNameFor(m) << " SNIFFS OUT A TRAP!";
+                            pushMsg(ss.str(), MessageKind::Info, true);
+                        }
+
+                        // Small visual hint at the trap location (works even if not currently visible).
+                        pushFxParticle(FXParticlePreset::Detect, tr.pos, 34, 0.22f);
+                    }
+                }
+            }
+
             // If an ally is adjacent and carrying gold, deliver it immediately.
             // (This consumes the ally's action for the turn.)
             if (depositAllyGold(m)) return;
@@ -493,6 +557,11 @@ void Game::monsterTurn() {
                 maxChase = carryingLoot ? 6 : 10;
             } else if (m.allyOrder == AllyOrder::Guard) {
                 maxChase = LOS_MANHATTAN;
+            }
+
+            // FEROCIOUS companions are more willing to chase fights.
+            if (petgen::petHasTrait(m.procAffixMask, petgen::PetTrait::Ferocious)) {
+                maxChase = std::min(maxChase + 4, LOS_MANHATTAN + 6);
             }
 
             for (auto& e : ents) {
@@ -528,6 +597,64 @@ void Game::monsterTurn() {
                     tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
                 }
                 return;
+            }
+
+            // SHINY: opportunistically scoop up nearby visible gold even while FOLLOWing.
+            // This gives the companion a bit of NetHack-like "apport" flavor without requiring FETCH mode.
+            if (m.allyOrder == AllyOrder::Follow && petgen::petHasTrait(m.procAffixMask, petgen::PetTrait::Shiny)) {
+                const bool carryingLoot = (m.stolenGold > 0) || (m.pocketConsumable.id != 0 && m.pocketConsumable.count > 0);
+                if (!carryingLoot) {
+                    Vec2i bestGold{-1, -1};
+                    int bestVal = 0;
+                    int bestDist = 999999;
+
+                    // Keep the detour small so FOLLOW still feels responsive.
+                    const int maxFromPlayer = 6;
+                    const int maxFromAlly = 6;
+
+                    for (const auto& g : ground) {
+                        if (g.item.kind != ItemKind::Gold) continue;
+                        if (g.item.count <= 0) continue;
+                        if (g.item.shopPrice > 0) continue;
+                        if (!dung.inBounds(g.pos.x, g.pos.y)) continue;
+                        const Tile& t0 = dung.at(g.pos.x, g.pos.y);
+                        if (!t0.visible) continue;
+
+                        if (chebyshev(p.pos, g.pos) > maxFromPlayer) continue;
+
+                        const int dist = manhattan(m.pos, g.pos);
+                        if (dist > maxFromAlly) continue;
+
+                        const int val = std::max(1, g.item.count);
+                        if (bestGold.x < 0) {
+                            bestGold = g.pos;
+                            bestVal = val;
+                            bestDist = dist;
+                            continue;
+                        }
+
+                        const int64_t lhs = static_cast<int64_t>(val) * static_cast<int64_t>(bestDist + 1);
+                        const int64_t rhs = static_cast<int64_t>(bestVal) * static_cast<int64_t>(dist + 1);
+                        if (lhs > rhs || (lhs == rhs && dist < bestDist)) {
+                            bestGold = g.pos;
+                            bestVal = val;
+                            bestDist = dist;
+                        }
+                    }
+
+                    if (bestGold.x >= 0) {
+                        if (bestGold == m.pos) {
+                            if (pickupGoldAt(m)) return;
+                        } else {
+                            const auto& costMap = getCostMap(bestGold, caps);
+                            const Vec2i step = bestStepToward(m, costMap, caps);
+                            if (step != m.pos) {
+                                tryMove(m, step.x - m.pos.x, step.y - m.pos.y);
+                                return;
+                            }
+                        }
+                    }
+                }
             }
 
             // No visible hostiles: obey orders.

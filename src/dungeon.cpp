@@ -8790,8 +8790,8 @@ GenKind chooseGenKind(int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
     // - Early: classic rooms (with occasional "ruins" variant)
     // - Early spikes: mines + grotto + an early maze/warrens band
     // - Midpoint: a bigger "you are deep now" spike
-    // - Late: a second set of themed generator hits (lower mines/catacombs/cavern)
-    // - Endgame: scripted penultimate labyrinth + final sanctum (handled in Dungeon::generate)
+	// - Late: a second set of themed generator hits (lower mines/catacombs/cavern)
+	// - Endgame: the deepest floors lean harder into irregular layouts (still fully procedural)
     if (maxDepth < 1) maxDepth = 1;
 
     // Endless depths (depth > maxDepth) only occur when Infinite World mode is enabled.
@@ -8926,8 +8926,8 @@ GenKind chooseGenKind(int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
 
     // Early floors: mostly classic BSP rooms, but occasionally use the graph/packed-rooms variant
     // to keep runs from feeling identical.
-    if (depth <= 3) {
-        // Depth 3 is a handcrafted Sokoban floor (handled earlier), but keep this safe for tests/endless.
+	if (depth <= 3) {
+		// Onboarding band: keep the first few floors room-heavy for readability.
         if (depth == 1) {
             // Keep the very first floor mostly familiar, but not always.
             if (rng.chance(0.40f)) return GenKind::RoomsGraph;
@@ -8959,7 +8959,7 @@ GenKind chooseGenKind(int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
         return GenKind::RoomsBsp;
     }
 
-    // Note: depth 6 is a fixed Rogue homage floor (handled earlier), but keep this for endless/testing.
+	// Depth 6: keep a predictable rooms floor for pacing (and for endless/testing).
     if (depth == 6) return GenKind::RoomsBsp;
     if (depth == Dungeon::CATACOMBS_DEPTH) return GenKind::Catacombs;
 
@@ -8972,7 +8972,8 @@ GenKind chooseGenKind(int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
     if (depth == midpoint + 4 && depth < maxDepth - 1) return GenKind::Catacombs;
     if (depth == midpoint + 6 && depth < maxDepth - 1) return GenKind::Cavern;
 
-    // Calm before the penultimate labyrinth (Dungeon::generate will handle maxDepth-1).
+	// Calm before the bottom: give the player one more relatively "readable" rooms floor
+	// right before the deepest depths.
     if (maxDepth >= 8 && depth == maxDepth - 2) {
         // Slight bias toward the "ruins" generator so the player sees more doors/loops
         // right before the final approach.
@@ -19321,41 +19322,11 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     // Non-camp branches should never have depth <= 0, but clamp for safety.
     if (depth < 1) depth = 1;
 
-
-    // Final floor: a bespoke arena-like sanctum that caps the run.
-    if (depth == maxDepth) {
-        generateSanctum(*this, rng, depth);
-        ensureBorders(*this);
-
-    // Final safety: ensure stair tiles survive any later carving/decoration overlap.
-    if (inBounds(stairsUp.x, stairsUp.y)) at(stairsUp.x, stairsUp.y).type = TileType::StairsUp;
-    if (depth != maxDepth && inBounds(stairsDown.x, stairsDown.y)) at(stairsDown.x, stairsDown.y).type = TileType::StairsDown;
-        return;
-    }
-
-    // Penultimate floor: a bespoke labyrinth that ramps tension before the sanctum.
-    // (Hard-coded so the run has a consistent "final approach" feel.)
-    if (maxDepth >= 2 && depth == maxDepth - 1) {
-        generateLabyrinth(*this, rng, depth);
-        ensureBorders(*this);
-        return;
-    }
-
-    // Sokoban-inspired puzzle floor (early-mid game).
-    // Keep it at a fixed depth so players learn to recognize the "boulder -> chasm" bridge mechanic.
-    if (depth == SOKOBAN_DEPTH) {
-        generateSokoban(*this, rng, depth);
-        ensureBorders(*this);
-        return;
-    }
-
-    // Rogue homage floor (mid-run): classic 3x3-room layout with doorless corridors.
-    // This deliberately changes the tactical texture vs. door-heavy BSP floors.
-    if (depth == ROGUE_LEVEL_DEPTH) {
-        generateRogueLevel(*this, rng, depth);
-        ensureBorders(*this);
-        return;
-    }
+    // Main campaign (Main branch) floors are now fully procedural by default.
+    //
+    // Legacy bespoke set-piece floors (Sokoban/Rogue/Labyrinth/Sanctum) remain in the
+    // codebase for potential future opt-in modes, but they are no longer used for the
+    // default depth 1..maxDepth run.
 
     // Choose a generation style (rooms vs caverns vs mazes) once (depth pacing),
     // then generate a few candidate layouts and pick the best by deterministic scoring.

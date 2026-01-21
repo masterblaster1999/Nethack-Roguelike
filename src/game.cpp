@@ -1,5 +1,6 @@
 #include "game_internal.hpp"
 #include "overworld.hpp"
+#include "bounty_gen.hpp"
 #include <cmath>
 
 uint32_t dailySeedUtc(std::string* outDateIso) {
@@ -274,13 +275,9 @@ static MapSizeWH pickProceduralMapSize(RNG& rng, DungeonBranch branch, int depth
         return out;
     }
 
-    // Keep bespoke/special layouts at the canonical size (they were authored/tuned for it).
-    if (depth <= 0) return out;
-    if (depth == Dungeon::SOKOBAN_DEPTH) return out;
-    if (depth == Dungeon::ROGUE_LEVEL_DEPTH) return out;
-    if (maxDepth >= 2 && depth == maxDepth - 1) return out; // labyrinth / pre-sanctum
-    if (depth == maxDepth) return out; // sanctum
-    if (branch != DungeonBranch::Main) return out;
+	// Non-main branches keep canonical sizing unless they opt into scaling.
+	if (depth <= 0) return out;
+	if (branch != DungeonBranch::Main) return out;
 
     // If infinite world is disabled, depth>maxDepth should never happen; keep stable if it does.
     if (!infiniteWorldEnabled && depth > maxDepth) return out;
@@ -365,8 +362,10 @@ static MapSizeWH pickProceduralMapSize(RNG& rng, DungeonBranch branch, int depth
         return out;
     }
 
-    // Regular finite-depth sizing (unchanged).
-    if (depth >= maxDepth) return out;
+	// Regular finite-depth sizing.
+	// NOTE: The main-campaign bottom floor (depth==maxDepth) is now procedural too,
+	// so we allow it to participate in the normal depth-based size scaling.
+	if (depth > maxDepth) return out;
 
     // Depth progress 0..(maxDepth-1) (with depth 1 at 0).
     const int den = std::max(1, maxDepth - 1);
@@ -1131,6 +1130,10 @@ void Game::onPlayerLevelUp() {
     invIdentifyMode = false;
     invEnchantRingMode = false;
     invPrompt_ = InvPromptKind::None;
+    invCraftMode = false;
+    invCraftFirstId_ = 0;
+    invCraftPreviewLines_.clear();
+    craftRecipeBook_.clear();
     closeChestOverlay();
     targeting = false;
     targetLine.clear();
@@ -1696,6 +1699,10 @@ void Game::newGame(uint32_t seed) {
     invIdentifyMode = false;
     invEnchantRingMode = false;
     invPrompt_ = InvPromptKind::None;
+    invCraftMode = false;
+    invCraftFirstId_ = 0;
+    invCraftPreviewLines_.clear();
+    craftRecipeBook_.clear();
     invSel = 0;
     targeting = false;
 
@@ -1907,21 +1914,13 @@ void Game::newGame(uint32_t seed) {
 
     ents.push_back(p);
 
-    // Starting companion: a friendly dog.
+    std::string companionIntroLine = "A DOG TROTS AT YOUR HEELS.";
+
+    // Starting companion: a procedurally-chosen friendly pet.
     {
-        Entity d;
-        d.id = nextEntityId++;
-        d.kind = EntityKind::Dog;
-        d.hpMax = 10;
-        d.hp = d.hpMax;
-        d.baseAtk = 2;
-        d.baseDef = 0;
-        d.spriteSeed = rng.nextU32();
-        d.speed = baseSpeedFor(d.kind);
-        d.willFlee = false;
-        d.alerted = false;
-        d.friendly = true;
-        d.allyOrder = AllyOrder::Follow;
+        // Use exactly one RNG draw for both identity and visuals so the rest of
+        // the new-run RNG stream stays stable.
+        const uint32_t petSeed = rng.nextU32();
 
         // Spawn near the player (prefer adjacent, but fall back to a wider search).
         Vec2i spawn{-1, -1};
@@ -1945,9 +1944,89 @@ void Game::newGame(uint32_t seed) {
             }
         }
 
+        auto chooseStartingPetKind = [&](uint32_t s) -> EntityKind {
+            struct Opt { EntityKind k; int w; };
+            Opt opts[5];
+            int n = 0;
+            auto add = [&](EntityKind k, int w) {
+                if (w <= 0 || n >= 5) return;
+                opts[n++] = Opt{k, w};
+            };
+
+            // Small class flavor: wizards skew to "weirder" pets; knights skew to dogs/wolves.
+            switch (playerClass_) {
+                case PlayerClass::Knight:
+                    add(EntityKind::Dog, 5);
+                    add(EntityKind::Wolf, 3);
+                    add(EntityKind::Bat, 1);
+                    add(EntityKind::Snake, 1);
+                    add(EntityKind::Spider, 1);
+                    break;
+                case PlayerClass::Rogue:
+                    add(EntityKind::Dog, 3);
+                    add(EntityKind::Wolf, 2);
+                    add(EntityKind::Bat, 2);
+                    add(EntityKind::Snake, 2);
+                    add(EntityKind::Spider, 2);
+                    break;
+                case PlayerClass::Archer:
+                    add(EntityKind::Dog, 3);
+                    add(EntityKind::Wolf, 3);
+                    add(EntityKind::Bat, 1);
+                    add(EntityKind::Snake, 2);
+                    add(EntityKind::Spider, 1);
+                    break;
+                case PlayerClass::Wizard:
+                    add(EntityKind::Dog, 1);
+                    add(EntityKind::Wolf, 1);
+                    add(EntityKind::Bat, 3);
+                    add(EntityKind::Snake, 3);
+                    add(EntityKind::Spider, 2);
+                    break;
+                case PlayerClass::Adventurer:
+                default:
+                    add(EntityKind::Dog, 4);
+                    add(EntityKind::Wolf, 2);
+                    add(EntityKind::Bat, 1);
+                    add(EntityKind::Snake, 1);
+                    add(EntityKind::Spider, 1);
+                    break;
+            }
+
+            int total = 0;
+            for (int i = 0; i < n; ++i) total += opts[i].w;
+            if (n <= 0 || total <= 0) return EntityKind::Dog;
+
+            uint32_t r = hash32(s ^ 0xF00DBA5Eu) % static_cast<uint32_t>(total);
+            for (int i = 0; i < n; ++i) {
+                const uint32_t w = static_cast<uint32_t>(std::max(0, opts[i].w));
+                if (r < w) return opts[i].k;
+                r -= w;
+            }
+            return opts[0].k;
+        };
+
         if (spawn.x >= 0) {
-            d.pos = spawn;
+            const EntityKind petKind = chooseStartingPetKind(petSeed);
+            Entity d = makeMonster(petKind, spawn, /*groupId=*/0, /*allowGear=*/false, /*forcedSpriteSeed=*/petSeed, /*allowProcVariant=*/false);
+            d.friendly = true;
+            d.allyOrder = AllyOrder::Follow;
+            d.willFlee = false;
+            d.alerted = false;
+            d.lastKnownPlayerPos = {-1, -1};
+            d.lastKnownPlayerAge = 9999;
+            d.energy = 0;
+
+            ensurePetTraits(d);
+
+            companionIntroLine = "COMPANION: " + petDisplayName(d);
+            const std::string traits = petgen::petTraitList(d.procAffixMask);
+            if (!traits.empty()) companionIntroLine += " (" + traits + ")";
+            companionIntroLine += ".";
+
             ents.push_back(d);
+        } else {
+            companionIntroLine = "YOU TRAVEL ALONE.";
         }
     }
 
@@ -2068,7 +2147,7 @@ void Game::newGame(uint32_t seed) {
         ms << "LEVEL SIZE: " << dung.width << "x" << dung.height << ".";
         pushMsg(ms.str(), MessageKind::System);
     }
-    pushMsg("A DOG TROTS AT YOUR HEELS.", MessageKind::System);
+    pushMsg(companionIntroLine, MessageKind::System);
     {
         std::ostringstream ss;
         ss << "GOAL: FIND THE AMULET OF YENDOR (DEPTH " << QUEST_DEPTH
@@ -2158,6 +2237,12 @@ bool Game::restoreLevel(LevelId id) {
         ents.push_back(m);
     }
 
+    // Defensive: older saves (or pre-pet allies) may not have pet traits initialized yet.
+    for (auto& e : ents) {
+        if (e.id == playerId_) continue;
+        ensurePetTraits(e);
+    }
+
     if (id.branch == DungeonBranch::Camp && id.depth == 0) {
         overworld::ensureBorderGates(dung);
     }
@@ -2213,6 +2298,12 @@ bool Game::restoreOverworldChunk(int x, int y) {
 
     for (const auto& m : it->second.monsters) {
         ents.push_back(m);
+    }
+
+    // Defensive: ensure restored friendly allies have their pet traits initialized.
+    for (auto& e : ents) {
+        if (e.id == playerId_) continue;
+        ensurePetTraits(e);
     }
 
     // Overworld chunks always have edge gates.
@@ -2413,8 +2504,8 @@ bool Game::tryOverworldStep(int dx, int dy) {
         ++companionCount;
     }
     if (companionCount > 0) {
-        if (companionCount == 1 && companions.size() == 1 && companions[0].kind == EntityKind::Dog) {
-            pushMsg("YOUR DOG FOLLOWS YOU.", MessageKind::System, true);
+        if (companionCount == 1 && companions.size() == 1) {
+            pushMsg("YOUR COMPANION FOLLOWS YOU.", MessageKind::System, true);
         } else {
             pushMsg("YOUR COMPANIONS FOLLOW YOU.", MessageKind::System, true);
         }
@@ -2795,6 +2886,8 @@ void Game::setupSurfaceCampInstallations() {
     }
 
     // If a chest already exists at the stash location, don't duplicate.
+    // However, we still treat it as the camp stash container and ensure it contains
+    // a basic fishing rod for new fishing mechanics.
     for (const auto& gi : ground) {
         if (gi.pos == stash && isChestKind(gi.item.kind)) {
             // Still add helpful markers if missing.
@@ -2806,6 +2899,65 @@ void Game::setupSurfaceCampInstallations() {
                 }
             }
             if (!haveStashMarker) mapMarkers_.push_back({stash, MarkerKind::Loot, "STASH"});
+
+            const int chestId = gi.item.id;
+
+            // Ensure the chest has a container entry.
+            ChestContainer* cont = nullptr;
+            for (auto& c : chestContainers_) {
+                if (c.chestId == chestId) { cont = &c; break; }
+            }
+            if (!cont) {
+                chestContainers_.push_back(ChestContainer{ chestId, {} });
+                cont = &chestContainers_.back();
+            }
+
+            // Ensure a fishing rod exists (one-time).
+            bool haveRod = false;
+            for (const auto& it : cont->items) {
+                if (it.kind == ItemKind::FishingRod) { haveRod = true; break; }
+            }
+            if (!haveRod) {
+                Item rod;
+                rod.id = nextItemId++;
+                rod.kind = ItemKind::FishingRod;
+                rod.count = 1;
+                rod.spriteSeed = rng.nextU32();
+                rod.charges = itemDef(rod.kind).maxCharges;
+                cont->items.push_back(rod);
+            }
+
+            // Ensure a crafting kit exists (one-time).
+            bool haveKit = false;
+            for (const auto& it : cont->items) {
+                if (it.kind == ItemKind::CraftingKit) { haveKit = true; break; }
+            }
+            if (!haveKit) {
+                Item kit;
+                kit.id = nextItemId++;
+                kit.kind = ItemKind::CraftingKit;
+                kit.count = 1;
+                kit.spriteSeed = rng.nextU32();
+                cont->items.push_back(kit);
+            }
+
+// Ensure a bounty contract exists (one-time).
+bool haveBounty = false;
+for (const auto& it : cont->items) {
+    if (it.kind == ItemKind::BountyContract) { haveBounty = true; break; }
+}
+if (!haveBounty) {
+    Item bc;
+    bc.id = nextItemId++;
+    bc.kind = ItemKind::BountyContract;
+    bc.count = 1;
+    bc.spriteSeed = rng.nextU32();
+    const int depthHint = std::max(1, maxDepthReached());
+    bc.charges = bountygen::makeCharges(bc.spriteSeed, depthHint);
+    bc.enchant = withBountyProgress(bc.enchant, 0);
+    cont->items.push_back(bc);
+}
+
             return;
         }
     }
@@ -2846,9 +2998,35 @@ void Game::setupSurfaceCampInstallations() {
         ration.count = 1;
         ration.spriteSeed = rng.nextU32();
 
+        Item rod;
+        rod.id = nextItemId++;
+        rod.kind = ItemKind::FishingRod;
+        rod.count = 1;
+        rod.spriteSeed = rng.nextU32();
+        rod.charges = itemDef(rod.kind).maxCharges;
+
+        Item kit;
+        kit.id = nextItemId++;
+        kit.kind = ItemKind::CraftingKit;
+        kit.count = 1;
+        kit.spriteSeed = rng.nextU32();
+
+        Item bc;
+        bc.id = nextItemId++;
+        bc.kind = ItemKind::BountyContract;
+        bc.count = 1;
+        bc.spriteSeed = rng.nextU32();
+        {
+            const int depthHint = std::max(1, maxDepthReached());
+            bc.charges = bountygen::makeCharges(bc.spriteSeed, depthHint);
+            bc.enchant = withBountyProgress(bc.enchant, 0);
+        }
+
         cc.items.push_back(torch);
         cc.items.push_back(ration);
-
+        cc.items.push_back(rod);
+        cc.items.push_back(kit);
+        cc.items.push_back(bc);
         chestContainers_.push_back(cc);
     }
 
@@ -3029,6 +3207,13 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
     autoExploreSearchAnnounced = false;
     autoExploreSearchTriedTurns.clear();
     invOpen = false;
+    invIdentifyMode = false;
+    invEnchantRingMode = false;
+    invPrompt_ = InvPromptKind::None;
+    invCraftMode = false;
+    invCraftFirstId_ = 0;
+    invCraftPreviewLines_.clear();
+    craftRecipeBook_.clear();
     targeting = false;
     helpOpen = false;
     minimapOpen = false;
@@ -3302,8 +3487,8 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
             ++companionCount;
         }
         if (companionCount > 0) {
-            if (companionCount == 1 && companions.size() == 1 && companions[0].kind == EntityKind::Dog) {
-                pushMsg("YOUR DOG FOLLOWS YOU.", MessageKind::System, true);
+            if (companionCount == 1 && companions.size() == 1) {
+                pushMsg("YOUR COMPANION FOLLOWS YOU.", MessageKind::System, true);
             } else {
                 pushMsg("YOUR COMPANIONS FOLLOW YOU.", MessageKind::System, true);
             }
@@ -3356,8 +3541,8 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
             ++companionCount;
         }
         if (companionCount > 0) {
-            if (companionCount == 1 && companions.size() == 1 && companions[0].kind == EntityKind::Dog) {
-                pushMsg("YOUR DOG FOLLOWS YOU.", MessageKind::System, true);
+            if (companionCount == 1 && companions.size() == 1) {
+                pushMsg("YOUR COMPANION FOLLOWS YOU.", MessageKind::System, true);
             } else {
                 pushMsg("YOUR COMPANIONS FOLLOW YOU.", MessageKind::System, true);
             }
@@ -3540,29 +3725,16 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
             pushMsg("YOU HEAR THE CLICK OF A LOCK DEEP WITHIN.", MessageKind::System, true);
         }
 
-        // Special floor callout: the Sokoban puzzle floor teaches/spotlights the
-        // boulder-into-chasm bridging mechanic.
-        if (goingDown && depth_ == Dungeon::SOKOBAN_DEPTH) {
-            pushMsg("THE AIR VIBRATES WITH A LOW RUMBLE...", MessageKind::System, true);
-            pushMsg("BOULDERS AND CHASMS AHEAD. BRIDGE THE GAPS BY PUSHING BOULDERS INTO THEM.", MessageKind::System, true);
-        }
-
-        // Special floor callout: the Rogue homage floor is deliberately doorless and grid-based,
-        // echoing classic Rogue/NetHack pacing.
-        if (goingDown && depth_ == Dungeon::ROGUE_LEVEL_DEPTH) {
-            pushMsg("YOU ENTER WHAT SEEMS TO BE AN OLDER, MORE PRIMITIVE WORLD.", MessageKind::System, true);
-        }
-
-        // Deep descent callout: the default run is longer now, so the "final approach"
-        // begins a few floors earlier than the labyrinth setpiece.
+		// Deep descent callout: the default run is longer now, so the "final approach"
+		// begins a few floors earlier than the quest floor.
         if (goingDown && depth_ == QUEST_DEPTH - 6) {
             pushMsg("THE DUNGEON PLUNGES EVEN DEEPER...", MessageKind::System, true);
             pushMsg("THE AIR GROWS THICK WITH OLD MAGIC.", MessageKind::System, true);
         }
 
         if (goingDown && depth_ == QUEST_DEPTH - 1) {
-            pushMsg("THE PASSAGES TWIST AND TURN... YOU ENTER A LABYRINTH.", MessageKind::System, true);
-            pushMsg("IN THE DISTANCE, YOU HEAR THE DRUMMING OF HEAVY HOOVES...", MessageKind::Warning, true);
+			pushMsg("THE DUNGEON TIGHTENS INTO CROOKED PASSAGES...", MessageKind::System, true);
+			pushMsg("YOU FEEL THE WEIGHT OF THE DEEP PLACES AHEAD.", MessageKind::System, true);
         }
         if (goingDown && depth_ == QUEST_DEPTH && !playerHasAmulet()) {
             pushMsg("A SINISTER PRESENCE LURKS AHEAD. THE AMULET MUST BE NEAR...", MessageKind::System, true);

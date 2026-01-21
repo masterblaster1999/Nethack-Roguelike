@@ -1280,7 +1280,17 @@ void Game::spawnItems() {
         else if (roll < 160) dropItemAt(ItemKind::ScrollFear, randomFreeTileInRoom(r), 1);
         else if (roll < 162) dropItemAt(ItemKind::ScrollEarth, randomFreeTileInRoom(r), 1);
         else if (roll < 163) dropItemAt(ItemKind::ScrollTaming, randomFreeTileInRoom(r), 1);
-        else if (roll < 166) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
+        else if (roll < 166) {
+            // Rare treasure-room find: capture spheres.
+            // Kept relatively uncommon here; magic shops are the primary source.
+            if (rng.chance(0.60f)) {
+                ItemKind sp = ItemKind::CaptureSphere;
+                if (depth_ >= 6 && rng.chance(0.40f)) sp = ItemKind::MegaSphere;
+                dropItemAt(sp, randomFreeTileInRoom(r), rng.range(1, 2));
+            } else {
+                dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
+            }
+        }
         else if (roll < 172) {
             // Rare traversal utility in treasure rooms.
             if (depth_ >= 3 && rng.chance(0.33f)) {
@@ -1478,11 +1488,16 @@ void Game::spawnItems() {
                     else if (roll < 78) { k = ItemKind::ScrollFear; }
                     else if (roll < 82) { k = ItemKind::ScrollEarth; }
                     else if (roll < 84) { k = ItemKind::ScrollTaming; }
-                    else if (roll < 86) { k = ItemKind::PotionStrength; }
-                    else if (roll < 92) { k = ItemKind::PotionRegeneration; }
-                    else if (roll < 96) { k = ItemKind::PotionHaste; }
-                    else if (roll < 98) { k = ItemKind::PotionEnergy; }
-                    else if (roll < 99) {
+                    else if (roll < 90) {
+                        // Capture spheres: staple item for monster collecting.
+                        k = (depth_ >= 6 && rng.chance(0.25f)) ? ItemKind::MegaSphere : ItemKind::CaptureSphere;
+                        count = rng.range(1, 3);
+                    }
+                    else if (roll < 92) { k = ItemKind::PotionStrength; }
+                    else if (roll < 98) { k = ItemKind::PotionRegeneration; }
+                    else if (roll < 102) { k = ItemKind::PotionHaste; }
+                    else if (roll < 104) { k = ItemKind::PotionEnergy; }
+                    else if (roll < 105) {
                         // A small chance of rings showing up in the magic shop.
                         const int rr = rng.range(0, 99);
                         if (rr < 28) k = ItemKind::RingProtection;

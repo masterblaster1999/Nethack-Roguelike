@@ -1,5 +1,7 @@
 #include "game.hpp"
 
+#include "pet_gen.hpp"
+
 #include "combat_rules.hpp"
 #include "physics.hpp"
 #include "projectile_utils.hpp"
@@ -129,6 +131,134 @@ int damageReduction(const Game& game, const Entity& e) {
 
 
 } // namespace
+
+
+void Game::awardCapturedPetProgress(Entity& pet, int xpGain, int bondGain, bool showMsgs) {
+    if (xpGain <= 0 && bondGain <= 0) return;
+    if (pet.hp <= 0) return;
+    if (!pet.friendly) return;
+    if (pet.id == player().id) return;
+
+    // Find a matching full capture sphere in the player's inventory.
+    // (This is what persists the pet's bond/level/xp across recalls.)
+    Item* sphere = nullptr;
+    for (auto& it : inv) {
+        if (!isCaptureSphereFullKind(it.kind)) continue;
+        if (it.enchant != static_cast<int>(pet.kind)) continue;
+        if (it.spriteSeed != pet.spriteSeed) continue;
+        sphere = &it;
+        break;
+    }
+    if (!sphere) return;
+
+    const int oldBond = clampi(captureSphereBondFromCharges(sphere->charges), 0, 99);
+    const int oldTier = oldBond / 25;
+    const int oldLevel = clampi(captureSpherePetLevelOrDefault(sphere->charges), 1, captureSpherePetLevelCap());
+    const int oldXp = clampi(captureSpherePetXpOrZero(sphere->charges), 0, 255);
+    const int hpStoredPct = clampi(captureSphereHpPctFromCharges(sphere->charges), 0, 100);
+
+    int bond = clampi(oldBond + bondGain, 0, 99);
+    int tier = bond / 25;
+
+    const int cap = captureSpherePetLevelCap();
+    int level = oldLevel;
+    int xp = oldXp + xpGain;
+    bool leveled = false;
+
+    while (level < cap) {
+        const int need = captureSpherePetXpToNext(level);
+        if (xp < need) break;
+        xp -= need;
+        ++level;
+        leveled = true;
+    }
+    if (level >= cap) {
+        level = cap;
+        xp = 0;
+    }
+    xp = clampi(xp, 0, 255);
+
+    // Persist updated progression into the sphere.
+    sphere->charges = packCaptureSphereCharges(bond, hpStoredPct, level, xp);
+
+    // Apply incremental growth immediately to the in-world entity so the player feels it.
+    const int atkDelta = captureSpherePetAtkBonus(level) - captureSpherePetAtkBonus(oldLevel);
+    const int defDelta = captureSpherePetDefBonus(level) - captureSpherePetDefBonus(oldLevel);
+    const int hpDelta  = captureSpherePetHpBonus(level) - captureSpherePetHpBonus(oldLevel);
+
+    if (atkDelta != 0) pet.baseAtk += atkDelta;
+    if (defDelta != 0) pet.baseDef += defDelta;
+    if (hpDelta != 0) {
+        pet.hpMax += hpDelta;
+        pet.hp += hpDelta;
+    }
+
+    // Bond tier deltas (must mirror the release-time bonuses).
+    if (oldTier < 1 && tier >= 1) pet.baseAtk += 1;
+    if (oldTier < 2 && tier >= 2) pet.baseDef += 1;
+    if (oldTier < 3 && tier >= 3) {
+        pet.hpMax += 3;
+        pet.hp += 3;
+    }
+
+    pet.hpMax = std::max(1, pet.hpMax);
+    pet.hp = clampi(pet.hp, 1, pet.hpMax);
+
+    if (!showMsgs) return;
+
+    const std::string pname = (pet.spriteSeed != 0u)
+        ? petgen::petGivenName(pet.spriteSeed)
+        : (std::string("YOUR ") + kindName(pet.kind));
+
+    if (leveled) {
+        std::ostringstream ss;
+        ss << pname << " LEVELS UP! (LV " << level << ")";
+        pushMsg(ss.str(), MessageKind::Success, true);
+
+        if (dung.inBounds(pet.pos.x, pet.pos.y) && dung.at(pet.pos.x, pet.pos.y).visible) {
+            pushFxParticle(FXParticlePreset::Buff, pet.pos, 10, 0.30f);
+        }
+    }
+
+    if (tier > oldTier) {
+        std::ostringstream ss;
+        ss << pname << " BOND RANK UP! (TIER " << tier << ")";
+        pushMsg(ss.str(), MessageKind::Info, true);
+    }
+}
+
+
+void Game::awardBountyProgress(EntityKind killedKind, bool showMsgs) {
+    // Bounty contracts live in inventory; we advance any matching active contracts.
+    // We keep messaging light to avoid spam: only notify on completion.
+    bool completedAny = false;
+
+    for (auto& it : inv) {
+        if (it.kind != ItemKind::BountyContract) continue;
+
+        const int rawTarget = bountyTargetKindFromCharges(it.charges);
+        if (rawTarget < 0 || rawTarget >= ENTITY_KIND_COUNT) continue;
+        if (static_cast<EntityKind>(rawTarget) != killedKind) continue;
+
+        const int req = clampi(bountyRequiredKillsFromCharges(it.charges), 1, 255);
+        const int prog = clampi(bountyProgressFromEnchant(it.enchant), 0, 255);
+        if (prog >= req) continue;
+
+        const int next = std::min(req, prog + 1);
+        it.enchant = withBountyProgress(it.enchant, next);
+
+        if (next >= req) {
+            completedAny = true;
+        }
+    }
+
+    if (completedAny && showMsgs) {
+        std::ostringstream ss;
+        ss << "BOUNTY COMPLETE! USE THE CONTRACT TO CLAIM YOUR REWARD.";
+        pushSystemMessage(ss.str());
+    }
+}
+
 
 
 void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
@@ -675,7 +805,28 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                     if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
                 }
 
-                grantXp(xpFor(defender));
+                const int xpAward = xpFor(defender);
+                grantXp(xpAward);
+                awardBountyProgress(defender.kind, true);
+
+                // Captured companion progression (Palworld/Pokemon-style).
+                // - If a captured pet gets the kill: it gains XP and bond.
+                // - If the player gets the kill: all currently-out captured pets gain a small XP share.
+                if (attacker.friendly) {
+                    const int petXp = clampi((xpAward + 1) / 2, 1, 120);
+                    const int bondGain = clampi(1 + xpAward / 20, 1, 5);
+                    const bool show = dung.inBounds(attacker.pos.x, attacker.pos.y) && dung.at(attacker.pos.x, attacker.pos.y).visible;
+                    awardCapturedPetProgress(attacker, petXp, bondGain, show);
+                } else if (attacker.kind == EntityKind::Player) {
+                    const int share = std::max(1, xpAward / 3);
+                    for (auto& e : ents) {
+                        if (e.hp <= 0) continue;
+                        if (!e.friendly) continue;
+                        if (e.id == player().id) continue;
+                        const bool show = dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible;
+                        awardCapturedPetProgress(e, share, /*bondGain=*/0, show);
+                    }
+                }
             }
         }
     }
@@ -947,7 +1098,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                 if (hit->friendly) ds << "YOUR " << kindName(hit->kind) << " DIES.";
                 else ds << kindName(hit->kind) << " DIES.";
                 pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
-                if (fromPlayer && !hit->friendly) {
+                if ((attacker.kind == EntityKind::Player || attacker.friendly) && !hit->friendly) {
                     ++killCount;
 
                     const size_t kidx = static_cast<size_t>(hit->kind);
@@ -956,7 +1107,25 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                         if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
                     }
 
-                    grantXp(xpFor(*hit));
+                    const int xpAward = xpFor(*hit);
+                    grantXp(xpAward);
+                    awardBountyProgress(hit->kind, true);
+
+                    if (attacker.friendly) {
+                        const int petXp = clampi((xpAward + 1) / 2, 1, 120);
+                        const int bondGain = clampi(1 + xpAward / 20, 1, 5);
+                        const bool show = dung.inBounds(attacker.pos.x, attacker.pos.y) && dung.at(attacker.pos.x, attacker.pos.y).visible;
+                        awardCapturedPetProgress(attacker, petXp, bondGain, show);
+                    } else if (attacker.kind == EntityKind::Player) {
+                        const int share = std::max(1, xpAward / 3);
+                        for (auto& e : ents) {
+                            if (e.hp <= 0) continue;
+                            if (!e.friendly) continue;
+                            if (e.id == player().id) continue;
+                            const bool show = dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible;
+                            awardCapturedPetProgress(e, share, /*bondGain=*/0, show);
+                        }
+                    }
                 }
             }
         }
@@ -1175,7 +1344,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                         else ds << kindName(e->kind) << " DIES.";
                         pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
                     }
-                    if (fromPlayer && !e->friendly) {
+                    if ((attacker.kind == EntityKind::Player || attacker.friendly) && !e->friendly) {
                         ++killCount;
 
                         const size_t kidx = static_cast<size_t>(e->kind);
@@ -1184,7 +1353,25 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                             if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
                         }
 
-                        grantXp(xpFor(*e));
+                        const int xpAward = xpFor(*e);
+                        grantXp(xpAward);
+                        awardBountyProgress(e->kind, true);
+
+                        if (attacker.friendly) {
+                            const int petXp = clampi((xpAward + 1) / 2, 1, 120);
+                            const int bondGain = clampi(1 + xpAward / 20, 1, 5);
+                            const bool show = dung.inBounds(attacker.pos.x, attacker.pos.y) && dung.at(attacker.pos.x, attacker.pos.y).visible;
+                            awardCapturedPetProgress(attacker, petXp, bondGain, show);
+                        } else if (attacker.kind == EntityKind::Player) {
+                            const int share = std::max(1, xpAward / 3);
+                            for (auto& ally : ents) {
+                                if (ally.hp <= 0) continue;
+                                if (!ally.friendly) continue;
+                                if (ally.id == player().id) continue;
+                                const bool show = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
+                                awardCapturedPetProgress(ally, share, /*bondGain=*/0, show);
+                            }
+                        }
                     }
                 }
             }

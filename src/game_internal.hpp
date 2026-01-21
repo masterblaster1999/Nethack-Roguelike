@@ -28,6 +28,7 @@
 #include "shop.hpp"
 #include "version.hpp"
 #include "vtuber_gen.hpp"
+#include "pet_gen.hpp"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -696,12 +697,67 @@ static std::pair<bool, bool> exportRunDumpToFile(const Game& game, const std::fi
 
 namespace {
 
+// Forward declarations for helpers referenced before their definitions later in this header.
+const char* kindName(EntityKind k);
+
 static std::vector<std::string> splitWS(const std::string& s) {
     std::istringstream iss(s);
     std::vector<std::string> out;
     std::string tok;
     while (iss >> tok) out.push_back(tok);
     return out;
+}
+
+// ------------------------------------------------------------
+// Procedural pets: deterministic names + compact trait bitmask.
+// ------------------------------------------------------------
+
+static uint32_t petProfileSeedFor(const Entity& e) {
+    // Prefer the persisted sprite seed; it is stable across save/load.
+    uint32_t s = e.spriteSeed;
+    if (s == 0u) {
+        // Defensive fallback for malformed/legacy entities.
+        const uint32_t a = static_cast<uint32_t>(e.id) ^ 0xBADC0DEu;
+        const uint32_t b = static_cast<uint32_t>(static_cast<uint8_t>(e.kind)) ^ 0xC0FFEEu;
+        s = hashCombine(a, b);
+        if (s == 0u) s = 1u;
+    }
+    return s;
+}
+
+static std::string petGivenNameFor(const Entity& e) {
+    return petgen::petGivenName(petProfileSeedFor(e));
+}
+
+static void ensurePetTraits(Entity& e) {
+    if (e.kind == EntityKind::Player) return;
+    if (!e.friendly) return;
+    if (e.hp <= 0) return;
+
+    const uint8_t cur = petgen::petTraitMask(e.procAffixMask);
+    if (cur != 0) return; // already initialized (and bonuses applied)
+
+    const uint32_t seed = petProfileSeedFor(e);
+    const uint8_t traits = petgen::petRollTraitMask(seed);
+    petgen::setPetTraitMask(e.procAffixMask, traits);
+
+    // Apply one-time, conservative stat bonuses.
+    if (e.speed <= 0) e.speed = baseSpeedFor(e.kind);
+
+    if ((traits & petgen::petTraitBit(petgen::PetTrait::Sprinter)) != 0) {
+        e.speed = std::min(220, e.speed + 12);
+    }
+    if ((traits & petgen::petTraitBit(petgen::PetTrait::Stout)) != 0) {
+        e.hpMax = std::max(1, e.hpMax + 3);
+        e.baseDef = std::max(0, e.baseDef + 1);
+        e.hp = std::min(e.hpMax, e.hp + 3);
+    }
+    if ((traits & petgen::petTraitBit(petgen::PetTrait::Ferocious)) != 0) {
+        e.baseAtk = std::max(0, e.baseAtk + 1);
+    }
+
+    e.hpMax = std::max(1, e.hpMax);
+    e.hp = clampi(e.hp, 0, e.hpMax);
 }
 
 // Hunger helper: 0 = OK, 1 = hungry, 2 = starving, 3 = starving (damage)
@@ -933,6 +989,11 @@ static std::vector<std::string> extendedCommandList() {
         "rest",
         "sneak",
         "dig",
+        "craft",
+        "recipes",
+        "fish",
+        "bounty",
+        "bounties",
         "throwtorch",
         "augury",
         "pray",
@@ -970,6 +1031,12 @@ static const ExtendedCommandUiMeta* extendedCommandUiMetaFor(const std::string& 
         {"search", Action::Search, "Search nearby tiles"},
         {"rest",   Action::Rest,   "Rest until healed / interrupted"},
         {"dig",    Action::Dig,    "Dig (requires pickaxe)"},
+
+        {"craft",  Action::None,  "Craft (requires Crafting Kit)"},
+
+        {"recipes", Action::None, "Show learned crafting recipes"},
+
+        {"fish",    Action::None, "Fish (requires Fishing Rod)"},
         {"sneak",  Action::ToggleSneak,  "Toggle sneak (stealth)"},
 
         {"explore", Action::AutoExplore, "Auto-explore"},
@@ -1041,6 +1108,20 @@ static std::string normalizeExtendedCommandAlias(const std::string& in) {
         {"loc", "pos"},
 
         {"label", "call"},
+
+
+        {"crafting", "craft"},
+        {"make", "craft"},
+        {"tinker", "craft"},
+        {"combine", "craft"},
+        {"alchemy", "craft"},
+
+
+        {"recipe", "recipes"},
+        {"recipes", "recipes"},
+        {"craftlog", "recipes"},
+        {"craft_log", "recipes"},
+        {"craftbook", "recipes"},
 
         {"danger", "threat"},
         {"threatpreview", "threat"},
@@ -1350,6 +1431,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse|recharge] (costs PIETY + cooldown)");
         game.pushSystemMessage("         donate [amount] (convert gold->piety) | sacrifice (offer a corpse for piety)");
         game.pushSystemMessage("AUGURY: augury (costs gold; shrine/camp only; hints can shift)");
+        game.pushSystemMessage("BOUNTIES: bounty (list contracts) | use a completed contract to redeem");
         game.pushSystemMessage("DIG: dig <dir> (requires wielded pickaxe)");
         game.pushSystemMessage("CURSES: CURSED weapons/armor can't be removed until uncursed (scroll or shrine).");
         game.pushSystemMessage("MORTEM: mortem [on/off]");
@@ -1926,6 +2008,26 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
     if (cmd == "rest") {
         game.handleAction(Action::Rest);
+        return;
+    }
+
+    if (cmd == "craft") {
+        game.beginCrafting();
+        return;
+    }
+
+    if (cmd == "recipes") {
+        game.showCraftRecipes();
+        return;
+    }
+
+    if (cmd == "fish") {
+        game.beginFishing();
+        return;
+    }
+
+    if (cmd == "bounty" || cmd == "bounties") {
+        game.showBountyContracts();
         return;
     }
 
@@ -3466,8 +3568,12 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     if (cmd == "pet") {
         const std::string v = arg(1);
         if (v.empty() || v == "status") {
-            int n = 0;
+            std::vector<const Entity*> comps;
+            comps.reserve(8);
+
             int carrying = 0;
+            int packMules = 0;
+
             AllyOrder order = AllyOrder::Follow;
             bool mixed = false;
             bool first = true;
@@ -3476,26 +3582,175 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
                 if (e.id == game.playerId()) continue;
                 if (e.hp <= 0) continue;
                 if (!e.friendly) continue;
-                ++n;
+
+                comps.push_back(&e);
+
                 if (e.stolenGold > 0 || (e.pocketConsumable.id != 0 && e.pocketConsumable.count > 0)) ++carrying;
-                if (first) { order = e.allyOrder; first = false; }
-                else if (e.allyOrder != order) mixed = true;
+
+                if (first) {
+                    order = e.allyOrder;
+                    first = false;
+                } else if (e.allyOrder != order) {
+                    mixed = true;
+                }
+
+                if (petgen::petHasTrait(e.procAffixMask, petgen::PetTrait::PackMule)) {
+                    ++packMules;
+                }
             }
 
-            if (n <= 0) {
-                game.pushSystemMessage("NO COMPANIONS.");
-            } else {
-                std::string o = mixed ? "MIXED" :
-                    (order == AllyOrder::Follow ? "FOLLOW" :
-                     order == AllyOrder::Stay ? "STAY" :
-                     order == AllyOrder::Fetch ? "FETCH" : "GUARD");
-                std::string msg = "COMPANIONS: " + std::to_string(n) + " | ORDER: " + o;
-                if (carrying > 0) msg += " | CARRYING: " + std::to_string(carrying);
-                msg += " | USAGE: pet <follow|stay|fetch|guard>";
-                game.pushSystemMessage(msg);
+            // Capture-sphere pals currently held in inventory.
+            // (This is the closest analogue to a "party/box" in Pokemon/Palworld.)
+            std::vector<const Item*> captured;
+            captured.reserve(16);
+            for (const auto& it : game.inventory()) {
+                if (isCaptureSphereFullKind(it.kind)) {
+                    captured.push_back(&it);
+                }
             }
+
+            const int n = static_cast<int>(comps.size());
+            const int storedN = static_cast<int>(captured.size());
+
+            auto sphereFor = [&](const Entity& c) -> const Item* {
+                for (const Item* it : captured) {
+                    if (it->enchant != static_cast<int>(c.kind)) continue;
+                    if (it->spriteSeed != c.spriteSeed) continue;
+                    return it;
+                }
+                return nullptr;
+            };
+
+            if (n <= 0) {
+                if (storedN <= 0) {
+                    game.pushSystemMessage("NO COMPANIONS.");
+                    return;
+                }
+
+                std::string msg = "NO ACTIVE COMPANIONS. STORED PALS: " + std::to_string(storedN);
+                msg += " | TIP: USE A FULL SPHERE TO RELEASE ONE.";
+                game.pushSystemMessage(msg);
+
+                constexpr int MAX_STORED_LIST = 8;
+                const int showStored = std::min(storedN, MAX_STORED_LIST);
+
+                for (int i = 0; i < showStored; ++i) {
+                    const Item& it = *captured[i];
+                    const EntityKind k = static_cast<EntityKind>(it.enchant);
+
+                    const int bond = clampi(captureSphereBondFromCharges(it.charges), 0, 99);
+                    const int lv = clampi(captureSpherePetLevelOrDefault(it.charges), 1, captureSpherePetLevelCap());
+                    const int hpPct = clampi(captureSphereHpPctFromCharges(it.charges), 0, 100);
+
+                    std::string line = "S" + std::to_string(i + 1) + ") ";
+                    line += petgen::petGivenName(it.spriteSeed);
+                    line += " THE ";
+                    line += kindName(k);
+                    line += " | LV " + std::to_string(lv);
+                    line += " | BOND " + std::to_string(bond);
+                    line += " | HP " + std::to_string(hpPct) + "%";
+
+                    game.pushSystemMessage(line);
+                }
+
+                if (storedN > MAX_STORED_LIST) {
+                    game.pushSystemMessage("... +" + std::to_string(storedN - MAX_STORED_LIST) + " MORE STORED PAL(S)." );
+                }
+
+                return;
+            }
+
+            std::string o = mixed ? "MIXED" :
+                (order == AllyOrder::Follow ? "FOLLOW" :
+                 order == AllyOrder::Stay ? "STAY" :
+                 order == AllyOrder::Fetch ? "FETCH" : "GUARD");
+
+            std::string msg = "COMPANIONS: " + std::to_string(n) + " | ORDER: " + o;
+            if (storedN > 0) msg += " | STORED PALS: " + std::to_string(storedN);
+            if (carrying > 0) msg += " | CARRYING: " + std::to_string(carrying);
+            if (packMules > 0) msg += " | PACK MULES: " + std::to_string(packMules);
+            msg += " | USAGE: pet <follow|stay|fetch|guard>";
+            game.pushSystemMessage(msg);
+
+            // Detailed list (avoid spam if you have a huge menagerie).
+            constexpr int MAX_LIST = 6;
+            const int show = std::min(n, MAX_LIST);
+
+            for (int i = 0; i < show; ++i) {
+                const Entity& c = *comps[i];
+                std::string line = std::to_string(i + 1) + ") ";
+                line += petGivenNameFor(c);
+                line += " THE ";
+                line += kindName(c.kind);
+
+                const std::string traits = petgen::petTraitList(c.procAffixMask);
+                if (!traits.empty()) line += " | TRAITS: " + traits;
+
+                if (const Item* sph = sphereFor(c)) {
+                    const int bond = clampi(captureSphereBondFromCharges(sph->charges), 0, 99);
+                    const int lv = clampi(captureSpherePetLevelOrDefault(sph->charges), 1, captureSpherePetLevelCap());
+                    line += " | LV " + std::to_string(lv);
+                    line += " | BOND " + std::to_string(bond);
+                }
+
+                line += " | HP " + std::to_string(c.hp) + "/" + std::to_string(c.hpMax);
+
+                line += " | ORDER: ";
+                line += (c.allyOrder == AllyOrder::Follow ? "FOLLOW" :
+                         c.allyOrder == AllyOrder::Stay ? "STAY" :
+                         c.allyOrder == AllyOrder::Fetch ? "FETCH" : "GUARD");
+
+                if (c.stolenGold > 0) line += " | " + std::to_string(c.stolenGold) + "G";
+                if (c.pocketConsumable.id != 0 && c.pocketConsumable.count > 0) {
+                    line += " | PACK: " + game.displayItemName(c.pocketConsumable);
+                }
+
+                game.pushSystemMessage(line);
+            }
+
+            if (n > MAX_LIST) {
+                game.pushSystemMessage("... +" + std::to_string(n - MAX_LIST) + " MORE COMPANION(S)." );
+            }
+
+            if (storedN > 0) {
+                game.pushSystemMessage("CAPTURED PALS (SPHERES): " + std::to_string(storedN));
+
+                constexpr int MAX_STORED_LIST = 8;
+                const int showStored = std::min(storedN, MAX_STORED_LIST);
+
+                for (int i = 0; i < showStored; ++i) {
+                    const Item& it = *captured[i];
+                    const EntityKind k = static_cast<EntityKind>(it.enchant);
+
+                    const int bond = clampi(captureSphereBondFromCharges(it.charges), 0, 99);
+                    const int lv = clampi(captureSpherePetLevelOrDefault(it.charges), 1, captureSpherePetLevelCap());
+                    const int hpPct = clampi(captureSphereHpPctFromCharges(it.charges), 0, 100);
+
+                    bool outNow = false;
+                    for (const Entity* e : comps) {
+                        if (e && e->kind == k && e->spriteSeed == it.spriteSeed) { outNow = true; break; }
+                    }
+
+                    std::string line = "S" + std::to_string(i + 1) + ") ";
+                    line += petgen::petGivenName(it.spriteSeed);
+                    line += " THE ";
+                    line += kindName(k);
+                    if (outNow) line += " | OUT";
+                    line += " | LV " + std::to_string(lv);
+                    line += " | BOND " + std::to_string(bond);
+                    line += " | HP " + std::to_string(hpPct) + "%";
+
+                    game.pushSystemMessage(line);
+                }
+
+                if (storedN > MAX_STORED_LIST) {
+                    game.pushSystemMessage("... +" + std::to_string(storedN - MAX_STORED_LIST) + " MORE STORED PAL(S)." );
+                }
+            }
+
             return;
         }
+
 
         AllyOrder o = AllyOrder::Follow;
         if (v == "follow" || v == "f") o = AllyOrder::Follow;
@@ -3612,6 +3867,14 @@ const char* kindName(EntityKind k) {
         case EntityKind::Minotaur: return "MINOTAUR";
         default: return "THING";
     }
+}
+
+static std::string petDisplayName(const Entity& e) {
+    // Keep consistent with classic roguelike messaging (NAME THE KIND).
+    std::string out = petGivenNameFor(e);
+    out += " THE ";
+    out += kindName(e.kind);
+    return out;
 }
 
 // ------------------------------------------------------------

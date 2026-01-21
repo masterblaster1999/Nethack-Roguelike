@@ -1,5 +1,11 @@
 #include "game_internal.hpp"
 
+#include "fishing_gen.hpp"
+
+#include "crafting_gen.hpp"
+
+#include "bounty_gen.hpp"
+
 static ChestContainer* findChestContainer(std::vector<ChestContainer>& containers, int chestId) {
     for (auto& c : containers) {
         if (c.chestId == chestId) return &c;
@@ -18,6 +24,11 @@ static const ChestContainer* findChestContainer(const std::vector<ChestContainer
 void Game::openInventory() {
     // Close other overlays
     targeting = false;
+    // Cancel any in-progress fishing fight prompt (UI-only).
+    fishingFightActive_ = false;
+    fishingFightRodItemId_ = 0;
+    fishingFightFishSeed_ = 0u;
+    fishingFightLabel_.clear();
     helpOpen = false;
     looking = false;
     minimapOpen = false;
@@ -36,6 +47,9 @@ void Game::openInventory() {
     invIdentifyMode = false;
     invEnchantRingMode = false;
     invPrompt_ = InvPromptKind::None;
+    invCraftMode = false;
+    invCraftFirstId_ = 0;
+    invCraftPreviewLines_.clear();
     invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 }
 
@@ -44,11 +58,498 @@ void Game::closeInventory() {
     invIdentifyMode = false;
     invEnchantRingMode = false;
     invPrompt_ = InvPromptKind::None;
+    invCraftMode = false;
+    invCraftFirstId_ = 0;
+    invCraftPreviewLines_.clear();
+}
+
+void Game::beginCrafting() {
+    // Requires a Crafting Kit in inventory.
+    bool haveKit = false;
+    for (const auto& it : inv) {
+        if (it.kind == ItemKind::CraftingKit) { haveKit = true; break; }
+    }
+    if (!haveKit) {
+        pushMsg("YOU DON'T HAVE A CRAFTING KIT.", MessageKind::Info, true);
+        return;
+    }
+
+    // Ensure the inventory overlay is open (beginCrafting can be called from #craft).
+    if (!invOpen) openInventory();
+
+    // Cancel other modal inventory prompts.
+    invIdentifyMode = false;
+    invEnchantRingMode = false;
+    invPrompt_ = InvPromptKind::None;
+
+    invCraftMode = true;
+    invCraftFirstId_ = 0;
+    invCraftPreviewLines_.clear();
+
+    // Move selection to a sensible first ingredient (skip the kit itself).
+    int first = -1;
+    int eligible = 0;
+    for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+        if (!isCraftIngredientKind(inv[static_cast<size_t>(i)].kind)) continue;
+        ++eligible;
+        if (first < 0) first = i;
+    }
+    if (first >= 0) invSel = first;
+    invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+
+    if (eligible < 2) {
+        pushMsg("YOU NEED TWO INGREDIENTS TO CRAFT.", MessageKind::Info, true);
+    }
+
+    pushMsg("CRAFTING: SELECT INGREDIENT 1 (ENTER). ESC TO EXIT.", MessageKind::System, true);
+
+    rebuildCraftingPreview();
+}
+
+void Game::beginFishing() {
+    // Convenience for #fish: start fishing targeting using your first Fishing Rod.
+    // Cancel any in-progress fishing fight prompt (UI-only).
+    fishingFightActive_ = false;
+    fishingFightRodItemId_ = 0;
+    fishingFightFishSeed_ = 0u;
+    fishingFightLabel_.clear();
+
+    int rodId = 0;
+    for (const auto& it : inv) {
+        if (it.kind == ItemKind::FishingRod) { rodId = it.id; break; }
+    }
+
+    if (rodId == 0) {
+        pushMsg("YOU DON'T HAVE A FISHING ROD.", MessageKind::Info, true);
+        return;
+    }
+
+    beginFishingTargeting(rodId);
+}
+
+Game::CraftComputed Game::computeCraftComputed(const Item& a0, const Item& b0) const {
+    CraftComputed cc;
+
+    // Room type can act as an implicit "workstation": crafting in themed rooms shifts outcomes
+    // while remaining deterministic within a run.
+    const RoomType rt = roomTypeAt(dung, player().pos);
+    cc.workstation = rt;
+
+    uint32_t envSalt = 0u;
+    switch (rt) {
+        case RoomType::Armory:     envSalt = 0xA11C0B1Du; break;
+        case RoomType::Library:    envSalt = 0x0B00B1E5u; break;
+        case RoomType::Laboratory: envSalt = 0x1AB0B0A5u; break;
+        case RoomType::Shrine:     envSalt = 0x5A1B1E01u; break;
+        case RoomType::Camp:       envSalt = 0xCA9F0001u; break;
+        default: break;
+    }
+
+    // Mix branch so Camp crafting doesn't accidentally mirror dungeon crafting exactly.
+    envSalt ^= static_cast<uint32_t>(branch_) * 0x9E3779B9u;
+
+    const uint32_t craftSeed = seed_ ^ hash32(envSalt);
+
+    const craftgen::Outcome o = craftgen::craft(craftSeed, a0, b0);
+    cc.tagA = o.tagA;
+    cc.tagB = o.tagB;
+    cc.tier = o.tier;
+    cc.out = o.out;
+
+    Item& out = cc.out;
+
+    // Workstation flavor: slight quality nudges by room type (deterministic).
+    auto qualityRoll = [&](uint32_t salt, int pct) -> bool {
+        const uint32_t r = hash32(out.spriteSeed ^ salt);
+        return (r % 100u) < static_cast<uint32_t>(clampi(pct, 0, 100));
+    };
+
+    if (rt == RoomType::Shrine) {
+        // Shrines tend to purify bad outcomes and sometimes bless.
+        if (out.buc < 0) out.buc = 0;
+        if (out.buc == 0 && qualityRoll(0xB1E55EEDu, 30)) out.buc = 1;
+    } else if (rt == RoomType::Laboratory) {
+        // Labs are potent but risky.
+        if (out.buc == 0 && qualityRoll(0x0C0FF0DEu, 20)) out.buc = -1;
+        if (out.charges > 0 && qualityRoll(0xC4A26E99u, 35)) out.charges += 1;
+    } else if (rt == RoomType::Library) {
+        // Libraries: more "clean" outcomes (fewer curses).
+        if (out.buc < 0 && qualityRoll(0xFA9E0001u, 60)) out.buc = 0;
+    } else if (rt == RoomType::Armory) {
+        // Armories: gear is more likely to be well-made.
+        if (isWearableGear(out.kind) && out.buc == 0 && qualityRoll(0xA4A0B011u, 35)) out.buc = 1;
+        if ((isWeapon(out.kind) || isArmor(out.kind)) && out.enchant == 0 && qualityRoll(0xEAC114E1u, 30)) out.enchant = 1;
+    } else if (rt == RoomType::Camp) {
+        // Camp crafting is safe: never worsens BUC.
+        if (out.buc < 0) out.buc = 0;
+    }
+
+    return cc;
+}
+
+void Game::recordCraftRecipe(const CraftComputed& cc) {
+    const uint32_t sig = cc.out.spriteSeed;
+    if (sig == 0u) return;
+
+    for (auto& e : craftRecipeBook_) {
+        if (e.sig == sig) {
+            e.times += 1;
+            return;
+        }
+    }
+
+    CraftRecipeEntry e;
+    e.sig = sig;
+    e.outKind = cc.out.kind;
+    e.firstTurn = turnCount;
+    e.times = 1;
+    e.tier = cc.tier;
+    e.workstation = cc.workstation;
+    e.tagA = cc.tagA;
+    e.tagB = cc.tagB;
+
+    craftRecipeBook_.push_back(std::move(e));
+
+    // Cap to keep UI sane (UI-only).
+    constexpr size_t kMaxRecipes = 96;
+    if (craftRecipeBook_.size() > kMaxRecipes) {
+        craftRecipeBook_.erase(craftRecipeBook_.begin(),
+                               craftRecipeBook_.begin() + (craftRecipeBook_.size() - kMaxRecipes));
+    }
+}
+
+void Game::showCraftRecipes() {
+    auto wsShort = [](RoomType rt) -> const char* {
+        switch (rt) {
+            case RoomType::Armory:     return "ARMORY";
+            case RoomType::Library:    return "LIBRARY";
+            case RoomType::Laboratory: return "LAB";
+            case RoomType::Shrine:     return "SHRINE";
+            case RoomType::Camp:       return "CAMP";
+            default: return "NONE";
+        }
+    };
+
+    if (craftRecipeBook_.empty()) {
+        pushSystemMessage("NO CRAFT RECIPES LEARNED YET.");
+        pushSystemMessage("TIP: USE A CRAFTING KIT (#CRAFT) AND COMBINE TWO INGREDIENTS.");
+        return;
+    }
+
+    std::ostringstream hdr;
+    hdr << "CRAFT RECIPES (" << craftRecipeBook_.size() << "):";
+    pushSystemMessage(hdr.str());
+
+    const size_t maxShow = 20;
+    size_t shown = 0;
+
+    // Show newest-first.
+    for (size_t i = craftRecipeBook_.size(); i-- > 0 && shown < maxShow; ) {
+        const auto& r = craftRecipeBook_[i];
+
+        std::ostringstream ss;
+        ss << "  " << craftgen::sigilName(r.sig);
+        ss << " | " << (r.tagA.empty() ? "MUNDANE" : r.tagA);
+        ss << " + " << (r.tagB.empty() ? "MUNDANE" : r.tagB);
+        ss << " T" << r.tier;
+        ss << " @" << wsShort(r.workstation);
+        ss << " -> " << displayItemNameSingle(r.outKind);
+        if (r.times > 1) ss << " x" << r.times;
+
+        pushSystemMessage(ss.str());
+        ++shown;
+    }
+
+    if (craftRecipeBook_.size() > maxShow) {
+        pushSystemMessage("  ...");
+    }
+
+    pushSystemMessage("TIP: DIFFERENT ROOMS ACT AS WORKSTATIONS AND CAN YIELD NEW SIGILS.");
+}
+
+void Game::rebuildCraftingPreview() {
+    invCraftPreviewLines_.clear();
+    if (!invOpen || !invCraftMode) return;
+
+    auto wsName = [](RoomType rt) -> const char* {
+        switch (rt) {
+            case RoomType::Armory:     return "ARMORY";
+            case RoomType::Library:    return "LIBRARY";
+            case RoomType::Laboratory: return "LABORATORY";
+            case RoomType::Shrine:     return "SHRINE";
+            case RoomType::Camp:       return "CAMP";
+            default: return "NONE";
+        }
+    };
+
+    auto wsEffect = [](RoomType rt) -> const char* {
+        switch (rt) {
+            case RoomType::Armory:     return "+GEAR QUALITY";
+            case RoomType::Library:    return "+CLEAN RESULTS";
+            case RoomType::Laboratory: return "+POTENCY / +RISK";
+            case RoomType::Shrine:     return "+PURIFY / +BLESS";
+            case RoomType::Camp:       return "+SAFE";
+            default: return "";
+        }
+    };
+
+    const RoomType rt = roomTypeAt(dung, player().pos);
+    {
+        std::ostringstream ss;
+        ss << "WORKSTATION: " << wsName(rt);
+        const char* eff = wsEffect(rt);
+        if (eff && eff[0]) ss << " (" << eff << ")";
+        invCraftPreviewLines_.push_back(ss.str());
+    }
+
+    if (inv.empty() || invSel < 0 || invSel >= static_cast<int>(inv.size())) {
+        invCraftPreviewLines_.push_back("NO ITEMS.");
+        return;
+    }
+
+    const Item& selIt = inv[static_cast<size_t>(invSel)];
+
+    auto essenceLine = [&](const Item& it) -> std::string {
+        const craftgen::Essence e = craftgen::essenceFor(it);
+        std::ostringstream ss;
+        ss << "ESSENCE: " << (e.tag.empty() ? "MUNDANE" : e.tag);
+        ss << "  TIER " << e.tier;
+        if (e.shiny) ss << " {SHINY}";
+        return ss.str();
+    };
+
+    auto singleName = [&](const Item& it) -> std::string {
+        Item t = it;
+        t.count = 1;
+        return displayItemName(t);
+    };
+
+    auto knownTimesForSig = [&](uint32_t sig) -> int {
+        for (const auto& r : craftRecipeBook_) {
+            if (r.sig == sig) return r.times;
+        }
+        return 0;
+    };
+
+    if (invCraftFirstId_ == 0) {
+        invCraftPreviewLines_.push_back("STEP 1/2: PICK INGREDIENT 1");
+        if (!isCraftIngredientKind(selIt.kind)) {
+            invCraftPreviewLines_.push_back("SELECTED ITEM IS NOT AN INGREDIENT.");
+            return;
+        }
+        invCraftPreviewLines_.push_back("ING1: " + singleName(selIt));
+        invCraftPreviewLines_.push_back(essenceLine(selIt));
+        invCraftPreviewLines_.push_back("ENTER: SET ING1");
+        return;
+    }
+
+    int idxA = findItemIndexById(inv, invCraftFirstId_);
+    if (idxA < 0) {
+        invCraftFirstId_ = 0;
+        invCraftPreviewLines_.push_back("ING1 LOST. PICK A NEW INGREDIENT.");
+        invCraftPreviewLines_.push_back("ENTER: SET ING1");
+        return;
+    }
+
+    const Item& a0 = inv[static_cast<size_t>(idxA)];
+    invCraftPreviewLines_.push_back("ING1: " + singleName(a0));
+    invCraftPreviewLines_.push_back(essenceLine(a0));
+    invCraftPreviewLines_.push_back("STEP 2/2: PICK INGREDIENT 2");
+
+    if (!isCraftIngredientKind(selIt.kind)) {
+        invCraftPreviewLines_.push_back("SELECTED ITEM IS NOT AN INGREDIENT.");
+        return;
+    }
+
+    // Same stack requires at least 2 units.
+    if (selIt.id == invCraftFirstId_) {
+        if (!isStackable(selIt.kind) || selIt.count < 2) {
+            invCraftPreviewLines_.push_back("NEED TWO UNITS TO USE THE SAME STACK TWICE.");
+            return;
+        }
+    }
+
+    const Item& b0 = selIt;
+    invCraftPreviewLines_.push_back("ING2: " + singleName(b0));
+    invCraftPreviewLines_.push_back(essenceLine(b0));
+
+    const CraftComputed cc = computeCraftComputed(a0, b0);
+
+    invCraftPreviewLines_.push_back("SIGIL: " + craftgen::sigilName(cc.out.spriteSeed));
+
+    const int kt = knownTimesForSig(cc.out.spriteSeed);
+    if (kt > 0) {
+        invCraftPreviewLines_.push_back("KNOWN: YES (x" + std::to_string(kt) + ")");
+    } else {
+        invCraftPreviewLines_.push_back("KNOWN: NO");
+    }
+
+    Item outNamed = cc.out;
+    outNamed.id = 0;
+    invCraftPreviewLines_.push_back("RESULT: " + displayItemName(outNamed));
+
+    std::ostringstream tierLine;
+    tierLine << "TIER: " << cc.tier;
+    invCraftPreviewLines_.push_back(tierLine.str());
+}
+
+bool Game::craftCombineById(int itemAId, int itemBId) {
+    if (itemAId == 0 || itemBId == 0) return false;
+
+    // Validate the player still has a crafting kit.
+    bool haveKit = false;
+    for (const auto& it : inv) {
+        if (it.kind == ItemKind::CraftingKit) { haveKit = true; break; }
+    }
+    if (!haveKit) {
+        pushMsg("YOU LACK THE TOOLS TO CRAFT.", MessageKind::Warning, true);
+        return false;
+    }
+
+    const int idxA0 = findItemIndexById(inv, itemAId);
+    const int idxB0 = findItemIndexById(inv, itemBId);
+
+    if (idxA0 < 0 || idxB0 < 0) {
+        pushMsg("YOUR INGREDIENTS ARE GONE.", MessageKind::Info, true);
+        return false;
+    }
+
+    const Item a0 = inv[static_cast<size_t>(idxA0)];
+    const Item b0 = inv[static_cast<size_t>(idxB0)];
+
+    if (!isCraftIngredientKind(a0.kind) || !isCraftIngredientKind(b0.kind)) {
+        pushMsg("THAT CANNOT BE USED AS A CRAFTING INGREDIENT.", MessageKind::Info, true);
+        return false;
+    }
+
+    // Same stack requires at least 2 units.
+    if (itemAId == itemBId) {
+        if (!isStackable(a0.kind) || a0.count < 2) {
+            pushMsg("YOU NEED TWO OF THOSE.", MessageKind::Info, true);
+            return false;
+        }
+    }
+
+    const CraftComputed cc0 = computeCraftComputed(a0, b0);
+
+    Item out = cc0.out;
+    out.id = nextItemId++;
+    out.shopPrice = 0;
+    out.shopDepth = 0;
+
+    const bool wasKnown = [&]() -> bool {
+        for (const auto& r : craftRecipeBook_) {
+            if (r.sig == out.spriteSeed) return true;
+        }
+        return false;
+    }();
+
+    // Determine names for messaging before consuming ingredients.
+    Item aNamed = a0; aNamed.count = 1;
+    Item bNamed = b0; bNamed.count = 1;
+
+    const std::string aName = displayItemName(aNamed);
+    const std::string bName = displayItemName(bNamed);
+
+    // Crafting reveals the true nature of what you just made.
+    (void)markIdentified(out.kind, false);
+
+    auto recordDebtForConsumedUnit = [&](const Item& it, int units) {
+        if (units <= 0) return;
+        if (it.shopPrice <= 0 || it.shopDepth <= 0) return;
+        const int sd = it.shopDepth;
+        if (sd >= 1 && sd <= DUNGEON_MAX_DEPTH) {
+            shopDebtLedger_[sd] += it.shopPrice * units;
+        }
+    };
+
+    // Consume ingredients (1 unit each; 2 units if same stack).
+    if (itemAId == itemBId) {
+        const int idx = findItemIndexById(inv, itemAId);
+        if (idx >= 0) {
+            Item& it = inv[static_cast<size_t>(idx)];
+            recordDebtForConsumedUnit(it, 2);
+            it.count -= 2;
+        }
+    } else {
+        // Remove higher index first so indices remain valid.
+        int idxA = findItemIndexById(inv, itemAId);
+        int idxB = findItemIndexById(inv, itemBId);
+        if (idxA >= 0 && idxB >= 0) {
+            const int firstIdx = std::max(idxA, idxB);
+            const int secondIdx = std::min(idxA, idxB);
+
+            auto consumeAt = [&](int idx) {
+                if (idx < 0 || idx >= static_cast<int>(inv.size())) return;
+                Item& it = inv[static_cast<size_t>(idx)];
+                recordDebtForConsumedUnit(it, 1);
+                if (isStackable(it.kind)) {
+                    it.count -= 1;
+                } else {
+                    it.count = 0;
+                }
+            };
+
+            consumeAt(firstIdx);
+            consumeAt(secondIdx);
+        }
+    }
+
+    // Remove emptied stackables / non-stackables consumed above.
+    inv.erase(std::remove_if(inv.begin(), inv.end(), [](const Item& v) {
+        return v.count <= 0;
+    }), inv.end());
+
+    // Now add the crafted output.
+    // Inventory capacity: crafting consumes 2 items, then produces 1, so it usually fits.
+    // However, if both ingredients are stackable and remain in inventory, we may still need a slot.
+    const int maxInv = 26;
+    bool stacked = tryStackItem(inv, out);
+    if (!stacked) {
+        if (static_cast<int>(inv.size()) >= maxInv) {
+            dropGroundItemItem(player().pos, out);
+            pushMsg("YOUR PACK IS FULL; YOU DROP " + displayItemName(out) + ".", MessageKind::Loot, true);
+        } else {
+            inv.push_back(out);
+        }
+    }
+
+    invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+
+    // Record the recipe in the run's journal (UI-only; not serialized).
+    recordCraftRecipe(cc0);
+
+    // Message (include the abstract "essence tags" when present).
+    {
+        std::ostringstream ss;
+        ss << "YOU CRAFT " << displayItemName(out) << " FROM " << aName << " + " << bName << ".";
+        pushMsg(ss.str(), MessageKind::Success, true);
+    }
+
+    if (!cc0.tagA.empty() || !cc0.tagB.empty()) {
+        std::ostringstream ss2;
+        ss2 << "ESSENCE: ";
+        ss2 << (cc0.tagA.empty() ? "MUNDANE" : cc0.tagA);
+        ss2 << " + ";
+        ss2 << (cc0.tagB.empty() ? "MUNDANE" : cc0.tagB);
+        pushMsg(ss2.str(), MessageKind::System, true);
+    }
+
+    {
+        std::ostringstream ss3;
+        ss3 << "SIGIL: " << craftgen::sigilName(out.spriteSeed);
+        if (!wasKnown) ss3 << " {NEW}";
+        pushMsg(ss3.str(), MessageKind::System, true);
+    }
+
+    rebuildCraftingPreview();
+    return true;
 }
 
 void Game::moveInventorySelection(int dy) {
     if (inv.empty()) { invSel = 0; return; }
     invSel = clampi(invSel + dy, 0, static_cast<int>(inv.size()) - 1);
+    if (invCraftMode) rebuildCraftingPreview();
 }
 
 
@@ -107,6 +608,7 @@ void Game::sortInventory() {
     invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 
     pushMsg("INVENTORY SORTED.", MessageKind::System, true);
+    if (invCraftMode) rebuildCraftingPreview();
 }
 
 void Game::sortChestContents(int chestId, int* selInOut) {
@@ -1109,6 +1611,7 @@ bool Game::dropSelected() {
     dropGroundItemItem(pos, drop);
 
     pushMsg(msg);
+    if (invCraftMode) rebuildCraftingPreview();
     return true;
 }
 
@@ -1179,6 +1682,7 @@ bool Game::dropSelectedAll() {
     dropGroundItemItem(pos, drop);
 
     pushMsg(msg);
+    if (invCraftMode) rebuildCraftingPreview();
     return true;
 }
 
@@ -1367,6 +1871,118 @@ bool Game::useSelected() {
         inv.erase(inv.begin() + invSel);
         invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
     };
+
+
+    // ------------------------------------------------------------
+    // Capture spheres (Palworld/Pokemon-like companion system)
+    // ------------------------------------------------------------
+    // Empty spheres open a targeter and only consume a turn once thrown.
+    if (isCaptureSphereEmptyKind(it.kind)) {
+        beginCaptureTargeting(it.id);
+        return false;
+    }
+
+    // Full spheres: recall if the matching companion is already out; otherwise target a tile to release.
+    if (isCaptureSphereFullKind(it.kind)) {
+        const int rawKind = it.enchant;
+        if (rawKind < 0 || rawKind >= ENTITY_KIND_COUNT) {
+            pushMsg("THE SPHERE FEELS WRONG.", MessageKind::Warning, true);
+            return false;
+        }
+        const EntityKind k = static_cast<EntityKind>(rawKind);
+        const uint32_t seed = it.spriteSeed;
+
+        if (seed != 0u) {
+            for (size_t i = 0; i < ents.size(); ++i) {
+                Entity& e = ents[i];
+                if (e.hp <= 0) continue;
+                if (!e.friendly) continue;
+                if (e.id == player().id) continue;
+                if (e.kind != k) continue;
+                if (e.spriteSeed != seed) continue;
+
+                const int hpPct = (e.hpMax > 0) ? clampi((e.hp * 100 + e.hpMax / 2) / e.hpMax, 0, 100) : 0;
+                it.charges = withCaptureSphereHpPct(it.charges, hpPct);
+
+                std::ostringstream ss;
+                ss << "YOU RECALL " << petGivenNameFor(e) << ".";
+                pushMsg(ss.str(), MessageKind::Info, true);
+
+                // Remove without killing (no corpse/loot).
+                ents.erase(ents.begin() + static_cast<long>(i));
+                return true;
+            }
+        }
+
+        // Not currently out: place the companion by targeting a valid tile.
+        beginCaptureTargeting(it.id);
+        return false;
+    }
+
+    // Fishing rods: open a targeter (cast only consumes a turn on release).
+    if (it.kind == ItemKind::FishingRod) {
+        beginFishingTargeting(it.id);
+        return false;
+    }
+
+    // Bounty contracts: show progress, and pay out once complete.
+    if (it.kind == ItemKind::BountyContract) {
+        const int rawTarget = bountyTargetKindFromCharges(it.charges);
+        EntityKind target = EntityKind::Goblin;
+        if (rawTarget >= 0 && rawTarget < ENTITY_KIND_COUNT) target = static_cast<EntityKind>(rawTarget);
+
+        const int req = clampi(bountyRequiredKillsFromCharges(it.charges), 1, 255);
+        const int prog = clampi(bountyProgressFromEnchant(it.enchant), 0, 255);
+        const int shown = std::min(req, prog);
+
+        if (shown < req) {
+            std::ostringstream ss;
+            ss << "BOUNTY: KILL " << req << " " << bountygen::pluralizeEntityName(target, req)
+               << " (" << shown << "/" << req << ").";
+            pushMsg(ss.str(), MessageKind::Info, true);
+            return false;
+        }
+
+        // Completed: pay out deterministically from the stored contract data.
+        const int rawReward = bountyRewardKindFromCharges(it.charges);
+        ItemKind rewardK = ItemKind::Gold;
+        if (rawReward >= 0 && rawReward < ITEM_KIND_COUNT) rewardK = static_cast<ItemKind>(rawReward);
+
+        int rewardC = clampi(bountyRewardCountFromCharges(it.charges), 0, 255);
+        if (rewardC <= 0) rewardC = 1;
+
+        if (rewardK == ItemKind::Gold) {
+            Item gold;
+            gold.id = nextItemId++;
+            gold.kind = ItemKind::Gold;
+            gold.count = rewardC;
+            gold.spriteSeed = rng.nextU32();
+
+            if (!tryStackItem(inv, gold)) inv.push_back(gold);
+
+            std::ostringstream ss;
+            ss << "GUILD PAYS YOU " << rewardC << " GOLD.";
+            pushMsg(ss.str(), MessageKind::Success, true);
+        } else {
+            Item reward;
+            reward.id = nextItemId++;
+            reward.kind = rewardK;
+            reward.count = (isStackable(rewardK) ? rewardC : 1);
+            reward.spriteSeed = rng.nextU32();
+
+            const ItemDef& rd = itemDef(rewardK);
+            if (rd.maxCharges > 0) reward.charges = rd.maxCharges;
+
+            if (!tryStackItem(inv, reward)) inv.push_back(reward);
+
+            std::ostringstream ss;
+            ss << "BOUNTY REDEEMED. YOU RECEIVE " << itemDisplayName(reward) << ".";
+            pushMsg(ss.str(), MessageKind::Success, true);
+        }
+
+        consumeOneNonStackable();
+        return true;
+    }
 
     if (it.kind == ItemKind::PotionHealing) {
         Entity& p = playerMut();        int heal = itemDef(it.kind).healAmount;
@@ -2230,6 +2846,87 @@ bool Game::useSelected() {
         return true;
     }
 
+    if (it.kind == ItemKind::Fish) {
+        Entity& p = playerMut();
+
+        // Decode fish seed + meta.
+        uint32_t fishSeed = 0u;
+        if (it.charges != 0) {
+            fishSeed = fishSeedFromCharges(it.charges);
+        } else if (it.spriteSeed != 0u) {
+            fishSeed = it.spriteSeed;
+        } else {
+            fishSeed = hash32(static_cast<uint32_t>(it.id) ^ 0xF15B00Fu);
+        }
+
+        const bool hasMeta = (it.enchant != 0);
+        const int rarityHint = hasMeta ? fishRarityFromEnchant(it.enchant) : -1;
+        const int sizeHint   = hasMeta ? fishSizeClassFromEnchant(it.enchant) : -1;
+        const int shinyHint  = hasMeta ? (fishIsShinyFromEnchant(it.enchant) ? 1 : 0) : -1;
+
+        const fishgen::FishSpec fs = fishgen::makeFish(fishSeed, rarityHint, sizeHint, shinyHint);
+        const int beforeState = hungerStateFor(hunger, hungerMax);
+
+        // Core nourishment.
+        if (fs.healAmount > 0 && p.hp < p.hpMax) {
+            p.hp = std::min(p.hpMax, p.hp + fs.healAmount);
+        }
+        if (hungerEnabled_) {
+            if (hungerMax <= 0) hungerMax = 800;
+            hunger = std::min(hungerMax, hunger + fs.hungerRestore);
+        }
+
+        pushMsg("YOU EAT " + fs.name + ".", MessageKind::Loot, true);
+
+        // Bonus tag effects (NetHack-ish: some things are weird/dangerous).
+        const std::string tag = (fs.bonusTag ? std::string(fs.bonusTag) : std::string());
+        if (!tag.empty()) {
+            const int wt = fs.weight10;
+            const int dur = clampi(8 + (wt / 25), 4, 22);
+            if (tag == "REGEN") {
+                p.effects.regenTurns = std::max(p.effects.regenTurns, dur);
+                pushMsg("YOU FEEL A GENTLE VITALITY.", MessageKind::Success, true);
+            } else if (tag == "HASTE") {
+                p.effects.hasteTurns = std::max(p.effects.hasteTurns, dur);
+                pushMsg("YOUR BLOOD RUNS QUICK.", MessageKind::Success, true);
+            } else if (tag == "SHIELD") {
+                p.effects.shieldTurns = std::max(p.effects.shieldTurns, dur + 2);
+                pushMsg("YOUR SKIN FEELS HARDER.", MessageKind::Success, true);
+            } else if (tag == "AURORA") {
+                p.effects.visionTurns = std::max(p.effects.visionTurns, dur + 4);
+                pushMsg("YOUR EYES CATCH THE LIGHT.", MessageKind::Success, true);
+                recomputeFov();
+            } else if (tag == "CLARITY") {
+                const bool wasConf = (p.effects.confusionTurns > 0);
+                const bool wasHall = (p.effects.hallucinationTurns > 0);
+                p.effects.confusionTurns = 0;
+                p.effects.hallucinationTurns = 0;
+                if (wasConf || wasHall) pushMsg("YOUR MIND CLEARS.", MessageKind::Success, true);
+                else pushMsg("YOU FEEL FOCUSED.", MessageKind::Info, true);
+            } else if (tag == "VENOM") {
+                p.effects.poisonTurns = std::max(p.effects.poisonTurns, 4 + (wt / 60));
+                pushMsg("UGH... YOU FEEL SICK.", MessageKind::Warning, true);
+            } else if (tag == "EMBER") {
+                p.effects.burnTurns = std::max(p.effects.burnTurns, 3 + (wt / 70));
+                pushMsg("YOUR THROAT BURNS!", MessageKind::Warning, true);
+            }
+        }
+
+        // Hunger feedback (mirrors Food Ration/corpse).
+        const int afterState = hungerStateFor(hunger, hungerMax);
+        if (hungerEnabled_) {
+            if (beforeState >= 2 && afterState < 2) {
+                pushMsg("YOU FEEL LESS STARVED.", MessageKind::System, true);
+            } else if (beforeState >= 1 && afterState == 0) {
+                pushMsg("YOU FEEL SATIATED.", MessageKind::System, true);
+            }
+        }
+        hungerStatePrev = hungerStateFor(hunger, hungerMax);
+
+        consumeOneStackable();
+        return true;
+    }
+
     if (it.kind == ItemKind::FoodRation) {
         Entity& p = playerMut();        const ItemDef& d = itemDef(it.kind);
 
@@ -2461,3 +3158,58 @@ bool Game::useSelected() {
     return false;
 }
 
+
+
+void Game::showBountyContracts() {
+    int count = 0;
+    for (const auto& it : inv) if (it.kind == ItemKind::BountyContract) ++count;
+
+    if (count <= 0) {
+        pushMsg("NO ACTIVE BOUNTY CONTRACTS.", MessageKind::Info, true);
+        return;
+    }
+
+    std::ostringstream header;
+    header << "BOUNTY CONTRACTS: " << count << ".";
+    pushMsg(header.str(), MessageKind::Info, true);
+
+    for (const auto& it : inv) {
+        if (it.kind != ItemKind::BountyContract) continue;
+
+        const uint32_t seed = (it.spriteSeed != 0u) ? it.spriteSeed : hash32(static_cast<uint32_t>(it.id) ^ 0xB01DCAFEu);
+        const std::string code = bountygen::codename(seed);
+
+        const int rawTarget = bountyTargetKindFromCharges(it.charges);
+        EntityKind target = EntityKind::Goblin;
+        if (rawTarget >= 0 && rawTarget < ENTITY_KIND_COUNT) target = static_cast<EntityKind>(rawTarget);
+
+        const int req = clampi(bountyRequiredKillsFromCharges(it.charges), 1, 255);
+        const int prog = clampi(bountyProgressFromEnchant(it.enchant), 0, 255);
+        const int shown = std::min(req, prog);
+
+        const int rawReward = bountyRewardKindFromCharges(it.charges);
+        ItemKind rewardK = ItemKind::Gold;
+        if (rawReward >= 0 && rawReward < ITEM_KIND_COUNT) rewardK = static_cast<ItemKind>(rawReward);
+
+        int rewardC = clampi(bountyRewardCountFromCharges(it.charges), 0, 255);
+
+        std::ostringstream ss;
+        ss << "- " << code << ": KILL " << req << " " << bountygen::pluralizeEntityName(target, req)
+           << " [" << shown << "/" << req << "]";
+
+        if (shown >= req) ss << " {COMPLETE}";
+
+        if (rewardK == ItemKind::Gold) {
+            if (rewardC > 0) ss << " -> " << rewardC << "G";
+        } else {
+            const ItemDef& rd = itemDef(rewardK);
+            if (isStackable(rewardK) && rewardC > 1) {
+                ss << " -> " << rewardC << "x " << rd.name;
+            } else {
+                ss << " -> " << rd.name;
+            }
+        }
+
+        pushMsg(ss.str(), MessageKind::Info, true);
+    }
+}

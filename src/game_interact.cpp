@@ -2772,24 +2772,18 @@ bool Game::augury() {
     std::vector<std::string> pool;
     pool.reserve(16);
 
-    // Floor signature (special depths get a thematic line).
+	// Floor signature (themed depths get a thematic line).
     if (nextDepth == Dungeon::MINES_DEPTH || nextDepth == Dungeon::DEEP_MINES_DEPTH) {
         pool.push_back("YOU DREAM OF PICKAXES AND TWISTING TUNNELS.");
     }
-    if (nextDepth == Dungeon::SOKOBAN_DEPTH) {
-        pool.push_back("YOU SEE BOULDERS WAITING TO BRIDGE AN ABYSS.");
-    }
     if (nextDepth == Dungeon::GROTTO_DEPTH) {
         pool.push_back("YOU HEAR WATER DRIPPING IN YOUR DREAMS.");
-    }
-    if (nextDepth == Dungeon::ROGUE_LEVEL_DEPTH) {
-        pool.push_back("NINE CHAMBERS REPEAT, LIKE A FORGOTTEN SONG.");
     }
     if (nextDepth == Dungeon::CATACOMBS_DEPTH) {
         pool.push_back("MANY DOORS. MANY NAMES. MANY BONES.");
     }
     if (nextDepth == DUNGEON_MAX_DEPTH) {
-        pool.push_back("A SANCTUM LIES BELOW. IT FEELS AWAKE.");
+		pool.push_back("THE AIR BELOW HUMS WITH OLD POWER.");
     }
 
     int shops = 0;

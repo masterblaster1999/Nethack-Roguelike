@@ -232,6 +232,11 @@ void Game::handleAction(Action a) {
         closeChestOverlay();
         targeting = false;
         targetingMode_ = TargetingMode::Ranged;
+        // Cancel any in-progress fishing fight prompt (UI-only).
+        fishingFightActive_ = false;
+        fishingFightRodItemId_ = 0;
+        fishingFightFishSeed_ = 0u;
+        fishingFightLabel_.clear();
         targetLine.clear();
         targetValid = false;
         targetStatusText_.clear();
@@ -759,6 +764,104 @@ void Game::handleAction(Action a) {
 
             default:
                 // Ignore other actions while the prompt is active.
+                break;
+        }
+        return;
+    }
+
+
+    // ------------------------------------------------------------
+    // Modal inventory prompt: crafting (Crafting Kit)
+    // ------------------------------------------------------------
+    // This prompt is UI-only until the player confirms a craft, at which point it consumes a turn.
+    if (invOpen && invCraftMode) {
+        // If the kit is missing (dropped/destroyed), abort the prompt safely.
+        bool haveKit = false;
+        for (const auto& it : inv) {
+            if (it.kind == ItemKind::CraftingKit) { haveKit = true; break; }
+        }
+        if (!haveKit) {
+            invCraftMode = false;
+            invCraftFirstId_ = 0;
+            rebuildCraftingPreview();
+            pushMsg("YOU NO LONGER HAVE A CRAFTING KIT.", MessageKind::Warning, true);
+            return;
+        }
+
+        auto selectedItemName = [&](const Item& it) -> std::string {
+            Item one = it;
+            one.count = 1;
+            return displayItemName(one);
+        };
+
+        switch (a) {
+            case Action::Up:
+                moveInventorySelection(-1);
+                break;
+            case Action::Down:
+                moveInventorySelection(1);
+                break;
+            case Action::LogUp:
+                moveInventorySelection(-10);
+                break;
+            case Action::LogDown:
+                moveInventorySelection(10);
+                break;
+            case Action::SortInventory:
+                sortInventory();
+                break;
+
+            case Action::Confirm: {
+                if (inv.empty()) {
+                    invCraftMode = false;
+                    invCraftFirstId_ = 0;
+                    rebuildCraftingPreview();
+                    pushMsg("NOTHING TO CRAFT WITH.", MessageKind::Info, true);
+                    break;
+                }
+
+                invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
+                const Item& selIt = inv[static_cast<size_t>(invSel)];
+
+                if (!isCraftIngredientKind(selIt.kind)) {
+                    pushMsg("THAT IS NOT A CRAFTING INGREDIENT.", MessageKind::Info, true);
+                    break;
+                }
+
+                if (invCraftFirstId_ == 0) {
+                    invCraftFirstId_ = selIt.id;
+                    pushMsg("INGREDIENT 1: " + selectedItemName(selIt) + ". SELECT INGREDIENT 2.", MessageKind::System, true);
+
+                    // Small UX: nudge selection off the first ingredient when possible.
+                    moveInventorySelection(1);
+                } else {
+                    const int firstId = invCraftFirstId_;
+                    const bool acted = craftCombineById(firstId, selIt.id);
+                    if (acted) {
+                        // Chain-crafting convenience: stay in craft mode, clear selection.
+                        invCraftFirstId_ = 0;
+                        pushMsg("CRAFT AGAIN OR ESC TO EXIT.", MessageKind::System, true);
+                        rebuildCraftingPreview();
+                        advanceAfterPlayerAction();
+                    }
+                }
+                break;
+            }
+
+            case Action::Cancel:
+            case Action::Inventory:
+                if (invCraftFirstId_ != 0) {
+                    invCraftFirstId_ = 0;
+                    pushMsg("INGREDIENT 1 CLEARED.", MessageKind::System, true);
+                } else {
+                    invCraftMode = false;
+                    pushMsg("CRAFTING MODE EXITED.", MessageKind::System, true);
+                }
+                rebuildCraftingPreview();
+                break;
+
+            default:
+                // Ignore other actions while crafting mode is active.
                 break;
         }
         return;
@@ -2143,6 +2246,166 @@ if (optionsSel == 19) {
         return;
     }
 
+
+
+    // Fishing fight mini-mode (after hooking a big fish).
+    if (fishingFightActive_) {
+        auto clearFight = [&]() {
+            fishingFightActive_ = false;
+            fishingFightRodItemId_ = 0;
+            fishingFightFishSeed_ = 0u;
+            fishingFightLabel_.clear();
+            fishingFightProgress_ = 0;
+            fishingFightTension_ = 0;
+            fishingFightSafeMin_ = 0;
+            fishingFightSafeMax_ = 0;
+            fishingFightTurnsLeft_ = 0;
+            fishingFightPull_ = 0;
+            fishingFightStep_ = 0;
+        };
+
+        auto findRodIndex = [&]() -> int {
+            for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+                if (inv[static_cast<size_t>(i)].id == fishingFightRodItemId_) return i;
+            }
+            return -1;
+        };
+
+        auto loseFish = [&](const std::string& msg, MessageKind kind) {
+            pushMsg(msg, kind, true);
+            clearFight();
+        };
+
+        auto landFish = [&]() {
+            Item fish;
+            fish.id = nextItemId++;
+            fish.kind = ItemKind::Fish;
+            fish.count = 1;
+            fish.spriteSeed = fishingFightFishSeed_;
+            fish.charges = static_cast<int>(fishingFightFishSeed_);
+            fish.enchant = fishingFightFishEnchant_;
+
+            const std::string fishName = itemDisplayName(fish);
+
+            if (inv.size() >= 26) {
+                dropGroundItemItem(player().pos, fish);
+                pushMsg("YOU LAND " + fishName + "! (PACK FULL - DROPPED)", MessageKind::Loot, true);
+            } else {
+                inv.push_back(fish);
+                pushMsg("YOU LAND " + fishName + "!", MessageKind::Loot, true);
+            }
+
+            if (fishIsShinyFromEnchant(fishingFightFishEnchant_) && player().effects.hallucinationTurns == 0) {
+                pushMsg("IT GLITTERS.", MessageKind::Success, true);
+            }
+
+            clearFight();
+        };
+
+        auto stepFight = [&](bool reel) -> bool {
+            // If the rod is missing, the fish gets away.
+            const int rodIdx = findRodIndex();
+            if (rodIdx < 0 || !isFishingRodKind(inv[static_cast<size_t>(rodIdx)].kind)) {
+                loseFish("YOUR LINE GOES SLACK.", MessageKind::Warning);
+                return false;
+            }
+
+            const int prevTension = fishingFightTension_;
+
+            // Fish pull + thrash (deterministic from seed/step).
+            const uint32_t h = hash32(hashCombine(fishingFightFishSeed_ ^ 0xA11CE0u, static_cast<uint32_t>(fishingFightStep_)));
+            fishingFightStep_++;
+            const int delta = static_cast<int>(h % 7u) - 3; // -3..+3
+            fishingFightTension_ += fishingFightPull_ + delta;
+
+            // Player control.
+            if (reel) {
+                const int reelTension = std::max(3, 8 - (playerAgility() / 2));
+                fishingFightTension_ += reelTension;
+
+                int gain = 14 + playerFocus() * 2;
+                gain -= fishingFightPull_ / 2;
+                if (fishingFightTension_ >= fishingFightSafeMin_ && fishingFightTension_ <= fishingFightSafeMax_) gain += 10;
+                else gain -= 6;
+                gain = clampi(gain, 2, 40);
+                fishingFightProgress_ += gain;
+            } else {
+                const int slack = 12 + (playerAgility() / 2);
+                fishingFightTension_ -= slack;
+                // If we go too slack, the fish regains ground.
+                if (fishingFightTension_ < fishingFightSafeMin_) {
+                    fishingFightProgress_ = std::max(0, fishingFightProgress_ - 4);
+                }
+            }
+
+            fishingFightTurnsLeft_ = std::max(0, fishingFightTurnsLeft_ - 1);
+
+            // Break / escape conditions.
+            if (fishingFightTension_ >= 100) {
+                // Line snaps: punish the rod a bit.
+                Item& rod = inv[static_cast<size_t>(rodIdx)];
+                rod.charges = std::max(0, rod.charges - 2);
+                if (rod.charges <= 0) {
+                    inv.erase(inv.begin() + rodIdx);
+                    invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+                    pushMsg("YOUR FISHING ROD SNAPS!", MessageKind::Warning, true);
+                } else {
+                    pushMsg("THE LINE SNAPS!", MessageKind::Warning, true);
+                }
+
+                loseFish("THE FISH GETS AWAY.", MessageKind::Info);
+                return true;
+            }
+
+            if (fishingFightTension_ <= 0) {
+                loseFish("THE FISH SLIPS FREE.", MessageKind::Info);
+                return true;
+            }
+
+            if (fishingFightTurnsLeft_ <= 0) {
+                loseFish("THE FISH TIRES OF YOU AND ESCAPES.", MessageKind::Info);
+                return true;
+            }
+
+            if (fishingFightProgress_ >= 100) {
+                landFish();
+                return true;
+            }
+
+            // Subtle feedback when crossing the safe band boundaries.
+            if (prevTension <= fishingFightSafeMax_ && fishingFightTension_ > fishingFightSafeMax_) {
+                pushMsg("THE LINE STRAINS.", MessageKind::Info);
+            } else if (prevTension >= fishingFightSafeMin_ && fishingFightTension_ < fishingFightSafeMin_) {
+                pushMsg("THE LINE GOES SLACK.", MessageKind::Info);
+            }
+
+            return true;
+        };
+
+        switch (a) {
+            case Action::Confirm:
+            case Action::Fire:
+                acted = stepFight(true);
+                break;
+            case Action::Wait:
+                acted = stepFight(false);
+                break;
+            case Action::Cancel:
+                pushMsg("YOU LET THE LINE GO.", MessageKind::Info, true);
+                clearFight();
+                acted = false;
+                break;
+            default:
+                // Ignore other inputs while fishing.
+                acted = false;
+                break;
+        }
+
+        if (acted) {
+            advanceAfterPlayerAction();
+        }
+        return;
+    }
     // Normal play mode.
     Entity& p = playerMut();    switch (a) {
         case Action::Up:        acted = tryMove(p, 0, -1); break;
@@ -2740,11 +3003,17 @@ void Game::tame() {
         target->friendly = true;
         target->allyOrder = AllyOrder::Follow;
         target->alerted = false;
+        target->willFlee = false;
         target->lastKnownPlayerPos = {-1, -1};
         target->lastKnownPlayerAge = 9999;
 
+        ensurePetTraits(*target);
+
         std::ostringstream ss;
-        ss << "THE " << kindName(target->kind) << " SEEMS FRIENDLY!";
+        ss << petDisplayName(*target) << " SEEMS FRIENDLY!";
+        const std::string traits = petgen::petTraitList(target->procAffixMask);
+        if (!traits.empty()) ss << " (" << traits << ")";
+        ss << ".";
         pushMsg(ss.str(), MessageKind::Success, true);
     } else {
         // Failure can make it more aggressive.

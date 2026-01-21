@@ -1,10 +1,10 @@
 {
-  "patch_id": "round110_patch",
-  "previous_patch_id": "round109_patch",
-  "round": 110,
+  "patch_id": "round112_patch",
+  "previous_patch_id": "round111_patch",
+  "round": 112,
   "date": "2026-01-21",
   "project": "Nethack-Roguelike",
-  "summary": "Main dungeon is now fully procedural for depths 1–25: remove fixed set-piece floors and update callouts/sizing.",
+  "summary": "Wind now deterministically drifts physical projectiles (arrows/rocks/torches); ranged targeting preview shows WIND/DRIFT and HIT 0% when the aim point is off-line.",
   "files_in_patch_zip": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
@@ -33,12 +33,20 @@
     "src/bounty_gen.hpp"
   ],
   "timestamp_utc": "2026-01-21T00:00:00Z",
-  "description": "Replaces fixed handcrafted set-piece floors with the standard procedural pipeline all the way down to depth 25, so every campaign floor is generated via the same generate-and-test procgen meta-pass.",
+  "description": "Introduces a deterministic per-level wind drift model for physical projectiles (arrows, rocks, torches). Shots are biased by the dungeon\u2019s wind direction/strength; the ranged targeting HUD now shows WIND/DRIFT and suppresses misleading hit chances when drift pushes the projectile line away from the aimed tile.",
   "timestamp": "2026-01-21T00:00:00Z",
   "generated_at": "2026-01-21",
   "notes": [
-    "Dungeon::generate no longer hard-switches to bespoke Sanctum/Labyrinth/Sokoban/Rogue layouts; the run uses the procedural generator for depths 1..DUNGEON_MAX_DEPTH.",
-    "Removed special-depth omen/callout text tied to the old handcrafted set-pieces.",
-    "Procedural map sizing now applies to depth==maxDepth as well (the bottom floor participates in the same sizing curve)."
+    "Add Game::windAdjustShot(): a small deterministic model that biases physical projectile targets (arrows/rocks/torches) based on per-level wind direction/strength and shot distance.",
+    "Apply wind drift in combat.cpp for ranged attacks so both player and monsters are affected consistently.",
+    "Update ranged targeting preview (src/game_targeting.cpp) to show WIND/DRIFT and display HIT 0% when drift makes the aimed tile fall off the actual projectile line."
+  ],
+  "files_changed_this_round": [
+    "CHANGELOG.md",
+    "PATCH_MANIFEST.json",
+    "src/game.hpp",
+    "src/game.cpp",
+    "src/combat.cpp",
+    "src/game_targeting.cpp"
   ]
 }

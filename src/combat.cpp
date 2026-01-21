@@ -162,24 +162,24 @@ void Game::awardCapturedPetProgress(Entity& pet, int xpGain, int bondGain, bool 
 
     const int cap = captureSpherePetLevelCap();
     int level = oldLevel;
-    int xp = oldXp + xpGain;
+    int petXp = oldXp + xpGain;
     bool leveled = false;
 
     while (level < cap) {
         const int need = captureSpherePetXpToNext(level);
-        if (xp < need) break;
-        xp -= need;
+        if (petXp < need) break;
+        petXp -= need;
         ++level;
         leveled = true;
     }
     if (level >= cap) {
         level = cap;
-        xp = 0;
+        petXp = 0;
     }
-    xp = clampi(xp, 0, 255);
+    petXp = clampi(petXp, 0, 255);
 
     // Persist updated progression into the sphere.
-    sphere->charges = packCaptureSphereCharges(bond, hpStoredPct, level, xp);
+    sphere->charges = packCaptureSphereCharges(bond, hpStoredPct, level, petXp);
 
     // Apply incremental growth immediately to the in-world entity so the player feels it.
     const int atkDelta = captureSpherePetAtkBonus(level) - captureSpherePetAtkBonus(oldLevel);
@@ -855,6 +855,13 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
         }
     }
 
+// Wind drift: physical projectiles are biased by the level's deterministic wind.
+// This is intentionally simple and readable: players can compensate by aiming into the wind.
+if (projKind == ProjectileKind::Arrow || projKind == ProjectileKind::Rock || projKind == ProjectileKind::Torch) {
+    const WindShotAdjust wa = windAdjustShot(attacker.pos, target, range, projKind);
+    target = wa.adjustedTarget;
+}
+
     std::vector<Vec2i> line = bresenhamLine(attacker.pos, target);
     if (line.size() <= 1) return;
 
@@ -1118,12 +1125,12 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                         awardCapturedPetProgress(attacker, petXp, bondGain, show);
                     } else if (attacker.kind == EntityKind::Player) {
                         const int share = std::max(1, xpAward / 3);
-                        for (auto& e : ents) {
-                            if (e.hp <= 0) continue;
-                            if (!e.friendly) continue;
-                            if (e.id == player().id) continue;
-                            const bool show = dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible;
-                            awardCapturedPetProgress(e, share, /*bondGain=*/0, show);
+                        for (auto& ally : ents) {
+                            if (ally.hp <= 0) continue;
+                            if (!ally.friendly) continue;
+                            if (ally.id == player().id) continue;
+                            const bool show = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
+                            awardCapturedPetProgress(ally, share, /*bondGain=*/0, show);
                         }
                     }
                 }

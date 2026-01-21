@@ -353,31 +353,41 @@ std::string Game::targetingCombatPreviewText() const {
         return ss.str();
     }
 
-    // Fishing rod targeting preview.
-    if (targetingMode_ == TargetingMode::Fish) {
-        const uint32_t ws = fishWaterSeedAt(*this, targetPos);
-        const int turn = static_cast<int>(turns());
-        const bool bite = fishgen::isInBiteWindow(ws, turn);
-        const float w01 = fishgen::biteWindow01(ws, turn);
-        const int density = fishableNeighborhoodCount(*this, targetPos, 2);
-        const int pct = fishingChancePercent(*this, rod, targetPos);
+// Fishing rod targeting preview.
+if (targetingMode_ == TargetingMode::Fish) {
+    const int idx = findItemIndexById(inv, targetingFishingRodItemId_);
+    if (idx < 0) return "FISH";
 
-        ss << (bite ? "BITE HOT" : "BITE COLD");
-        if (bite && w01 > 0.60f) ss << "!";
+    const Item& rod = inv[static_cast<size_t>(idx)];
+    const ItemDef& d = itemDef(rod.kind);
 
-        if (bite) {
-            const int rem = fishgen::turnsRemainingInBiteWindow(ws, turn);
-            if (rem > 0) ss << " (" << rem << "T)";
-        } else {
-            const int nxt = fishgen::turnsUntilNextBite(ws, turn);
-            if (nxt > 0) ss << " (NEXT " << nxt << "T)";
-        }
+    std::ostringstream ss;
+    ss << d.name;
+    if (d.range > 0) ss << " | RNG " << d.range;
 
-        ss << " | CATCH " << pct << "%";
-        if (density >= 14) ss << " | DEEP";
-        else if (density <= 8) ss << " | SHALLOW";
-        return ss.str();
+    const uint32_t ws = fishWaterSeedAt(*this, targetPos);
+    const int turn = static_cast<int>(turns());
+    const bool bite = fishgen::isInBiteWindow(ws, turn);
+    const float w01 = fishgen::biteWindow01(ws, turn);
+    const int density = fishableNeighborhoodCount(*this, targetPos, 2);
+    const int pct = fishingChancePercent(*this, rod, targetPos);
+
+    ss << " | " << (bite ? "BITE HOT" : "BITE COLD");
+    if (bite && w01 > 0.60f) ss << "!";
+
+    if (bite) {
+        const int rem = fishgen::turnsRemainingInBiteWindow(ws, turn);
+        if (rem > 0) ss << " (" << rem << "T)";
+    } else {
+        const int nxt = fishgen::turnsUntilNextBite(ws, turn);
+        if (nxt > 0) ss << " (NEXT " << nxt << "T)";
     }
+
+    ss << " | CATCH " << pct << "%";
+    if (density >= 14) ss << " | DEEP";
+    else if (density <= 8) ss << " | SHALLOW";
+    return ss.str();
+}
 
     // Determine what will be used if the player fires right now (equipped ranged weapon vs throw).
     ProjectileKind projKind = ProjectileKind::Arrow;
@@ -445,24 +455,52 @@ std::string Game::targetingCombatPreviewText() const {
 
     if (!tag.empty()) ss << tag << " ";
 
+    // Wind drift hint: physical projectiles are biased by the current level's wind.
+    // The cursor stays at the aimed tile; this only affects where the projectile tends to go.
+    WindShotAdjust windAdj;
+    bool cursorOnShotLine = true;
+    if (projKind == ProjectileKind::Arrow || projKind == ProjectileKind::Rock || projKind == ProjectileKind::Torch) {
+        windAdj = windAdjustShot(player().pos, targetPos, range, projKind);
+
+        // If drift moves the effective target, the aimed tile may not lie on the actual shot line.
+        if (windAdj.drift.x != 0 || windAdj.drift.y != 0) {
+            std::vector<Vec2i> shot = bresenhamLine(player().pos, windAdj.adjustedTarget);
+            if (range > 0 && static_cast<int>(shot.size()) > range + 1) {
+                shot.resize(static_cast<size_t>(range + 1));
+            }
+
+            cursorOnShotLine = false;
+            for (const auto& p : shot) {
+                if (p == targetPos) {
+                    cursorOnShotLine = true;
+                    break;
+                }
+            }
+        }
+    }
+
     // For an actual hit chance, only show it when the current target is valid and contains a creature.
     if (targetValid) {
         if (const Entity* e = entityAt(targetPos.x, targetPos.y)) {
             if (e->hp > 0 && e->id != player().id) {
-                const int ac = 10 + ((e->kind == EntityKind::Player) ? playerDefense() : e->baseDef);
-
-                const int dist = std::max(1, static_cast<int>(targetLine.size()) - 1);
-                const int penalty = dist / 3;
-
-                int adjAtk = atkBonus - penalty;
-                const bool confused = (player().effects.confusionTurns > 0);
-                if (confused) adjAtk -= 3;
-
-                if (player().effects.hallucinationTurns > 0) {
-                    ss << "HIT ?% ";
+                if (!cursorOnShotLine) {
+                    ss << "HIT 0% ";
                 } else {
-                    const int pct = hitChancePercent(adjAtk, ac);
-                    ss << "HIT " << pct << "% ";
+                    const int ac = 10 + ((e->kind == EntityKind::Player) ? playerDefense() : e->baseDef);
+
+                    const int dist = std::max(1, static_cast<int>(targetLine.size()) - 1);
+                    const int penalty = dist / 3;
+
+                    int adjAtk = atkBonus - penalty;
+                    const bool confused = (player().effects.confusionTurns > 0);
+                    if (confused) adjAtk -= 3;
+
+                    if (player().effects.hallucinationTurns > 0) {
+                        ss << "HIT ?% ";
+                    } else {
+                        const int pct = hitChancePercent(adjAtk, ac);
+                        ss << "HIT " << pct << "% ";
+                    }
                 }
             }
         }
@@ -472,6 +510,28 @@ std::string Game::targetingCombatPreviewText() const {
     ss << "DMG " << dmgStr;
 
     if (player().effects.confusionTurns > 0) ss << " CONFUSED";
+
+    // Keep it short: show wind direction/strength + the deterministic drift (if any).
+    if (projKind == ProjectileKind::Arrow || projKind == ProjectileKind::Rock || projKind == ProjectileKind::Torch) {
+        if (windAdj.strength > 0 && (windAdj.wind.x != 0 || windAdj.wind.y != 0)) {
+            char wd = '?';
+            if (windAdj.wind.x > 0) wd = 'E';
+            else if (windAdj.wind.x < 0) wd = 'W';
+            else if (windAdj.wind.y > 0) wd = 'S';
+            else if (windAdj.wind.y < 0) wd = 'N';
+
+            ss << " WIND " << wd << windAdj.strength;
+
+            if (windAdj.drift.x != 0 || windAdj.drift.y != 0) {
+                ss << " DRIFT ";
+                if (windAdj.drift.x > 0) ss << windAdj.drift.x << "E";
+                else if (windAdj.drift.x < 0) ss << (-windAdj.drift.x) << "W";
+                else if (windAdj.drift.y > 0) ss << windAdj.drift.y << "S";
+                else if (windAdj.drift.y < 0) ss << (-windAdj.drift.y) << "N";
+            }
+        }
+    }
+
 
     return ss.str();
 }
@@ -1060,7 +1120,7 @@ bool Game::endTargeting(bool fire) {
         }
 
         // Casting makes noise (splash/line snap), which can matter for stealth.
-        emitNoise(targetPos, 10, false);
+        emitNoise(targetPos, 10);
 
         const uint32_t ws = fishWaterSeedAt(*this, targetPos);
         const int turn = static_cast<int>(turns());

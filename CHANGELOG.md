@@ -32,6 +32,7 @@
 - Game-driven procedural particle FX events (spells + digging) via `FXParticleEvent` queue.
 - **Procedural particle flipbook animation**: renderer-owned particle textures (spark/smoke/ember/mote) are now generated as **4-frame animated flipbooks** using looped noise + domain warp, with per-particle phase offsets so bursts don’t animate in perfect sync.
 - **Procedural particle motion advection**: smoke/motes/embers now drift through a lightweight **curl-noise** flow field and are biased by the game’s deterministic per-level **wind**, yielding more fluid, coherent motion (visual-only).
+- **Wind-drifted physical projectiles**: arrows/rocks/torches are now biased by the level’s deterministic wind (aim into the wind to compensate). The ranged targeting preview shows **WIND** and **DRIFT**, and will display **HIT 0%** when your aimed tile is no longer on the projectile line due to drift.
 - **Procedural item micro-animations (4-frame)**: potions now slosh with looped-noise swirl (plus metallic/milky/murky/smoky variants), scroll labels shimmer, rings get orbiting specular glints, wands pulse with an energy crawl, and lit torches flicker with coherent embers.
 - **Procedural sprite animation**: entities, items, and projectiles now use smooth, renderer-side procedural motion (move tween + hop/squash, idle bob, and hit recoil) to reduce "teleporty" feel in both top-down and isometric views.
 - **High-resolution voxel sprite detail (64x64/128x128)**: voxel sprites now automatically increase their internal voxel-model resolution (nearest-neighbor voxel upscaling) before rendering, so large tile sizes produce smoother 3D voxel meshes in both perspective and isometric modes (isometric raytracing caps detail to stay performant).
@@ -371,6 +372,9 @@
 - Fixed MSVC build breaks/warnings: implemented missing chest overlay item icon helper, corrected keybind chord formatting, and centralized SDL includes to avoid SDL_MAIN_HANDLED macro redefinitions.
 - Fixed MSVC build errors/warnings in renderer + procedural spritegen: declared `resampleSpriteToSize()` in the public spritegen header, added a `rand01(uint32_t)` hash-to-float helper, corrected an isometric `pointInIsoDiamond()` callsite, avoided shadowed locals in render UI preview blocks, exposed `Renderer::FRAMES` for flipbook consumers, and added `ScoreEntry.conducts` (recorded + persisted in the scores CSV).
 - Fixed MSVC build break in minimap cursor tooltip: expose Game::describeAt and remove shadowing warnings in save migration + isometric phantom rendering.
+- Fixed MSVC build errors in fishing targeting preview (rod lookup + local HUD stream) and corrected an `emitNoise` call to match its signature.
+- Fixed MSVC build error for `#bounty`: `Game::showBountyContracts()` is now public.
+- Cleaned up MSVC shadowing warnings (C4456/C4458) in combat XP progression, dungeon door placement, and `#pet` status output.
 - Keybind parsing now **deduplicates equivalent chords** (e.g. `?` and `shift+slash`) so bindings don't “double up” in the UI.
 - Keybinds now treat the **CMD/GUI** modifier as a first-class bindable modifier (INI + editor), and the default help bind includes **cmd+?**.
 - Keybind parsing now robustly accepts literal `<`, `>`, and `?` tokens even when SDL can't map those shifted symbols back to scancodes (helps config-file editing across layouts).

@@ -10089,8 +10089,8 @@ static bool annexGenWfcAnnex(AnnexGrid& g, RNG& rng, Vec2i entry, int depth) {
                 if (static_cast<int>(placed.size()) >= wantDoors) break;
 
                 bool near = false;
-                for (const Vec2i& q : placed) {
-                    if (chebyshev(p, q) <= 1) { near = true; break; }
+                for (const Vec2i& prev : placed) {
+                    if (chebyshev(p, prev) <= 1) { near = true; break; }
                 }
                 if (near) continue;
 

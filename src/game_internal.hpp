@@ -3642,15 +3642,15 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
                     const int lv = clampi(captureSpherePetLevelOrDefault(it.charges), 1, captureSpherePetLevelCap());
                     const int hpPct = clampi(captureSphereHpPctFromCharges(it.charges), 0, 100);
 
-                    std::string line = "S" + std::to_string(i + 1) + ") ";
-                    line += petgen::petGivenName(it.spriteSeed);
-                    line += " THE ";
-                    line += kindName(k);
-                    line += " | LV " + std::to_string(lv);
-                    line += " | BOND " + std::to_string(bond);
-                    line += " | HP " + std::to_string(hpPct) + "%";
+                    std::string row = "S" + std::to_string(i + 1) + ") ";
+                    row += petgen::petGivenName(it.spriteSeed);
+                    row += " THE ";
+                    row += kindName(k);
+                    row += " | LV " + std::to_string(lv);
+                    row += " | BOND " + std::to_string(bond);
+                    row += " | HP " + std::to_string(hpPct) + "%";
 
-                    game.pushSystemMessage(line);
+                    game.pushSystemMessage(row);
                 }
 
                 if (storedN > MAX_STORED_LIST) {
@@ -3678,34 +3678,34 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
             for (int i = 0; i < show; ++i) {
                 const Entity& c = *comps[i];
-                std::string line = std::to_string(i + 1) + ") ";
-                line += petGivenNameFor(c);
-                line += " THE ";
-                line += kindName(c.kind);
+                std::string row = std::to_string(i + 1) + ") ";
+                row += petGivenNameFor(c);
+                row += " THE ";
+                row += kindName(c.kind);
 
                 const std::string traits = petgen::petTraitList(c.procAffixMask);
-                if (!traits.empty()) line += " | TRAITS: " + traits;
+                if (!traits.empty()) row += " | TRAITS: " + traits;
 
                 if (const Item* sph = sphereFor(c)) {
                     const int bond = clampi(captureSphereBondFromCharges(sph->charges), 0, 99);
                     const int lv = clampi(captureSpherePetLevelOrDefault(sph->charges), 1, captureSpherePetLevelCap());
-                    line += " | LV " + std::to_string(lv);
-                    line += " | BOND " + std::to_string(bond);
+                    row += " | LV " + std::to_string(lv);
+                    row += " | BOND " + std::to_string(bond);
                 }
 
-                line += " | HP " + std::to_string(c.hp) + "/" + std::to_string(c.hpMax);
+                row += " | HP " + std::to_string(c.hp) + "/" + std::to_string(c.hpMax);
 
-                line += " | ORDER: ";
-                line += (c.allyOrder == AllyOrder::Follow ? "FOLLOW" :
+                row += " | ORDER: ";
+                row += (c.allyOrder == AllyOrder::Follow ? "FOLLOW" :
                          c.allyOrder == AllyOrder::Stay ? "STAY" :
                          c.allyOrder == AllyOrder::Fetch ? "FETCH" : "GUARD");
 
-                if (c.stolenGold > 0) line += " | " + std::to_string(c.stolenGold) + "G";
+                if (c.stolenGold > 0) row += " | " + std::to_string(c.stolenGold) + "G";
                 if (c.pocketConsumable.id != 0 && c.pocketConsumable.count > 0) {
-                    line += " | PACK: " + game.displayItemName(c.pocketConsumable);
+                    row += " | PACK: " + game.displayItemName(c.pocketConsumable);
                 }
 
-                game.pushSystemMessage(line);
+                game.pushSystemMessage(row);
             }
 
             if (n > MAX_LIST) {
@@ -3731,16 +3731,16 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
                         if (e && e->kind == k && e->spriteSeed == it.spriteSeed) { outNow = true; break; }
                     }
 
-                    std::string line = "S" + std::to_string(i + 1) + ") ";
-                    line += petgen::petGivenName(it.spriteSeed);
-                    line += " THE ";
-                    line += kindName(k);
-                    if (outNow) line += " | OUT";
-                    line += " | LV " + std::to_string(lv);
-                    line += " | BOND " + std::to_string(bond);
-                    line += " | HP " + std::to_string(hpPct) + "%";
+                    std::string row = "S" + std::to_string(i + 1) + ") ";
+                    row += petgen::petGivenName(it.spriteSeed);
+                    row += " THE ";
+                    row += kindName(k);
+                    if (outNow) row += " | OUT";
+                    row += " | LV " + std::to_string(lv);
+                    row += " | BOND " + std::to_string(bond);
+                    row += " | HP " + std::to_string(hpPct) + "%";
 
-                    game.pushSystemMessage(line);
+                    game.pushSystemMessage(row);
                 }
 
                 if (storedN > MAX_STORED_LIST) {

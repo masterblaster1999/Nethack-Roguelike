@@ -1291,6 +1291,17 @@ public:
     // 0 = calm, 1..3 = increasing strength.
     int windStrength() const;
 
+struct WindShotAdjust {
+    Vec2i adjustedTarget{0, 0};
+    Vec2i drift{0, 0};         // drift applied to the aim point (tile delta)
+    Vec2i wind{0, 0};          // wind direction (cardinal) or {0,0} for calm
+    int strength = 0;          // 0..3
+};
+
+// Deterministic wind drift for physical projectiles (arrows/rocks/torches).
+// The player still aims at 'aim', but the projectile is biased toward adjustedTarget.
+WindShotAdjust windAdjustShot(Vec2i src, Vec2i aim, int range, ProjectileKind projKind) const;
+
     const Entity& player() const;
     Entity& playerMut();
 
@@ -1948,6 +1959,10 @@ bool clearItemCallLabel(ItemKind k);
     // (UI-only; not serialized)
     void showCraftRecipes();
 
+    // Bounties
+    // Print a summary of active bounty contracts in inventory (used by #bounty).
+    void showBountyContracts();
+
     // Auto-move / auto-explore
     bool isAutoActive() const { return autoMode != AutoMoveMode::None; }
     bool isAutoTraveling() const { return autoMode == AutoMoveMode::Travel; }
@@ -2524,8 +2539,6 @@ private:
     bool equipSelected();
     bool useSelected();
 
-    // Bounty helper: prints a summary of active bounty contracts in inventory.
-    void showBountyContracts();
 
 
     // Crafting (Crafting Kit)

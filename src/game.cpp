@@ -4276,6 +4276,69 @@ int Game::windStrength() const {
     return clampi(s, 1, 3);
 }
 
+Game::WindShotAdjust Game::windAdjustShot(Vec2i src, Vec2i aim, int range, ProjectileKind projKind) const {
+    WindShotAdjust out;
+    out.adjustedTarget = aim;
+    out.wind = windDir();
+    out.strength = windStrength();
+
+    // Fast path: calm air (or sheltered camp).
+    if (out.strength <= 0 || (out.wind.x == 0 && out.wind.y == 0)) return out;
+
+    auto driftFactorFor = [](ProjectileKind k) -> float {
+        switch (k) {
+            case ProjectileKind::Arrow: return 1.0f;   // light, very wind-sensitive
+            case ProjectileKind::Torch: return 0.85f;  // tumbling, light
+            case ProjectileKind::Rock:  return 0.35f;  // heavy
+            default: return 0.0f;                      // sparks/fireballs: ignore
+        }
+    };
+
+    const float f = driftFactorFor(projKind);
+    if (f <= 0.0f) return out;
+
+    // Point-blank shots are effectively unaffected (and drift here would feel unfair).
+    const int dist = std::max(0, chebyshev(src, aim));
+    if (dist <= 2) return out;
+
+    const int dx = aim.x - src.x;
+    const int dy = aim.y - src.y;
+    const int sdx = (dx > 0) ? 1 : (dx < 0) ? -1 : 0;
+    const int sdy = (dy > 0) ? 1 : (dy < 0) ? -1 : 0;
+
+    // -1 = headwind component, 0 = crosswind, +1 = tailwind component.
+    // We mostly model crosswind drift; head/tail winds just reduce the effect.
+    const int dot = sdx * out.wind.x + sdy * out.wind.y; // -1..1
+
+    // Crosswind drift scaling: perpendicular = 1.0, aligned = ~0.3.
+    const float crossScale = 1.0f - 0.7f * float(std::abs(dot));
+
+    // Drift grows gently with distance and wind strength. Clamp to keep it readable and fair.
+    const float magF = (f * float(out.strength) * float(dist) / 13.0f) * crossScale;
+    int mag = clampi(static_cast<int>(std::round(magF)), 0, 3);
+    if (mag <= 0) return out;
+
+    // Avoid shifting the "impact target" beyond the shot's range.
+    const int maxX = dung.width - 1;
+    const int maxY = dung.height - 1;
+
+    Vec2i cand = aim;
+    while (mag > 0) {
+        cand = aim;
+        cand.x = clampi(cand.x + out.wind.x * mag, 0, maxX);
+        cand.y = clampi(cand.y + out.wind.y * mag, 0, maxY);
+
+        if (range <= 0 || chebyshev(src, cand) <= range) break;
+        mag -= 1;
+    }
+
+    out.adjustedTarget = cand;
+    out.drift = { cand.x - aim.x, cand.y - aim.y };
+    return out;
+}
+
+
+
 
 
 void Game::pushFxParticle(FXParticlePreset preset, Vec2i pos, int intensity, float duration, float delay, uint32_t seed) {

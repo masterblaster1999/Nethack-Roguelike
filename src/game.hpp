@@ -1914,6 +1914,22 @@ bool clearItemCallLabel(ItemKind k);
     const std::vector<FXParticleEvent>& fxParticles() const { return fxParticles_; }
     bool inputLocked() const { return inputLock; }
 
+
+    // NetHack-style numeric count prefix and action repeat.
+    //
+    // This is **UI-only**: it is driven by the platform layer (main.cpp) and is not serialized.
+    // It exists so the HUD can show what the player is about to repeat (or is currently repeating).
+    int inputCountPrefix() const { return inputCountPrefix_; }
+    void setInputCountPrefix(int n) { inputCountPrefix_ = std::clamp(n, 0, 9999); }
+    void clearInputCountPrefix() { inputCountPrefix_ = 0; }
+
+    Action inputRepeatAction() const { return inputRepeatAction_; }
+    int inputRepeatRemaining() const { return inputRepeatRemaining_; }
+    void setInputRepeatIndicator(Action a, int remaining) {
+        inputRepeatAction_ = a;
+        inputRepeatRemaining_ = std::max(0, remaining);
+    }
+
     // Queue a visual-only particle event for the renderer.
     void pushFxParticle(FXParticlePreset preset, Vec2i pos, int intensity = 10, float duration = 0.20f, float delay = 0.0f, uint32_t seed = 0);
     // Save/load helpers
@@ -2410,6 +2426,12 @@ private:
     std::vector<FXExplosion> fxExpl;
     std::vector<FXParticleEvent> fxParticles_;
     bool inputLock = false;
+
+
+    // Input prefix / repeat indicator (UI-only; not serialized).
+    int inputCountPrefix_ = 0;
+    Action inputRepeatAction_ = Action::None;
+    int inputRepeatRemaining_ = 0;
 
     bool gameOver = false;
     bool gameWon = false;

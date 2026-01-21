@@ -7174,6 +7174,24 @@ void Renderer::drawHud(const Game& game) {
         pushWrappedControl(game.fishingFightControlText(), yellow);
     }
 
+    // NetHack-style numeric count prefix / repeat indicator (UI-only; driven by main.cpp).
+    if (game.inputRepeatRemaining() > 0) {
+        std::string actName = "ACTION";
+        if (game.inputRepeatAction() != Action::None) {
+            const char* d = actioninfo::desc(game.inputRepeatAction());
+            if (d && d[0] != '\0') actName = d;
+            else actName = actioninfo::token(game.inputRepeatAction());
+        }
+        std::stringstream ssr;
+        ssr << "REPEAT x" << game.inputRepeatRemaining() << ": " << actName << "  (ESC CANCEL)";
+        pushWrappedControl(ssr.str(), yellow);
+    } else if (game.inputCountPrefix() > 0) {
+        std::stringstream ssc;
+        ssc << "COUNT: " << game.inputCountPrefix()
+            << "  (TYPE MOVE/WAIT/SEARCH. BACKSPACE EDIT, ESC CLEAR)";
+        pushWrappedControl(ssc.str(), yellow);
+    }
+
     pushWrappedControl(
         "MOVE: WASD/ARROWS/NUMPAD | SPACE/. WAIT | R REST | N SNEAK (STEALTH) | < > STAIRS",
         gray
@@ -8669,6 +8687,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     add("F4 MONSTER CODEX  (TAB SORT, LEFT/RIGHT FILTER)", gray);
     add("\\ DISCOVERIES  (TAB/LEFT/RIGHT FILTER, SHIFT+S SORT)", gray);
     add("PGUP/PGDN LOG  ESC CANCEL/QUIT", gray);
+    add("COUNT PREFIX: TYPE DIGITS THEN MOVE/WAIT/SEARCH TO REPEAT (BACKSPACE EDIT, ESC CLEAR)", gray);
 
     blank();
     add("EXTENDED COMMAND EXAMPLES:", white);

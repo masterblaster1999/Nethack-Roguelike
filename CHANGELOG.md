@@ -326,6 +326,7 @@
 - Inventory overlay: the left-hand list now shows compact **quick-compare** badges (ATK/DEF/RA/RN deltas + ring mods) so upgrades are visible at a glance; fixed gear stat comparisons to include **bless/curse** modifiers.
 - Keybinds editor overlay: added an in-overlay **filter/search** (press `/`), **DEL** to unbind (writes `none`), and highlighted **conflicting** duplicate chords.
 - Keyboard input: SDL key repeat is now honored for movement and menu navigation (hold a direction to keep moving; repeats are still suppressed for toggles/confirm/ESC to avoid accidental spam).
+- Keyboard input: added a NetHack-style **COUNT prefix** — type digits then a repeatable action (move/wait/search/evade/stairs) to auto-repeat it; **Backspace** edits the count and **Esc** clears/cancels.
 - **#whistle** now calls **all friendly companions** with **Follow/Fetch** orders (not just the starting dog).
 - Auto-travel: you can now **target locked doors** directly (when you have keys/lockpicks), making it easier to walk to vault doors intentionally.
 - Auto-explore: when no normal frontiers remain, it will now **walk to reachable locked doors** that border unexplored tiles (if you have keys/lockpicks) so it doesn't incorrectly report the floor as fully explored.

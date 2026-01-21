@@ -670,6 +670,26 @@ int main(int argc, char** argv) {
     bool textInputOn = false;
     uint32_t lastEscPressMs = 0;
 
+    // NetHack-style numeric count prefix / action repeat (platform-side scheduler).
+    // The core simulation remains deterministic because we still dispatch each repeated Action normally.
+    int inputCountPrefix = 0;
+    Action repeatAction = Action::None;
+    int repeatRemaining = 0;
+    float repeatTimer = 0.0f;
+
+    auto clearCountPrefix = [&]() {
+        inputCountPrefix = 0;
+        game.setInputCountPrefix(0);
+    };
+
+    auto clearRepeat = [&]() {
+        repeatAction = Action::None;
+        repeatRemaining = 0;
+        repeatTimer = 0.0f;
+        game.setInputRepeatIndicator(Action::None, 0);
+    };
+
+
 
     // ------------------------------------------------------------
     // Replay playback state
@@ -1240,11 +1260,46 @@ int main(int argc, char** argv) {
                             }
                         }
 
+                        // If an automatic count-repeat is currently running, any manual key press interrupts it.
+                        // Ignore SDL key-repeat events while the scheduler is active to avoid double-input.
+                        if (repeatRemaining > 0) {
+                            if (isRepeat) break;
+                            if (key != SDLK_ESCAPE) {
+                                clearRepeat();
+                            }
+                        }
+
+                        const bool noCountMods = (mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI | KMOD_SHIFT)) == 0;
+
+                        // Count prefix editing (Backspace removes the last digit).
+                        if (!isRepeat && noCountMods && inputCountPrefix > 0 && key == SDLK_BACKSPACE) {
+                            inputCountPrefix /= 10;
+                            game.setInputCountPrefix(inputCountPrefix);
+                            lastEscPressMs = 0;
+                            break;
+                        }
+
                         if (key == SDLK_ESCAPE) {
                             if (isRepeat) break;
+
+                            // First priority: clear local input modes (count/repeat) without quitting.
+                            if (repeatRemaining > 0) {
+                                clearRepeat();
+                                clearCountPrefix();
+                                lastEscPressMs = 0;
+                                break;
+                            }
+                            if (inputCountPrefix > 0) {
+                                clearCountPrefix();
+                                lastEscPressMs = 0;
+                                break;
+                            }
+
                             // ESC cancels UI modes; cancels auto-move; otherwise quit (optionally double-press).
-                            if (game.isInventoryOpen() || game.isTargeting() || game.isHelpOpen() || game.isLooking() ||
+                            if (game.isInventoryOpen() || game.isChestOpen() || game.isSpellsOpen() ||
+                                game.isTargeting() || game.isHelpOpen() || game.isLooking() ||
                                 game.isMinimapOpen() || game.isStatsOpen() || game.isMessageHistoryOpen() || game.isOptionsOpen() || game.isKeybindsOpen() || game.isCommandOpen() ||
+                                game.isCodexOpen() || game.isDiscoveriesOpen() || game.isScoresOpen() ||
                                 game.isAutoActive()) {
                                 dispatchAction(Action::Cancel);
                                 lastEscPressMs = 0;
@@ -1264,7 +1319,46 @@ int main(int argc, char** argv) {
                             break;
                         }
 
-                        const Action a = keyBinds.mapKey(game, key, mod);
+                        auto isCountDigit = [](SDL_Keycode k, int& outDigit) -> bool {
+                            if (k >= SDLK_0 && k <= SDLK_9) {
+                                outDigit = static_cast<int>(k - SDLK_0);
+                                return true;
+                            }
+                            if (k >= SDLK_KP_0 && k <= SDLK_KP_9) {
+                                outDigit = static_cast<int>(k - SDLK_KP_0);
+                                return true;
+                            }
+                            return false;
+                        };
+
+                        auto countPrefixAllowedNow = [&]() -> bool {
+                            // Only allow count-prefix in "normal" gameplay mode (no modal UI).
+                            return !game.isInventoryOpen() && !game.isChestOpen() && !game.isSpellsOpen() &&
+                                   !game.isHelpOpen() && !game.isLooking() && !game.isTargeting() &&
+                                   !game.isMinimapOpen() && !game.isStatsOpen() &&
+                                   !game.isCodexOpen() && !game.isDiscoveriesOpen() && !game.isScoresOpen() &&
+                                   !game.isMessageHistoryOpen() && !game.isOptionsOpen() && !game.isKeybindsOpen() && !game.isCommandOpen() &&
+                                   !game.isAutoActive() && !game.isFinished();
+                        };
+
+                        // NetHack-style count prefix: type digits, then repeat the next repeatable action.
+                        // We only treat digits as a count if they are *not* currently bound to an action.
+                        int digit = -1;
+                        if (!isRepeat && noCountMods && countPrefixAllowedNow() && isCountDigit(key, digit)) {
+                            const Action digitMapped = keyBinds.mapKey(game, key, mod);
+                            if (digitMapped == Action::None) {
+                                if (inputCountPrefix == 0 && digit == 0) {
+                                    // Ignore leading zero.
+                                    break;
+                                }
+                                inputCountPrefix = std::min(9999, inputCountPrefix * 10 + digit);
+                                game.setInputCountPrefix(inputCountPrefix);
+                                lastEscPressMs = 0;
+                                break;
+                            }
+                        }
+
+                        Action a = keyBinds.mapKey(game, key, mod);
 
                         auto allowRepeatAction = [](Action act) -> bool {
                             switch (act) {
@@ -1286,6 +1380,53 @@ int main(int argc, char** argv) {
 
                         if (isRepeat && !allowRepeatAction(a)) {
                             break;
+                        }
+
+                        auto allowCountRepeat = [](Action act) -> bool {
+                            switch (act) {
+                                case Action::Up:
+                                case Action::Down:
+                                case Action::Left:
+                                case Action::Right:
+                                case Action::UpLeft:
+                                case Action::UpRight:
+                                case Action::DownLeft:
+                                case Action::DownRight:
+                                case Action::Wait:
+                                case Action::Search:
+                                case Action::Evade:
+                                case Action::StairsUp:
+                                case Action::StairsDown:
+                                    return true;
+                                default:
+                                    return false;
+                            }
+                        };
+
+                        // If a count prefix is active, apply it to the next repeatable action.
+                        if (!isRepeat && inputCountPrefix > 0) {
+                            if (allowCountRepeat(a)) {
+                                repeatAction = a;
+                                repeatRemaining = inputCountPrefix;
+                                repeatTimer = 0.0f;
+
+                                clearCountPrefix();
+                                game.setInputRepeatIndicator(repeatAction, repeatRemaining);
+
+                                // Fire the first step immediately so the keypress feels responsive.
+                                dispatchAction(repeatAction);
+                                --repeatRemaining;
+                                game.setInputRepeatIndicator(repeatAction, repeatRemaining);
+
+                                if (repeatRemaining <= 0) {
+                                    clearRepeat();
+                                }
+                                break;
+                            } else {
+                                // Any non-digit key consumes the prefix (even if it doesn't repeat).
+                                clearCountPrefix();
+                                if (a == Action::None) break;
+                            }
                         }
 
                         dispatchAction(a);
@@ -1433,6 +1574,56 @@ int main(int argc, char** argv) {
             if (replayIndex >= replayFile.events.size()) {
                 replayActive = false;
                 game.pushSystemMessage("REPLAY FINISHED (input unlocked).");
+            }
+        }
+
+        // Platform-level action repeat (numeric prefix).
+        // (Runs outside Game::update so each repeated Action is still recorded for replays.)
+        if (!replayActive && repeatRemaining > 0) {
+            // Stop repeating if a modal UI is open (avoid accidental menu navigation).
+            if (game.isInventoryOpen() || game.isChestOpen() || game.isSpellsOpen() ||
+                game.isHelpOpen() || game.isStatsOpen() ||
+                game.isMessageHistoryOpen() || game.isOptionsOpen() || game.isKeybindsOpen() || game.isCommandOpen() ||
+                game.isCodexOpen() || game.isDiscoveriesOpen() || game.isScoresOpen() ||
+                game.isTargeting() || game.isLooking() || game.isMinimapOpen() || game.isFinished()) {
+                clearRepeat();
+            } else {
+                repeatTimer += dt;
+                const float stepDelay = std::max(0.0f, game.autoStepDelayMs() / 1000.0f);
+
+                // To avoid long stalls when stepDelay == 0, cap how many actions we can fire per frame.
+                int guard = 0;
+                while (repeatRemaining > 0 && !game.inputLocked() &&
+                       (stepDelay <= 0.0f || repeatTimer >= stepDelay)) {
+                    if (stepDelay > 0.0f) repeatTimer -= stepDelay;
+
+                    dispatchAction(repeatAction);
+
+                    --repeatRemaining;
+                    game.setInputRepeatIndicator(repeatAction, repeatRemaining);
+
+                    if (repeatRemaining <= 0) break;
+
+                    // Stop if the action opened a modal UI (e.g. targeting/menus) or ended the run.
+                    if (game.isInventoryOpen() || game.isChestOpen() || game.isSpellsOpen() ||
+                        game.isHelpOpen() || game.isStatsOpen() ||
+                        game.isMessageHistoryOpen() || game.isOptionsOpen() || game.isKeybindsOpen() || game.isCommandOpen() ||
+                        game.isCodexOpen() || game.isDiscoveriesOpen() || game.isScoresOpen() ||
+                        game.isTargeting() || game.isLooking() || game.isMinimapOpen() || game.isFinished()) {
+                        clearRepeat();
+                        break;
+                    }
+
+                    if (++guard >= 32) {
+                        // Avoid running huge repeats in a single frame.
+                        repeatTimer = 0.0f;
+                        break;
+                    }
+                }
+
+                if (repeatRemaining <= 0) {
+                    clearRepeat();
+                }
             }
         }
 

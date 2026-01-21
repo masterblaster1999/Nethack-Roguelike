@@ -1,10 +1,14 @@
 {
-  "patch_id": "round112_patch",
-  "previous_patch_id": "round111_patch",
-  "round": 112,
+  "patch_id": "round113_patch",
+  "previous_patch_id": "round112_patch",
+  "round": 113,
   "date": "2026-01-21",
   "project": "Nethack-Roguelike",
-  "summary": "Wind now deterministically drifts physical projectiles (arrows/rocks/torches); ranged targeting preview shows WIND/DRIFT and HIT 0% when the aim point is off-line.",
+  "summary": [
+    "Added a NetHack-style COUNT prefix for repeatable actions: type digits then move/wait/search/evade/stairs to auto-repeat at the configured auto-step delay.",
+    "HUD now shows COUNT (pending) and REPEAT (active) indicators, plus help overlay docs.",
+    "ESC/CANCEL now correctly closes chest/spells/codex/discoveries/scores overlays (not just inventory/help/etc)."
+  ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
@@ -30,12 +34,13 @@
     "src/pet_gen.hpp",
     "src/render.cpp",
     "src/spritegen.cpp",
-    "src/bounty_gen.hpp"
+    "src/bounty_gen.hpp",
+    "src/main.cpp"
   ],
   "timestamp_utc": "2026-01-21T00:00:00Z",
   "description": "Introduces a deterministic per-level wind drift model for physical projectiles (arrows, rocks, torches). Shots are biased by the dungeon\u2019s wind direction/strength; the ranged targeting HUD now shows WIND/DRIFT and suppresses misleading hit chances when drift pushes the projectile line away from the aimed tile.",
   "timestamp": "2026-01-21T00:00:00Z",
-  "generated_at": "2026-01-21",
+  "generated_at": "2026-01-21T12:34:19.633357Z",
   "notes": [
     "Add Game::windAdjustShot(): a small deterministic model that biases physical projectile targets (arrows/rocks/torches) based on per-level wind direction/strength and shot distance.",
     "Apply wind drift in combat.cpp for ranged attacks so both player and monsters are affected consistently.",
@@ -48,5 +53,13 @@
     "src/game.cpp",
     "src/combat.cpp",
     "src/game_targeting.cpp"
-  ]
+  ],
+  "files_changed": [
+    "CHANGELOG.md",
+    "PATCH_MANIFEST.json",
+    "src/game.hpp",
+    "src/render.cpp",
+    "src/main.cpp"
+  ],
+  "files_added": []
 }

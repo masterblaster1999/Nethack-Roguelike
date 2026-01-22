@@ -1,13 +1,13 @@
 {
-  "patch_id": "round121_patch",
-  "previous_patch_id": "round120_patch",
-  "round": 121,
+  "patch_id": "round122_patch",
+  "previous_patch_id": "round121_patch",
+  "round": 122,
   "date": "2026-01-22",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Added compile-time tag hashing (FNV-1a) via tag32(\"NAME\") in src/rng.hpp to make deterministic seed salting readable and to prevent accidental invalid numeric literal suffixes.",
-    "Fixed MSVC build errors in biolum lighting: replaced an invalid hex literal suffix seed salt with tag32(\"BIOLUM\"), keeping per-level glow selection deterministic.",
-    "Cleaned up MSVC C4456 shadowing warnings in the fluvial gully generator by renaming locals in the channel start selection and connectivity repair logic."
+    "Fixed MSVC compilation errors in heightfield terrain decoration by correcting the ridge pillar spacing check (removed an accidental reference to an out-of-scope variable).",
+    "Added a deterministic SpatialHashGrid2D helper for fast minimum-distance placement checks and applied it to ridge pillar and scree cluster center selection.",
+    "Removed now-unused separation-squared locals that became redundant after the spatial hash refactor."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -47,19 +47,21 @@
     "docs/PROCGEN_TERRAIN_BIOLUM.md",
     "src/proc_rd.hpp",
     "src/game_world.cpp",
-    "src/rng.hpp"
+    "src/rng.hpp",
+    "src/spatial_hash.hpp"
   ],
   "files_changed_this_round": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
-    "src/rng.hpp",
-    "src/game_world.cpp",
-    "src/dungeon.cpp"
+    "src/dungeon.cpp",
+    "src/spatial_hash.hpp"
   ],
-  "files_added": [],
+  "files_added": [
+    "src/spatial_hash.hpp"
+  ],
   "notes": [
-    "tag32() uses a small constexpr FNV-1a hash of a string literal to generate stable 32-bit domain separation constants.",
-    "This patch is a build+infrastructure fix; gameplay impact is limited to keeping biolum light selection deterministic after the salt fix."
+    "SpatialHashGrid2D is a fixed-bucket grid (no unordered_map) designed for deterministic procgen passes and fast O(k) neighbor checks.",
+    "The ridge pillar + scree cluster placement rules remain unchanged (still uses strict distSq < r*r), but the new implementation is harder to break and scales better on larger maps."
   ],
   "generated_at": "2026-01-22T00:00:00Z"
 }

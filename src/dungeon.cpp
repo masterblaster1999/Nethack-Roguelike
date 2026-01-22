@@ -5,6 +5,7 @@
 #include "pathfinding.hpp"
 #include "wfc.hpp"
 #include "proc_rd.hpp"
+#include "spatial_hash.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -19667,24 +19668,17 @@ void applyHeightfieldTerrain(Dungeon& d, DungeonBranch branch, int depth, int ma
     std::sort(ridgeCands.begin(), ridgeCands.end(), [](const Cand& a, const Cand& b) { return a.v > b.v; });
 
     const int minSep = (g == GenKind::Cavern) ? 4 : 3;
-    const int minSep2 = minSep * minSep;
 
-    std::vector<Vec2i> placedPillars;
-    placedPillars.reserve(static_cast<size_t>(ridgeTarget));
+    SpatialHashGrid2D pillarGrid(W, H, minSep);
 
     int placedRidge = 0;
     for (const Cand& c : ridgeCands) {
         if (placedRidge >= ridgeTarget) break;
 
-        bool close = false;
-        for (const Vec2i& p : placedPillars) {
-            const int dx = c.x - prevStart.x;
-            const int dy = c.y - prevStart.y;
-            if (dx * dx + dy * dy < minSep2) { close = true; break; }
-        }
-        if (close) continue;
+        const Vec2i pos{c.x, c.y};
+        if (pillarGrid.anyWithinRadius(pos, minSep)) continue;
 
-        Tile& t = d.at(c.x, c.y);
+        Tile& t = d.at(pos.x, pos.y);
         if (t.type != TileType::Floor) continue;
 
         t.type = TileType::Pillar;
@@ -19693,7 +19687,7 @@ void applyHeightfieldTerrain(Dungeon& d, DungeonBranch branch, int depth, int ma
             continue;
         }
 
-        placedPillars.push_back({c.x, c.y});
+        pillarGrid.insert(pos);
         placedRidge += 1;
     }
 
@@ -19724,7 +19718,6 @@ void applyHeightfieldTerrain(Dungeon& d, DungeonBranch branch, int depth, int ma
 
     const int clustersTarget = std::clamp(screeTarget / 7, 2, 10);
     const int clusterSep = 8;
-    const int clusterSep2 = clusterSep * clusterSep;
 
     // Precompute offsets in a radius-3 disk (excluding center), sorted by distance for natural clusters.
     std::vector<Vec2i> offsets;
@@ -19745,8 +19738,7 @@ void applyHeightfieldTerrain(Dungeon& d, DungeonBranch branch, int depth, int ma
         return a.x < b.x;
     });
 
-    std::vector<Vec2i> clusterCenters;
-    clusterCenters.reserve(static_cast<size_t>(clustersTarget));
+    SpatialHashGrid2D clusterGrid(W, H, clusterSep);
 
     int clustersPlaced = 0;
     int bouldersPlaced = 0;
@@ -19755,13 +19747,8 @@ void applyHeightfieldTerrain(Dungeon& d, DungeonBranch branch, int depth, int ma
         if (clustersPlaced >= clustersTarget) break;
         if (bouldersPlaced >= screeTarget) break;
 
-        bool close = false;
-        for (const Vec2i& c : clusterCenters) {
-            const int dx = s.x - c.x;
-            const int dy = s.y - c.y;
-            if (dx * dx + dy * dy < clusterSep2) { close = true; break; }
-        }
-        if (close) continue;
+        const Vec2i center{s.x, s.y};
+        if (clusterGrid.anyWithinRadius(center, clusterSep)) continue;
 
         // Deterministic "cluster personality".
         const uint32_t sh = hash32(hashCombine(seed, hashCombine(static_cast<uint32_t>(s.x), static_cast<uint32_t>(s.y))));
@@ -19832,7 +19819,7 @@ void applyHeightfieldTerrain(Dungeon& d, DungeonBranch branch, int depth, int ma
         }
 
         // Commit cluster.
-        clusterCenters.push_back({s.x, s.y});
+        clusterGrid.insert(center);
         clustersPlaced += 1;
         bouldersPlaced += static_cast<int>(changed.size());
     }

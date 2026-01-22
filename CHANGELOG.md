@@ -364,6 +364,7 @@
 - Shielding now contributes to **monster damage reduction**, making shield potions and Arcane Ward meaningful.
 - Fixed MSVC build break: LOOK/targeting HUD no longer references an out-of-scope `fitToChars` lambda (shared helper lives in render.cpp).
 - Fixed MSVC build break: LOOK info overlays (sound/hearing) no longer reference an undefined `idx` helper; grid indexing is now local and bounds-checked.
+- Fixed MSVC build errors in heightfield terrain decoration: ridge pillar spacing now checks against actual placed pillars (no stray out-of-scope identifier).
 - Targeting + LOOK bottom hint text now uses a compact **two-line** layout and a middle-ellipsis fitter, keeping both context and keybind hints readable on narrow windows.
 - Removed MSVC C4244 warnings by passing properly typed `Uint8` color channels to `SDL_SetRenderDrawColor` and by using `uint8_t{0}` for byte-grid fills/initialization.
 - Fixed MSVC build errors in monster AI procedural abilities (undefined dungeon member, incorrect FOV mask type, and undefined dimensions) and reduced per-cast allocations by reusing a scratch FOV mask for hazard seeding.

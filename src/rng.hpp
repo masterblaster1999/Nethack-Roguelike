@@ -24,6 +24,14 @@ constexpr uint32_t tag32(const char (&str)[N]) {
 }
 
 
+
+
+// User-defined literal for compile-time tag hashing.
+// Example:  uint32_t s = hashCombine(seed, "BIOLUM"_tag);
+constexpr uint32_t operator"" _tag(const char* str, std::size_t len) {
+    return fnv1a32(str, len);
+}
+
 // Simple, fast RNG with deterministic cross-platform behavior.
 // Not cryptographically secure.
 struct RNG {

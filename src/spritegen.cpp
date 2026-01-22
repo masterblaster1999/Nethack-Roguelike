@@ -3862,7 +3862,7 @@ SpritePixels genFloorBorderOverlay16(uint32_t seed, uint8_t style, uint8_t mask,
     SpritePixels s = makeSprite(16, 16, {0,0,0,0});
     if (style == 0u || mask == 0u) return s;
 
-    const TilePalette p = floorPalette(style, seed ^ 0xB0RD3Ru);
+    const TilePalette p = floorPalette(style, seed ^ "BORDER"_tag);
 
     int thick = 2;
     int inset = 1; // draw inside the tile so borders feel like a room "trim", not a seam crack

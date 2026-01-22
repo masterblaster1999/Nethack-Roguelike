@@ -3023,13 +3023,13 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
                 const uint32_t stepMs = std::clamp<uint32_t>(420u - static_cast<uint32_t>(bio) * 2u, 180u, 420u);
                 const uint32_t dtClamped = std::min<uint32_t>(dtMs, stepMs - 1u);
 
-                const uint32_t phase = hash32(tileSeed ^ 0xB10L1234u) % stepMs;
+                const uint32_t phase = hash32(tileSeed ^ "BIOLUM"_tag) % stepMs;
                 const uint32_t now = (ticks + phase) % stepMs;
                 const uint32_t prev = (((ticks > dtClamped) ? (ticks - dtClamped) : 0u) + phase) % stepMs;
 
                 if (now < prev) {
                     const uint32_t cycle = (ticks + phase) / stepMs;
-                    uint32_t s = hash32(tileSeed ^ 0xB10L1234u ^ (cycle * 0x27D4EB2Du));
+                    uint32_t s = hash32(tileSeed ^ "BIOLUM"_tag ^ (cycle * 0x27D4EB2Du));
 
                     const uint32_t chance = std::clamp<uint32_t>(8u + static_cast<uint32_t>(bio) / 4u, 8u, 60u);
                     if ((s & 0xFFu) < chance) {

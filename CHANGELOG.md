@@ -413,6 +413,7 @@
 - Consolidated canonical **Action token** metadata into a shared, SDL-free registry (`action_info.hpp`), so keybind parsing and extended command `#bind/#unbind` stay perfectly in sync.
 - Keybinds overlay now shows a contextual **INFO** description for the currently selected action (pulled from the same registry).
 - Fixed MSVC build errors/warnings in procedural biolum lighting + fluvial terrain: replaced an invalid hex literal suffix used for a seed salt, and removed C4456 shadowing warnings in the gully connectivity repair logic.
+- Fixed MSVC build break: replaced invalid mnemonic hex seed salts in biolum ambient particles and room-trim floor border overlays with compile-time hashed tags (`"..."_tag`).
 
 
 

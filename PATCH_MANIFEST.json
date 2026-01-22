@@ -1,13 +1,13 @@
 {
-  "patch_id": "round124_patch",
-  "previous_patch_id": "round123_patch",
-  "round": 124,
+  "patch_id": "round125_patch",
+  "previous_patch_id": "round124_patch",
+  "round": 125,
   "date": "2026-01-22",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Introduced a shared, unit-testable scent-field helper (src/scent_field.hpp) that updates the per-turn scent trail deterministically (decay + deposit + single-pass spread).",
-    "Extended scent propagation to be wind-biased using the game's existing deterministic per-level wind, yielding longer downwind trails and sharper upwind falloff.",
-    "Upgraded smell-capable monster tracking to escape local scent plateaus with a bounded BFS, improving tracking robustness in tight corridors."
+    "Fixed MSVC build breaks caused by mnemonic-but-invalid hex seed salts in ambient biolum particles and floor-border overlays.",
+    "Introduced a convenient compile-time hashed tag literal (`\"...\"_tag`) for readable, domain-separated procedural RNG salting (built on existing FNV-1a tag hashing).",
+    "Refactored the affected salting callsites to use the new `_tag` literal (removing the risk of future invalid hex typos)."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -56,16 +56,14 @@
   "files_changed_this_round": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
-    "src/ai.cpp",
-    "src/game_world.cpp",
-    "tests/test_main.cpp"
+    "src/rng.hpp",
+    "src/render.cpp",
+    "src/spritegen.cpp"
   ],
-  "files_added": [
-    "src/scent_field.hpp"
-  ],
+  "files_added": [],
   "notes": [
-    "The scent simulation follows a classic roguelike approach (deposit + decay + relaxation/spread), but adds a small wind term to emulate advection: downwind propagation loses less intensity, upwind propagation loses more.",
-    "AI smell tracking now performs a small bounded BFS when the local scent gradient is flat, preventing animals from stalling on plateaus/local maxima created by conservative diffusion."
+    "The MSVC error C3688 ('invalid literal suffix') was triggered because tokens like `0xB10L1234u` / `0xB0RD3Ru` contain non-hex digits (L/R), so the compiler interprets them as malformed numeric literals with a suffix.",
+    "Using compile-time hashed string tags avoids brittle 'cute' hex mnemonics while keeping salts readable and deterministic across platforms."
   ],
   "generated_at": "2026-01-22T00:00:00Z"
 }

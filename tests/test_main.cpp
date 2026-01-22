@@ -1,5 +1,7 @@
 #include "game.hpp"
 #include "settings.hpp"
+#include "scent_field.hpp"
+#include "wfc.hpp"
 
 #include <cctype>
 #include <filesystem>
@@ -51,6 +53,141 @@ bool containsCaseInsensitive(const std::string& haystack, const std::string& nee
         return false; \
     } \
 } while (0)
+
+
+bool test_wfc_solver_basic() {
+    const int w = 5;
+    const int h = 5;
+    const int nTiles = 2;
+
+    std::vector<uint32_t> allow[4];
+    for (int dir = 0; dir < 4; ++dir) allow[dir].assign(static_cast<size_t>(nTiles), 0u);
+
+    const uint32_t a = 1u << 0;
+    const uint32_t b = 1u << 1;
+
+    // Simple "same-tile adjacency" rule: A next to A, B next to B.
+    for (int dir = 0; dir < 4; ++dir) {
+        allow[dir][0] = a;
+        allow[dir][1] = b;
+    }
+
+    std::vector<float> weights = {1.0f, 1.0f};
+
+    RNG rng(12345u);
+    RNG ref = rng;
+    (void)ref.nextU32(); // solve() should advance rng by one draw per attempt.
+
+    std::vector<uint8_t> out;
+    const bool ok = wfc::solve(w, h, nTiles, allow, weights, rng, /*initialDomains=*/{}, out, /*maxRestarts=*/0);
+    CHECK(ok);
+    CHECK(out.size() == static_cast<size_t>(w * h));
+    CHECK(rng.state == ref.state);
+
+    auto at = [&](int x, int y) -> uint8_t {
+        return out[static_cast<size_t>(y * w + x)];
+    };
+
+    // Verify adjacency constraint.
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const uint8_t t = at(x, y);
+            if (x + 1 < w) CHECK(at(x + 1, y) == t);
+            if (y + 1 < h) CHECK(at(x, y + 1) == t);
+        }
+    }
+
+    return true;
+}
+
+bool test_wfc_solver_unsat_forced_contradiction() {
+    const int w = 2;
+    const int h = 1;
+    const int nTiles = 2;
+
+    std::vector<uint32_t> allow[4];
+    for (int dir = 0; dir < 4; ++dir) allow[dir].assign(static_cast<size_t>(nTiles), 0u);
+
+    const uint32_t a = 1u << 0;
+    const uint32_t b = 1u << 1;
+
+    // Same-tile adjacency rule again.
+    for (int dir = 0; dir < 4; ++dir) {
+        allow[dir][0] = a;
+        allow[dir][1] = b;
+    }
+
+    std::vector<float> weights = {1.0f, 1.0f};
+
+    const uint32_t full = wfc::allMask(nTiles);
+    std::vector<uint32_t> dom(static_cast<size_t>(w * h), full);
+
+    // Force an immediate contradiction: [A][B] but A cannot neighbor B.
+    dom[0] = a;
+    dom[1] = b;
+
+    RNG rng(999u);
+    RNG ref = rng;
+    (void)ref.nextU32();
+
+    std::vector<uint8_t> out;
+    const bool ok = wfc::solve(w, h, nTiles, allow, weights, rng, dom, out, /*maxRestarts=*/0);
+    CHECK(!ok);
+    CHECK(rng.state == ref.state);
+    return true;
+}
+
+bool test_scent_field_wind_bias() {
+    // A tiny self-contained test of the shared scent-field helper.
+    //
+    // With wind blowing east, scent should spread further to the east than to the west.
+    const int W = 7;
+    const int H = 3;
+
+    auto idx = [&](int x, int y) -> size_t {
+        return static_cast<size_t>(y * W + x);
+    };
+
+    auto walkable = [&](int x, int y) -> bool {
+        return (x >= 0 && y >= 0 && x < W && y < H);
+    };
+
+    auto fxAt = [&](int /*x*/, int /*y*/) -> ScentCellFx {
+        return ScentCellFx{};
+    };
+
+    const Vec2i src{3, 1};
+
+    // Windy: eastward draft.
+    {
+        std::vector<uint8_t> f;
+        ScentFieldParams p;
+        p.windDir = {1, 0};
+        p.windStrength = 3;
+
+        updateScentField(W, H, f, src, 255u, walkable, fxAt, p);
+
+        const uint8_t east = f[idx(src.x + 1, src.y)];
+        const uint8_t west = f[idx(src.x - 1, src.y)];
+        CHECK(east > west);
+    }
+
+    // Calm: symmetric spread.
+    {
+        std::vector<uint8_t> f;
+        ScentFieldParams p;
+        p.windDir = {0, 0};
+        p.windStrength = 0;
+
+        updateScentField(W, H, f, src, 255u, walkable, fxAt, p);
+
+        const uint8_t east = f[idx(src.x + 1, src.y)];
+        const uint8_t west = f[idx(src.x - 1, src.y)];
+        CHECK(east == west);
+    }
+
+    return true;
+}
 
 bool test_new_game_determinism() {
     Game a;
@@ -200,6 +337,9 @@ struct TestCase {
 int main(int argc, char** argv) {
     std::vector<TestCase> tests = {
         {"new_game_determinism", test_new_game_determinism},
+        {"scent_field_wind_bias", test_scent_field_wind_bias},
+        {"wfc_solver_basic",     test_wfc_solver_basic},
+        {"wfc_solver_unsat",     test_wfc_solver_unsat_forced_contradiction},
         {"save_load_roundtrip",  test_save_load_roundtrip},
         {"save_load_sneak",      test_save_load_preserves_sneak},
         {"settings_minimap_zoom", test_settings_minimap_zoom_clamp},

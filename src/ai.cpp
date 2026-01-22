@@ -9,6 +9,7 @@
 #include "pathfinding.hpp"
 #include "projectile_utils.hpp"
 
+#include <deque>
 #include <limits>
 #include <sstream>
 #include <unordered_map>
@@ -787,9 +788,12 @@ void Game::monsterTurn() {
         auto bestScentStep = [&]() -> Vec2i {
             if (smellR <= 0) return m.pos;
 
-            // Require a meaningful gradient to avoid oscillations on very faint scent.
+            // Require a meaningful local signal before committing to long-term tracking.
+            // (Very faint scent is noisy and can cause oscillations.)
             constexpr uint8_t TRACK_THRESHOLD = 32u;
+            if (scentHere < TRACK_THRESHOLD) return m.pos;
 
+            // 1) Fast path: greedily step to a strictly stronger neighbor.
             Vec2i best = m.pos;
             uint8_t bestV = scentHere;
 
@@ -801,7 +805,6 @@ void Game::monsterTurn() {
 
                 if (!dung.inBounds(nx, ny)) continue;
                 if (!dung.isWalkable(nx, ny)) continue;
-
                 if (dx != 0 && dy != 0 && !diagonalPassable(dung, m.pos, dx, dy)) continue;
 
                 const uint8_t sv = scentAt(nx, ny);
@@ -811,7 +814,97 @@ void Game::monsterTurn() {
                 }
             }
 
-            if (best != m.pos && bestV >= TRACK_THRESHOLD) return best;
+            if (best != m.pos) return best;
+
+            // 2) Plateau escape: if the local gradient is flat, do a small bounded BFS
+            // to find *any* reachable tile within smell range that has a stronger scent,
+            // and return the first step on the shortest path toward it.
+            //
+            // This prevents animals from stalling on local maxima/plateaus in narrow
+            // corridors when the scent diffusion step is conservative.
+            struct Node {
+                Vec2i pos;
+                uint8_t firstDir = 255; // 0..7
+                uint8_t dist = 0;
+            };
+
+            const int W = std::max(1, dung.width);
+            const int H = std::max(1, dung.height);
+            auto idxOf = [&](int x, int y) -> size_t {
+                return static_cast<size_t>(y * W + x);
+            };
+
+            std::deque<Node> q;
+            std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0u);
+            visited[idxOf(m.pos.x, m.pos.y)] = 1u;
+
+            auto tryEnqueue = [&](Vec2i from, int dir, uint8_t firstDir, uint8_t dist) {
+                const int dx = dirs[dir][0];
+                const int dy = dirs[dir][1];
+                const int nx = from.x + dx;
+                const int ny = from.y + dy;
+
+                if (!dung.inBounds(nx, ny)) return;
+                if (!dung.isWalkable(nx, ny)) return;
+                if (dx != 0 && dy != 0 && !diagonalPassable(dung, from, dx, dy)) return;
+
+                const size_t ni = idxOf(nx, ny);
+                if (ni >= visited.size() || visited[ni]) return;
+                visited[ni] = 1u;
+
+                Node n;
+                n.pos = {nx, ny};
+                n.firstDir = firstDir;
+                n.dist = dist;
+                q.push_back(n);
+            };
+
+            // Seed the frontier with the 8 neighbors so the firstDir bookkeeping is trivial.
+            for (uint8_t di = 0; di < 8; ++di) {
+                tryEnqueue(m.pos, di, di, 1);
+            }
+
+            // Best candidate found so far.
+            uint8_t bestFoundV = scentHere;
+            uint8_t bestFoundDist = 255;
+            uint8_t bestFoundDir = 255;
+
+            while (!q.empty()) {
+                const Node cur = q.front();
+                q.pop_front();
+
+                const uint8_t sv = scentAt(cur.pos.x, cur.pos.y);
+
+                // Primary key: higher scent.
+                // Secondary: fewer steps (more direct tracking).
+                // Tertiary: deterministic direction order.
+                if (sv > bestFoundV ||
+                    (sv == bestFoundV && sv > scentHere && cur.dist < bestFoundDist) ||
+                    (sv == bestFoundV && sv > scentHere && cur.dist == bestFoundDist && cur.firstDir < bestFoundDir)) {
+                    bestFoundV = sv;
+                    bestFoundDist = cur.dist;
+                    bestFoundDir = cur.firstDir;
+                }
+
+                if (cur.dist >= static_cast<uint8_t>(smellR)) continue;
+
+                for (uint8_t di = 0; di < 8; ++di) {
+                    tryEnqueue(cur.pos, di, cur.firstDir, static_cast<uint8_t>(cur.dist + 1));
+                }
+            }
+
+            if (bestFoundV > scentHere && bestFoundDir != 255) {
+                const int dx = dirs[bestFoundDir][0];
+                const int dy = dirs[bestFoundDir][1];
+                const int nx = m.pos.x + dx;
+                const int ny = m.pos.y + dy;
+                if (dung.inBounds(nx, ny) && dung.isWalkable(nx, ny)) {
+                    if (dx == 0 || dy == 0 || diagonalPassable(dung, m.pos, dx, dy)) {
+                        return {nx, ny};
+                    }
+                }
+            }
+
             return m.pos;
         };
 

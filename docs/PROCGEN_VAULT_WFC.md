@@ -4,6 +4,13 @@ The dungeon generator includes a small library of **hand-authored vault prefabs*
 
 This project also ships a lightweight **Wave Function Collapse (WFC)** adjacency solver (`src/wfc.hpp`) that is already used elsewhere for furnishing.
 
+### Solver note (Round 123)
+
+The bundled `wfc::solve(...)` implementation now uses **bounded DFS backtracking** (instead of only greedy-collapse + full restart)
+and also runs with a **locally-scoped RNG stream per restart attempt**. This keeps vault furnishing **more reliable** while reducing
+how much WFC can perturb unrelated procgen steps later in the pipeline.
+
+
 This document describes an additional micro-vault generator added in **Round 114**:
 
 - **WFC Ruin Pocket vaults**: small, single-entrance wall pockets whose interior is synthesized by WFC, then validated for solvability.

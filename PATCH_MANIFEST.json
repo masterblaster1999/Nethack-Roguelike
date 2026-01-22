@@ -1,13 +1,13 @@
 {
-  "patch_id": "round122_patch",
-  "previous_patch_id": "round121_patch",
-  "round": 122,
+  "patch_id": "round124_patch",
+  "previous_patch_id": "round123_patch",
+  "round": 124,
   "date": "2026-01-22",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Fixed MSVC compilation errors in heightfield terrain decoration by correcting the ridge pillar spacing check (removed an accidental reference to an out-of-scope variable).",
-    "Added a deterministic SpatialHashGrid2D helper for fast minimum-distance placement checks and applied it to ridge pillar and scree cluster center selection.",
-    "Removed now-unused separation-squared locals that became redundant after the spatial hash refactor."
+    "Introduced a shared, unit-testable scent-field helper (src/scent_field.hpp) that updates the per-turn scent trail deterministically (decay + deposit + single-pass spread).",
+    "Extended scent propagation to be wind-biased using the game's existing deterministic per-level wind, yielding longer downwind trails and sharper upwind falloff.",
+    "Upgraded smell-capable monster tracking to escape local scent plateaus with a bounded BFS, improving tracking robustness in tight corridors."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -48,20 +48,24 @@
     "src/proc_rd.hpp",
     "src/game_world.cpp",
     "src/rng.hpp",
-    "src/spatial_hash.hpp"
+    "src/spatial_hash.hpp",
+    "src/wfc.hpp",
+    "src/scent_field.hpp",
+    "tests/test_main.cpp"
   ],
   "files_changed_this_round": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
-    "src/dungeon.cpp",
-    "src/spatial_hash.hpp"
+    "src/ai.cpp",
+    "src/game_world.cpp",
+    "tests/test_main.cpp"
   ],
   "files_added": [
-    "src/spatial_hash.hpp"
+    "src/scent_field.hpp"
   ],
   "notes": [
-    "SpatialHashGrid2D is a fixed-bucket grid (no unordered_map) designed for deterministic procgen passes and fast O(k) neighbor checks.",
-    "The ridge pillar + scree cluster placement rules remain unchanged (still uses strict distSq < r*r), but the new implementation is harder to break and scales better on larger maps."
+    "The scent simulation follows a classic roguelike approach (deposit + decay + relaxation/spread), but adds a small wind term to emulate advection: downwind propagation loses less intensity, upwind propagation loses more.",
+    "AI smell tracking now performs a small bounded BFS when the local scent gradient is flat, preventing animals from stalling on plateaus/local maxima created by conservative diffusion."
   ],
   "generated_at": "2026-01-22T00:00:00Z"
 }

@@ -25,6 +25,12 @@ namespace wfc {
 struct SolveStats {
     int restarts = 0;
     int contradictions = 0;
+
+    // Backtracking telemetry (best-effort; not serialized).
+    int decisions = 0;     // successful branch decisions (cell collapses)
+    int backtracks = 0;    // number of times a decision was undone
+    int maxDepth = 0;      // maximum recursion depth reached
+    int nodesVisited = 0;  // DFS nodes visited (bounded by an internal budget)
 };
 
 inline int popcount32(uint32_t v) {
@@ -117,6 +123,7 @@ inline uint32_t unionAllowed(uint32_t domain, const std::vector<uint32_t>& allow
 // or size exactly w*h.
 //
 // Returns true if solved; outTiles receives per-cell tile ids (0..nTiles-1).
+// outTiles receives per-cell tile ids (0..nTiles-1).
 inline bool solve(int w, int h,
                   int nTiles,
                   const std::vector<uint32_t> allow[4],
@@ -164,8 +171,50 @@ inline bool solve(int w, int h,
     const int restartCap = std::max(0, maxRestarts);
     int contradictions = 0;
 
+    // Propagation lambda (returns false on contradiction).
+    auto propagate = [&]() -> bool {
+        size_t head = 0;
+        while (head < q.size()) {
+            const int cur = q[head++];
+            if (cur < 0 || static_cast<size_t>(cur) >= N) continue;
+
+            const int cx = cur % w;
+            const int cy = cur / w;
+            const uint32_t curDom = dom[static_cast<size_t>(cur)];
+            if (curDom == 0u) return false;
+
+            for (int dir = 0; dir < 4; ++dir) {
+                const int nx = cx + dx[dir];
+                const int ny = cy + dy[dir];
+                if (!inBounds(nx, ny)) continue;
+
+                const size_t ni = idx(nx, ny);
+                const uint32_t allowed = unionAllowed(curDom, allow[dir]);
+                const uint32_t oldDom = dom[ni];
+                const uint32_t newDom = oldDom & allowed;
+                if (newDom == 0u) return false;
+                if (newDom != oldDom) {
+                    dom[ni] = newDom;
+                    push(static_cast<int>(ni));
+                }
+            }
+        }
+        return true;
+    };
+
+    // ------------------------------------------------------------
+    // Solve attempts
+    //
+    // We intentionally use a locally-scoped RNG per attempt so this solver
+    // advances the caller-provided RNG in a predictable way (one draw per
+    // restart attempt). This reduces the chance that changing constraint
+    // difficulty or internal backtracking behavior perturbs unrelated procgen
+    // steps that happen after WFC.
+    // ------------------------------------------------------------
     for (int attempt = 0; attempt <= restartCap; ++attempt) {
-        bool failed = false;
+        // Deterministic per-attempt RNG stream.
+        const uint32_t attemptSeed = hashCombine(rng.nextU32(), tag32("WFC_SOLVE"));
+        RNG local(attemptSeed);
 
         // Reset domains.
         if (initialDomains.empty()) {
@@ -176,6 +225,7 @@ inline bool solve(int w, int h,
 
         // Seed propagation from all pre-restricted cells.
         q.clear();
+        bool failed = false;
         for (size_t i = 0; i < N; ++i) {
             if (dom[i] == 0u) {
                 contradictions++;
@@ -188,112 +238,123 @@ inline bool solve(int w, int h,
         }
         if (failed) continue;
 
-        // Propagation lambda (returns false on contradiction).
-        auto propagate = [&]() -> bool {
-            size_t head = 0;
-            while (head < q.size()) {
-                const int cur = q[head++];
-                if (cur < 0 || static_cast<size_t>(cur) >= N) continue;
-
-                const int cx = cur % w;
-                const int cy = cur / w;
-                const uint32_t curDom = dom[static_cast<size_t>(cur)];
-                if (curDom == 0u) return false;
-
-                for (int dir = 0; dir < 4; ++dir) {
-                    const int nx = cx + dx[dir];
-                    const int ny = cy + dy[dir];
-                    if (!inBounds(nx, ny)) continue;
-
-                    const size_t ni = idx(nx, ny);
-                    const uint32_t allowed = unionAllowed(curDom, allow[dir]);
-                    const uint32_t oldDom = dom[ni];
-                    const uint32_t newDom = oldDom & allowed;
-                    if (newDom == 0u) return false;
-                    if (newDom != oldDom) {
-                        dom[ni] = newDom;
-                        push(static_cast<int>(ni));
-                    }
-                }
-            }
-            return true;
-        };
-
         if (!propagate()) {
             contradictions++;
             continue;
         }
 
-        // Collapse loop.
-        for (int safety = 0; safety < w * h * 8; ++safety) {
-            int bestEntropy = std::numeric_limits<int>::max();
-            std::vector<int> best;
-            best.reserve(32);
+        // ---------------------------
+        // DFS backtracking search
+        // ---------------------------
+        int decisions = 0;
+        int backtracks = 0;
+        int maxDepth = 0;
+        int nodesVisited = 0;
 
+        // Node budget prevents pathological exponential blowups on bad rulesets.
+        const int64_t nodeBudget = static_cast<int64_t>(w) * static_cast<int64_t>(h) * 8192;
+        const int maxNodes = static_cast<int>(std::clamp<int64_t>(nodeBudget, 2048, 2'000'000));
+
+        auto dfs = [&](auto&& self, int depth) -> bool {
+            ++nodesVisited;
+            if (nodesVisited > maxNodes) return false;
+            if (depth > maxDepth) maxDepth = depth;
+
+            // Find an uncollapsed cell with minimum entropy (domain size).
+            int bestEntropy = std::numeric_limits<int>::max();
+            int pickCell = -1;
+            int pickCount = 0;
             for (size_t i = 0; i < N; ++i) {
                 const uint32_t m = dom[i];
                 const int e = popcount32(m);
                 if (e <= 1) continue;
                 if (e < bestEntropy) {
                     bestEntropy = e;
-                    best.clear();
-                    best.push_back(static_cast<int>(i));
+                    pickCell = static_cast<int>(i);
+                    pickCount = 1;
                 } else if (e == bestEntropy) {
-                    best.push_back(static_cast<int>(i));
+                    // Reservoir tie-break for variety.
+                    // This uses the per-attempt RNG stream, so it does not
+                    // perturb the caller's RNG beyond the fixed seeding above.
+                    ++pickCount;
+                    if (local.range(0, pickCount - 1) == 0) {
+                        pickCell = static_cast<int>(i);
+                    }
                 }
             }
 
             // Done (all collapsed).
-            if (best.empty()) {
-                outTiles.assign(N, 0);
-                for (size_t i = 0; i < N; ++i) {
-                    const uint32_t m = dom[i];
-                    const int t = ctz32(m);
-                    outTiles[i] = static_cast<uint8_t>(std::max(0, t));
+            if (pickCell < 0) return true;
+
+            const uint32_t cellMask = dom[static_cast<size_t>(pickCell)];
+            if (cellMask == 0u) return false;
+
+            // Build a weighted-random option ordering for this decision.
+            std::vector<int> options;
+            options.reserve(std::max(2, popcount32(cellMask)));
+
+            uint32_t remaining = cellMask;
+            while (remaining) {
+                int choice = pickWeightedFromMask(remaining, weights, local);
+                if (choice < 0 || choice >= nTiles) choice = ctz32(remaining);
+                options.push_back(choice);
+                remaining &= ~(1u << static_cast<uint32_t>(choice));
+            }
+
+            const std::vector<uint32_t> baseDom = dom;
+
+            for (int choice : options) {
+                dom = baseDom;
+
+                dom[static_cast<size_t>(pickCell)] = (1u << static_cast<uint32_t>(choice));
+                q.clear();
+                push(pickCell);
+
+                if (!propagate()) {
+                    contradictions++;
+                    continue;
                 }
 
-                if (outStats) {
-                    outStats->restarts = attempt;
-                    outStats->contradictions = contradictions;
-                }
-                return true;
+                ++decisions;
+                if (self(self, depth + 1)) return true;
+
+                ++backtracks;
             }
 
-            // Pick a minimal-entropy cell at random.
-            const int pickCell = best[static_cast<size_t>(rng.range(0, static_cast<int>(best.size()) - 1))];
-            if (pickCell < 0 || static_cast<size_t>(pickCell) >= N) {
-                contradictions++;
-                failed = true;
-                break;
+            dom = baseDom;
+            return false;
+        };
+
+        if (dfs(dfs, 0)) {
+            outTiles.assign(N, 0);
+            for (size_t i = 0; i < N; ++i) {
+                const uint32_t m = dom[i];
+                const int t = ctz32(m);
+                outTiles[i] = static_cast<uint8_t>(std::max(0, t));
             }
 
-            const uint32_t cellDom = dom[static_cast<size_t>(pickCell)];
-            const int chosen = pickWeightedFromMask(cellDom, weights, rng);
-            if (chosen < 0 || chosen >= nTiles) {
-                contradictions++;
-                failed = true;
-                break;
+            if (outStats) {
+                outStats->restarts = attempt;
+                outStats->contradictions = contradictions;
+                outStats->decisions = decisions;
+                outStats->backtracks = backtracks;
+                outStats->maxDepth = maxDepth;
+                outStats->nodesVisited = nodesVisited;
             }
-
-            dom[static_cast<size_t>(pickCell)] = (1u << static_cast<uint32_t>(chosen));
-            q.clear();
-            push(pickCell);
-            if (!propagate()) {
-                contradictions++;
-                failed = true;
-                break;
-            }
+            return true;
         }
 
-        if (failed) continue;
-
-        // If we hit safety cap, treat as a restart.
+        // Treat a full DFS failure as a contradiction-triggered restart.
         contradictions++;
     }
 
     if (outStats) {
         outStats->restarts = restartCap;
         outStats->contradictions = contradictions;
+        outStats->decisions = 0;
+        outStats->backtracks = 0;
+        outStats->maxDepth = 0;
+        outStats->nodesVisited = 0;
     }
     return false;
 }

@@ -1,5 +1,7 @@
 #include "game_internal.hpp"
 
+#include "scent_field.hpp"
+
 void Game::dropGroundItem(Vec2i pos, ItemKind k, int count, int enchant) {
     count = std::max(1, count);
 
@@ -581,46 +583,10 @@ uint8_t Game::fireAt(int x, int y) const {
 void Game::updateScentMap() {
     const int W = dung.width;
     const int H = dung.height;
-    const size_t n = static_cast<size_t>(W * H);
-    if (n == 0) return;
-
-    if (scentField_.size() != n) {
-        scentField_.assign(n, 0u);
-    }
-
-    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * W + x); };
+    if (W <= 0 || H <= 0) return;
 
     // Substrate materials influence scent: mossy/earthy areas absorb odor faster.
     dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
-
-    // --- Tunables ---
-    // How fast scent fades everywhere each player turn (base, before material adjustments).
-    constexpr int BASE_DECAY = 2;
-    // How much scent is lost when it spreads across one tile of distance (base, before material adjustments).
-    constexpr int BASE_SPREAD_DROP = 14;
-    // How strong a fresh scent deposit is at the player position.
-    constexpr uint8_t DEPOSIT = 255u;
-
-    // Global decay (per-tile): mossy/earthy surfaces absorb scent faster.
-    for (size_t i = 0; i < n; ++i) {
-        const int x = static_cast<int>(i % static_cast<size_t>(W));
-        const int y = static_cast<int>(i / static_cast<size_t>(W));
-
-        // Keep non-walkable tiles scent-free so it can't "leak" through walls.
-        if (!dung.isWalkable(x, y)) {
-            scentField_[i] = 0u;
-            continue;
-        }
-
-        const uint8_t v = scentField_[i];
-        if (v == 0u) continue;
-
-        const TerrainMaterial m = dung.materialAtCached(x, y);
-        const TerrainMaterialFx matFx = terrainMaterialFx(m);
-
-        const int decay = clampi(BASE_DECAY + matFx.scentDecayDelta, 0, 20);
-        scentField_[i] = (v > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(v - static_cast<uint8_t>(decay)) : 0u;
-    }
 
     // Deposit at the player's current tile.
     //
@@ -628,79 +594,59 @@ void Game::updateScentMap() {
     // smell-capable monsters have a harder time tracking you around corners.
     // Heavy armor / heavy burden reduce the benefit.
     const Entity& p = player();
-    if (dung.inBounds(p.pos.x, p.pos.y)) {
-        uint8_t deposit = DEPOSIT;
+    uint8_t deposit = 255u;
 
-        if (isSneaking()) {
-            // Base sneaking deposit: ~200 down to ~80 with high agility.
-            int d = 200 - std::max(0, playerAgility()) * 6;
+    if (isSneaking()) {
+        // Base sneaking deposit: ~200 down to ~80 with high agility.
+        int d = 200 - std::max(0, playerAgility()) * 6;
 
-            // Heavy armor makes it harder to suppress your trail.
-            if (const Item* a = equippedArmor()) {
-                if (a->kind == ItemKind::ChainArmor) d += 20;
-                if (a->kind == ItemKind::PlateArmor) d += 40;
-            }
-
-            // Encumbrance makes sneaking clumsier and less subtle.
-            if (encumbranceEnabled_) {
-                switch (burdenState()) {
-                    case BurdenState::Unburdened: break;
-                    case BurdenState::Burdened:   d += 10; break;
-                    case BurdenState::Stressed:   d += 20; break;
-                    case BurdenState::Strained:   d += 30; break;
-                    case BurdenState::Overloaded: d += 40; break;
-                }
-            }
-
-            if (d < 80) d = 80;
-            if (d > 255) d = 255;
-            deposit = static_cast<uint8_t>(d);
+        // Heavy armor makes it harder to suppress your trail.
+        if (const Item* a = equippedArmor()) {
+            if (a->kind == ItemKind::ChainArmor) d += 20;
+            if (a->kind == ItemKind::PlateArmor) d += 40;
         }
 
-        const size_t pi = idx(p.pos.x, p.pos.y);
-        scentField_[pi] = std::max(scentField_[pi], deposit);
+        // Encumbrance makes sneaking clumsier and less subtle.
+        if (encumbranceEnabled_) {
+            switch (burdenState()) {
+                case BurdenState::Unburdened: break;
+                case BurdenState::Burdened:   d += 10; break;
+                case BurdenState::Stressed:   d += 20; break;
+                case BurdenState::Strained:   d += 30; break;
+                case BurdenState::Overloaded: d += 40; break;
+            }
+        }
+
+        if (d < 80) d = 80;
+        if (d > 255) d = 255;
+        deposit = static_cast<uint8_t>(d);
     }
 
-    // Spread along walkable tiles so the "trail" forms a gradient that can be followed around corners.
-    // This is intentionally cheap: one relaxation pass per player turn.
-    std::vector<uint8_t> next = scentField_;
+    // Use the shared helper so we can unit-test the logic and keep it consistent
+    // across gameplay and headless builds.
+    ScentFieldParams params;
+    params.baseDecay = 2;
+    params.baseSpreadDrop = 14;
+    params.minSpreadDrop = 6;
+    params.maxSpreadDrop = 40;
+    params.maxDecay = 20;
+    params.windDir = windDir();
+    params.windStrength = windStrength();
 
-    auto passableForScent = [&](int x, int y) -> bool {
-        if (!dung.inBounds(x, y)) return false;
-        // Scent travels through walkable terrain (floors, open doors, stairs).
-        // Closed/locked/secret doors and walls block it.
-        return dung.isWalkable(x, y);
+    auto isWalkable = [&](int x, int y) -> bool {
+        return dung.inBounds(x, y) && dung.isWalkable(x, y);
     };
 
-    for (int y = 0; y < H; ++y) {
-        for (int x = 0; x < W; ++x) {
-            const size_t i = idx(x, y);
+    auto fxAt = [&](int x, int y) -> ScentCellFx {
+        const TerrainMaterial m = dung.materialAtCached(x, y);
+        const TerrainMaterialFx matFx = terrainMaterialFx(m);
+        ScentCellFx out;
+        out.decayDelta = matFx.scentDecayDelta;
+        out.spreadDropDelta = matFx.scentSpreadDropDelta;
+        return out;
+    };
 
-            if (!passableForScent(x, y)) {
-                // Keep non-walkable tiles scent-free so it can't "leak" through walls.
-                next[i] = 0u;
-                continue;
-            }
-
-            uint8_t bestN = 0u;
-            const int dirs4[4][2] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
-            for (const auto& d : dirs4) {
-                const int nx = x + d[0];
-                const int ny = y + d[1];
-                if (!passableForScent(nx, ny)) continue;
-                const uint8_t nv = scentField_[idx(nx, ny)];
-                if (nv > bestN) bestN = nv;
-            }
-
-            const TerrainMaterial m = dung.materialAtCached(x, y);
-            const TerrainMaterialFx matFx = terrainMaterialFx(m);
-            const int drop = clampi(BASE_SPREAD_DROP + matFx.scentSpreadDropDelta, 6, 40);
-            const uint8_t spread = (bestN > static_cast<uint8_t>(drop)) ? static_cast<uint8_t>(bestN - static_cast<uint8_t>(drop)) : 0u;
-            if (spread > next[i]) next[i] = spread;
-        }
-    }
-
-    scentField_.swap(next);
+    updateScentField(W, H, scentField_, p.pos, deposit, isWalkable, fxAt, params);
 }
 
 uint8_t Game::scentAt(int x, int y) const {

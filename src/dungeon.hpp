@@ -258,6 +258,11 @@ mutable int materialCacheCell = 0;
 mutable std::vector<uint8_t> materialCache;
 
 
+// Procedural bioluminescent terrain field (cosmetic only; not serialized).
+// Stored as per-tile intensity 0..255 and computed alongside the material cache.
+mutable std::vector<uint8_t> biolumCache;
+
+
     // Generator hints: optional guaranteed bonus loot spawns (e.g. boulder bridge caches).
     // Used only during floor generation; not serialized.
     std::vector<Vec2i> bonusLootSpots;
@@ -376,6 +381,21 @@ mutable std::vector<uint8_t> materialCache;
     int openSpaceClearanceMaxAfter = 0;
     int openSpacePillarCount = 0;
     int openSpaceBoulderCount = 0;
+
+    // Not serialized: macro terrain heightfield pass (warped fBm).
+    // Adds ridge-line pillar spines and scree boulder clusters biased by a deterministic height/slope field.
+    int heightfieldRidgePillarCount = 0;
+    int heightfieldScreeBoulderCount = 0;
+
+    // Not serialized: fluvial erosion terrain (heightfield drainage network).
+    // Carves a few narrow chasm "gullies" that follow a deterministic flow-accumulation field
+    // over the macro heightfield, then preserves stairs connectivity by placing small
+    // causeways/bridges as needed (or rolling back).
+    int fluvialGullyCount = 0;      // Number of gullies (channels) successfully carved.
+    int fluvialChasmCount = 0;      // Total tiles converted to Chasm by the pass.
+    int fluvialCausewayCount = 0;   // Bridges/causeways placed to preserve connectivity.
+
+
 
     // Not serialized: perimeter service tunnels (inner-border maintenance corridors).
     //
@@ -527,6 +547,8 @@ mutable std::vector<uint8_t> materialCache;
 void ensureMaterials(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const;
 TerrainMaterial materialAt(int x, int y, uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const;
 TerrainMaterial materialAtCached(int x, int y) const;
+uint8_t biolumAt(int x, int y, uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const;
+uint8_t biolumAtCached(int x, int y) const;
 int materialCellSize() const { return materialCacheCell; }
 
 

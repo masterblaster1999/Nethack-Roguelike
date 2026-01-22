@@ -1409,8 +1409,20 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     // nudge terrain towards a coherent palette for this run/floor.
     bool procPaletteEnabled() const { return procPaletteEnabled_; }
     int procPaletteStrength() const { return procPaletteStrength_; }
+    // Extra user controls for the procedural palette:
+    // - Hue shift in degrees (applied as HSV hue rotation)
+    // - Saturation and brightness adjustments as percentages (applied in HSV)
+    // - Spatial chroma field strength: smoothly varies hue/sat/value across the map
+    int procPaletteHueDeg() const { return procPaletteHueDeg_; }
+    int procPaletteSaturationPct() const { return procPaletteSaturationPct_; }
+    int procPaletteBrightnessPct() const { return procPaletteBrightnessPct_; }
+    int procPaletteSpatialStrength() const { return procPaletteSpatialStrength_; }
     void setProcPaletteEnabled(bool enabled) { procPaletteEnabled_ = enabled; }
     void setProcPaletteStrength(int pct) { procPaletteStrength_ = std::clamp(pct, 0, 100); }
+    void setProcPaletteHueDeg(int deg) { procPaletteHueDeg_ = std::clamp(deg, -45, 45); }
+    void setProcPaletteSaturationPct(int pct) { procPaletteSaturationPct_ = std::clamp(pct, -80, 80); }
+    void setProcPaletteBrightnessPct(int pct) { procPaletteBrightnessPct_ = std::clamp(pct, -60, 60); }
+    void setProcPaletteSpatialStrength(int pct) { procPaletteSpatialStrength_ = std::clamp(pct, 0, 100); }
 
 
 
@@ -2503,6 +2515,10 @@ private:
     bool isoCutawayEnabled_ = true;
     bool procPaletteEnabled_ = true;
     int procPaletteStrength_ = 70; // 0..100
+    int procPaletteHueDeg_ = 0; // -45..45 (HSV hue shift)
+    int procPaletteSaturationPct_ = 0; // -80..80 (HSV saturation multiplier in percent)
+    int procPaletteBrightnessPct_ = 0; // -60..60 (HSV value multiplier in percent)
+    int procPaletteSpatialStrength_ = 35; // 0..100 (strength of the spatial chroma field)
 
     // Autosave
     int autosaveInterval = 0; // 0 = off

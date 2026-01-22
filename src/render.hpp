@@ -365,6 +365,20 @@ private:
     // Mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "neighbor is a wall-mass occluder")
     std::array<std::array<AnimTex, AUTO_VARS>, AUTO_MASKS> topDownWallShadeVar{};
 
+
+    // Room-style floor border overlays (transparent, layered on top of base floors).
+    // These provide a subtle "trim" around special rooms and smooth visual transitions between
+    // different room floor styles, using the same 4-neighbor 4-bit mask encoding as other overlays.
+    // mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "border on that edge")
+    static constexpr int BORDER_VARS = 2;
+    // Runtime-scaled subset of border variants (keeps VRAM in check for huge tile sizes).
+    int borderVarsUsed = BORDER_VARS;
+    std::array<std::array<std::array<AnimTex, BORDER_VARS>, AUTO_MASKS>, ROOM_STYLES> floorBorderVar{};
+
+    // Isometric diamond variants for the same room-style border overlays.
+    // Generated lazily with other isometric terrain textures.
+    std::array<std::array<std::array<AnimTex, BORDER_VARS>, AUTO_MASKS>, ROOM_STYLES> floorBorderVarIso{};
+
     // Isometric edge shading overlays (diamond masks) for contact shadows / chasm rims.
     // Generated lazily together with the other isometric terrain textures.
     std::array<AnimTex, AUTO_MASKS> isoEdgeShadeVar{};

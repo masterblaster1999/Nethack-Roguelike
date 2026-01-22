@@ -1,5 +1,6 @@
 #include "game_internal.hpp"
 #include "content.hpp"
+#include "proc_rd.hpp"
 
 namespace {
 
@@ -2732,71 +2733,13 @@ void Game::spawnChemicalHazards() {
         Volatile,     // poison + embers (fire)
     };
 
-    struct RDParams {
-        float da;
-        float db;
-        float feed;
-        float kill;
-    };
-
     // A few Gray-Scott reaction-diffusion presets that produce distinct "spill" patterns.
     // (Values loosely based on classic parameter sets.)
-    const RDParams presets[] = {
+    const proc::GrayScottParams presets[] = {
         {1.0f, 0.50f, 0.0367f, 0.0649f},
         {1.0f, 0.50f, 0.0300f, 0.0620f},
         {1.0f, 0.50f, 0.0220f, 0.0510f},
         {1.0f, 0.50f, 0.0460f, 0.0630f},
-    };
-
-    auto runReactionDiffusion = [&](int w, int h, const RDParams& p, int iters, std::vector<float>& A, std::vector<float>& B) {
-        const int W = std::max(1, w);
-        const int H = std::max(1, h);
-        const size_t N = static_cast<size_t>(W * H);
-        if (A.size() != N) A.assign(N, 1.0f);
-        if (B.size() != N) B.assign(N, 0.0f);
-
-        std::vector<float> nA(N, 1.0f);
-        std::vector<float> nB(N, 0.0f);
-
-        auto at = [&](const std::vector<float>& v, int x, int y) -> float {
-            x = clampi(x, 0, W - 1);
-            y = clampi(y, 0, H - 1);
-            return v[static_cast<size_t>(y * W + x)];
-        };
-
-        constexpr float dt = 1.0f;
-
-        for (int it = 0; it < iters; ++it) {
-            for (int y = 0; y < H; ++y) {
-                for (int x = 0; x < W; ++x) {
-                    const size_t i = static_cast<size_t>(y * W + x);
-                    const float a = A[i];
-                    const float b = B[i];
-
-                    // 9-sample Laplacian (standard RD stencil).
-                    const float lapA =
-                        -a
-                        + 0.20f * (at(A, x - 1, y) + at(A, x + 1, y) + at(A, x, y - 1) + at(A, x, y + 1))
-                        + 0.05f * (at(A, x - 1, y - 1) + at(A, x + 1, y - 1) + at(A, x - 1, y + 1) + at(A, x + 1, y + 1));
-
-                    const float lapB =
-                        -b
-                        + 0.20f * (at(B, x - 1, y) + at(B, x + 1, y) + at(B, x, y - 1) + at(B, x, y + 1))
-                        + 0.05f * (at(B, x - 1, y - 1) + at(B, x + 1, y - 1) + at(B, x - 1, y + 1) + at(B, x + 1, y + 1));
-
-                    const float reaction = a * b * b;
-
-                    float na = a + (p.da * lapA - reaction + p.feed * (1.0f - a)) * dt;
-                    float nb = b + (p.db * lapB + reaction - (p.kill + p.feed) * b) * dt;
-
-                    nA[i] = clampf(na, 0.0f, 1.0f);
-                    nB[i] = clampf(nb, 0.0f, 1.0f);
-                }
-            }
-
-            A.swap(nA);
-            B.swap(nB);
-        }
     };
 
     auto chooseTheme = [&]() -> ChemTheme {
@@ -2845,7 +2788,7 @@ void Game::spawnChemicalHazards() {
             B.assign(static_cast<size_t>(iw * ih), 0.0f);
 
             const int presetIdx = crng.range(0, static_cast<int>(sizeof(presets) / sizeof(presets[0])) - 1);
-            const RDParams pset = presets[static_cast<size_t>(presetIdx)];
+            const proc::GrayScottParams pset = presets[static_cast<size_t>(presetIdx)];
 
             const int seeds = clampi(2 + (iw * ih > 60 ? 1 : 0), 1, 5);
             const int padX = std::max(0, iw / 4);
@@ -2878,7 +2821,7 @@ void Game::spawnChemicalHazards() {
             }
 
             const int iters = 18 + crng.range(0, 14);
-            runReactionDiffusion(iw, ih, pset, iters, A, B);
+            proc::runGrayScott(iw, ih, pset, iters, A, B);
         }
 
         // Compute min/max for dynamic range normalization.

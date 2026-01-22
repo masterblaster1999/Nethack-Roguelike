@@ -3853,6 +3853,259 @@ SpritePixels genWallDecal16(uint32_t seed, uint8_t style, int frame) {
     return s;
 }
 
+
+// Themed floor border overlay: subtle accent lines drawn *inside* a room's floor tiles
+// to visually frame special rooms and mark style transitions.
+//
+// mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "draw border on that edge")
+SpritePixels genFloorBorderOverlay16(uint32_t seed, uint8_t style, uint8_t mask, int variant, int frame) {
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+    if (style == 0u || mask == 0u) return s;
+
+    const TilePalette p = floorPalette(style, seed ^ 0xB0RD3Ru);
+
+    int thick = 2;
+    int inset = 1; // draw inside the tile so borders feel like a room "trim", not a seam crack
+
+    Color lineCol = withAlpha(p.accent, 175);
+    Color glowCol = withAlpha(p.accent2, 90);
+    Color shadeCol = withAlpha(p.dark, 110);
+    Color studCol = withAlpha(p.accent2, 180);
+
+    switch (style) {
+        default:
+        case 1: // Treasure: brighter, gilded
+            lineCol = withAlpha(p.accent, 200);
+            glowCol = withAlpha(p.accent2, 120);
+            studCol = withAlpha(p.accent2, 220);
+            break;
+        case 2: // Lair: slimy, softer edge
+            lineCol = withAlpha(p.accent, 150);
+            glowCol = withAlpha(p.accent2, 70);
+            shadeCol = withAlpha(p.dark, 90);
+            thick = 2;
+            break;
+        case 3: // Shrine: runic glow
+            lineCol = withAlpha(p.accent, 165 + (frame & 1) * 18);
+            glowCol = withAlpha(p.accent2, 95 + (frame & 1) * 18);
+            studCol = withAlpha(p.accent2, 210);
+            break;
+        case 4: // Secret: subtle, dusty
+            lineCol = withAlpha(p.accent, 115);
+            glowCol = withAlpha(p.accent2, 55);
+            shadeCol = withAlpha(p.dark, 120);
+            thick = 1;
+            break;
+        case 5: // Vault: crisp metal inlay
+            lineCol = withAlpha(p.accent, 180);
+            glowCol = withAlpha(p.accent2, 90);
+            studCol = withAlpha(p.accent2, 200);
+            break;
+        case 6: // Shop: warm trim
+            lineCol = withAlpha(p.accent, 170);
+            glowCol = withAlpha(p.accent2, 80);
+            studCol = withAlpha(p.accent2, 190);
+            break;
+    }
+
+    auto ditherKeep = [&](int x, int y, float strength) -> bool {
+        // strength in [0..1]
+        const float b = bayer4Threshold(x + static_cast<int>(seed), y + static_cast<int>(seed));
+        return b < strength;
+    };
+
+    auto drawH = [&](int y) {
+        for (int x = 0; x < 16; ++x) {
+            // Slightly broken line so it doesn't look like a perfectly printed UI stroke.
+            float keep = 0.92f;
+            if (style == 4) keep = 0.75f;
+            if (style == 2) keep = 0.86f;
+            if (!ditherKeep(x, y, keep)) continue;
+
+            setPx(s, x, y, lineCol);
+            if (thick >= 2 && y + 1 < 16) setPx(s, x, y + 1, shadeCol);
+            if (thick >= 3 && y + 2 < 16) setPx(s, x, y + 2, withAlpha(shadeCol, 70));
+        }
+    };
+
+    auto drawHBottom = [&](int y) {
+        for (int x = 0; x < 16; ++x) {
+            float keep = 0.92f;
+            if (style == 4) keep = 0.75f;
+            if (style == 2) keep = 0.86f;
+            if (!ditherKeep(x, y, keep)) continue;
+
+            setPx(s, x, y, lineCol);
+            if (thick >= 2 && y - 1 >= 0) setPx(s, x, y - 1, shadeCol);
+            if (thick >= 3 && y - 2 >= 0) setPx(s, x, y - 2, withAlpha(shadeCol, 70));
+        }
+    };
+
+    auto drawV = [&](int x) {
+        for (int y = 0; y < 16; ++y) {
+            float keep = 0.92f;
+            if (style == 4) keep = 0.75f;
+            if (style == 2) keep = 0.86f;
+            if (!ditherKeep(x, y, keep)) continue;
+
+            setPx(s, x, y, lineCol);
+            if (thick >= 2 && x + 1 < 16) setPx(s, x + 1, y, shadeCol);
+            if (thick >= 3 && x + 2 < 16) setPx(s, x + 2, y, withAlpha(shadeCol, 70));
+        }
+    };
+
+    auto drawVRight = [&](int x) {
+        for (int y = 0; y < 16; ++y) {
+            float keep = 0.92f;
+            if (style == 4) keep = 0.75f;
+            if (style == 2) keep = 0.86f;
+            if (!ditherKeep(x, y, keep)) continue;
+
+            setPx(s, x, y, lineCol);
+            if (thick >= 2 && x - 1 >= 0) setPx(s, x - 1, y, shadeCol);
+            if (thick >= 3 && x - 2 >= 0) setPx(s, x - 2, y, withAlpha(shadeCol, 70));
+        }
+    };
+
+    // Draw edges (inside the tile).
+    if (mask & 1u) drawH(inset);               // N
+    if (mask & 4u) drawHBottom(15 - inset);    // S
+    if (mask & 8u) drawV(inset);               // W
+    if (mask & 2u) drawVRight(15 - inset);     // E
+
+    // Corner accents help readability on small tile sizes.
+    auto cornerDot = [&](int cx, int cy) {
+        // Tiny 2x2 glow
+        for (int dy = 0; dy < 2; ++dy) {
+            for (int dx = 0; dx < 2; ++dx) {
+                const int x = clampiLocal(cx + dx, 0, 15);
+                const int y = clampiLocal(cy + dy, 0, 15);
+                blendOver(s, x, y, glowCol);
+            }
+        }
+    };
+
+    if ((mask & 1u) && (mask & 8u)) cornerDot(inset, inset);
+    if ((mask & 1u) && (mask & 2u)) cornerDot(15 - inset - 1, inset);
+    if ((mask & 4u) && (mask & 8u)) cornerDot(inset, 15 - inset - 1);
+    if ((mask & 4u) && (mask & 2u)) cornerDot(15 - inset - 1, 15 - inset - 1);
+
+    // Style-specific embellishments.
+    switch (style) {
+        case 1: { // Treasure: animated sparkles along the border
+            const int phase = (frame + variant) & 3;
+            auto sparkleH = [&](int y) {
+                for (int x = 2; x < 14; ++x) {
+                    if (((x + y) & 3) != phase) continue;
+                    if (noise01(seed ^ 0x51A1u, x, y) > 0.74f) setPx(s, x, y, studCol);
+                }
+            };
+            auto sparkleV = [&](int x) {
+                for (int y = 2; y < 14; ++y) {
+                    if (((x + y) & 3) != phase) continue;
+                    if (noise01(seed ^ 0x51A2u, x, y) > 0.74f) setPx(s, x, y, studCol);
+                }
+            };
+            if (mask & 1u) sparkleH(inset);
+            if (mask & 4u) sparkleH(15 - inset);
+            if (mask & 8u) sparkleV(inset);
+            if (mask & 2u) sparkleV(15 - inset);
+            break;
+        }
+        case 2: { // Lair: occasional slime drips inward
+            auto dripH = [&](int y, int dir) {
+                for (int x = 2; x < 14; ++x) {
+                    const float n = noise01(seed ^ 0x511AEu, x + variant * 7, y);
+                    if (n > 0.83f) {
+                        blendOver(s, x, y + dir, withAlpha(lineCol, 120));
+                        if (n > 0.90f) blendOver(s, x, y + 2 * dir, withAlpha(lineCol, 90));
+                    }
+                }
+            };
+            auto dripV = [&](int x, int dir) {
+                for (int y = 2; y < 14; ++y) {
+                    const float n = noise01(seed ^ 0x511AFu, x, y + variant * 7);
+                    if (n > 0.83f) {
+                        blendOver(s, x + dir, y, withAlpha(lineCol, 120));
+                        if (n > 0.90f) blendOver(s, x + 2 * dir, y, withAlpha(lineCol, 90));
+                    }
+                }
+            };
+            if (mask & 1u) dripH(inset, +1);
+            if (mask & 4u) dripH(15 - inset, -1);
+            if (mask & 8u) dripV(inset, +1);
+            if (mask & 2u) dripV(15 - inset, -1);
+            break;
+        }
+        case 3: { // Shrine: rune ticks (pulsing)
+            const uint8_t a = static_cast<uint8_t>(150 + ((frame + variant) & 1) * 40);
+            const Color rune = withAlpha(p.accent2, a);
+            auto ticksH = [&](int y, int dir) {
+                for (int x = 2; x < 14; x += 3) {
+                    if (noise01(seed ^ 0x5EEDu, x, y) > 0.55f) {
+                        setPx(s, x, y + dir, rune);
+                        if (noise01(seed ^ 0x5EEDu, x + 1, y) > 0.80f) setPx(s, x + 1, y + dir, rune);
+                    }
+                }
+            };
+            auto ticksV = [&](int x, int dir) {
+                for (int y = 2; y < 14; y += 3) {
+                    if (noise01(seed ^ 0x5EEE0u, x, y) > 0.55f) {
+                        setPx(s, x + dir, y, rune);
+                        if (noise01(seed ^ 0x5EEE0u, x, y + 1) > 0.80f) setPx(s, x + dir, y + 1, rune);
+                    }
+                }
+            };
+            if (mask & 1u) ticksH(inset, +1);
+            if (mask & 4u) ticksH(15 - inset, -1);
+            if (mask & 8u) ticksV(inset, +1);
+            if (mask & 2u) ticksV(15 - inset, -1);
+            break;
+        }
+        case 5: { // Vault: rivet studs
+            auto studsH = [&](int y) {
+                for (int x = 3; x < 13; x += 5) {
+                    if (noise01(seed ^ 0xA11Cu, x, y) > 0.45f) setPx(s, x, y, studCol);
+                }
+            };
+            auto studsV = [&](int x) {
+                for (int y = 3; y < 13; y += 5) {
+                    if (noise01(seed ^ 0xA11Du, x, y) > 0.45f) setPx(s, x, y, studCol);
+                }
+            };
+            if (mask & 1u) studsH(inset);
+            if (mask & 4u) studsH(15 - inset);
+            if (mask & 8u) studsV(inset);
+            if (mask & 2u) studsV(15 - inset);
+            break;
+        }
+        case 6: { // Shop: stitched trim pattern
+            auto stitchH = [&](int y) {
+                for (int x = 2; x < 14; ++x) {
+                    if (((x + variant + frame) & 1) == 0) continue;
+                    blendOver(s, x, y, glowCol);
+                }
+            };
+            auto stitchV = [&](int x) {
+                for (int y = 2; y < 14; ++y) {
+                    if (((y + variant + frame) & 1) == 0) continue;
+                    blendOver(s, x, y, glowCol);
+                }
+            };
+            if (mask & 1u) stitchH(inset);
+            if (mask & 4u) stitchH(15 - inset);
+            if (mask & 8u) stitchV(inset);
+            if (mask & 2u) stitchV(15 - inset);
+            break;
+        }
+        default:
+            break;
+    }
+
+    return s;
+}
+
+
 // Autotile overlay: simple edge highlight. Generated at 16x16.
 SpritePixels genWallEdgeOverlay16(uint32_t seed, uint8_t openMask, int variant, int frame) {
     (void)frame;
@@ -4604,6 +4857,20 @@ SpritePixels generateWallDecalTile(uint32_t seed, uint8_t style, int frame, int 
     SpritePixels base = genWallDecal16(seed, style, frame);
     return resampleSpriteToSizeInternal(base, pxSize);
 }
+
+SpritePixels generateFloorBorderOverlay(uint32_t seed, uint8_t style, uint8_t mask, int variant, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    SpritePixels base = genFloorBorderOverlay16(seed, style, mask, variant, frame);
+    return resampleSpriteToSizeInternal(base, pxSize);
+}
+
+SpritePixels generateIsometricFloorBorderOverlay(uint32_t seed, uint8_t style, uint8_t mask, int variant, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    SpritePixels square = genFloorBorderOverlay16(seed, style, mask, variant, frame);
+    SpritePixels base = genIsoOverlayFromSquare16(square, seed, frame);
+    return resampleSpriteToRectInternal(base, pxSize, std::max(1, pxSize / 2));
+}
+
 
 SpritePixels generateWallEdgeOverlay(uint32_t seed, uint8_t openMask, int variant, int frame, int pxSize) {
     pxSize = clampSpriteSize(pxSize);

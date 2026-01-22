@@ -1,24 +1,30 @@
 {
-  "patch_id": "round113_patch",
-  "previous_patch_id": "round112_patch",
-  "round": 113,
-  "date": "2026-01-21",
+  "patch_id": "round120_patch",
+  "previous_patch_id": "round119_patch",
+  "round": 120,
+  "date": "2026-01-22",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Added a NetHack-style COUNT prefix for repeatable actions: type digits then move/wait/search/evade/stairs to auto-repeat at the configured auto-step delay.",
-    "HUD now shows COUNT (pending) and REPEAT (active) indicators, plus help overlay docs.",
-    "ESC/CANCEL now correctly closes chest/spells/codex/discoveries/scores overlays (not just inventory/help/etc)."
+    "Introduced a deterministic procedural biolum terrain field (lichen/crystal glow) computed via Gray-Scott reaction-diffusion and cached per floor.",
+    "Integrated biolum tiles into darkness-mode lighting as a small set of spaced, colored light sources (green lichen, cyan/purple crystals) to create subtle navigation landmarks.",
+    "Added ambient biolum mote particles and extended #mapstats with BIOLUM counts for quick tuning / debugging.",
+    "Refactored the Gray-Scott solver into reusable header src/proc_rd.hpp and reused it for chemical hazards to keep numerics consistent across systems."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
+    "docs/PROCGEN_COLOR_PALETTE.md",
+    "docs/PROCGEN_TERRAIN_FLUVIAL.md",
+    "docs/PROCGEN_TILE_BORDERS.md",
+    "docs/PROCGEN_VAULT_WFC.md",
     "src/ai.cpp",
+    "src/bounty_gen.hpp",
     "src/combat.cpp",
     "src/crafting_gen.hpp",
-    "src/farm_gen.hpp",
-    "src/fishing_gen.hpp",
     "src/dungeon.cpp",
     "src/dungeon.hpp",
+    "src/farm_gen.hpp",
+    "src/fishing_gen.hpp",
     "src/game.cpp",
     "src/game.hpp",
     "src/game_interact.cpp",
@@ -31,35 +37,39 @@
     "src/game_targeting.cpp",
     "src/items.cpp",
     "src/items.hpp",
+    "src/main.cpp",
     "src/pet_gen.hpp",
     "src/render.cpp",
+    "src/render.hpp",
+    "src/settings.cpp",
+    "src/settings.hpp",
     "src/spritegen.cpp",
-    "src/bounty_gen.hpp",
-    "src/main.cpp"
-  ],
-  "timestamp_utc": "2026-01-21T00:00:00Z",
-  "description": "Introduces a deterministic per-level wind drift model for physical projectiles (arrows, rocks, torches). Shots are biased by the dungeon\u2019s wind direction/strength; the ranged targeting HUD now shows WIND/DRIFT and suppresses misleading hit chances when drift pushes the projectile line away from the aimed tile.",
-  "timestamp": "2026-01-21T00:00:00Z",
-  "generated_at": "2026-01-21T12:34:19.633357Z",
-  "notes": [
-    "Add Game::windAdjustShot(): a small deterministic model that biases physical projectile targets (arrows/rocks/torches) based on per-level wind direction/strength and shot distance.",
-    "Apply wind drift in combat.cpp for ranged attacks so both player and monsters are affected consistently.",
-    "Update ranged targeting preview (src/game_targeting.cpp) to show WIND/DRIFT and display HIT 0% when drift makes the aimed tile fall off the actual projectile line."
+    "src/spritegen.hpp",
+    "docs/PROCGEN_TERRAIN_BIOLUM.md",
+    "src/proc_rd.hpp",
+    "src/game_world.cpp"
   ],
   "files_changed_this_round": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
-    "src/game.hpp",
-    "src/game.cpp",
-    "src/combat.cpp",
-    "src/game_targeting.cpp"
+    "docs/PROCGEN_TERRAIN_BIOLUM.md",
+    "src/proc_rd.hpp",
+    "src/dungeon.hpp",
+    "src/dungeon.cpp",
+    "src/game_world.cpp",
+    "src/game_spawn.cpp",
+    "src/game_internal.hpp",
+    "src/render.cpp"
   ],
-  "files_changed": [
-    "CHANGELOG.md",
-    "PATCH_MANIFEST.json",
-    "src/game.hpp",
-    "src/render.cpp",
-    "src/main.cpp"
+  "files_added": [
+    "docs/PROCGEN_TERRAIN_BIOLUM.md",
+    "src/proc_rd.hpp"
   ],
-  "files_added": []
+  "notes": [
+    "The biolum field is cosmetic and deterministic: it is computed once per floor (cached alongside terrain materials) and is not serialized.",
+    "Biolum lights are injected only when darkness mode is active, and are selected with a greedy spacing rule to avoid performance spikes from too many sources.",
+    "Strong biolum tiles (>=48 intensity) emit occasional motes to make glow pockets more readable.",
+    "The Gray-Scott solver is now shared (src/proc_rd.hpp) so future procedural fields can reuse the same implementation."
+  ],
+  "generated_at": "2026-01-22T00:00:00Z"
 }

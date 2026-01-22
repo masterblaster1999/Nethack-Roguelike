@@ -2582,6 +2582,55 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
         {
             std::ostringstream ss;
+            ss << "TERRAIN HF";
+            ss << " | RIDGE PILLARS " << d.heightfieldRidgePillarCount;
+            ss << " | SCREE BOULDERS " << d.heightfieldScreeBoulderCount;
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            ss << "TERRAIN FLUVIAL";
+            ss << " | GULLIES " << d.fluvialGullyCount;
+            ss << " | CHASM " << d.fluvialChasmCount;
+            ss << " | CAUSEWAYS " << d.fluvialCausewayCount;
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            // Procedural biolum terrain stats (lichen/crystal glow): counts of tiles that can emit light.
+            d.ensureMaterials(static_cast<uint32_t>(game.seed()), game.branch(), game.depth(), game.dungeonMaxDepth());
+
+            int bioTiles = 0;
+            int bioStrong = 0;
+            int bioCrystal = 0;
+            int bioMoss = 0;
+
+            for (int y = 0; y < d.height; ++y) {
+                for (int x = 0; x < d.width; ++x) {
+                    if (d.at(x, y).type != TileType::Floor) continue;
+                    const uint8_t g = d.biolumAtCached(x, y);
+                    if (g == 0u) continue;
+                    ++bioTiles;
+                    if (g >= 48u) ++bioStrong;
+
+                    const TerrainMaterial m = d.materialAtCached(x, y);
+                    if (m == TerrainMaterial::Crystal) ++bioCrystal;
+                    if (m == TerrainMaterial::Moss) ++bioMoss;
+                }
+            }
+
+            std::ostringstream ss;
+            ss << "BIOLUM " << bioTiles;
+            ss << " | STRONG " << bioStrong;
+            ss << " | CRYSTAL " << bioCrystal;
+            ss << " | MOSS " << bioMoss;
+            game.pushSystemMessage(ss.str());
+        }
+
+
+        {
+            std::ostringstream ss;
             ss << "FURNISH";
             ss << " | SYMROOMS " << d.symmetryRoomCount;
             ss << " | SYMOBS " << d.symmetryObstacleCount;
@@ -2592,6 +2641,10 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             std::ostringstream ss;
             ss << "PALETTE " << (game.procPaletteEnabled() ? "ON" : "OFF");
             ss << " | STRENGTH " << game.procPaletteStrength();
+            ss << " | HUE " << game.procPaletteHueDeg();
+            ss << " | SAT " << game.procPaletteSaturationPct();
+            ss << " | BRIGHT " << game.procPaletteBrightnessPct();
+            ss << " | SPATIAL " << game.procPaletteSpatialStrength();
             game.pushSystemMessage(ss.str());
         }
 
@@ -3215,9 +3268,18 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     if (cmd == "palette" || cmd == "pal") {
         if (toks.size() <= 1) {
             game.pushSystemMessage(std::string("PROC PALETTE: ") + (game.procPaletteEnabled() ? "ON" : "OFF") +
-                                   " | STRENGTH " + std::to_string(game.procPaletteStrength()));
+                                   " | STRENGTH " + std::to_string(game.procPaletteStrength()) +
+                                   " | HUE " + std::to_string(game.procPaletteHueDeg()) +
+                                   " | SAT " + std::to_string(game.procPaletteSaturationPct()) +
+                                   " | BRIGHT " + std::to_string(game.procPaletteBrightnessPct()) +
+                                   " | SPATIAL " + std::to_string(game.procPaletteSpatialStrength()));
             game.pushSystemMessage("USAGE: #palette on/off/toggle");
             game.pushSystemMessage("       #palette strength <0..100>");
+            game.pushSystemMessage("       #palette hue <deg -45..45>");
+            game.pushSystemMessage("       #palette sat <pct -80..80>");
+            game.pushSystemMessage("       #palette bright <pct -60..60>");
+            game.pushSystemMessage("       #palette spatial <0..100>");
+            game.pushSystemMessage("       #palette reset");
             return;
         }
 
@@ -3257,8 +3319,92 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             return;
         }
 
+        if (v == "hue" || v == "h") {
+            if (toks.size() < 3) {
+                game.pushSystemMessage("USAGE: #palette hue <deg -45..45>");
+                return;
+            }
+            int deg = 0;
+            if (!parseInt(toks[2], deg)) {
+                game.pushSystemMessage("INVALID HUE (EXPECTED INTEGER -45..45)." );
+                return;
+            }
+            deg = std::clamp(deg, -45, 45);
+            game.setProcPaletteHueDeg(deg);
+            game.markSettingsDirty();
+            game.pushSystemMessage("PROC PALETTE HUE: " + std::to_string(deg));
+            return;
+        }
+
+        if (v == "sat" || v == "saturation") {
+            if (toks.size() < 3) {
+                game.pushSystemMessage("USAGE: #palette sat <pct -80..80>");
+                return;
+            }
+            int pct = 0;
+            if (!parseInt(toks[2], pct)) {
+                game.pushSystemMessage("INVALID SATURATION (EXPECTED INTEGER -80..80)." );
+                return;
+            }
+            pct = std::clamp(pct, -80, 80);
+            game.setProcPaletteSaturationPct(pct);
+            game.markSettingsDirty();
+            game.pushSystemMessage("PROC PALETTE SAT: " + std::to_string(pct));
+            return;
+        }
+
+        if (v == "bright" || v == "brightness" || v == "val" || v == "value") {
+            if (toks.size() < 3) {
+                game.pushSystemMessage("USAGE: #palette bright <pct -60..60>");
+                return;
+            }
+            int pct = 0;
+            if (!parseInt(toks[2], pct)) {
+                game.pushSystemMessage("INVALID BRIGHTNESS (EXPECTED INTEGER -60..60)." );
+                return;
+            }
+            pct = std::clamp(pct, -60, 60);
+            game.setProcPaletteBrightnessPct(pct);
+            game.markSettingsDirty();
+            game.pushSystemMessage("PROC PALETTE BRIGHT: " + std::to_string(pct));
+            return;
+        }
+
+        if (v == "spatial" || v == "field") {
+            if (toks.size() < 3) {
+                game.pushSystemMessage("USAGE: #palette spatial <0..100>");
+                return;
+            }
+            int pct = 0;
+            if (!parseInt(toks[2], pct)) {
+                game.pushSystemMessage("INVALID SPATIAL (EXPECTED INTEGER 0..100)." );
+                return;
+            }
+            pct = std::clamp(pct, 0, 100);
+            game.setProcPaletteSpatialStrength(pct);
+            game.markSettingsDirty();
+            game.pushSystemMessage("PROC PALETTE SPATIAL: " + std::to_string(pct));
+            return;
+        }
+
+        if (v == "reset" || v == "default" || v == "defaults") {
+            game.setProcPaletteStrength(70);
+            game.setProcPaletteHueDeg(0);
+            game.setProcPaletteSaturationPct(0);
+            game.setProcPaletteBrightnessPct(0);
+            game.setProcPaletteSpatialStrength(35);
+            game.markSettingsDirty();
+            game.pushSystemMessage("PROC PALETTE: RESET (STRENGTH 70 | HUE 0 | SAT 0 | BRIGHT 0 | SPATIAL 35)");
+            return;
+        }
+
         game.pushSystemMessage("USAGE: #palette on/off/toggle");
         game.pushSystemMessage("       #palette strength <0..100>");
+        game.pushSystemMessage("       #palette hue <deg -45..45>");
+        game.pushSystemMessage("       #palette sat <pct -80..80>");
+        game.pushSystemMessage("       #palette bright <pct -60..60>");
+        game.pushSystemMessage("       #palette spatial <0..100>");
+        game.pushSystemMessage("       #palette reset");
         return;
     }
 

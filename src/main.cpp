@@ -474,6 +474,10 @@ int main(int argc, char** argv) {
     game.setIsoCutawayEnabled(settings.isoCutaway);
     game.setProcPaletteEnabled(settings.procPalette);
     game.setProcPaletteStrength(settings.procPaletteStrength);
+    game.setProcPaletteHueDeg(settings.procPaletteHueDeg);
+    game.setProcPaletteSaturationPct(settings.procPaletteSaturationPct);
+    game.setProcPaletteBrightnessPct(settings.procPaletteBrightnessPct);
+    game.setProcPaletteSpatialStrength(settings.procPaletteSpatialStrength);
     game.setSaveBackups(settings.saveBackups);
 
     if (replayMode) {
@@ -1667,6 +1671,10 @@ int main(int argc, char** argv) {
             ok &= updateIniKey(settingsPath, "iso_cutaway", game.isoCutawayEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "proc_palette", game.procPaletteEnabled() ? "true" : "false");
             ok &= updateIniKey(settingsPath, "proc_palette_strength", std::to_string(game.procPaletteStrength()));
+            ok &= updateIniKey(settingsPath, "proc_palette_hue_deg", std::to_string(game.procPaletteHueDeg()));
+            ok &= updateIniKey(settingsPath, "proc_palette_sat_pct", std::to_string(game.procPaletteSaturationPct()));
+            ok &= updateIniKey(settingsPath, "proc_palette_bright_pct", std::to_string(game.procPaletteBrightnessPct()));
+            ok &= updateIniKey(settingsPath, "proc_palette_spatial", std::to_string(game.procPaletteSpatialStrength()));
             ok &= updateIniKey(settingsPath, "autosave_every_turns", std::to_string(game.autosaveEveryTurns()));
             ok &= updateIniKey(settingsPath, "save_backups", std::to_string(game.saveBackups()));
 
@@ -1734,6 +1742,10 @@ int main(int argc, char** argv) {
             game.setIsoCutawayEnabled(newSettings.isoCutaway);
             game.setProcPaletteEnabled(newSettings.procPalette);
             game.setProcPaletteStrength(newSettings.procPaletteStrength);
+            game.setProcPaletteHueDeg(newSettings.procPaletteHueDeg);
+            game.setProcPaletteSaturationPct(newSettings.procPaletteSaturationPct);
+            game.setProcPaletteBrightnessPct(newSettings.procPaletteBrightnessPct);
+            game.setProcPaletteSpatialStrength(newSettings.procPaletteSpatialStrength);
 
             // Keep the local copy up-to-date for any later use.
             settings = newSettings;

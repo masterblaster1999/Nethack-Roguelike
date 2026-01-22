@@ -55,6 +55,15 @@ struct Settings {
     bool procPalette = true;              // proc_palette: true|false
     int procPaletteStrength = 70;         // proc_palette_strength: 0..100 (0 disables the effect)
 
+    // Optional user controls for the procedural palette:
+    // - Hue shift (degrees): rotates the palette in HSV space.
+    // - Saturation/brightness (%): scales HSV S/V.
+    // - Spatial strength (%): adds a smooth, low-frequency chroma field across the map.
+    int procPaletteHueDeg = 0;            // proc_palette_hue_deg: -45..45
+    int procPaletteSaturationPct = 0;     // proc_palette_sat_pct: -80..80
+    int procPaletteBrightnessPct = 0;     // proc_palette_bright_pct: -60..60
+    int procPaletteSpatialStrength = 35;  // proc_palette_spatial: 0..100
+
 
     // Rendering / performance
     // - vsync: enables SDL_Renderer vsync (lower CPU usage, smoother rendering).

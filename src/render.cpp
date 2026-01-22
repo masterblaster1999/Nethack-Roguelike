@@ -610,6 +610,99 @@ inline Color hslToRgb(float h, float s, float l) {
                  Uint8{255}};
 }
 
+// Forward decls for helpers used by HSV/HSL tint functions.
+inline Color lerpColor(const Color& a, const Color& b, float t);
+
+// HSV helpers (h in [0,1), s/v in [0,1]). Used for user-facing hue/saturation/brightness controls
+// and for the spatial chroma-field modulator.
+struct HSV01 {
+    float h = 0.0f;
+    float s = 0.0f;
+    float v = 0.0f;
+};
+
+inline HSV01 rgbToHsv01(const Color& c) {
+    const float r = static_cast<float>(c.r) / 255.0f;
+    const float g = static_cast<float>(c.g) / 255.0f;
+    const float b = static_cast<float>(c.b) / 255.0f;
+
+    const float mx = std::max({r, g, b});
+    const float mn = std::min({r, g, b});
+    const float d = mx - mn;
+
+    HSV01 out{};
+    out.v = mx;
+    out.s = (mx <= 1e-6f) ? 0.0f : (d / mx);
+
+    float h = 0.0f;
+    if (d > 1e-6f) {
+        if (mx == r) {
+            h = (g - b) / d;
+            if (h < 0.0f) h += 6.0f;
+        } else if (mx == g) {
+            h = (b - r) / d + 2.0f;
+        } else {
+            h = (r - g) / d + 4.0f;
+        }
+        h /= 6.0f;
+    }
+    out.h = frac01(h);
+    return out;
+}
+
+inline Color hsv01ToRgb(const HSV01& hsv) {
+    const float h = frac01(hsv.h);
+    const float s = std::clamp(hsv.s, 0.0f, 1.0f);
+    const float v = std::clamp(hsv.v, 0.0f, 1.0f);
+
+    const float C = v * s;
+    const float hh = h * 6.0f;
+    const float X = C * (1.0f - std::fabs(std::fmod(hh, 2.0f) - 1.0f));
+    const float m = v - C;
+
+    float rr = 0.0f, gg = 0.0f, bb = 0.0f;
+    if (hh < 1.0f) {
+        rr = C; gg = X; bb = 0.0f;
+    } else if (hh < 2.0f) {
+        rr = X; gg = C; bb = 0.0f;
+    } else if (hh < 3.0f) {
+        rr = 0.0f; gg = C; bb = X;
+    } else if (hh < 4.0f) {
+        rr = 0.0f; gg = X; bb = C;
+    } else if (hh < 5.0f) {
+        rr = X; gg = 0.0f; bb = C;
+    } else {
+        rr = C; gg = 0.0f; bb = X;
+    }
+
+    const int R = static_cast<int>((rr + m) * 255.0f + 0.5f);
+    const int G = static_cast<int>((gg + m) * 255.0f + 0.5f);
+    const int B = static_cast<int>((bb + m) * 255.0f + 0.5f);
+    return Color{clampToU8(R), clampToU8(G), clampToU8(B), Uint8{255}};
+}
+
+inline Color tintFromHsv(float h, float s, float v, float mix) {
+    const Color c = hsv01ToRgb(HSV01{h, s, v});
+    return lerpColor(Color{255, 255, 255, 255}, c, mix);
+}
+
+inline Color applyHsvAdjust(Color c, float hueShift01, float satMul, float valMul) {
+    HSV01 hsv = rgbToHsv01(c);
+    hsv.h = frac01(hsv.h + hueShift01);
+    hsv.s = std::clamp(hsv.s * satMul, 0.0f, 1.0f);
+    hsv.v = std::clamp(hsv.v * valMul, 0.0f, 1.0f);
+
+    // Readability: avoid overly saturated near-black multipliers (causes chroma noise on grout/shadows).
+    if (hsv.v < 0.18f) {
+        const float k = std::clamp(hsv.v / 0.18f, 0.0f, 1.0f);
+        hsv.s *= k;
+    }
+
+    Color out = hsv01ToRgb(hsv);
+    out.a = c.a;
+    return out;
+}
+
 inline Color lerpColor(const Color& a, const Color& b, float t) {
     t = std::clamp(t, 0.0f, 1.0f);
     const auto lerpChan = [&](Uint8 x, Uint8 y) {
@@ -1349,6 +1442,10 @@ bool Renderer::init() {
     autoVarsUsed = (spritePx <= 96) ? 4 : (spritePx <= 160 ? 3 : 2);
     autoVarsUsed = std::clamp(autoVarsUsed, 1, AUTO_VARS);
 
+    borderVarsUsed = (spritePx <= 96) ? 2 : 1;
+    borderVarsUsed = std::clamp(borderVarsUsed, 1, BORDER_VARS);
+
+
     // Configure the sprite texture cache budget.
     // 0 => unlimited (no eviction).
     size_t budgetBytes = 0;
@@ -1454,6 +1551,28 @@ for (int st = 0; st < DECAL_STYLES; ++st) {
         }
     }
 }
+
+
+    // Pre-generate room-style floor border overlays (thin "trim" lines keyed by room style + 4-neighbor mask).
+    // These are transparent overlays layered on top of base floor tiles.
+    for (int st = 0; st < ROOM_STYLES; ++st) {
+        for (int mask = 0; mask < AUTO_MASKS; ++mask) {
+            for (int v = 0; v < borderVarsUsed; ++v) {
+                const uint32_t bSeed = hashCombine(0xB0BDE3D0u + static_cast<uint32_t>(st) * 131u + static_cast<uint32_t>(mask) * 17u,
+                                                   static_cast<uint32_t>(v));
+                for (int f = 0; f < FRAMES; ++f) {
+                    floorBorderVar[static_cast<size_t>(st)][static_cast<size_t>(mask)][static_cast<size_t>(v)][static_cast<size_t>(f)] =
+                        (st == 0 || mask == 0) ? nullptr : textureFromSprite(generateFloorBorderOverlay(bSeed, static_cast<uint8_t>(st), static_cast<uint8_t>(mask), v, f, spritePx));
+                }
+            }
+            // Ensure unused variants are nullptr (borderVarsUsed may be < BORDER_VARS at large tile sizes).
+            for (int v = borderVarsUsed; v < BORDER_VARS; ++v) {
+                for (int f = 0; f < FRAMES; ++f) {
+                    floorBorderVar[static_cast<size_t>(st)][static_cast<size_t>(mask)][static_cast<size_t>(v)][static_cast<size_t>(f)] = nullptr;
+                }
+            }
+        }
+    }
 
 
 // Pre-generate autotile overlays (edge/corner shaping for walls and chasm rims).
@@ -1659,7 +1778,29 @@ for (auto& arr : floorDecalVarIso) {
 }
 floorDecalVarIso.clear();
 
+// Room-style floor border overlays
+for (auto& styleArr : floorBorderVar) {
+    for (auto& maskArr : styleArr) {
+        for (auto& anim : maskArr) {
+            for (SDL_Texture*& t : anim) {
+                if (t) SDL_DestroyTexture(t);
+                t = nullptr;
+            }
+        }
+    }
+}
 
+// Isometric room-style floor border overlays
+for (auto& styleArr : floorBorderVarIso) {
+    for (auto& maskArr : styleArr) {
+        for (auto& anim : maskArr) {
+            for (SDL_Texture*& t : anim) {
+                if (t) SDL_DestroyTexture(t);
+                t = nullptr;
+            }
+        }
+    }
+}
 
 // Isometric edge shading overlays
 for (auto& anim : isoEdgeShadeVar) {
@@ -2785,13 +2926,18 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
     const uint32_t lvlSalt = hashCombine(hashCombine(runSeed ^ 0xA11CE5u, static_cast<uint32_t>(game.branch())),
                                          static_cast<uint32_t>(game.depth()));
 
+    // Ensure deterministic terrain caches are available (biolum/material queries).
+    d.ensureMaterials(runSeed, game.branch(), game.depth(), game.dungeonMaxDepth());
+
     for (int y = 0; y < d.height; ++y) {
         for (int x = 0; x < d.width; ++x) {
             const Tile& t = d.at(x, y);
             if (!t.visible) continue;
 
             const TileType tt = t.type;
-            if (tt != TileType::Fountain && tt != TileType::Altar) continue;
+            const uint8_t bio = (tt == TileType::Floor) ? d.biolumAtCached(x, y) : 0u;
+            const bool isBiolum = dark && (bio >= 48u);
+            if (tt != TileType::Fountain && tt != TileType::Altar && !isBiolum) continue;
 
             const uint8_t L = dark ? game.tileLightLevel(x, y) : 255u;
             if (dark && L == 0u) continue;
@@ -2870,6 +3016,68 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
 
                             particles_->add(sp);
                         }
+                    }
+                }
+            } else if (isBiolum) {
+                // Bioluminescent spores/motes: subtle, color-tinted drift.
+                const uint32_t stepMs = std::clamp<uint32_t>(420u - static_cast<uint32_t>(bio) * 2u, 180u, 420u);
+                const uint32_t dtClamped = std::min<uint32_t>(dtMs, stepMs - 1u);
+
+                const uint32_t phase = hash32(tileSeed ^ 0xB10L1234u) % stepMs;
+                const uint32_t now = (ticks + phase) % stepMs;
+                const uint32_t prev = (((ticks > dtClamped) ? (ticks - dtClamped) : 0u) + phase) % stepMs;
+
+                if (now < prev) {
+                    const uint32_t cycle = (ticks + phase) / stepMs;
+                    uint32_t s = hash32(tileSeed ^ 0xB10L1234u ^ (cycle * 0x27D4EB2Du));
+
+                    const uint32_t chance = std::clamp<uint32_t>(8u + static_cast<uint32_t>(bio) / 4u, 8u, 60u);
+                    if ((s & 0xFFu) < chance) {
+                        ParticleEngine::Particle p{};
+                        p.layer = ParticleEngine::LAYER_BEHIND;
+                        p.kind = ParticleEngine::Kind::Mote;
+                        p.var = static_cast<uint8_t>(static_cast<int>(
+                            randRange(s, 0.0f, static_cast<float>(ParticleEngine::MOTE_VARS))));
+                        p.seed = s;
+
+                        p.x = static_cast<float>(x) + 0.50f + randRange(s, -0.18f, 0.18f);
+                        p.y = static_cast<float>(y) + 0.50f + randRange(s, -0.18f, 0.18f);
+                        p.z = randRange(s, 0.06f, 0.24f);
+
+                        p.vx = randRange(s, -0.06f, 0.06f);
+                        p.vy = randRange(s, -0.06f, 0.06f);
+                        p.vz = randRange(s, 0.05f, 0.18f);
+                        p.drag = 1.10f;
+
+                        // Match the underlying biolum material tint.
+                        const TerrainMaterial m = d.materialAtCached(x, y);
+                        Color c0{ 200, 245, 210, 160 };
+                        Color c1{  40,  80,  60, 0 };
+                        if (m == TerrainMaterial::Crystal) {
+                            c0 = Color{ 170, 210, 255, 165 };
+                            c1 = Color{  40,  70, 120, 0 };
+                        } else if (m == TerrainMaterial::Moss) {
+                            c0 = Color{ 120, 255, 180, 165 };
+                            c1 = Color{  30,  70,  50, 0 };
+                        } else if (m == TerrainMaterial::Bone) {
+                            c0 = Color{ 235, 230, 195, 150 };
+                            c1 = Color{  70,  60,  40, 0 };
+                        } else if (m == TerrainMaterial::Metal) {
+                            c0 = Color{ 200, 225, 255, 150 };
+                            c1 = Color{  40,  70, 110, 0 };
+                        }
+
+                        const float bioLum = std::clamp(static_cast<float>(bio) / 160.0f, 0.0f, 1.0f);
+                        const int a0 = std::clamp(static_cast<int>(std::round(static_cast<float>(c0.a) * lum * (0.55f + 0.65f * bioLum))), 18, 210);
+                        c0.a = static_cast<uint8_t>(a0);
+                        p.c0 = c0;
+                        p.c1 = c1;
+
+                        p.life = randRange(s, 0.45f, 0.90f);
+                        p.size0 = randRange(s, 0.04f, 0.10f);
+                        p.size1 = p.size0 * randRange(s, 0.35f, 0.60f);
+
+                        particles_->add(p);
                     }
                 }
             } else if (tt == TileType::Altar) {
@@ -3479,6 +3687,15 @@ void Renderer::ensureIsoTerrainAssets(uint32_t styleSeed, bool voxelBlocks, bool
     }
     floorDecalVarIso.clear();
 
+
+    // Isometric room-style floor border overlays (diamond-projected overlays)
+    for (auto& styleArr : floorBorderVarIso) {
+        for (auto& maskArr : styleArr) {
+            for (auto& anim : maskArr) {
+                for (SDL_Texture*& t : anim) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+            }
+        }
+    }
     auto mixSeed = [&](uint32_t base) -> uint32_t {
         return (styleSeed != 0u) ? hashCombine(styleSeed, base) : base;
     };
@@ -3660,6 +3877,26 @@ void Renderer::ensureIsoTerrainAssets(uint32_t styleSeed, bool voxelBlocks, bool
             }
         }
     }
+
+    // Isometric room-style floor border overlays: diamond variants of the same style+mask trim used in top-down view.
+    for (int st = 0; st < ROOM_STYLES; ++st) {
+        for (int mask = 0; mask < AUTO_MASKS; ++mask) {
+            for (int v = 0; v < borderVarsUsed; ++v) {
+                const uint32_t bSeed = hashCombine(0xB0BDE3D0u + static_cast<uint32_t>(st) * 131u + static_cast<uint32_t>(mask) * 17u,
+                                                   static_cast<uint32_t>(v));
+                for (int f = 0; f < FRAMES; ++f) {
+                    floorBorderVarIso[static_cast<size_t>(st)][static_cast<size_t>(mask)][static_cast<size_t>(v)][static_cast<size_t>(f)] =
+                        (st == 0 || mask == 0) ? nullptr : textureFromSprite(generateIsometricFloorBorderOverlay(bSeed, static_cast<uint8_t>(st), static_cast<uint8_t>(mask), v, f, spritePx));
+                }
+            }
+            for (int v = borderVarsUsed; v < BORDER_VARS; ++v) {
+                for (int f = 0; f < FRAMES; ++f) {
+                    floorBorderVarIso[static_cast<size_t>(st)][static_cast<size_t>(mask)][static_cast<size_t>(v)][static_cast<size_t>(f)] = nullptr;
+                }
+            }
+        }
+    }
+
 
     // Isometric environmental overlays (gas/fire) so effects follow the diamond grid.
     for (int i = 0; i < GAS_VARS; ++i) {
@@ -4304,6 +4541,18 @@ d.ensureMaterials(runSeed, game.branch(), game.depth(), game.dungeonMaxDepth());
 const float procPalStrength =
     (game.procPaletteEnabled() ? (std::clamp(game.procPaletteStrength(), 0, 100) / 100.0f) : 0.0f);
 
+// User tuning for proc palette: expressed in hue/saturation/brightness (HSV),
+// scaled by procPalStrength so the main knob still acts as a master control.
+const float userHue01 = (static_cast<float>(std::clamp(game.procPaletteHueDeg(), -45, 45)) / 360.0f) * procPalStrength;
+const float userSatMul = 1.0f + (static_cast<float>(std::clamp(game.procPaletteSaturationPct(), -80, 80)) / 100.0f) * procPalStrength;
+const float userValMul = 1.0f + (static_cast<float>(std::clamp(game.procPaletteBrightnessPct(), -60, 60)) / 100.0f) * procPalStrength;
+const float spatialStrength = (static_cast<float>(std::clamp(game.procPaletteSpatialStrength(), 0, 100)) / 100.0f) * procPalStrength;
+
+auto applyUserPaletteAdjust = [&](Color c) -> Color {
+    if (procPalStrength <= 0.001f) return c;
+    return applyHsvAdjust(c, userHue01, std::clamp(userSatMul, 0.20f, 2.50f), std::clamp(userValMul, 0.20f, 2.50f));
+};
+
 struct TerrainPaletteTints {
     std::array<Color, ROOM_STYLES> floorStyle{};
     Color wall{255, 255, 255, 255};
@@ -4368,19 +4617,26 @@ const TerrainPaletteTints terrainPalette = [&]() -> TerrainPaletteTints {
         const float s = std::clamp(kSat[i] + themeSatBias, 0.0f, 0.85f);
         const float l = std::clamp(kLum[i], 0.0f, 1.0f);
         const float mix = std::clamp((kMix[i] + themeMixBias) * procPalStrength, 0.0f, 0.55f);
-        p.floorStyle[static_cast<size_t>(i)] = tintFromHsl(h, s, l, mix);
+        p.floorStyle[static_cast<size_t>(i)] = applyUserPaletteAdjust(tintFromHsl(h, s, l, mix));
     }
 
     const float wallMix = std::clamp((0.12f + themeMixBias) * procPalStrength, 0.0f, 0.40f);
-    p.wall = tintFromHsl(baseHue + 0.02f, std::clamp(0.10f + themeSatBias * 0.5f, 0.0f, 0.40f), 0.66f,
-                         wallMix);
+    p.wall = applyUserPaletteAdjust(tintFromHsl(baseHue + 0.02f,
+                                               std::clamp(0.10f + themeSatBias * 0.5f, 0.0f, 0.40f),
+                                               0.66f,
+                                               wallMix));
 
     const float chasmMix = std::clamp((0.16f + themeMixBias) * procPalStrength, 0.0f, 0.45f);
-    p.chasm = tintFromHsl(baseHue + 0.55f, std::clamp(0.16f + themeSatBias * 0.6f, 0.0f, 0.55f), 0.56f,
-                          chasmMix);
+    p.chasm = applyUserPaletteAdjust(tintFromHsl(baseHue + 0.55f,
+                                                std::clamp(0.16f + themeSatBias * 0.6f, 0.0f, 0.55f),
+                                                0.56f,
+                                                chasmMix));
 
     const float doorMix = std::clamp((0.20f + themeMixBias) * procPalStrength, 0.0f, 0.55f);
-    p.door = tintFromHsl(baseHue + 0.08f, std::clamp(0.32f + themeSatBias, 0.0f, 0.85f), 0.66f, doorMix);
+    p.door = applyUserPaletteAdjust(tintFromHsl(baseHue + 0.08f,
+                                               std::clamp(0.32f + themeSatBias, 0.0f, 0.85f),
+                                               0.66f,
+                                               doorMix));
 
     return p;
 }();
@@ -4458,12 +4714,89 @@ auto terrainMaterialTint = [&](TerrainMaterial mat, TileType tt) -> Color {
 
     // Scale with the existing procedural palette strength so users have one knob.
     const float m = std::clamp(mix * procPalStrength, 0.0f, 0.45f);
-    return tintFromHsl(frac01(h), s, l, m);
+    return applyUserPaletteAdjust(tintFromHsl(frac01(h), s, l, m));
 };
 
-auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyle, TerrainMaterial mat) -> Color {
-    // Palette first (run+room themed), then substrate material tint.
-    return mulColor(applyTerrainPalette(baseMod, tt, floorStyle), terrainMaterialTint(mat, tt));
+// Spatial "chroma field": a smooth, low-frequency HSV variation across the map.
+// This is purely cosmetic and is intentionally subtle; it helps break up large uniform floors
+// while keeping each room style/material coherent.
+auto terrainSpatialTintAt = [&](int tx, int ty, TileType tt, int floorStyle, TerrainMaterial mat) -> Color {
+    if (spatialStrength <= 0.001f || procPalStrength <= 0.001f) return Color{255, 255, 255, 255};
+    if (!d.inBounds(tx, ty)) return Color{255, 255, 255, 255};
+
+    // Doors are readability-critical; keep them unmodified.
+    if (tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorOpen) {
+        return Color{255, 255, 255, 255};
+    }
+
+    // Match the palette's base hue derivation so the field feels like part of the same "paint job".
+    const int curDepth = std::max(1, game.depth());
+    const int maxDepth = std::max(1, game.dungeonMaxDepth());
+    const int clampedDepth = std::clamp(curDepth, 1, maxDepth);
+    const float depth01 = (maxDepth > 1)
+                              ? (static_cast<float>(clampedDepth - 1) / static_cast<float>(maxDepth - 1))
+                              : 0.0f;
+
+    float baseHue = (hash32(styleSeed ^ 0xC0FFEEu) / 4294967296.0f);
+    baseHue = frac01(baseHue + depth01 * 0.14f);
+
+    float themeHueBias = 0.0f;
+    switch (game.uiTheme()) {
+        case UITheme::Parchment: themeHueBias = 0.03f; break;
+        case UITheme::Arcane:    themeHueBias = 0.74f; break;
+        case UITheme::DarkStone:
+        default: break;
+    }
+    baseHue = frac01(baseHue + themeHueBias);
+
+    const float runJitter = ((hash32(styleSeed ^ 0x9E3779B9u) & 0xFFFFu) / 65535.0f - 0.5f) * 0.04f;
+    baseHue = frac01(baseHue + runJitter);
+
+    // Use the per-level seed so the field changes each floor but remains stable within it.
+    const uint32_t fieldSeed = hashCombine(lvlSeed ^ 0xC0A51D11u, styleSeed ^ 0x51A11u);
+
+    const float nh = fractalNoise2D01(tx, ty, static_cast<uint32_t>(fieldSeed ^ 0xA11u));
+    const float ns = fractalNoise2D01(tx + 127, ty - 91, static_cast<uint32_t>(fieldSeed ^ 0xB22u));
+    const float nv = fractalNoise2D01(tx - 53, ty + 211, static_cast<uint32_t>(fieldSeed ^ 0xC33u));
+
+    // Subtle hue drift per room style, plus smooth field drift.
+    const float styleDrift = static_cast<float>(std::clamp(floorStyle, 0, ROOM_STYLES - 1)) * 0.015f;
+    float h = frac01(baseHue + styleDrift + (nh - 0.5f) * 0.10f);
+
+    // Tint saturation/value are low so the multiplier stays near-white.
+    float s = std::clamp(0.10f + (ns - 0.5f) * 0.18f, 0.0f, 0.55f);
+    float v = std::clamp(0.96f + (nv - 0.5f) * 0.10f, 0.85f, 1.08f);
+
+    // Material influences (kept subtle).
+    switch (mat) {
+        case TerrainMaterial::Moss:
+            s *= 1.15f; break;
+        case TerrainMaterial::Crystal:
+            s *= 1.25f; v *= 1.02f; break;
+        case TerrainMaterial::Obsidian:
+            s *= 0.60f; v *= 0.95f; break;
+        case TerrainMaterial::Basalt:
+            s *= 0.80f; v *= 0.97f; break;
+        default:
+            break;
+    }
+
+    // Chasms: cooler, darker field.
+    if (tt == TileType::Chasm) {
+        h = frac01(h + 0.55f);
+        s *= 0.85f;
+        v *= 0.94f;
+    }
+
+    const float mix = std::clamp(0.20f * spatialStrength, 0.0f, 0.30f);
+    Color tint = tintFromHsv(h, std::clamp(s, 0.0f, 1.0f), std::clamp(v, 0.0f, 1.0f), mix);
+    return applyUserPaletteAdjust(tint);
+};
+
+auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType tt, int floorStyle, TerrainMaterial mat) -> Color {
+    // Palette first (run+room themed), then substrate material tint, then spatial chroma field.
+    const Color base = mulColor(applyTerrainPalette(baseMod, tt, floorStyle), terrainMaterialTint(mat, tt));
+    return mulColor(base, terrainSpatialTintAt(tx, ty, tt, floorStyle, mat));
 };
 
 
@@ -4633,6 +4966,35 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
         return 0;
     };
 
+    // Border style is intentionally stricter than floorStyleAt(): we only assign a non-zero style to
+    // tiles that are actually inside a themed room (roomTypeCache), plus the door tiles that lead into
+    // that room. This prevents border/trim overlays from bleeding into adjacent corridors.
+    auto borderStyleAt = [&](int tx, int ty) -> int {
+        if (!d.inBounds(tx, ty)) return 0;
+        const size_t ii = static_cast<size_t>(ty * d.width + tx);
+        if (ii < roomTypeCache.size()) {
+            const int s = styleForRoomType(roomTypeCache[ii]);
+            if (s != 0) return s;
+        }
+
+        const TileType tt = d.at(tx, ty).type;
+        const bool isDoor = (tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorOpen);
+        if (!isDoor) return 0;
+
+        const int dx[4] = { 1, -1, 0, 0 };
+        const int dy[4] = { 0, 0, 1, -1 };
+        for (int k = 0; k < 4; ++k) {
+            const int nx = tx + dx[k];
+            const int ny = ty + dy[k];
+            if (!d.inBounds(nx, ny)) continue;
+            const size_t jj = static_cast<size_t>(ny * d.width + nx);
+            if (jj >= roomTypeCache.size()) continue;
+            const int s2 = styleForRoomType(roomTypeCache[jj]);
+            if (s2 != 0) return s2;
+        }
+        return 0;
+    };
+
     auto isWallMass = [&](TileType tt) -> bool {
         switch (tt) {
             case TileType::Wall:
@@ -4710,8 +5072,8 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
             SDL_Texture* btex = tileTexture(base, x, y, levelKey, frame, style);
             const Color baseMod = tileColorMod(x, y, t.visible);
             const TerrainMaterial mat = d.materialAtCached(x, y);
-            const Color mod = applyTerrainStyleMod(baseMod, base, style, mat);
-            const Color modTall = applyTerrainStyleMod(baseMod, t.type, style, mat);
+            const Color mod = applyTerrainStyleMod(baseMod, x, y, base, style, mat);
+            const Color modTall = applyTerrainStyleMod(baseMod, x, y, t.type, style, mat);
             const Uint8 a = t.visible ? 255 : (game.darknessActive() ? 115 : 175);
 
             if (btex) {
@@ -4762,6 +5124,63 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
                 }
 
             }
+
+            // Room border trim overlays (isometric): project the room-style border overlays onto the diamond grid.
+            // This frames special rooms in 2.5D view without relying on manual art.
+            if (base == TileType::Floor && t.type != TileType::Wall && t.type != TileType::DoorSecret && borderVarsUsed > 0) {
+                const int bStyle = borderStyleAt(x, y);
+                if (bStyle > 0) {
+                    auto isFloorBaseForBorder = [&](TileType tt) -> bool {
+                        switch (tt) {
+                            case TileType::Floor:
+                            case TileType::DoorOpen:
+                            case TileType::DoorClosed:
+                            case TileType::DoorLocked:
+                            case TileType::Pillar:
+                            case TileType::Boulder:
+                            case TileType::Fountain:
+                            case TileType::Altar:
+                            case TileType::StairsUp:
+                            case TileType::StairsDown:
+                                return true;
+                            default:
+                                return false;
+                        }
+                    };
+
+                    uint8_t bmask = 0;
+                    auto consider = [&](int nx, int ny, uint8_t bit) {
+                        if (!d.inBounds(nx, ny)) { bmask |= bit; return; }
+                        const TileType nt = d.at(nx, ny).type;
+                        if (!isFloorBaseForBorder(nt)) { bmask |= bit; return; }
+                        const int nStyle = borderStyleAt(nx, ny);
+                        if (nStyle != bStyle) bmask |= bit;
+                    };
+
+                    consider(x, y - 1, 0x01u);
+                    consider(x + 1, y, 0x02u);
+                    consider(x, y + 1, 0x04u);
+                    consider(x - 1, y, 0x08u);
+
+                    if (bmask != 0u) {
+                        const uint32_t h = hashCombine(hashCombine(lvlSeed ^ 0xB0BDE3D0u, static_cast<uint32_t>(x)),
+                                                       static_cast<uint32_t>(y)) ^ (static_cast<uint32_t>(bStyle) * 0x9E3779B9u)
+                                                      ^ static_cast<uint32_t>(bmask);
+                        const uint32_t r = hash32(h);
+                        const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(borderVarsUsed));
+
+                        SDL_Texture* btexIso = floorBorderVarIso[static_cast<size_t>(bStyle)][static_cast<size_t>(bmask)][v][static_cast<size_t>(frame % FRAMES)];
+                        if (btexIso) {
+                            SDL_SetTextureColorMod(btexIso, mod.r, mod.g, mod.b);
+                            SDL_SetTextureAlphaMod(btexIso, a);
+                            SDL_RenderCopy(renderer, btexIso, nullptr, &dst);
+                            SDL_SetTextureColorMod(btexIso, 255, 255, 255);
+                            SDL_SetTextureAlphaMod(btexIso, 255);
+                        }
+                    }
+                }
+            }
+
 
             // Ground-plane overlays that should stay on the diamond tile.
             if (t.type == TileType::StairsUp) {
@@ -5174,8 +5593,8 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
 
         const Color baseMod = tileColorMod(x, y, t.visible);
         const TerrainMaterial mat = d.materialAtCached(x, y);
-        const Color mod = applyTerrainStyleMod(baseMod, baseType, floorStyle, mat);
-        const Color modObj = isOverlay ? applyTerrainStyleMod(baseMod, t.type, floorStyle, mat) : mod;
+        const Color mod = applyTerrainStyleMod(baseMod, x, y, baseType, floorStyle, mat);
+        const Color modObj = isOverlay ? applyTerrainStyleMod(baseMod, x, y, t.type, floorStyle, mat) : mod;
         SDL_SetTextureColorMod(tex, mod.r, mod.g, mod.b);
         SDL_SetTextureAlphaMod(tex, 255);
 
@@ -5222,6 +5641,65 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, TileType tt, int floorStyl
                 }
             }
         }
+
+
+        // Room border trim overlays: accent lines at style transitions for special rooms.
+        // Uses a 4-neighbor 4-bit mask (N/E/S/W) so borders auto-connect cleanly.
+        if (baseType == TileType::Floor && borderVarsUsed > 0) {
+            const int bStyle = borderStyleAt(x, y);
+            if (bStyle > 0) {
+                auto isFloorBaseForBorder = [&](TileType tt) -> bool {
+                    switch (tt) {
+                        case TileType::Floor:
+                        case TileType::DoorOpen:
+                        case TileType::DoorClosed:
+                        case TileType::DoorLocked:
+                        case TileType::Pillar:
+                        case TileType::Boulder:
+                        case TileType::Fountain:
+                        case TileType::Altar:
+                        case TileType::StairsUp:
+                        case TileType::StairsDown:
+                            return true;
+                        default:
+                            return false;
+                    }
+                };
+
+                uint8_t bmask = 0;
+                auto consider = [&](int nx, int ny, uint8_t bit) {
+                    if (!d.inBounds(nx, ny)) { bmask |= bit; return; }
+                    const TileType nt = d.at(nx, ny).type;
+                    if (!isFloorBaseForBorder(nt)) { bmask |= bit; return; }
+                    const int nStyle = borderStyleAt(nx, ny);
+                    if (nStyle != bStyle) bmask |= bit;
+                };
+
+                consider(x, y - 1, 0x01u);
+                consider(x + 1, y, 0x02u);
+                consider(x, y + 1, 0x04u);
+                consider(x - 1, y, 0x08u);
+
+                if (bmask != 0u) {
+                    const uint32_t h = hashCombine(hashCombine(lvlSeed ^ 0xB0BDE3D0u, static_cast<uint32_t>(x)),
+                                                   static_cast<uint32_t>(y)) ^ (static_cast<uint32_t>(bStyle) * 0x9E3779B9u)
+                                                  ^ static_cast<uint32_t>(bmask);
+                    const uint32_t r = hash32(h);
+                    const size_t v = static_cast<size_t>(r % static_cast<uint32_t>(borderVarsUsed));
+
+                    SDL_Texture* btex = floorBorderVar[static_cast<size_t>(bStyle)][static_cast<size_t>(bmask)][v][static_cast<size_t>(frame % FRAMES)];
+                    if (btex) {
+                        const Uint8 ba = t.visible ? 240 : (game.darknessActive() ? 105 : 150);
+                        SDL_SetTextureColorMod(btex, mod.r, mod.g, mod.b);
+                        SDL_SetTextureAlphaMod(btex, ba);
+                        SDL_RenderCopy(renderer, btex, nullptr, &dst);
+                        SDL_SetTextureColorMod(btex, 255, 255, 255);
+                        SDL_SetTextureAlphaMod(btex, 255);
+                    }
+                }
+            }
+        }
+
 
 
         // Top-down wall contact shadows (ambient occlusion): subtle depth shading on floors next to walls.

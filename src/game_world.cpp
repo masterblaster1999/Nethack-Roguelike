@@ -331,6 +331,126 @@ void Game::recomputeLightMap() {
         }
     }
 
+
+
+    // Procedural bioluminescent terrain (lichen/crystal) emitters.
+    // These are cosmetic light sources derived from the deterministic per-level
+    // biolum cache (computed alongside terrain materials). The intent is to create
+    // occasional dim navigation landmarks in darkness without replacing torches.
+    {
+        // Ensure terrain caches exist (biolum is computed in Dungeon::ensureMaterials).
+        dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
+        struct GlowCand {
+            Vec2i pos;
+            uint8_t glow;
+            TerrainMaterial mat;
+            uint32_t h;
+        };
+
+        std::vector<GlowCand> cands;
+        cands.reserve(128);
+
+        const uint32_t lvlSeed = hash32(levelGenSeed(LevelId{branch_, depth_}) ^ 0xB10LUMu);
+
+        for (int y = 0; y < dung.height; ++y) {
+            for (int x = 0; x < dung.width; ++x) {
+                if (dung.at(x, y).type != TileType::Floor) continue;
+
+                const uint8_t g = dung.biolumAtCached(x, y);
+                if (g < 14u) continue;
+
+                const TerrainMaterial mat = dung.materialAtCached(x, y);
+                // Restrict sources to materials we expect to plausibly glow.
+                if (mat != TerrainMaterial::Crystal &&
+                    mat != TerrainMaterial::Moss &&
+                    mat != TerrainMaterial::Metal &&
+                    mat != TerrainMaterial::Bone &&
+                    mat != TerrainMaterial::Dirt) {
+                    continue;
+                }
+
+                const uint32_t h = hash32(hashCombine(lvlSeed, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y))));
+                cands.push_back({ Vec2i{x, y}, g, mat, h });
+            }
+        }
+
+        if (!cands.empty()) {
+            // Greedy Poisson-style selection: take the brightest candidates first,
+            // then reject ones that are too close to previously accepted sources.
+            std::sort(cands.begin(), cands.end(), [](const GlowCand& a, const GlowCand& b) {
+                if (a.glow != b.glow) return a.glow > b.glow;
+                return a.h > b.h;
+            });
+
+            const bool minesTheme = (depth_ == Dungeon::MINES_DEPTH || depth_ == Dungeon::DEEP_MINES_DEPTH);
+            const int minSep = minesTheme ? 6 : 5;
+            const int maxSources = clampi(12 + depth_ / 2, 12, 22);
+
+            std::vector<Vec2i> chosen;
+            chosen.reserve(static_cast<size_t>(maxSources));
+
+            auto lerp8 = [&](uint8_t a, uint8_t b, float t) -> uint8_t {
+                const float v = (1.0f - t) * static_cast<float>(a) + t * static_cast<float>(b);
+                return static_cast<uint8_t>(clampi(static_cast<int>(v + 0.5f), 0, 255));
+            };
+
+            for (const auto& c : cands) {
+                if (static_cast<int>(chosen.size()) >= maxSources) break;
+
+                bool ok = true;
+                for (const auto& p : chosen) {
+                    if (chebyshev(p, c.pos) < minSep) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) continue;
+
+                chosen.push_back(c.pos);
+
+                int radius = 2 + static_cast<int>(c.glow) / 45;
+                radius = clampi(radius, 2, 5);
+
+                int intensity = 40 + static_cast<int>(c.glow);
+                if (c.mat == TerrainMaterial::Crystal) intensity += 20;
+                if (c.mat == TerrainMaterial::Moss) intensity += 5;
+                intensity = clampi(intensity, 35, 200);
+
+                // Slight per-source color variation (still deterministic).
+                const float t = static_cast<float>((c.h >> 8) & 0xFFu) / 255.0f;
+
+                Color tint{ 255, 255, 255, 255 };
+                switch (c.mat) {
+                    case TerrainMaterial::Moss:
+                        // green-cyan
+                        tint = Color{ lerp8(120, 160, t), lerp8(235, 255, t), lerp8(150, 210, t), 255 };
+                        break;
+                    case TerrainMaterial::Crystal:
+                        // cyan-purple
+                        tint = Color{ lerp8(150, 220, t), lerp8(200, 150, t), 255, 255 };
+                        break;
+                    case TerrainMaterial::Metal:
+                        // cold steel
+                        tint = Color{ 210, 228, 255, 255 };
+                        break;
+                    case TerrainMaterial::Bone:
+                        // eerie pale
+                        tint = Color{ 235, 230, 195, 255 };
+                        break;
+                    case TerrainMaterial::Dirt:
+                        // faint greenish spores
+                        tint = Color{ 200, 245, 210, 255 };
+                        break;
+                    default:
+                        tint = Color{ 255, 255, 255, 255 };
+                        break;
+                }
+
+                sources.push_back({ c.pos, radius, static_cast<uint8_t>(intensity), tint });
+            }
+        }
+    }
     // Apply each source using shadowcasting LOS from the source.
     std::vector<uint8_t> mask;
     for (const auto& s : sources) {

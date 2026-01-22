@@ -224,6 +224,18 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "proc_palette_strength" || key == "palette_strength" || key == "terrain_palette_strength") {
             int v = 0;
             if (parseInt(val, v)) s.procPaletteStrength = std::clamp(v, 0, 100);
+        } else if (key == "proc_palette_hue_deg" || key == "palette_hue" || key == "terrain_palette_hue") {
+            int v = 0;
+            if (parseInt(val, v)) s.procPaletteHueDeg = std::clamp(v, -45, 45);
+        } else if (key == "proc_palette_sat_pct" || key == "palette_sat" || key == "terrain_palette_sat") {
+            int v = 0;
+            if (parseInt(val, v)) s.procPaletteSaturationPct = std::clamp(v, -80, 80);
+        } else if (key == "proc_palette_bright_pct" || key == "palette_bright" || key == "terrain_palette_bright") {
+            int v = 0;
+            if (parseInt(val, v)) s.procPaletteBrightnessPct = std::clamp(v, -60, 60);
+        } else if (key == "proc_palette_spatial" || key == "palette_spatial" || key == "terrain_palette_spatial") {
+            int v = 0;
+            if (parseInt(val, v)) s.procPaletteSpatialStrength = std::clamp(v, 0, 100);
         } else if (key == "texture_cache_mb") {
             int v = 0;
             if (parseInt(val, v)) {
@@ -388,6 +400,16 @@ proc_palette = true
 # proc_palette_strength: 0..100
 # 0 disables the effect entirely; 100 is the most colorful.
 proc_palette_strength = 70
+
+# Optional palette tuning (cosmetic; applied only when proc_palette=true).
+# proc_palette_hue_deg: -45..45  (HSV hue rotation)
+# proc_palette_sat_pct: -80..80  (HSV saturation percentage)
+# proc_palette_bright_pct: -60..60  (HSV brightness/value percentage)
+# proc_palette_spatial: 0..100   (smooth "chroma field" variation across the map)
+proc_palette_hue_deg = 0
+proc_palette_sat_pct = 0
+proc_palette_bright_pct = 0
+proc_palette_spatial = 35
 
 # texture_cache_mb: 0 or 16..2048
 # Approximate VRAM budget for cached entity/item/projectile textures.

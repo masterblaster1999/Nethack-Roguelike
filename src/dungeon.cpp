@@ -4,6 +4,7 @@
 #include "terrain_sculpt.hpp"
 #include "pathfinding.hpp"
 #include "wfc.hpp"
+#include "proc_rd.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -110,6 +111,15 @@ void fillWalls(Dungeon& d) {
     d.openSpaceClearanceMaxAfter = 0;
     d.openSpacePillarCount = 0;
     d.openSpaceBoulderCount = 0;
+
+    d.heightfieldRidgePillarCount = 0;
+    d.heightfieldScreeBoulderCount = 0;
+
+
+    d.fluvialGullyCount = 0;
+    d.fluvialChasmCount = 0;
+    d.fluvialCausewayCount = 0;
+
 
     d.perimTunnelCarvedTiles = 0;
     d.perimTunnelHatchCount = 0;
@@ -11847,6 +11857,420 @@ static bool tryPlaceProceduralMazeVaultPrefab(Dungeon& d, RNG& rng, int depth, G
     return false;
 }
 
+
+// ------------------------------------------------------------
+// Procedural vault prefab: WFC "ruin pocket"
+//
+// A second fully procedural micro-vault generator.
+// Instead of a perfect-maze corridor, we use a tiny Wave Function Collapse
+// solver to synthesize an aperiodic ruin layout in a wall pocket.
+//
+// Goals:
+// - More visual variety than the perfect maze cache
+// - Always solvable: entrance -> treasure path exists
+// - Still optional and off-corridor, so it never gates the critical path
+// ------------------------------------------------------------
+
+enum class WfcVaultTile : uint8_t {
+    Wall = 0,
+    Floor,
+    Pillar,
+    Chasm,
+    Door,
+};
+
+static void buildWfcVaultRules(std::vector<uint32_t> allow[4]) {
+    constexpr int nTiles = 5;
+    const uint32_t ALL = (1u << nTiles) - 1u;
+
+    auto bit = [](WfcVaultTile t) -> uint32_t {
+        return 1u << static_cast<uint32_t>(t);
+    };
+
+    const uint32_t wallMask   = ALL;
+    const uint32_t floorMask  = bit(WfcVaultTile::Wall) | bit(WfcVaultTile::Floor) | bit(WfcVaultTile::Pillar) | bit(WfcVaultTile::Chasm) | bit(WfcVaultTile::Door);
+    const uint32_t pillarMask = bit(WfcVaultTile::Floor) | bit(WfcVaultTile::Wall);
+    const uint32_t chasmMask  = bit(WfcVaultTile::Floor) | bit(WfcVaultTile::Wall) | bit(WfcVaultTile::Chasm);
+    const uint32_t doorMask   = bit(WfcVaultTile::Wall) | bit(WfcVaultTile::Floor);
+
+    uint32_t m[nTiles];
+    m[static_cast<int>(WfcVaultTile::Wall)]   = wallMask;
+    m[static_cast<int>(WfcVaultTile::Floor)]  = floorMask;
+    m[static_cast<int>(WfcVaultTile::Pillar)] = pillarMask;
+    m[static_cast<int>(WfcVaultTile::Chasm)]  = chasmMask;
+    m[static_cast<int>(WfcVaultTile::Door)]   = doorMask;
+
+    for (int dir = 0; dir < 4; ++dir) {
+        allow[dir].assign(nTiles, 0u);
+        for (int t = 0; t < nTiles; ++t) {
+            allow[dir][t] = m[t];
+        }
+    }
+}
+
+static bool isWfcVaultPassableChar(char c) {
+    return c == '.' || c == '+' || c == 's' || c == 'L' || c == 'T' || c == 'K' || c == 'R';
+}
+
+static std::vector<std::string> makeWfcVaultBase(RNG& rng, int w, int h, char doorChar, int depth, int& outDoorX, int& outDoorY) {
+    outDoorX = 0;
+    outDoorY = 0;
+
+    std::vector<std::string> base(static_cast<size_t>(h), std::string(static_cast<size_t>(w), '#'));
+    if (w < 5 || h < 5) return base;
+
+    // Pick a boundary door (non-corner).
+    const int side = rng.range(0, 3); // 0=left,1=right,2=top,3=bottom
+    if (side == 0 || side == 1) {
+        const int y = (h > 6) ? rng.range(2, h - 3) : rng.range(1, h - 2);
+        outDoorY = y;
+        outDoorX = (side == 0) ? 0 : (w - 1);
+    } else {
+        const int x = (w > 6) ? rng.range(2, w - 3) : rng.range(1, w - 2);
+        outDoorX = x;
+        outDoorY = (side == 2) ? 0 : (h - 1);
+    }
+    base[static_cast<size_t>(outDoorY)][static_cast<size_t>(outDoorX)] = doorChar;
+
+    // WFC solve on full grid with fixed boundary/door.
+    constexpr int nTiles = 5;
+    static bool rulesBuilt = false;
+    static std::vector<uint32_t> allow[4];
+    if (!rulesBuilt) {
+        buildWfcVaultRules(allow);
+        rulesBuilt = true;
+    }
+
+    auto bit = [](WfcVaultTile t) -> uint32_t { return 1u << static_cast<uint32_t>(t); };
+
+    const uint32_t wallBit   = bit(WfcVaultTile::Wall);
+    const uint32_t floorBit  = bit(WfcVaultTile::Floor);
+    const uint32_t pillarBit = bit(WfcVaultTile::Pillar);
+    const uint32_t chasmBit  = bit(WfcVaultTile::Chasm);
+    const uint32_t doorBit   = bit(WfcVaultTile::Door);
+
+    const bool allowChasm = (depth >= 7) && rng.chance(0.28f);
+    const float dd = static_cast<float>(std::clamp(depth, 0, 12));
+
+    std::vector<float> weights(static_cast<size_t>(nTiles), 0.0f);
+    weights[static_cast<size_t>(WfcVaultTile::Wall)]   = 55.0f + 3.5f * dd;
+    weights[static_cast<size_t>(WfcVaultTile::Floor)]  = 100.0f;
+    weights[static_cast<size_t>(WfcVaultTile::Pillar)] = 9.0f + 0.9f * dd;
+    weights[static_cast<size_t>(WfcVaultTile::Chasm)]  = allowChasm ? (2.0f + 0.35f * std::max(0.0f, dd - 6.0f)) : 0.0f;
+    weights[static_cast<size_t>(WfcVaultTile::Door)]   = 1.0f;
+
+    // Domain setup: boundary fixed to wall, door fixed to Door.
+    std::vector<uint32_t> domains(static_cast<size_t>(w * h), wallBit | floorBit | pillarBit | (allowChasm ? chasmBit : 0u));
+    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
+
+    // Determine interior neighbor of the door to keep the entrance open.
+    Vec2i inDir{0, 0};
+    if (outDoorX == 0) inDir = {1, 0};
+    else if (outDoorX == w - 1) inDir = {-1, 0};
+    else if (outDoorY == 0) inDir = {0, 1};
+    else inDir = {0, -1};
+
+    const int ix = outDoorX + inDir.x;
+    const int iy = outDoorY + inDir.y;
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const bool boundary = (x == 0 || y == 0 || x == (w - 1) || y == (h - 1));
+            if (boundary) {
+                if (x == outDoorX && y == outDoorY) domains[idx(x, y)] = doorBit;
+                else domains[idx(x, y)] = wallBit;
+                continue;
+            }
+
+            uint32_t m = wallBit | floorBit | pillarBit;
+            if (allowChasm) m |= chasmBit;
+
+            // Keep a small safe buffer around the entrance so the pocket is legible.
+            const int md = std::abs(x - ix) + std::abs(y - iy);
+            if (md <= 2) {
+                m &= ~chasmBit;
+                if (md <= 1) m &= ~pillarBit;
+            }
+
+            domains[idx(x, y)] = m;
+        }
+    }
+
+    // Force the interior entrance cell to be floor.
+    if (ix >= 1 && ix <= w - 2 && iy >= 1 && iy <= h - 2) {
+        domains[idx(ix, iy)] = floorBit;
+    }
+
+    std::vector<uint8_t> sol;
+    wfc::SolveStats stats;
+    const bool ok = wfc::solve(w, h, nTiles, allow, weights, rng, domains, sol, /*maxRestarts=*/24, &stats);
+    (void)stats;
+    if (!ok || static_cast<int>(sol.size()) != (w * h)) return base;
+
+    // Build char grid from solution.
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const uint8_t t = sol[idx(x, y)];
+            char c = '#';
+            if (t == static_cast<uint8_t>(WfcVaultTile::Wall)) c = '#';
+            else if (t == static_cast<uint8_t>(WfcVaultTile::Floor)) c = '.';
+            else if (t == static_cast<uint8_t>(WfcVaultTile::Pillar)) c = 'P';
+            else if (t == static_cast<uint8_t>(WfcVaultTile::Chasm)) c = 'C';
+            else if (t == static_cast<uint8_t>(WfcVaultTile::Door)) c = doorChar;
+
+            base[static_cast<size_t>(y)][static_cast<size_t>(x)] = c;
+        }
+    }
+
+    // Validate: need a non-trivial reachable floor region.
+    std::vector<int> dist(static_cast<size_t>(w * h), -1);
+    std::deque<Vec2i> q;
+
+    auto passable = [&](int x, int y) -> bool {
+        if (x < 0 || y < 0 || x >= w || y >= h) return false;
+        return isWfcVaultPassableChar(base[static_cast<size_t>(y)][static_cast<size_t>(x)]);
+    };
+
+    if (!passable(ix, iy)) {
+        base[static_cast<size_t>(iy)][static_cast<size_t>(ix)] = '.';
+    }
+
+    dist[idx(ix, iy)] = 0;
+    q.push_back({ix, iy});
+
+    static const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+    while (!q.empty()) {
+        const Vec2i p = q.front();
+        q.pop_front();
+        const int d0 = dist[idx(p.x, p.y)];
+
+        for (int di = 0; di < 4; ++di) {
+            const int nx = p.x + dirs[di][0];
+            const int ny = p.y + dirs[di][1];
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            if (!passable(nx, ny)) continue;
+            if (dist[idx(nx, ny)] >= 0) continue;
+            dist[idx(nx, ny)] = d0 + 1;
+            q.push_back({nx, ny});
+        }
+    }
+
+    int floorCount = 0;
+    int wallCount = 0;
+    int obstacleCount = 0;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const char c = base[static_cast<size_t>(y)][static_cast<size_t>(x)];
+            if (c == '.') floorCount += 1;
+            else if (c == '#') wallCount += 1;
+            else if (c == 'P' || c == 'C') obstacleCount += 1;
+        }
+    }
+
+    (void)obstacleCount;
+
+    // Heuristic quality gates.
+    if (floorCount < (w * h) / 6) return base;
+    if (wallCount < (w * h) / 10) return base; // avoid "empty box" layouts
+
+    // Pick farthest reachable '.' tile as treasure.
+    int bestD = -1;
+    std::vector<Vec2i> best;
+
+    for (int y = 1; y < h - 1; ++y) {
+        for (int x = 1; x < w - 1; ++x) {
+            if (base[static_cast<size_t>(y)][static_cast<size_t>(x)] != '.') continue;
+            const int d0 = dist[idx(x, y)];
+            if (d0 <= 0) continue;
+
+            if (d0 > bestD) {
+                bestD = d0;
+                best.clear();
+                best.push_back({x, y});
+            } else if (d0 == bestD) {
+                best.push_back({x, y});
+            }
+        }
+    }
+
+    if (best.empty() || bestD < 3) return base;
+
+    const Vec2i t = best[static_cast<size_t>(rng.range(0, static_cast<int>(best.size()) - 1))];
+    base[static_cast<size_t>(t.y)][static_cast<size_t>(t.x)] = 'T';
+
+    // Bonus: drop a tool in a reachable dead-end.
+    std::vector<Vec2i> dead;
+    dead.reserve(32);
+
+    auto countPassNeighbors = [&](int x, int y) -> int {
+        int n = 0;
+        for (int di = 0; di < 4; ++di) {
+            const int nx = x + dirs[di][0];
+            const int ny = y + dirs[di][1];
+            if (passable(nx, ny)) n += 1;
+        }
+        return n;
+    };
+
+    for (int y = 1; y < h - 1; ++y) {
+        for (int x = 1; x < w - 1; ++x) {
+            if (base[static_cast<size_t>(y)][static_cast<size_t>(x)] != '.') continue;
+            if (x == t.x && y == t.y) continue;
+            const int d0 = dist[idx(x, y)];
+            if (d0 < 0) continue;
+            if (d0 < 2) continue;
+            if (countPassNeighbors(x, y) <= 1) dead.push_back({x, y});
+        }
+    }
+
+    if (!dead.empty() && rng.chance(0.65f)) {
+        const Vec2i p = dead[static_cast<size_t>(rng.range(0, static_cast<int>(dead.size()) - 1))];
+        const char tool = (rng.chance(depth >= 6 ? 0.70f : 0.40f)) ? 'R' : 'K';
+        base[static_cast<size_t>(p.y)][static_cast<size_t>(p.x)] = tool;
+    }
+
+    return base;
+}
+
+static bool tryPlaceProceduralWfcVaultPrefab(Dungeon& d, RNG& rng, int depth, GenKind g) {
+    (void)g;
+
+    int w = 9;
+    int h = 7;
+
+    if (depth >= 5 && rng.chance(0.55f)) w = 11;
+    if (depth >= 7 && rng.chance(0.50f)) h = 9;
+    if (depth >= 10 && rng.chance(0.35f)) { w = 11; h = 9; }
+
+    // Entrance style: deeper floors trend toward secret/locked finds.
+    char doorChar = '+';
+    const float pLocked = (depth >= 8) ? 0.12f : 0.0f;
+    const float pSecret = std::clamp(0.16f + 0.05f * static_cast<float>(std::max(0, depth - 3)), 0.16f, 0.70f);
+    if (pLocked > 0.0f && rng.chance(pLocked)) doorChar = 'L';
+    else if (rng.chance(pSecret)) doorChar = 's';
+
+    int doorX = 0;
+    int doorY = 0;
+
+    // Try a few WFC layouts; some seeds will produce low-quality or disconnected pockets.
+    std::vector<std::string> base;
+    const int maxLayoutAttempts = 10;
+    for (int a = 0; a < maxLayoutAttempts; ++a) {
+        base = makeWfcVaultBase(rng, w, h, doorChar, depth, doorX, doorY);
+
+        bool hasT = false;
+        for (const auto& row : base) {
+            if (row.find('T') != std::string::npos) { hasT = true; break; }
+        }
+        if (hasT) break;
+
+        // Occasionally tweak size slightly to avoid repeated contradictions on unlucky seeds.
+        if (a == 4 && w == 9 && depth >= 6) w = 11;
+        if (a == 7 && h == 7 && depth >= 7) h = 9;
+    }
+
+    bool hasTreasure = false;
+    for (const auto& row : base) {
+        if (row.find('T') != std::string::npos) { hasTreasure = true; break; }
+    }
+    if (!hasTreasure) return false;
+
+    // Build rotated/mirrored variants so we can attach to any corridor-facing wall.
+    std::vector<PrefabVariant> variants;
+    variants.reserve(8);
+    for (int rot = 0; rot < 4; ++rot) {
+        for (int mirror = 0; mirror < 2; ++mirror) {
+            PrefabVariant v;
+            if (buildPrefabVariantFromGrid(base, w, h, rot, mirror != 0, v)) {
+                variants.push_back(std::move(v));
+            }
+        }
+    }
+    if (variants.empty()) return false;
+
+    const Vec2i dirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+    auto tooCloseToStairsDoor = [&](int x, int y) -> bool {
+        const int du = (d.inBounds(d.stairsUp.x, d.stairsUp.y))
+            ? (std::abs(x - d.stairsUp.x) + std::abs(y - d.stairsUp.y))
+            : 9999;
+        const int dd = (d.inBounds(d.stairsDown.x, d.stairsDown.y))
+            ? (std::abs(x - d.stairsDown.x) + std::abs(y - d.stairsDown.y))
+            : 9999;
+        return du <= 4 || dd <= 4;
+    };
+
+    auto hasBonusItemAt = [&](const Vec2i& p) -> bool {
+        for (const auto& it : d.bonusItemSpawns) {
+            if (it.pos.x == p.x && it.pos.y == p.y) return true;
+        }
+        return false;
+    };
+
+    const int maxTries = 500;
+    for (int tries = 0; tries < maxTries; ++tries) {
+        const int x = rng.range(2, d.width - 3);
+        const int y = rng.range(2, d.height - 3);
+
+        if (!d.inBounds(x, y)) continue;
+        if (d.at(x, y).type != TileType::Wall) continue;
+        if (tooCloseToStairsDoor(x, y)) continue;
+
+        // Avoid clustering doors; these should feel like tucked-away finds.
+        if (anyDoorInRadius(d, x, y, 2)) continue;
+
+        int adjFloors = 0;
+        Vec2i outDir{0, 0};
+        for (const Vec2i& dv : dirs) {
+            const int nx = x + dv.x;
+            const int ny = y + dv.y;
+            if (!d.inBounds(nx, ny)) continue;
+            if (d.at(nx, ny).type == TileType::Floor) {
+                adjFloors += 1;
+                outDir = dv;
+            }
+        }
+        if (adjFloors != 1) continue;
+
+        const int fx = x + outDir.x;
+        const int fy = y + outDir.y;
+        if (!d.inBounds(fx, fy)) continue;
+        if (d.at(fx, fy).type != TileType::Floor) continue;
+
+        // Avoid attaching directly into special rooms (shops/shrines/etc).
+        if (const Room* rr = findRoomContaining(d, fx, fy)) {
+            if (rr->type != RoomType::Normal) continue;
+        }
+
+        // Pick a variant whose entrance faces the corridor direction.
+        std::vector<int> matches;
+        matches.reserve(variants.size());
+        for (int i = 0; i < static_cast<int>(variants.size()); ++i) {
+            if (variants[static_cast<size_t>(i)].outsideDir == outDir) matches.push_back(i);
+        }
+        if (matches.empty()) continue;
+
+        const int start = rng.range(0, static_cast<int>(matches.size()) - 1);
+        for (int k = 0; k < static_cast<int>(matches.size()); ++k) {
+            const PrefabVariant& v = variants[static_cast<size_t>(matches[static_cast<size_t>((start + k) % matches.size())])];
+
+            const int x0 = x - v.doorX;
+            const int y0 = y - v.doorY;
+
+            if (!applyPrefabAt(d, v, x0, y0)) continue;
+
+            // If this is a locked entrance, drop a key right outside so the micro-vault is always solvable.
+            if (v.doorChar == 'L' && d.inBounds(fx, fy) && !hasBonusItemAt({fx, fy})) {
+                d.bonusItemSpawns.push_back({{fx, fy}, ItemKind::Key, 1});
+            }
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool maybePlaceVaultPrefabs(Dungeon& d, RNG& rng, int depth, GenKind g) {
     d.vaultPrefabCount = 0;
 
@@ -11954,13 +12378,22 @@ bool maybePlaceVaultPrefabs(Dungeon& d, RNG& rng, int depth, GenKind g) {
         return &kPrefabs[0];
     };
 
-    // Mix in procedural maze-vaults for extra variety (still rare).
+    // Mix in *procedural* micro-vaults for extra variety (still rare):
+    //  - a perfect-maze cache
+    //  - a WFC-synthesized "ruin pocket"
     float pProc = 0.0f;
     if (depth >= 2) pProc = 0.22f;
     if (depth >= 6) pProc = 0.32f;
     if (depth >= 9) pProc = 0.38f;
     if (g == GenKind::Cavern) pProc *= 0.60f;
     pProc = std::clamp(pProc, 0.0f, 0.45f);
+
+    float pWfc = 0.0f;
+    if (depth >= 4) pWfc = 0.45f;
+    if (depth >= 7) pWfc = 0.55f;
+    if (depth >= 10) pWfc = 0.62f;
+    if (g == GenKind::Cavern) pWfc *= 0.75f;
+    pWfc = std::clamp(pWfc, 0.0f, 0.75f);
 
     int placed = 0;
     for (int i = 0; i < want; ++i) {
@@ -11969,10 +12402,27 @@ bool maybePlaceVaultPrefabs(Dungeon& d, RNG& rng, int depth, GenKind g) {
         for (int attempt = 0; attempt < 4 && !ok; ++attempt) {
             bool didProc = false;
 
-            // First: sometimes try a fully procedural micro-vault (maze cache).
+            // First: sometimes try a fully procedural micro-vault.
+            // We pick between the maze-cache and WFC-ruin styles.
             if (pProc > 0.0f && rng.chance(pProc)) {
                 didProc = true;
-                if (tryPlaceProceduralMazeVaultPrefab(d, rng, depth, g)) {
+
+                bool procOk = false;
+                if (depth >= 4 && pWfc > 0.0f && rng.chance(pWfc)) {
+                    procOk = tryPlaceProceduralWfcVaultPrefab(d, rng, depth, g);
+                    if (!procOk) {
+                        // Fallback to maze if WFC couldn't find a valid layout/fit.
+                        procOk = tryPlaceProceduralMazeVaultPrefab(d, rng, depth, g);
+                    }
+                } else {
+                    procOk = tryPlaceProceduralMazeVaultPrefab(d, rng, depth, g);
+                    // Occasionally try WFC as a secondary attempt for variety.
+                    if (!procOk && depth >= 4 && pWfc > 0.0f && rng.chance(0.55f)) {
+                        procOk = tryPlaceProceduralWfcVaultPrefab(d, rng, depth, g);
+                    }
+                }
+
+                if (procOk) {
                     d.vaultPrefabCount += 1;
                     ok = true;
                     break;
@@ -11991,7 +12441,13 @@ bool maybePlaceVaultPrefabs(Dungeon& d, RNG& rng, int depth, GenKind g) {
             // If we didn't roll a procedural attempt and the static attempt failed,
             // try the procedural one as a last chance (helps on maps with little wall mass).
             if (!didProc && pProc > 0.0f && rng.chance(0.35f)) {
-                if (tryPlaceProceduralMazeVaultPrefab(d, rng, depth, g)) {
+                bool procOk = false;
+                if (depth >= 4 && pWfc > 0.0f && rng.chance(pWfc)) {
+                    procOk = tryPlaceProceduralWfcVaultPrefab(d, rng, depth, g);
+                }
+                if (!procOk) procOk = tryPlaceProceduralMazeVaultPrefab(d, rng, depth, g);
+
+                if (procOk) {
                     d.vaultPrefabCount += 1;
                     ok = true;
                     break;
@@ -18879,6 +19335,942 @@ static int countDeadEnds(const Dungeon& d) {
     return dead;
 }
 
+
+// -----------------------------------------------------------------------------
+// Macro terrain: warped fBm heightfield
+//
+// This is a late post-pass that does NOT alter the fundamental connectivity of the floor.
+// Instead, it uses a deterministic "geology" field (height + ridges + slope) to place
+// coherent pillar spines (ridges) and small boulder scree clusters (steep slopes).
+//
+// Safety rules:
+// - Never touches stairs tiles or their landing pads
+// - Never touches the shortest stairs path "halo"
+// - Avoids doors and special rooms
+// - Rolls back any placement group that would disconnect stairs
+// -----------------------------------------------------------------------------
+
+inline float hfSmooth3(float t) { return t * t * (3.0f - 2.0f * t); }
+inline float hfLerp(float a, float b, float t) { return a + (b - a) * t; }
+
+inline uint32_t hfHash2(uint32_t seed, int x, int y) {
+    // hashCombine is stable and cheap; casting negatives to uint32_t is fine (wraparound)
+    // and still produces deterministic variation.
+    const uint32_t hx = hashCombine(seed ^ 0xB5297A4Du, static_cast<uint32_t>(x));
+    return hash32(hashCombine(hx, static_cast<uint32_t>(y)));
+}
+
+float hfValueNoise(uint32_t seed, float x, float y) {
+    const int xi = static_cast<int>(std::floor(x));
+    const int yi = static_cast<int>(std::floor(y));
+    const float fx = x - static_cast<float>(xi);
+    const float fy = y - static_cast<float>(yi);
+
+    const float u = hfSmooth3(fx);
+    const float v = hfSmooth3(fy);
+
+    const float v00 = rand01(hfHash2(seed, xi, yi));
+    const float v10 = rand01(hfHash2(seed, xi + 1, yi));
+    const float v01 = rand01(hfHash2(seed, xi, yi + 1));
+    const float v11 = rand01(hfHash2(seed, xi + 1, yi + 1));
+
+    const float a = hfLerp(v00, v10, u);
+    const float b = hfLerp(v01, v11, u);
+    return hfLerp(a, b, v);
+}
+
+// Returns fBm in [-1, 1].
+float hfFbm(uint32_t seed, float x, float y, int octaves) {
+    float sum = 0.0f;
+    float amp = 1.0f;
+    float norm = 0.0f;
+    float freq = 1.0f;
+
+    octaves = std::clamp(octaves, 1, 8);
+
+    for (int i = 0; i < octaves; ++i) {
+        const uint32_t s = seed ^ hash32(static_cast<uint32_t>(i) * 0x9E3779B9u);
+        const float n01 = hfValueNoise(s, x * freq, y * freq);
+        const float n = n01 * 2.0f - 1.0f;
+        sum += n * amp;
+        norm += amp;
+        amp *= 0.5f;
+        freq *= 2.0f;
+    }
+
+    if (norm <= 0.0f) return 0.0f;
+    return sum / norm;
+}
+
+void hfDomainWarp(uint32_t seed, float x, float y, float& outX, float& outY) {
+    // Low-frequency warp field; keeps features organic and less grid-aligned.
+    const float warpFreq = 0.85f;
+    const float warpAmp = 0.60f;
+
+    const float wx = hfFbm(seed ^ 0xA17D2C3Bu, x * warpFreq, y * warpFreq, 3);
+    const float wy = hfFbm(seed ^ 0xC0FFEE11u, x * warpFreq, y * warpFreq, 3);
+
+    outX = x + wx * warpAmp;
+    outY = y + wy * warpAmp;
+}
+
+float hfHeight01(uint32_t seed, float nx, float ny) {
+    // nx,ny expected in [0,1]. Scale picks the "macro feature" size.
+    const float scale = 3.35f;
+
+    float x = nx * scale;
+    float y = ny * scale;
+
+    float wx = x;
+    float wy = y;
+    hfDomainWarp(seed, x, y, wx, wy);
+
+    const float n = hfFbm(seed ^ 0x51F15EEDu, wx, wy, 5);
+    return std::clamp(0.5f + 0.5f * n, 0.0f, 1.0f);
+}
+
+float hfRidge01(uint32_t seed, float nx, float ny) {
+    const float scale = 3.35f;
+
+    float x = nx * scale;
+    float y = ny * scale;
+
+    float wx = x;
+    float wy = y;
+    hfDomainWarp(seed ^ 0x9E3779B9u, x, y, wx, wy);
+
+    const float n = hfFbm(seed ^ 0xD00DFEEDu, wx, wy, 4);
+    const float n01 = std::clamp(0.5f + 0.5f * n, 0.0f, 1.0f);
+
+    float ridge = 1.0f - std::fabs(n01 * 2.0f - 1.0f); // 0..1, peaks at mid-values
+    ridge = ridge * ridge; // sharpen
+    return std::clamp(ridge, 0.0f, 1.0f);
+}
+
+uint32_t heightfieldSeedKey(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth, const EndlessStratumInfo& st) {
+    uint32_t k = hashCombine(worldSeed ^ 0xA8173D55u, static_cast<uint32_t>(branch));
+    k = hashCombine(k, hashCombine(static_cast<uint32_t>(depth), static_cast<uint32_t>(maxDepth)));
+    if (st.seed != 0u) {
+        // Align macro terrain to Infinite World strata bands when applicable.
+        k = hashCombine(k, st.seed ^ 0x51A7D00Du);
+    }
+    k = hash32(k);
+    return k ? k : 1u;
+}
+
+void hfMarkDisk(std::vector<uint8_t>& mask, int w, int h, int cx, int cy, int r) {
+    r = std::max(0, r);
+    const int r2 = r * r;
+    for (int oy = -r; oy <= r; ++oy) {
+        for (int ox = -r; ox <= r; ++ox) {
+            if (ox * ox + oy * oy > r2) continue;
+            const int x = cx + ox;
+            const int y = cy + oy;
+            if (x < 0 || y < 0 || x >= w || y >= h) continue;
+            mask[static_cast<size_t>(y * w + x)] = 1u;
+        }
+    }
+}
+
+void hfReserveShortestStairsHalo(const Dungeon& d, std::vector<uint8_t>& mask, int haloR) {
+    if (!d.inBounds(d.stairsUp.x, d.stairsUp.y)) return;
+    if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) return;
+
+    const auto dist = bfsDistanceMap(d, d.stairsUp);
+    const auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * d.width + x); };
+
+    const size_t endIdx = idx(d.stairsDown.x, d.stairsDown.y);
+    if (endIdx >= dist.size()) return;
+    int cd = dist[endIdx];
+    if (cd < 0) return;
+
+    Vec2i cur = d.stairsDown;
+    const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    // Walk "downhill" in the distance field to reconstruct one shortest path.
+    for (int guard = 0; guard < d.width * d.height + 8; ++guard) {
+        hfMarkDisk(mask, d.width, d.height, cur.x, cur.y, haloR);
+        if (cur.x == d.stairsUp.x && cur.y == d.stairsUp.y) break;
+
+        bool stepped = false;
+        for (auto& dv : dirs) {
+            const int nx = cur.x + dv[0];
+            const int ny = cur.y + dv[1];
+            if (!d.inBounds(nx, ny)) continue;
+            const size_t ni = idx(nx, ny);
+            if (ni >= dist.size()) continue;
+            if (dist[ni] == cd - 1) {
+                cur = {nx, ny};
+                cd = dist[ni];
+                stepped = true;
+                break;
+            }
+        }
+
+        if (!stepped) break;
+        if (cd <= 0) break;
+    }
+}
+
+int passableCardinalNeighbors(const Dungeon& d, int x, int y) {
+    static const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+    int n = 0;
+    for (auto& dv : dirs) {
+        const int nx = x + dv[0];
+        const int ny = y + dv[1];
+        if (!d.inBounds(nx, ny)) continue;
+        if (d.isPassable(nx, ny)) ++n;
+    }
+    return n;
+}
+
+bool hfIsLocalMax(const std::vector<float>& field, int w, int h, int x, int y) {
+    const float v = field[static_cast<size_t>(y * w + x)];
+    for (int oy = -1; oy <= 1; ++oy) {
+        for (int ox = -1; ox <= 1; ++ox) {
+            if (ox == 0 && oy == 0) continue;
+            const int nx = x + ox;
+            const int ny = y + oy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            const float nv = field[static_cast<size_t>(ny * w + nx)];
+            if (nv > v) return false;
+        }
+    }
+    return true;
+}
+
+void applyHeightfieldTerrain(Dungeon& d, DungeonBranch branch, int depth, int maxDepth, GenKind g, uint32_t worldSeed, const EndlessStratumInfo& st) {
+    d.heightfieldRidgePillarCount = 0;
+    d.heightfieldScreeBoulderCount = 0;
+
+    if (branch != DungeonBranch::Main) return;
+    if (d.width <= 0 || d.height <= 0) return;
+
+    const int W = d.width;
+    const int H = d.height;
+    const int N = W * H;
+
+    const uint32_t seed = heightfieldSeedKey(worldSeed, branch, depth, maxDepth, st);
+
+    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * W + x); };
+
+    // Precompute height + ridge fields.
+    std::vector<float> height(static_cast<size_t>(N), 0.0f);
+    std::vector<float> ridge(static_cast<size_t>(N), 0.0f);
+
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const float nx = (static_cast<float>(x) + 0.5f) / static_cast<float>(W);
+            const float ny = (static_cast<float>(y) + 0.5f) / static_cast<float>(H);
+            height[idx(x, y)] = hfHeight01(seed, nx, ny);
+            ridge[idx(x, y)] = hfRidge01(seed, nx, ny);
+        }
+    }
+
+    // Approximate slope magnitude from the height field.
+    std::vector<float> slope(static_cast<size_t>(N), 0.0f);
+    auto hAt = [&](int x, int y) -> float {
+        x = std::clamp(x, 0, W - 1);
+        y = std::clamp(y, 0, H - 1);
+        return height[idx(x, y)];
+    };
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const float dx = hAt(x + 1, y) - hAt(x - 1, y);
+            const float dy = hAt(x, y + 1) - hAt(x, y - 1);
+            slope[idx(x, y)] = std::sqrt(dx * dx + dy * dy);
+        }
+    }
+
+    // Reserved mask (1 = do not modify).
+    std::vector<uint8_t> reserved(static_cast<size_t>(N), 0u);
+
+    // Stairs halos: keep landings readable and avoid cheap stair traps.
+    if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) hfMarkDisk(reserved, W, H, d.stairsUp.x, d.stairsUp.y, 2);
+    if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) hfMarkDisk(reserved, W, H, d.stairsDown.x, d.stairsDown.y, 2);
+
+    // Shortest-path halo between stairs (keeps at least one clean "spine").
+    hfReserveShortestStairsHalo(d, reserved, 1);
+
+    // Doors (and near-doors) are always left unobstructed.
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            if (isDoorTileType(d.at(x, y).type)) {
+                hfMarkDisk(reserved, W, H, x, y, 1);
+            }
+        }
+    }
+
+    // Avoid special rooms entirely.
+    for (const Room& rr : d.rooms) {
+        if (rr.type == RoomType::Normal) continue;
+
+        // Expand by 1 to avoid placing right on special-room borders.
+        const int x0 = std::max(0, rr.x - 1);
+        const int y0 = std::max(0, rr.y - 1);
+        const int x1 = std::min(W - 1, rr.x2());
+        const int y1 = std::min(H - 1, rr.y2());
+
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
+                reserved[idx(x, y)] = 1u;
+            }
+        }
+    }
+
+    // Intensity tuning by generator kind.
+    float styleMul = 1.0f;
+    switch (g) {
+        case GenKind::Cavern:     styleMul = 1.30f; break;
+        case GenKind::Warrens:    styleMul = 1.15f; break;
+        case GenKind::Maze:       styleMul = 0.85f; break;
+        case GenKind::RoomsGraph: styleMul = 0.85f; break;
+        case GenKind::RoomsBsp:   styleMul = 0.80f; break;
+        case GenKind::Catacombs:  styleMul = 0.90f; break;
+        case GenKind::Mines:      styleMul = 0.95f; break;
+        default:                 styleMul = 1.0f; break;
+    }
+
+    const float depth01 = (maxDepth > 0)
+        ? std::clamp(static_cast<float>(std::min(depth, maxDepth)) / static_cast<float>(maxDepth), 0.0f, 1.0f)
+        : 0.0f;
+
+    // Use passable area rather than total area so caverns (high open area) naturally get more features.
+    int passable = 0;
+    for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) if (d.isPassable(x, y)) ++passable;
+
+    const float areaF = static_cast<float>(std::max(1, passable));
+
+    const int ridgeTarget = static_cast<int>(std::clamp(styleMul * (areaF / 430.0f) * (0.75f + 0.65f * depth01) + 6.0f, 6.0f, 48.0f));
+    const int screeTarget = static_cast<int>(std::clamp(styleMul * (areaF / 320.0f) * (0.70f + 0.75f * depth01) + 8.0f, 8.0f, 80.0f));
+
+    // -------------------------------------------------------------------------
+    // Ridge pillars: place on ridge maxima with spacing, rollback on failure.
+    // -------------------------------------------------------------------------
+    struct Cand { int x; int y; float v; };
+    std::vector<Cand> ridgeCands;
+    ridgeCands.reserve(static_cast<size_t>(N / 4));
+
+    for (int y = 1; y < H - 1; ++y) {
+        for (int x = 1; x < W - 1; ++x) {
+            const size_t ii = idx(x, y);
+            if (reserved[ii]) continue;
+            if (d.at(x, y).type != TileType::Floor) continue;
+            const float rv = ridge[ii];
+            if (rv < 0.55f) continue;
+            if (!hfIsLocalMax(ridge, W, H, x, y)) continue;
+            if (passableCardinalNeighbors(d, x, y) < 3) continue; // avoid narrow corridors
+            ridgeCands.push_back({x, y, rv});
+        }
+    }
+
+    std::sort(ridgeCands.begin(), ridgeCands.end(), [](const Cand& a, const Cand& b) { return a.v > b.v; });
+
+    const int minSep = (g == GenKind::Cavern) ? 4 : 3;
+    const int minSep2 = minSep * minSep;
+
+    std::vector<Vec2i> placedPillars;
+    placedPillars.reserve(static_cast<size_t>(ridgeTarget));
+
+    int placedRidge = 0;
+    for (const Cand& c : ridgeCands) {
+        if (placedRidge >= ridgeTarget) break;
+
+        bool close = false;
+        for (const Vec2i& p : placedPillars) {
+            const int dx = c.x - p.x;
+            const int dy = c.y - p.y;
+            if (dx * dx + dy * dy < minSep2) { close = true; break; }
+        }
+        if (close) continue;
+
+        Tile& t = d.at(c.x, c.y);
+        if (t.type != TileType::Floor) continue;
+
+        t.type = TileType::Pillar;
+        if (!stairsConnected(d)) {
+            t.type = TileType::Floor;
+            continue;
+        }
+
+        placedPillars.push_back({c.x, c.y});
+        placedRidge += 1;
+    }
+
+    d.heightfieldRidgePillarCount = placedRidge;
+
+    // -------------------------------------------------------------------------
+    // Scree boulders: clustered boulders on steep slopes.
+    // Rollback whole clusters on failure.
+    // -------------------------------------------------------------------------
+    struct Seed { int x; int y; float s; };
+    std::vector<Seed> slopeSeeds;
+    slopeSeeds.reserve(static_cast<size_t>(N / 3));
+
+    for (int y = 1; y < H - 1; ++y) {
+        for (int x = 1; x < W - 1; ++x) {
+            const size_t ii = idx(x, y);
+            if (reserved[ii]) continue;
+            if (d.at(x, y).type != TileType::Floor) continue;
+
+            const float sv = slope[ii];
+            if (sv < 0.08f) continue;
+            if (passableCardinalNeighbors(d, x, y) < 3) continue;
+            slopeSeeds.push_back({x, y, sv});
+        }
+    }
+
+    std::sort(slopeSeeds.begin(), slopeSeeds.end(), [](const Seed& a, const Seed& b) { return a.s > b.s; });
+
+    const int clustersTarget = std::clamp(screeTarget / 7, 2, 10);
+    const int clusterSep = 8;
+    const int clusterSep2 = clusterSep * clusterSep;
+
+    // Precompute offsets in a radius-3 disk (excluding center), sorted by distance for natural clusters.
+    std::vector<Vec2i> offsets;
+    offsets.reserve(64);
+    const int R = 3;
+    for (int oy = -R; oy <= R; ++oy) {
+        for (int ox = -R; ox <= R; ++ox) {
+            if (ox == 0 && oy == 0) continue;
+            if (ox * ox + oy * oy > R * R) continue;
+            offsets.push_back({ox, oy});
+        }
+    }
+    std::sort(offsets.begin(), offsets.end(), [](const Vec2i& a, const Vec2i& b) {
+        const int da = a.x * a.x + a.y * a.y;
+        const int db = b.x * b.x + b.y * b.y;
+        if (da != db) return da < db;
+        if (a.y != b.y) return a.y < b.y;
+        return a.x < b.x;
+    });
+
+    std::vector<Vec2i> clusterCenters;
+    clusterCenters.reserve(static_cast<size_t>(clustersTarget));
+
+    int clustersPlaced = 0;
+    int bouldersPlaced = 0;
+
+    for (const Seed& s : slopeSeeds) {
+        if (clustersPlaced >= clustersTarget) break;
+        if (bouldersPlaced >= screeTarget) break;
+
+        bool close = false;
+        for (const Vec2i& c : clusterCenters) {
+            const int dx = s.x - c.x;
+            const int dy = s.y - c.y;
+            if (dx * dx + dy * dy < clusterSep2) { close = true; break; }
+        }
+        if (close) continue;
+
+        // Deterministic "cluster personality".
+        const uint32_t sh = hash32(hashCombine(seed, hashCombine(static_cast<uint32_t>(s.x), static_cast<uint32_t>(s.y))));
+        int want = 3 + static_cast<int>(sh % 5u); // 3..7
+        // Slightly larger clusters on steep seeds.
+        if (s.s > 0.14f) want += 2;
+        want = std::clamp(want, 3, 10);
+
+        // Order offsets by a per-cluster hash so clusters look less uniform.
+        struct Off { uint32_t k; Vec2i o; };
+        std::vector<Off> ordered;
+        ordered.reserve(offsets.size());
+        for (size_t i = 0; i < offsets.size(); ++i) {
+            const uint32_t k = hash32(hashCombine(sh, static_cast<uint32_t>(i)));
+            ordered.push_back({k, offsets[i]});
+        }
+        std::sort(ordered.begin(), ordered.end(), [](const Off& a, const Off& b) { return a.k < b.k; });
+
+        std::vector<Vec2i> changed;
+        changed.reserve(static_cast<size_t>(want));
+
+        for (const Off& of : ordered) {
+            if (static_cast<int>(changed.size()) >= want) break;
+            if (bouldersPlaced + static_cast<int>(changed.size()) >= screeTarget) break;
+
+            const int x = s.x + of.o.x;
+            const int y = s.y + of.o.y;
+            if (!d.inBounds(x, y)) continue;
+
+            const size_t ii = idx(x, y);
+            if (reserved[ii]) continue;
+
+            Tile& t = d.at(x, y);
+            if (t.type != TileType::Floor) continue;
+
+            // Keep the cluster on the same "slope band".
+            if (slope[ii] < s.s * 0.55f) continue;
+
+            if (passableCardinalNeighbors(d, x, y) < 3) continue;
+
+            // Prevent excessive clumping: allow at most a couple adjacent boulders.
+            int near = 0;
+            for (int oy = -1; oy <= 1; ++oy) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    if (ox == 0 && oy == 0) continue;
+                    const int nx = x + ox;
+                    const int ny = y + oy;
+                    if (!d.inBounds(nx, ny)) continue;
+                    if (d.at(nx, ny).type == TileType::Boulder) near += 1;
+                }
+            }
+            if (near >= 3) continue;
+
+            t.type = TileType::Boulder;
+            changed.push_back({x, y});
+        }
+
+        if (changed.empty()) continue;
+
+        if (!stairsConnected(d)) {
+            // Rollback this cluster.
+            for (const Vec2i& p : changed) {
+                if (d.inBounds(p.x, p.y) && d.at(p.x, p.y).type == TileType::Boulder) {
+                    d.at(p.x, p.y).type = TileType::Floor;
+                }
+            }
+            continue;
+        }
+
+        // Commit cluster.
+        clusterCenters.push_back({s.x, s.y});
+        clustersPlaced += 1;
+        bouldersPlaced += static_cast<int>(changed.size());
+    }
+
+    d.heightfieldScreeBoulderCount = bouldersPlaced;
+}
+
+
+// -------------------------------------------------------------------------
+// Fluvial erosion gullies (drainage network over the macro heightfield)
+//
+// This pass carves a few narrow Chasm "gullies" that roughly follow a
+// deterministic drainage field derived from the same macro heightfield used by
+// applyHeightfieldTerrain(). Unlike the run faultline / ravine seams, gullies
+// form shorter dendritic cuts that feel like local erosion.
+// Safety rules:
+// - Never touch stairs or doors.
+// - Reserve a small halo around the shortest stairs path (keeps a clean spine).
+// - Avoid special rooms entirely.
+// - Always preserve (or repair) stairs connectivity; rollback on failure.
+// -------------------------------------------------------------------------
+
+static uint32_t fluvialSeedKey(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth, const EndlessStratumInfo& st) {
+    uint32_t k = hashCombine(worldSeed ^ 0xF17A51A1u, static_cast<uint32_t>(branch));
+    k = hashCombine(k, static_cast<uint32_t>(depth));
+    k = hashCombine(k, static_cast<uint32_t>(maxDepth));
+    if (st.index >= 0) k = hashCombine(k, st.seed ^ 0xA11A57A1u);
+    k = hash32(k);
+    if (k == 0u) k = 1u;
+    return k;
+}
+
+static void applyFluvialGullies(Dungeon& d, DungeonBranch branch, int depth, int maxDepth, GenKind g, uint32_t worldSeed, const EndlessStratumInfo& st) {
+    d.fluvialGullyCount = 0;
+    d.fluvialChasmCount = 0;
+    d.fluvialCausewayCount = 0;
+
+    if (branch != DungeonBranch::Main) return;
+    if (d.width < 22 || d.height < 16) return;
+
+    const int W = d.width;
+    const int H = d.height;
+    const int N = W * H;
+
+    // Deterministic per-run/per-depth RNG independent of candidate RNG.
+    const uint32_t seed = fluvialSeedKey(worldSeed, branch, depth, maxDepth, st);
+    RNG rr(seed);
+
+    // Modulate chance by generator kind and other macro terrain features.
+    float p = 0.14f + 0.017f * static_cast<float>(std::max(0, depth));
+    if (g == GenKind::Maze) p *= 0.35f;
+    if (g == GenKind::RoomsBsp) p *= 0.90f;
+    if (g == GenKind::RoomsGraph) p *= 0.90f;
+    if (g == GenKind::Mines) p *= 1.05f;
+    if (g == GenKind::Cavern) p *= 1.20f;
+
+    if (d.hasCavernLake) p *= 0.55f;
+    if (d.runFaultActive) p *= 0.65f;
+
+    p = std::clamp(p, 0.0f, 0.55f);
+    if (!rr.chance(p)) return;
+
+    auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * W + x); };
+
+    // Reserved mask (1 = do not modify).
+    std::vector<uint8_t> reserved(static_cast<size_t>(N), 0u);
+
+    // Keep landings readable and avoid cheap stair traps.
+    if (d.inBounds(d.stairsUp.x, d.stairsUp.y)) hfMarkDisk(reserved, W, H, d.stairsUp.x, d.stairsUp.y, 3);
+    if (d.inBounds(d.stairsDown.x, d.stairsDown.y)) hfMarkDisk(reserved, W, H, d.stairsDown.x, d.stairsDown.y, 3);
+
+    // Keep at least one clean "spine" between stairs.
+    hfReserveShortestStairsHalo(d, reserved, 2);
+
+    // Doors (and near-doors) are always left unobstructed.
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            if (isDoorTileType(d.at(x, y).type)) {
+                hfMarkDisk(reserved, W, H, x, y, 1);
+            }
+        }
+    }
+
+    // Avoid special rooms entirely.
+    for (const Room& rr0 : d.rooms) {
+        if (rr0.type == RoomType::Normal) continue;
+
+        const int x0 = std::max(0, rr0.x - 1);
+        const int y0 = std::max(0, rr0.y - 1);
+        const int x1 = std::min(W - 1, rr0.x2());
+        const int y1 = std::min(H - 1, rr0.y2());
+
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
+                reserved[idx(x, y)] = 1u;
+            }
+        }
+    }
+
+    // Use the same macro heightfield as the ridge/scree pass so gullies "agree" with the terrain.
+    const uint32_t hfSeed = heightfieldSeedKey(worldSeed, branch, depth, maxDepth, st);
+
+    // Heightfield samples for all tiles (independent of layout).
+    std::vector<float> height(static_cast<size_t>(N), 0.0f);
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const float nx = (static_cast<float>(x) + 0.5f) / static_cast<float>(W);
+            const float ny = (static_cast<float>(y) + 0.5f) / static_cast<float>(H);
+            height[idx(x, y)] = hfHeight01(hfSeed, nx, ny);
+        }
+    }
+
+    // Approximate slope magnitude from the height field.
+    std::vector<float> slope(static_cast<size_t>(N), 0.0f);
+    auto hAt = [&](int x, int y) -> float {
+        x = std::clamp(x, 0, W - 1);
+        y = std::clamp(y, 0, H - 1);
+        return height[idx(x, y)];
+    };
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const float dx = hAt(x + 1, y) - hAt(x - 1, y);
+            const float dy = hAt(x, y + 1) - hAt(x, y - 1);
+            slope[idx(x, y)] = std::sqrt(dx * dx + dy * dy);
+        }
+    }
+
+    // Walkable mask for flow routing (passable tiles, excluding impassable terrain).
+    std::vector<uint8_t> flowOk(static_cast<size_t>(N), 0u);
+    std::vector<size_t> flowCells;
+    flowCells.reserve(static_cast<size_t>(N / 2));
+
+    int floorCount = 0;
+
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const TileType t = d.at(x, y).type;
+            if (t == TileType::Floor) floorCount += 1;
+
+            const bool ok = d.isPassable(x, y) && t != TileType::Chasm && t != TileType::Pillar && t != TileType::Boulder;
+            if (!ok) continue;
+
+            const size_t ii = idx(x, y);
+            flowOk[ii] = 1u;
+            flowCells.push_back(ii);
+        }
+    }
+
+    if (floorCount < 300) return;
+
+    // D8 flow direction: for each cell, pick the steepest descent neighbor (8-neighborhood).
+    std::vector<int> flowTo(static_cast<size_t>(N), -1);
+    static const int dirs8[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
+
+    for (size_t ii : flowCells) {
+        const int x = static_cast<int>(ii % static_cast<size_t>(W));
+        const int y = static_cast<int>(ii / static_cast<size_t>(W));
+
+        const float curH = height[ii];
+        float bestH = curH;
+        int best = -1;
+
+        // Tie-breaker hash per cell (stable).
+        const uint32_t th = hash32(hashCombine(seed ^ 0x9E3779B9u, static_cast<uint32_t>(ii)));
+
+        for (int k = 0; k < 8; ++k) {
+            const int nx = x + dirs8[k][0];
+            const int ny = y + dirs8[k][1];
+            if (!d.inBounds(nx, ny)) continue;
+            const size_t ni = idx(nx, ny);
+            if (!flowOk[ni]) continue;
+
+            const float nh = height[ni];
+
+            if (nh < bestH - 1e-6f) {
+                bestH = nh;
+                best = static_cast<int>(ni);
+            } else if (best >= 0 && std::abs(nh - bestH) <= 1e-6f && nh < curH - 1e-6f) {
+                // Deterministic tie-break in favor of one neighbor.
+                if (((th >> static_cast<uint32_t>(k)) & 1u) != 0u) {
+                    bestH = nh;
+                    best = static_cast<int>(ni);
+                }
+            }
+        }
+
+        // Only accept a strictly downhill step.
+        if (best >= 0 && bestH < curH - 1e-6f) {
+            flowTo[ii] = best;
+        }
+    }
+
+    // Flow accumulation: count how many cells drain through each cell (including itself).
+    std::vector<int> acc(static_cast<size_t>(N), 0);
+    for (size_t ii : flowCells) acc[ii] = 1;
+
+    std::vector<size_t> order = flowCells;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        return height[a] > height[b];
+    });
+
+    int accMax = 1;
+    for (size_t ii : order) {
+        const int dst = flowTo[ii];
+        if (dst >= 0) {
+            acc[static_cast<size_t>(dst)] += acc[ii];
+            accMax = std::max(accMax, acc[static_cast<size_t>(dst)]);
+        }
+    }
+
+    // Channel sources: pick high-elevation, high-slope floor tiles (spaced out).
+    struct SourceCand { int x; int y; float score; };
+    std::vector<SourceCand> sources;
+    sources.reserve(static_cast<size_t>(floorCount / 8));
+
+    for (int y = 2; y < H - 2; ++y) {
+        for (int x = 2; x < W - 2; ++x) {
+            const size_t ii = idx(x, y);
+            if (reserved[ii]) continue;
+            if (d.at(x, y).type != TileType::Floor) continue;
+            if (!flowOk[ii]) continue;
+            if (nearStairs(d, x, y, 4)) continue;
+            if (anyDoorInRadius(d, x, y, 1)) continue;
+            if (passableCardinalNeighbors(d, x, y) < 3) continue;
+
+            const float h0 = height[ii];
+            const float s0 = slope[ii];
+
+            // Prefer higher/steeper points; avoid extreme peaks that tend to be isolated.
+            if (h0 < 0.52f) continue;
+            if (s0 < 0.045f) continue;
+
+            float score = h0 * 1.20f + s0 * 1.35f;
+            // Light bias away from edges.
+            score -= 0.004f * static_cast<float>(std::abs(x - W / 2) + std::abs(y - H / 2));
+
+            sources.push_back({x, y, score});
+        }
+    }
+
+    if (sources.empty()) return;
+
+    std::sort(sources.begin(), sources.end(), [](const SourceCand& a, const SourceCand& b) { return a.score > b.score; });
+
+    int wantChannels = 1;
+    if (depth >= 6 && rr.chance(0.60f)) wantChannels += 1;
+    if (g == GenKind::Cavern && rr.chance(0.55f)) wantChannels += 1;
+    if (g == GenKind::Mines && rr.chance(0.35f)) wantChannels += 1;
+    wantChannels = std::clamp(wantChannels, 1, 3);
+
+    const int pool = std::min(60, static_cast<int>(sources.size()));
+
+    const int minSep = (g == GenKind::Cavern) ? 14 : 12;
+    const int minSep2 = minSep * minSep;
+
+    std::vector<Vec2i> chosenStarts;
+    chosenStarts.reserve(static_cast<size_t>(wantChannels));
+
+    // Budget: don't let gullies dominate already-hazardous floors.
+    const int maxTotalChasm = std::clamp(floorCount / 18, 70, 220);
+
+    int totalCarved = 0;
+
+    for (int ch = 0; ch < wantChannels; ++ch) {
+        // Pick a start.
+        Vec2i start{-1, -1};
+        for (int tries = 0; tries < 120; ++tries) {
+            const int k = rr.range(0, pool - 1);
+            const SourceCand& c = sources[static_cast<size_t>(k)];
+            bool ok = true;
+            for (const Vec2i& p : chosenStarts) {
+                const int dx = c.x - p.x;
+                const int dy = c.y - p.y;
+                if (dx * dx + dy * dy < minSep2) { ok = false; break; }
+            }
+            if (!ok) continue;
+            start = {c.x, c.y};
+            break;
+        }
+
+        if (start.x < 0) break;
+        chosenStarts.push_back(start);
+
+        // Trace downhill along the flow field.
+        std::vector<Vec2i> path;
+        path.reserve(256);
+
+        std::vector<uint8_t> visited(static_cast<size_t>(N), 0u);
+
+        Vec2i cur = start;
+        const int maxLen = std::clamp((W + H) * 2, 120, 260);
+
+        for (int step = 0; step < maxLen; ++step) {
+            if (!d.inBounds(cur.x, cur.y)) break;
+            const size_t ii = idx(cur.x, cur.y);
+            if (!flowOk[ii]) break;
+            if (visited[ii]) break;
+            visited[ii] = 1u;
+
+            path.push_back(cur);
+
+            const int nxt = flowTo[ii];
+            if (nxt < 0) break;
+
+            const int nx = nxt % W;
+            const int ny = nxt / W;
+            cur = {nx, ny};
+        }
+
+        if (path.size() < 12) continue;
+
+        // Carve a gully along the traced path.
+        std::vector<TileChange> changes;
+        changes.reserve(path.size() * 2);
+
+        const int accCarveMin = std::max(10, floorCount / 120);
+        const int accWideMin  = std::max(accCarveMin + 8, floorCount / 45);
+        const int accWiderMin = std::max(accWideMin + 10, floorCount / 28);
+
+        int carved = 0;
+        int causeways = 0;
+
+        auto tryCarve = [&](int x, int y) {
+            if (!d.inBounds(x, y)) return;
+            const size_t ii = idx(x, y);
+            if (reserved[ii]) return;
+            if (nearStairs(d, x, y, 4)) return;
+            if (anyDoorInRadius(d, x, y, 1)) return;
+
+            Tile& t = d.at(x, y);
+            if (t.type != TileType::Floor) return;
+
+            // Avoid shredding narrow corridors; these gullies are meant to be open-space terrain.
+            if (passableCardinalNeighbors(d, x, y) < 3) return;
+
+            forceSetTileFeature(d, x, y, TileType::Chasm, changes);
+            if (d.at(x, y).type == TileType::Chasm) carved += 1;
+        };
+
+        for (size_t i = 0; i < path.size(); ++i) {
+            if (totalCarved >= maxTotalChasm) break;
+
+            const Vec2i p0 = path[i];
+            const size_t ii = idx(p0.x, p0.y);
+
+            // Only carve where the drainage area is non-trivial (streams deepen downstream).
+            if (acc[ii] < accCarveMin) continue;
+
+            // Mild slope gate: avoid painting gullies across ultra-flat basins.
+            if (slope[ii] < 0.018f && acc[ii] < accWideMin) continue;
+
+            tryCarve(p0.x, p0.y);
+            if (d.at(p0.x, p0.y).type != TileType::Chasm) continue;
+
+            totalCarved += 1;
+
+            // Direction for widening.
+            Vec2i dir{0, 0};
+            if (i + 1 < path.size()) {
+                dir = { path[i + 1].x - p0.x, path[i + 1].y - p0.y };
+            } else if (i > 0) {
+                dir = { p0.x - path[i - 1].x, p0.y - path[i - 1].y };
+            }
+            if (dir.x != 0) dir.x = (dir.x > 0) ? 1 : -1;
+            if (dir.y != 0) dir.y = (dir.y > 0) ? 1 : -1;
+
+            const Vec2i perp{ dir.y, -dir.x };
+
+            // Widen based on drainage area (thicker downstream).
+            if (acc[ii] >= accWideMin) {
+                if (rr.chance(0.55f)) tryCarve(p0.x + perp.x, p0.y + perp.y);
+                if (rr.chance(0.18f)) tryCarve(p0.x - perp.x, p0.y - perp.y);
+            }
+            if (acc[ii] >= accWiderMin) {
+                if (rr.chance(0.35f)) tryCarve(p0.x + perp.x * 2, p0.y + perp.y * 2);
+            }
+        }
+
+        if (carved < 10) {
+            undoChanges(d, changes);
+            continue;
+        }
+
+        // Add at least one natural ford if possible (even if we didn't break connectivity).
+        if (carved >= 28) {
+            const int want = (carved >= 70 && rr.chance(0.40f)) ? 2 : 1;
+            for (int i = 0; i < want; ++i) {
+                if (placeRavineBridge(d, rr, changes)) causeways += 1;
+                else break;
+            }
+        }
+
+        // Repair connectivity if we severed stairs.
+        if (!stairsConnected(d)) {
+            for (int tries = 0; tries < 12 && !stairsConnected(d); ++tries) {
+                int compCount = 0;
+                auto comp = computePassableComponents(d, compCount);
+                if (compCount <= 1) break;
+
+                auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * W + x); };
+                const int compUp = (d.inBounds(d.stairsUp.x, d.stairsUp.y)) ? comp[idx2(d.stairsUp.x, d.stairsUp.y)] : -1;
+                const int compDown = (d.inBounds(d.stairsDown.x, d.stairsDown.y)) ? comp[idx2(d.stairsDown.x, d.stairsDown.y)] : -1;
+                if (compUp < 0 || compDown < 0) break;
+                if (compUp == compDown) break;
+
+                const int maxLen = std::clamp(carved / 2 + 14, 20, 95);
+
+                bool placed = placeChasmCauseway(d, rr, changes, comp, compUp, compDown, maxLen);
+                if (!placed) {
+                    placed = placeRavineBridge(d, rr, changes, &comp, compUp, compDown);
+                }
+                if (!placed) {
+                    for (int c = 0; c < compCount; ++c) {
+                        if (c == compUp) continue;
+                        if (placeChasmCauseway(d, rr, changes, comp, compUp, c, maxLen)) { placed = true; break; }
+                    }
+                }
+
+                if (placed) causeways += 1;
+                else break;
+            }
+
+            if (!stairsConnected(d)) {
+                undoChanges(d, changes);
+                continue;
+            }
+        }
+
+        d.fluvialGullyCount += 1;
+        d.fluvialChasmCount += carved;
+        d.fluvialCausewayCount += causeways;
+
+        // Safety: don't carve too many channels on a single floor.
+        if (totalCarved >= maxTotalChasm) break;
+    }
+}
+
+
 static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, DungeonBranch branch, int depth, int maxDepth, GenKind g, uint32_t worldSeed, const EndlessStratumInfo& stratum) {
     [[maybe_unused]] const EndlessStratumTheme theme = stratum.theme;
     d.bonusLootSpots.clear();
@@ -19035,6 +20427,10 @@ static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, DungeonBranch br
     // Biome zones: partition the walkable map into a few contiguous regions and apply
     // coherent obstacle/hazard styles per-region (without ever blocking stairs).
     (void)applyBiomeZones(d, rng, depth, g, theme);
+
+    // Macro terrain: warped heightfield ridges + scree (deterministic; safe/rollback).
+    applyHeightfieldTerrain(d, branch, depth, maxDepth, g, worldSeed, stratum);
+    applyFluvialGullies(d, branch, depth, maxDepth, g, worldSeed, stratum);
 
     // Final procgen robustness: ensure stair landings remain usable and repair the
     // rare case where late passes accidentally disconnect stairs.
@@ -19252,6 +20648,13 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     openSpaceClearanceMaxAfter = 0;
     openSpacePillarCount = 0;
     openSpaceBoulderCount = 0;
+
+    heightfieldRidgePillarCount = 0;
+    heightfieldScreeBoulderCount = 0;
+
+    fluvialGullyCount = 0;
+    fluvialChasmCount = 0;
+    fluvialCausewayCount = 0;
 
     perimTunnelCarvedTiles = 0;
     perimTunnelHatchCount = 0;
@@ -19572,10 +20975,13 @@ inline int materialCellSizeFor(int w, int h, int depth, int maxDepth) {
 void Dungeon::ensureMaterials(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const {
     const uint32_t key = materialCacheKeyFor(worldSeed, branch, depth, maxDepth);
 
+    const size_t expected = static_cast<size_t>(std::max(0, width) * std::max(0, height));
+
     if (materialCacheKey == key &&
         materialCacheW == width &&
         materialCacheH == height &&
-        materialCache.size() == static_cast<size_t>(std::max(0, width) * std::max(0, height))) {
+        materialCache.size() == expected &&
+        biolumCache.size() == expected) {
         return;
     }
 
@@ -19585,6 +20991,7 @@ void Dungeon::ensureMaterials(uint32_t worldSeed, DungeonBranch branch, int dept
 
     if (width <= 0 || height <= 0) {
         materialCache.clear();
+        biolumCache.clear();
         materialCacheCell = 0;
         return;
     }
@@ -19595,6 +21002,8 @@ void Dungeon::ensureMaterials(uint32_t worldSeed, DungeonBranch branch, int dept
     const EndlessStratumInfo st = computeEndlessStratum(worldSeed, branch, depth, maxDepth);
 
     const uint32_t seedKey = hash32(hashCombine(key ^ 0xA5B3571Du, st.seed ^ 0xC0FFEEu));
+
+    const uint32_t hfSeed = heightfieldSeedKey(worldSeed, branch, depth, maxDepth, st);
 
     materialCache.assign(static_cast<size_t>(width * height), static_cast<uint8_t>(TerrainMaterial::Stone));
 
@@ -19631,8 +21040,222 @@ void Dungeon::ensureMaterials(uint32_t worldSeed, DungeonBranch branch, int dept
                 }
             }
 
-            const TerrainMaterial m = pickSiteMaterial(bestSite, branch, depth, maxDepth, st);
+            TerrainMaterial m = pickSiteMaterial(bestSite, branch, depth, maxDepth, st);
+
+            // Heightfield material bias: basins tend mossy/dirt, ridges trend basalt/obsidian,
+            // and Mines-like themes get occasional ore seams along ridges.
+            const float nx = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+            const float ny = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+            const float h01 = hfHeight01(hfSeed, nx, ny);
+            const float r01 = hfRidge01(hfSeed, nx, ny);
+
+            const uint32_t th = hash32(hashCombine(hfSeed ^ 0xB00B135u,
+                                                  hashCombine(static_cast<uint32_t>(x),
+                                                              static_cast<uint32_t>(y))));
+
+            // Basins: add a bit of moss/dirt.
+            if (m != TerrainMaterial::Metal && m != TerrainMaterial::Crystal &&
+                m != TerrainMaterial::Bone && m != TerrainMaterial::Wood) {
+                if (h01 < 0.20f && (th & 3u) == 0u) {
+                    m = TerrainMaterial::Moss;
+                } else if (h01 < 0.26f && (th & 7u) == 0u) {
+                    m = TerrainMaterial::Dirt;
+                }
+            }
+
+            // Ridges: bias toward basalt/obsidian.
+            if (r01 > 0.82f && h01 > 0.55f &&
+                m != TerrainMaterial::Metal && m != TerrainMaterial::Crystal &&
+                m != TerrainMaterial::Bone && m != TerrainMaterial::Wood) {
+                const bool deep = (depth >= 7) || (st.index >= 0 && st.theme == EndlessStratumTheme::Labyrinth);
+                if (deep && ((th >> 8) & 1u)) m = TerrainMaterial::Obsidian;
+                else m = TerrainMaterial::Basalt;
+            }
+
+            const bool minesTheme =
+                (depth == Dungeon::MINES_DEPTH || depth == Dungeon::DEEP_MINES_DEPTH) ||
+                (st.index >= 0 && st.theme == EndlessStratumTheme::Mines);
+
+            if (minesTheme && r01 > 0.78f && h01 > 0.55f) {
+                const bool canOre =
+                    (m == TerrainMaterial::Stone || m == TerrainMaterial::Brick || m == TerrainMaterial::Marble ||
+                     m == TerrainMaterial::Basalt || m == TerrainMaterial::Obsidian);
+
+                // Rare seams: 1/32 chance.
+                if (canOre && (th & 31u) == 0u) {
+                    m = (((th >> 5) & 1u) != 0u) ? TerrainMaterial::Metal : TerrainMaterial::Crystal;
+                }
+            }
+
             materialCache[static_cast<size_t>(y * width + x)] = static_cast<uint8_t>(m);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Bioluminescent terrain field (cosmetic)
+    // ---------------------------------------------------------------------
+    // This is computed deterministically from the same level key as materials.
+    // It uses a small Gray-Scott reaction-diffusion sim (masked to floor tiles)
+    // to create organic glow/lichen patches that can serve as subtle light sources
+    // in darkness mode.
+    biolumCache.assign(static_cast<size_t>(width * height), 0u);
+
+    if (branch == DungeonBranch::Camp) {
+        return;
+    }
+
+    // Keep this mostly on deeper floors / thematically appropriate strata.
+    const bool cavernTheme = (depth == Dungeon::GROTTO_DEPTH) ||
+                             (st.index >= 0 && st.theme == EndlessStratumTheme::Caverns);
+    const bool minesTheme = (depth == Dungeon::MINES_DEPTH || depth == Dungeon::DEEP_MINES_DEPTH) ||
+                            (st.index >= 0 && st.theme == EndlessStratumTheme::Mines);
+    const bool tombTheme = (depth == Dungeon::CATACOMBS_DEPTH) ||
+                           (st.index >= 0 && st.theme == EndlessStratumTheme::Labyrinth);
+
+    const bool wantBiolum = (depth >= 3) || cavernTheme || minesTheme || tombTheme;
+    if (!wantBiolum) {
+        return;
+    }
+
+    const size_t N = static_cast<size_t>(width * height);
+
+    // Active mask: restrict the sim to floor tiles so patterns conform to walkable space.
+    std::vector<uint8_t> active(N, 0u);
+    int activeCount = 0;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const size_t i = static_cast<size_t>(y * width + x);
+            if (at(x, y).type == TileType::Floor) {
+                active[i] = 1u;
+                ++activeCount;
+            }
+        }
+    }
+    if (activeCount <= 0) {
+        return;
+    }
+
+    std::vector<float> A(N, 1.0f);
+    std::vector<float> B(N, 0.0f);
+
+    proc::GrayScottParams pset{};
+    if (cavernTheme) {
+        // Spotty/lichen-like.
+        pset = proc::GrayScottParams{1.0f, 0.50f, 0.0367f, 0.0649f};
+    } else if (minesTheme) {
+        // Tend toward maze/vein shapes.
+        pset = proc::GrayScottParams{1.0f, 0.50f, 0.0220f, 0.0510f};
+    } else if (tombTheme) {
+        // Softer, more diffuse patches.
+        pset = proc::GrayScottParams{1.0f, 0.50f, 0.0300f, 0.0620f};
+    } else {
+        // General fallback.
+        pset = proc::GrayScottParams{1.0f, 0.50f, 0.0460f, 0.0630f};
+    }
+
+    float depth01 = 0.0f;
+    if (maxDepth > 0) {
+        depth01 = std::clamp(static_cast<float>(depth) / static_cast<float>(std::max(1, maxDepth)), 0.0f, 1.0f);
+    }
+    float seedScale = 0.65f + 0.70f * depth01;
+    if (cavernTheme) seedScale *= 1.10f;
+    if (minesTheme) seedScale *= 0.95f;
+
+    const uint32_t bioSeed = hash32(hashCombine(seedKey ^ 0xB10B1A5u, hfSeed ^ 0x51A7u));
+
+    auto seedDroplet = [&](int sx, int sy, float strength) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int xx = clampi(sx + dx, 0, width - 1);
+                const int yy = clampi(sy + dy, 0, height - 1);
+                const size_t j = static_cast<size_t>(yy * width + xx);
+                if (j >= active.size() || active[j] == 0u) continue;
+                B[j] = std::max(B[j], strength);
+                A[j] = std::min(A[j], 1.0f - strength);
+            }
+        }
+    };
+
+    // Seed B with droplets biased by substrate material and theme.
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const size_t i = static_cast<size_t>(y * width + x);
+            if (i >= active.size() || active[i] == 0u) continue;
+
+            TerrainMaterial m = static_cast<TerrainMaterial>(materialCache[i]);
+            float p = 0.0f;
+            switch (m) {
+                case TerrainMaterial::Moss:    p = 0.030f; break;
+                case TerrainMaterial::Crystal: p = 0.026f; break;
+                case TerrainMaterial::Metal:   p = minesTheme ? 0.014f : 0.006f; break;
+                case TerrainMaterial::Bone:    p = tombTheme ? 0.012f : 0.006f; break;
+                case TerrainMaterial::Dirt:    p = cavernTheme ? 0.010f : 0.004f; break;
+                default:                       p = 0.0f; break;
+            }
+
+            if (p <= 0.0f) continue;
+            p *= seedScale;
+
+            const uint32_t h = hash32(hashCombine(bioSeed, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y))));
+            const float r01 = static_cast<float>(h & 0xFFFFu) * (1.0f / 65535.0f);
+
+            if (r01 < p) {
+                // Strong seed.
+                seedDroplet(x, y, 1.0f);
+            } else if (r01 < p * 1.75f && ((h >> 16) & 3u) == 0u) {
+                // Occasional weaker speckle to keep patterns from collapsing into a few blobs.
+                seedDroplet(x, y, 0.60f);
+            }
+        }
+    }
+
+    const int iters = clampi(16 + depth / 2 + (cavernTheme ? 4 : 0) + (minesTheme ? 1 : 0), 14, 32);
+    proc::runGrayScott(width, height, pset, iters, A, B, &active);
+
+    // Normalize B into 0..1 for dynamic range mapping.
+    float minB = 1.0f;
+    float maxB = 0.0f;
+    for (size_t i = 0; i < N; ++i) {
+        if (i >= active.size() || active[i] == 0u) continue;
+        const float v = B[i];
+        if (v < minB) minB = v;
+        if (v > maxB) maxB = v;
+    }
+
+    if (maxB <= minB + 0.0001f) {
+        return;
+    }
+
+    const int maxI = clampi(70 + depth * 6, 80, 160);
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const size_t i = static_cast<size_t>(y * width + x);
+            if (i >= active.size() || active[i] == 0u) continue;
+
+            const float b = B[i];
+            float bn = (b - minB) / (maxB - minB);
+            bn = proc::clampf(bn, 0.0f, 1.0f);
+
+            // Emphasize peaks so glows read as distinct clusters.
+            bn = bn * bn;
+
+            const TerrainMaterial m = static_cast<TerrainMaterial>(materialCache[i]);
+            float scale = 0.0f;
+            switch (m) {
+                case TerrainMaterial::Crystal: scale = 1.00f; break;
+                case TerrainMaterial::Moss:    scale = 0.82f; break;
+                case TerrainMaterial::Metal:   scale = 0.70f; break;
+                case TerrainMaterial::Bone:    scale = 0.62f; break;
+                case TerrainMaterial::Dirt:    scale = 0.55f; break;
+                default:                       scale = 0.0f; break;
+            }
+            if (scale <= 0.0f) continue;
+
+            const int s = static_cast<int>(std::round(bn * static_cast<float>(maxI) * scale));
+            if (s < 10) continue;
+
+            biolumCache[i] = static_cast<uint8_t>(clampi(s, 0, 255));
         }
     }
 }
@@ -19644,6 +21267,18 @@ TerrainMaterial Dungeon::materialAtCached(int x, int y) const {
     const uint8_t v = materialCache[idx];
     if (v >= static_cast<uint8_t>(TerrainMaterial::COUNT)) return TerrainMaterial::Stone;
     return static_cast<TerrainMaterial>(v);
+}
+
+uint8_t Dungeon::biolumAtCached(int x, int y) const {
+    if (!inBounds(x, y)) return 0u;
+    const size_t idx = static_cast<size_t>(y * width + x);
+    if (idx >= biolumCache.size()) return 0u;
+    return biolumCache[idx];
+}
+
+uint8_t Dungeon::biolumAt(int x, int y, uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const {
+    ensureMaterials(worldSeed, branch, depth, maxDepth);
+    return biolumAtCached(x, y);
 }
 
 TerrainMaterial Dungeon::materialAt(int x, int y, uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const {

@@ -351,7 +351,7 @@ void Game::recomputeLightMap() {
         std::vector<GlowCand> cands;
         cands.reserve(128);
 
-        const uint32_t lvlSeed = hash32(levelGenSeed(LevelId{branch_, depth_}) ^ 0xB10LUMu);
+        const uint32_t lvlSeed = hashCombine(levelGenSeed(LevelId{branch_, depth_}), tag32("BIOLUM"));
 
         for (int y = 0; y < dung.height; ++y) {
             for (int x = 0; x < dung.width; ++x) {

@@ -1,6 +1,28 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 #include <limits>
+
+// Compile-time tag hashing (FNV-1a) for readable domain separation.
+// Useful for salting procedural generators without magic hex constants.
+//
+// Example:
+//   uint32_t s = hashCombine(levelSeed, tag32("BIOLUM"));
+constexpr uint32_t fnv1a32(const char* data, std::size_t len) {
+    uint32_t h = 2166136261u; // FNV offset basis
+    for (std::size_t i = 0; i < len; ++i) {
+        h ^= static_cast<uint8_t>(static_cast<unsigned char>(data[i]));
+        h *= 16777619u; // FNV prime
+    }
+    return h;
+}
+
+template <std::size_t N>
+constexpr uint32_t tag32(const char (&str)[N]) {
+    // N includes the null terminator for string literals.
+    return fnv1a32(str, (N > 0) ? (N - 1) : 0);
+}
+
 
 // Simple, fast RNG with deterministic cross-platform behavior.
 // Not cryptographically secure.

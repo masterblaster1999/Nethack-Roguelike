@@ -1,14 +1,13 @@
 {
-  "patch_id": "round120_patch",
-  "previous_patch_id": "round119_patch",
-  "round": 120,
+  "patch_id": "round121_patch",
+  "previous_patch_id": "round120_patch",
+  "round": 121,
   "date": "2026-01-22",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Introduced a deterministic procedural biolum terrain field (lichen/crystal glow) computed via Gray-Scott reaction-diffusion and cached per floor.",
-    "Integrated biolum tiles into darkness-mode lighting as a small set of spaced, colored light sources (green lichen, cyan/purple crystals) to create subtle navigation landmarks.",
-    "Added ambient biolum mote particles and extended #mapstats with BIOLUM counts for quick tuning / debugging.",
-    "Refactored the Gray-Scott solver into reusable header src/proc_rd.hpp and reused it for chemical hazards to keep numerics consistent across systems."
+    "Added compile-time tag hashing (FNV-1a) via tag32(\"NAME\") in src/rng.hpp to make deterministic seed salting readable and to prevent accidental invalid numeric literal suffixes.",
+    "Fixed MSVC build errors in biolum lighting: replaced an invalid hex literal suffix seed salt with tag32(\"BIOLUM\"), keeping per-level glow selection deterministic.",
+    "Cleaned up MSVC C4456 shadowing warnings in the fluvial gully generator by renaming locals in the channel start selection and connectivity repair logic."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -47,29 +46,20 @@
     "src/spritegen.hpp",
     "docs/PROCGEN_TERRAIN_BIOLUM.md",
     "src/proc_rd.hpp",
-    "src/game_world.cpp"
+    "src/game_world.cpp",
+    "src/rng.hpp"
   ],
   "files_changed_this_round": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
-    "docs/PROCGEN_TERRAIN_BIOLUM.md",
-    "src/proc_rd.hpp",
-    "src/dungeon.hpp",
-    "src/dungeon.cpp",
+    "src/rng.hpp",
     "src/game_world.cpp",
-    "src/game_spawn.cpp",
-    "src/game_internal.hpp",
-    "src/render.cpp"
+    "src/dungeon.cpp"
   ],
-  "files_added": [
-    "docs/PROCGEN_TERRAIN_BIOLUM.md",
-    "src/proc_rd.hpp"
-  ],
+  "files_added": [],
   "notes": [
-    "The biolum field is cosmetic and deterministic: it is computed once per floor (cached alongside terrain materials) and is not serialized.",
-    "Biolum lights are injected only when darkness mode is active, and are selected with a greedy spacing rule to avoid performance spikes from too many sources.",
-    "Strong biolum tiles (>=48 intensity) emit occasional motes to make glow pockets more readable.",
-    "The Gray-Scott solver is now shared (src/proc_rd.hpp) so future procedural fields can reuse the same implementation."
+    "tag32() uses a small constexpr FNV-1a hash of a string literal to generate stable 32-bit domain separation constants.",
+    "This patch is a build+infrastructure fix; gameplay impact is limited to keeping biolum light selection deterministic after the salt fix."
   ],
   "generated_at": "2026-01-22T00:00:00Z"
 }

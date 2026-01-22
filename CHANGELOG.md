@@ -317,6 +317,7 @@
 ### Save compatibility
 - Save version bumped to **v43** (v41 adds `Item.flags`; v42 adds merchant guild pursuit; v43 adds shrine piety + prayer cooldown).
 
+- Added `tag32("...")` compile-time seed salt helper (FNV-1a) in `src/rng.hpp` for readable domain separation when mixing deterministic procedural seeds.
 ### Changed
 - Procedural entity/projectile flipbooks: added sprite-space idle warps (slime squash & stretch, bat wing flap, snake slither, spider scuttle, wolf/dog tail wag) and replaced per-frame sprite shading jitter with a seamless looping shimmer; projectile arrow/rock now have 4-frame glint/tumble cues.
 - Procedural VFX flipbooks: **confusion/poison gas** and **fire** overlays now apply a lightweight **curl-noise flow warp** (divergence-free) before the existing domain-warp masks, producing more "advected" motion and richer turbulence in both top-down and isometric views.
@@ -407,6 +408,7 @@
 - Command prompt TAB-completion now carries per-command metadata (keybind token + short description) so the dropdown can show a one-line **INFO** description for the current selection while keeping keybind hints accurate and de-duplicated.
 - Consolidated canonical **Action token** metadata into a shared, SDL-free registry (`action_info.hpp`), so keybind parsing and extended command `#bind/#unbind` stay perfectly in sync.
 - Keybinds overlay now shows a contextual **INFO** description for the currently selected action (pulled from the same registry).
+- Fixed MSVC build errors/warnings in procedural biolum lighting + fluvial terrain: replaced an invalid hex literal suffix used for a seed salt, and removed C4456 shadowing warnings in the gully connectivity repair logic.
 
 
 

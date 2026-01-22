@@ -19678,8 +19678,8 @@ void applyHeightfieldTerrain(Dungeon& d, DungeonBranch branch, int depth, int ma
 
         bool close = false;
         for (const Vec2i& p : placedPillars) {
-            const int dx = c.x - p.x;
-            const int dy = c.y - p.y;
+            const int dx = c.x - prevStart.x;
+            const int dy = c.y - prevStart.y;
             if (dx * dx + dy * dy < minSep2) { close = true; break; }
         }
         if (close) continue;
@@ -20103,9 +20103,9 @@ static void applyFluvialGullies(Dungeon& d, DungeonBranch branch, int depth, int
             const int k = rr.range(0, pool - 1);
             const SourceCand& c = sources[static_cast<size_t>(k)];
             bool ok = true;
-            for (const Vec2i& p : chosenStarts) {
-                const int dx = c.x - p.x;
-                const int dy = c.y - p.y;
+            for (const Vec2i& prevStart : chosenStarts) {
+                const int dx = c.x - prevStart.x;
+                const int dy = c.y - prevStart.y;
                 if (dx * dx + dy * dy < minSep2) { ok = false; break; }
             }
             if (!ok) continue;
@@ -20238,16 +20238,16 @@ static void applyFluvialGullies(Dungeon& d, DungeonBranch branch, int depth, int
                 if (compUp < 0 || compDown < 0) break;
                 if (compUp == compDown) break;
 
-                const int maxLen = std::clamp(carved / 2 + 14, 20, 95);
+                const int causewayMaxLen = std::clamp(carved / 2 + 14, 20, 95);
 
-                bool placed = placeChasmCauseway(d, rr, changes, comp, compUp, compDown, maxLen);
+                bool placed = placeChasmCauseway(d, rr, changes, comp, compUp, compDown, causewayMaxLen);
                 if (!placed) {
                     placed = placeRavineBridge(d, rr, changes, &comp, compUp, compDown);
                 }
                 if (!placed) {
                     for (int c = 0; c < compCount; ++c) {
                         if (c == compUp) continue;
-                        if (placeChasmCauseway(d, rr, changes, comp, compUp, c, maxLen)) { placed = true; break; }
+                        if (placeChasmCauseway(d, rr, changes, comp, compUp, c, causewayMaxLen)) { placed = true; break; }
                     }
                 }
 

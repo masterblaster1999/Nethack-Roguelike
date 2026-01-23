@@ -40,6 +40,10 @@ inline HearingFieldResult buildVisibleHostileHearingField(const Game& g, int max
     const Dungeon& dung = g.dungeon();
     if (dung.width <= 0 || dung.height <= 0) return out;
 
+    // Ensure deterministic per-floor material cache so sound propagation costs
+    // can incorporate substrate acoustics (moss/dirt dampen; metal/crystal carry).
+    dung.ensureMaterials(g.seed(), g.branch(), g.depth(), g.dungeonMaxDepth());
+
     // Collect visible hostile listeners.
     struct Listener {
         Vec2i pos;

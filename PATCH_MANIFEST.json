@@ -1,18 +1,17 @@
 {
-  "patch_id": "round125_patch",
-  "previous_patch_id": "round124_patch",
-  "round": 125,
-  "date": "2026-01-22",
+  "patch_id": "round131_patch",
+  "previous_patch_id": "round130_patch",
+  "round": 131,
+  "date": "2026-01-23",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Fixed MSVC build breaks caused by mnemonic-but-invalid hex seed salts in ambient biolum particles and floor-border overlays.",
-    "Introduced a convenient compile-time hashed tag literal (`\"...\"_tag`) for readable, domain-separated procedural RNG salting (built on existing FNV-1a tag hashing).",
-    "Refactored the affected salting callsites to use the new `_tag` literal (removing the risk of future invalid hex typos)."
+    "Rune Tablets are now flagged as consumables (read/use) in item definitions. The broader Rune Tablet procedural spell casting/targeting vertical slice is still intentionally withheld until it can be delivered as a complete, compile-safe integration."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
     "docs/PROCGEN_COLOR_PALETTE.md",
+    "docs/PROCGEN_TERRAIN_BIOLUM.md",
     "docs/PROCGEN_TERRAIN_FLUVIAL.md",
     "docs/PROCGEN_TILE_BORDERS.md",
     "docs/PROCGEN_VAULT_WFC.md",
@@ -34,36 +33,36 @@
     "src/game_save.cpp",
     "src/game_spawn.cpp",
     "src/game_targeting.cpp",
+    "src/game_world.cpp",
+    "src/hearing_field.hpp",
     "src/items.cpp",
     "src/items.hpp",
     "src/main.cpp",
+    "src/noise_localization.hpp",
     "src/pet_gen.hpp",
+    "src/proc_rd.hpp",
+    "src/proc_spells.hpp",
     "src/render.cpp",
     "src/render.hpp",
+    "src/rng.hpp",
+    "src/scent_field.hpp",
     "src/settings.cpp",
     "src/settings.hpp",
+    "src/spatial_hash.hpp",
     "src/spritegen.cpp",
     "src/spritegen.hpp",
-    "docs/PROCGEN_TERRAIN_BIOLUM.md",
-    "src/proc_rd.hpp",
-    "src/game_world.cpp",
-    "src/rng.hpp",
-    "src/spatial_hash.hpp",
     "src/wfc.hpp",
-    "src/scent_field.hpp",
     "tests/test_main.cpp"
   ],
   "files_changed_this_round": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
-    "src/rng.hpp",
-    "src/render.cpp",
-    "src/spritegen.cpp"
+    "src/items.cpp"
   ],
   "files_added": [],
   "notes": [
-    "The MSVC error C3688 ('invalid literal suffix') was triggered because tokens like `0xB10L1234u` / `0xB0RD3Ru` contain non-hex digits (L/R), so the compiler interprets them as malformed numeric literals with a suffix.",
-    "Using compile-time hashed string tags avoids brittle 'cute' hex mnemonics while keeping salts readable and deterministic across platforms."
+    "This round ships a small, compile-safe Rune Tablet ergonomics tweak (marking Rune Tablets as consumables) while intentionally deferring the larger procedural casting/targeting wiring until it is fully implemented end-to-end.",
+    "No partial Rune Tablet targeting/casting changes are included in this patch."
   ],
-  "generated_at": "2026-01-22T00:00:00Z"
+  "generated_at": "2026-01-23T06:56:34Z"
 }

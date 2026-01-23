@@ -2,6 +2,8 @@
 #include "settings.hpp"
 #include "scent_field.hpp"
 #include "wfc.hpp"
+#include "noise_localization.hpp"
+#include "proc_spells.hpp"
 
 #include <cctype>
 #include <filesystem>
@@ -327,6 +329,80 @@ bool test_settings_minimap_zoom_clamp() {
 }
 
 
+bool test_noise_localization_determinism() {
+    // Basic sanity: threshold sounds should yield a non-zero search radius.
+    const Vec2i src{10, 10};
+    const uint32_t seed = 12345u;
+    const uint32_t turn = 77u;
+    const int volume = 6;
+    const int eff = 6;
+    const int dist = 6;
+
+    const int r = noiseInvestigateRadius(volume, eff, dist);
+    CHECK(r > 0);
+
+    const uint32_t h1 = noiseInvestigateHash(seed, turn, 1, src, volume, eff, dist);
+    const uint32_t h2 = noiseInvestigateHash(seed, turn, 1, src, volume, eff, dist);
+    CHECK(h1 == h2);
+
+    const Vec2i o1 = noiseInvestigateOffset(h1, r);
+    const Vec2i o2 = noiseInvestigateOffset(h2, r);
+    CHECK(o1.x == o2.x);
+    CHECK(o1.y == o2.y);
+
+    // Changing monsterId must affect the hash (even if the offset can coincide by chance).
+    const uint32_t hOther = noiseInvestigateHash(seed, turn, 2, src, volume, eff, dist);
+    CHECK(hOther != h1);
+
+    // Loud sounds should be treated as precise (radius 0).
+    CHECK(noiseInvestigateRadius(18, 18, 10) == 0);
+
+    // Nearby sounds should also be precise (radius 0).
+    CHECK(noiseInvestigateRadius(6, 6, 2) == 0);
+
+    return true;
+}
+
+
+bool test_proc_spell_generation_determinism() {
+    // The same id must always produce the same spell.
+    const uint32_t id = makeProcSpellId(/*tier=*/7, /*seed28=*/0x00ABCDEFu);
+    const ProcSpell a = generateProcSpell(id);
+    const ProcSpell b = generateProcSpell(id);
+    CHECK(a.id == b.id);
+    CHECK(a.tier == b.tier);
+    CHECK(a.element == b.element);
+    CHECK(a.form == b.form);
+    CHECK(a.mods == b.mods);
+    CHECK(a.manaCost == b.manaCost);
+    CHECK(a.range == b.range);
+    CHECK(a.needsTarget == b.needsTarget);
+    CHECK(a.aoeRadius == b.aoeRadius);
+    CHECK(a.durationTurns == b.durationTurns);
+    CHECK(a.damageDiceCount == b.damageDiceCount);
+    CHECK(a.damageDiceSides == b.damageDiceSides);
+    CHECK(a.damageFlat == b.damageFlat);
+    CHECK(a.noise == b.noise);
+    CHECK(a.name == b.name);
+    CHECK(a.runeSigil == b.runeSigil);
+    CHECK(a.description == b.description);
+    CHECK(!a.name.empty());
+    CHECK(!a.description.empty());
+    CHECK(!a.runeSigil.empty());
+
+    // Different ids should usually differ in at least one major property.
+    const ProcSpell c = generateProcSpell(makeProcSpellId(/*tier=*/2, /*seed28=*/0x00123456u));
+    const ProcSpell d = generateProcSpell(makeProcSpellId(/*tier=*/12, /*seed28=*/0x0000BEEFu));
+    CHECK(c.id != d.id);
+    CHECK(c.name != d.name || c.element != d.element || c.form != d.form || c.manaCost != d.manaCost);
+
+    // Tier clamping: tier 0 should be treated as tier 1.
+    const ProcSpell z = generateProcSpell(makeProcSpellId(/*tier=*/0, /*seed28=*/0x00000001u));
+    CHECK(z.tier == 1);
+
+    return true;
+}
+
 struct TestCase {
     const char* name;
     bool (*fn)();
@@ -343,6 +419,8 @@ int main(int argc, char** argv) {
         {"save_load_roundtrip",  test_save_load_roundtrip},
         {"save_load_sneak",      test_save_load_preserves_sneak},
         {"settings_minimap_zoom", test_settings_minimap_zoom_clamp},
+        {"noise_localization",  test_noise_localization_determinism},
+        {"proc_spells",         test_proc_spell_generation_determinism},
     };
 
     bool list = false;

@@ -120,6 +120,7 @@ inline const char* terrainMaterialAdj(TerrainMaterial m) {
 struct TerrainMaterialFx {
     int footstepNoiseDelta = 0;   // additive to footstep emitNoise() volume
     int digNoiseDelta = 0;        // additive to dig emitNoise() volume
+    int soundTileCostDelta = 0;   // additive to Dungeon::soundTileCost() (higher = sound attenuates faster)
     int scentDecayDelta = 0;      // additive to global scent decay per turn
     int scentSpreadDropDelta = 0; // additive to scent spread drop per tile
 };
@@ -132,12 +133,14 @@ inline TerrainMaterialFx terrainMaterialFx(TerrainMaterial m) {
             fx.digNoiseDelta = -2;
             fx.scentDecayDelta = 2;
             fx.scentSpreadDropDelta = 6;
+            fx.soundTileCostDelta = 1;
             break;
         case TerrainMaterial::Dirt:
             fx.footstepNoiseDelta = -1;
             fx.digNoiseDelta = -1;
             fx.scentDecayDelta = 1;
             fx.scentSpreadDropDelta = 4;
+            fx.soundTileCostDelta = 1;
             break;
         case TerrainMaterial::Wood:
             // Wooden boards can creak, but also absorb scent more than stone.
@@ -145,14 +148,17 @@ inline TerrainMaterialFx terrainMaterialFx(TerrainMaterial m) {
             fx.digNoiseDelta = -1;
             fx.scentDecayDelta = 1;
             fx.scentSpreadDropDelta = 2;
+            fx.soundTileCostDelta = 1;
             break;
         case TerrainMaterial::Metal:
             fx.footstepNoiseDelta = 2;
             fx.digNoiseDelta = 2;
+            fx.soundTileCostDelta = -1;
             break;
         case TerrainMaterial::Crystal:
             fx.footstepNoiseDelta = 1;
             fx.digNoiseDelta = 1;
+            fx.soundTileCostDelta = -1;
             break;
         case TerrainMaterial::Bone:
             fx.footstepNoiseDelta = 1; // crunch

@@ -2,6 +2,7 @@
 #include "spritegen3d.hpp"
 #include "game.hpp"      // EntityKind
 #include "items.hpp"     // ItemKind, ProjectileKind
+#include "proc_spells.hpp"
 #include "vtuber_gen.hpp"
 #include <algorithm>
 #include <cmath>
@@ -2904,6 +2905,91 @@ case ItemKind::Arrow: {
             if (frame % 2 == 1) setPx(s, 9, 12, {255,255,255,110});
             break;
         }
+
+        case ItemKind::RuneTablet: {
+            // A carved stone tablet with glowing runes (procedural spell id in seed).
+            // The glow hue is driven by the spell's element; intensity scales with tier.
+            const ProcSpell ps = generateProcSpell(seed);
+
+            Color stone = add({150, 150, 155, 255}, rng.range(-12, 8), rng.range(-12, 8), rng.range(-12, 8));
+            Color stoneDark = mul(stone, 0.70f);
+            Color stoneHi = mul(stone, 1.12f);
+
+            // Tablet body.
+            rect(s, 4, 3, 8, 11, stone);
+            // Bevel/shading.
+            line(s, 4, 3, 11, 3, stoneHi);
+            line(s, 4, 3, 4, 13, stoneHi);
+            line(s, 11, 3, 11, 13, stoneDark);
+            line(s, 4, 13, 11, 13, stoneDark);
+
+            // Minor chips / cracks.
+            for (int i = 0; i < 6; ++i) {
+                int x = rng.range(5, 10);
+                int y = rng.range(4, 12);
+                setPx(s, x, y, mul(stone, (0.55f + rng.next01() * (0.85f - 0.55f))));
+            }
+            if (rng.range(0, 2) == 0) {
+                line(s, 6, 6, 9, 9, mul(stoneDark, 0.9f));
+            }
+
+            // Element-driven glow color.
+            Color glow = {200, 200, 255, 210};
+            switch (ps.element) {
+                case ProcSpellElement::Fire:     glow = {255, 120, 60, 220}; break;
+                case ProcSpellElement::Frost:    glow = {120, 200, 255, 220}; break;
+                case ProcSpellElement::Shock:    glow = {255, 240, 120, 220}; break;
+                case ProcSpellElement::Venom:    glow = {120, 255, 140, 220}; break;
+                case ProcSpellElement::Shadow:   glow = {190, 120, 255, 220}; break;
+                case ProcSpellElement::Radiance: glow = {255, 240, 190, 220}; break;
+                case ProcSpellElement::Arcane:   glow = {255, 140, 255, 220}; break;
+                case ProcSpellElement::Stone:    glow = {220, 220, 220, 210}; break;
+                case ProcSpellElement::Wind:     glow = {140, 255, 235, 220}; break;
+                case ProcSpellElement::Blood:    glow = {255, 100, 120, 220}; break;
+                default: break;
+            }
+
+            // Tier intensity.
+            const float t = std::clamp(0.55f + 0.03f * static_cast<float>(ps.tier), 0.55f, 1.0f);
+            glow = mul(glow, t);
+
+            // Draw a simple rune cluster (3 glyph strokes).
+            auto runePx = [&](int x, int y, Color c) {
+                setPx(s, x, y, c);
+                // Soft glow around the rune pixel.
+                Color g2 = c; g2.a = static_cast<uint8_t>(std::max(0, static_cast<int>(c.a) - 90));
+                setPx(s, x - 1, y, g2);
+                setPx(s, x + 1, y, g2);
+                setPx(s, x, y - 1, g2);
+                setPx(s, x, y + 1, g2);
+            };
+
+            // Flicker a bit.
+            if (frame % 2 == 1) glow.a = static_cast<uint8_t>(std::min(255, static_cast<int>(glow.a) + 20));
+
+            // Center rune strokes.
+            for (int x = 6; x <= 9; ++x) runePx(x, 6, glow);
+            runePx(6, 7, glow); runePx(7, 8, glow); runePx(8, 9, glow); runePx(9, 10, glow);
+            for (int x = 6; x <= 9; ++x) runePx(x, 11, glow);
+
+            // Extra accent depending on form.
+            if (ps.form == ProcSpellForm::Beam) {
+                for (int y = 6; y <= 11; ++y) runePx(8, y, glow);
+            } else if (ps.form == ProcSpellForm::Burst) {
+                runePx(7, 8, glow); runePx(9, 8, glow); runePx(7, 10, glow); runePx(9, 10, glow);
+            } else if (ps.form == ProcSpellForm::Cloud) {
+                runePx(7, 10, glow); runePx(8, 10, glow); runePx(9, 10, glow);
+            } else if (ps.form == ProcSpellForm::Ward) {
+                runePx(6, 9, glow); runePx(10, 9, glow);
+            } else if (ps.form == ProcSpellForm::Hex) {
+                runePx(7, 9, glow); runePx(9, 9, glow);
+            }
+
+            // Subtle glint.
+            if (frame % 3 == 0) setPx(s, 10, 5, {255,255,255,120});
+            break;
+        }
+
 
         case ItemKind::Chest: {
             Color wood = add({150, 95, 55, 255}, rng.range(-12,12), rng.range(-12,12), rng.range(-12,12));

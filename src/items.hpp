@@ -206,6 +206,9 @@ enum class ItemKind : uint8_t {
     // --- Bounties (append-only) ---
     // A guild contract that tracks kills and pays out a deterministic reward.
     BountyContract,
+
+    // --- Procedural rune magic (append-only) ---
+    RuneTablet,
 };
 
 // Item "egos" (NetHack-style brands / special properties) applied to some gear.
@@ -244,7 +247,7 @@ inline int egoValueMultiplierPct(ItemEgo e) {
 }
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::BountyContract) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::RuneTablet) + 1;
 
 inline bool isVtuberCollectible(ItemKind k) {
     return k == ItemKind::VtuberFigurine || k == ItemKind::VtuberHoloCard;
@@ -274,6 +277,8 @@ inline bool isCraftingKitKind(ItemKind k) { return k == ItemKind::CraftingKit; }
 // --- Bounty helpers (append-only) ---
 
 inline bool isBountyContractKind(ItemKind k) { return k == ItemKind::BountyContract; }
+
+inline bool isRuneTabletKind(ItemKind k) { return k == ItemKind::RuneTablet; }
 
 // Items eligible as crafting ingredients.
 // We intentionally exclude a few "tool" / meta items so crafting stays focused on loot.

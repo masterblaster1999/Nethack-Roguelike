@@ -5,6 +5,7 @@
 #include "fishing_gen.hpp"
 #include "farm_gen.hpp"
 #include "bounty_gen.hpp"
+#include "proc_spells.hpp"
 #include "game.hpp"
 #include "rng.hpp"
 #include <algorithm>
@@ -254,7 +255,12 @@ const ItemDef& itemDef(ItemKind k) {
         // Crafting (append-only)
         { ItemKind::CraftingKit,  "CRAFTING KIT",       false, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 4, 75 },
         { ItemKind::BountyContract, "BOUNTY CONTRACT", false, true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 1, 0 },
-    };
+    
+        // Procedural rune magic (append-only)
+        // Rune Tablets are consumables (read/use) even before the full procedural spell casting
+        // vertical slice lands.
+        { ItemKind::RuneTablet, "RUNE TABLET", false, true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 6, 200 },
+};
 
     static std::vector<ItemDef> defs;
     static uint32_t appliedGen = 0;
@@ -500,6 +506,26 @@ std::string itemDisplayName(const Item& it) {
 
     
 
+} else if (it.kind == ItemKind::RuneTablet) {
+        // Procedural rune magic tablet: spell id is encoded in spriteSeed.
+        // This is UI/name/sprite support only for now; learning/casting wiring will come later.
+        uint32_t pid = it.spriteSeed;
+        if (pid == 0u) pid = hash32(static_cast<uint32_t>(it.id) ^ 0x52C39A7Bu);
+
+        const ProcSpell ps = generateProcSpell(pid);
+
+        ss << "RUNE TABLET OF " << ps.name;
+        ss << " {T" << static_cast<int>(ps.tier) << "}";
+        ss << " {" << procSpellElementName(ps.element) << " " << procSpellFormName(ps.form) << "}";
+
+        const std::string modTags = procSpellModsToTags(ps.mods);
+        if (!modTags.empty()) ss << " {" << toUpper(modTags) << "}";
+
+        ss << " {M" << ps.manaCost << "}";
+        if (ps.needsTarget) ss << " {R" << ps.range << "}";
+        if (ps.aoeRadius > 0) ss << " {A" << ps.aoeRadius << "}";
+        if (ps.durationTurns > 0) ss << " {D" << ps.durationTurns << "}";
+        ss << " {" << ps.runeSigil << "}";
 } else if (it.kind == ItemKind::BountyContract) {
 
     // Procedural bounty contracts: show target/progress/reward inline.

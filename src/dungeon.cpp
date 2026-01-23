@@ -21336,12 +21336,23 @@ bool Dungeon::soundPassable(int x, int y) const {
 int Dungeon::soundTileCost(int x, int y) const {
     if (!inBounds(x, y)) return 1000000000;
     const TileType t = at(x, y).type;
+
     // Closed/locked doors muffle sound more than open spaces.
+    int cost = 1;
     switch (t) {
-        case TileType::DoorClosed: return 2;
-        case TileType::DoorLocked: return 3;
-        default: return 1;
+        case TileType::DoorClosed: cost = 2; break;
+        case TileType::DoorLocked: cost = 3; break;
+        default: cost = 1; break;
     }
+
+    // Substrate acoustics: moss/dirt absorb sound (higher cost), while
+    // metal/crystal can carry it a bit farther (lower cost). This uses the
+    // deterministic per-floor material cache.
+    const TerrainMaterial m = materialAtCached(x, y);
+    cost += terrainMaterialFx(m).soundTileCostDelta;
+
+    // Never allow <=0 costs (pathfinding treats non-positive as blocked).
+    return std::max(1, cost);
 }
 
 bool Dungeon::soundDiagonalOk(int fromX, int fromY, int dx, int dy) const {

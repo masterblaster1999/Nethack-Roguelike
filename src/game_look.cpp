@@ -330,6 +330,10 @@ void Game::refreshSoundPreview() {
     }
     maxEff = std::max(0, maxEff);
 
+    // Ensure deterministic substrate cache so sound propagation can incorporate
+    // material acoustics (moss/dirt dampen; metal/crystal carry).
+    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
     soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, maxEff);
 }
 

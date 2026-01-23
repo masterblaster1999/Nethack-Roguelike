@@ -1,5 +1,7 @@
 #include "game_internal.hpp"
 
+#include "noise_localization.hpp"
+
 std::string Game::defaultSavePath() const {
     if (!savePathOverride.empty()) return savePathOverride;
     return "procrogue_save.dat";
@@ -808,8 +810,32 @@ void Game::emitNoise(Vec2i pos, int volume) {
     }
     maxEff = std::max(0, maxEff);
 
-    // Dungeon-aware propagation: walls/secret doors block sound; doors muffle.
+    // Ensure deterministic substrate cache so sound propagation can incorporate
+    // material acoustics (moss/dirt dampen; metal/crystal carry).
+    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
+    // Dungeon-aware propagation: walls/secret doors block sound; doors + materials muffle/carry.
     const std::vector<int> sound = dung.computeSoundMap(pos.x, pos.y, maxEff);
+
+    // Noise localization model:
+    //   - Monsters still get alerted when a sound reaches them, but quiet/far noises
+    //     do not necessarily pinpoint the exact source tile.
+    //   - We derive a deterministic per-monster offset (no RNG stream consumption).
+
+    auto validInvestigateTile = [&](Vec2i p) {
+        if (!dung.inBounds(p.x, p.y)) return false;
+        const TileType t = dung.at(p.x, p.y).type;
+        switch (t) {
+            case TileType::Wall:
+            case TileType::Pillar:
+            case TileType::DoorSecret:
+            case TileType::Chasm:
+            case TileType::Boulder:
+                return false;
+            default:
+                return true;
+        }
+    };
 
     for (auto& m : ents) {
         if (m.id == playerId_) continue;
@@ -823,8 +849,24 @@ void Game::emitNoise(Vec2i pos, int volume) {
         const int d = sound[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
         if (d < 0 || d > eff) continue;
 
+        Vec2i investigatePos = pos;
+        const int r = noiseInvestigateRadius(volume, eff, d);
+        if (r > 0) {
+            const uint32_t base = noiseInvestigateHash(seed_, turnCount, m.id, pos, volume, eff, d);
+
+            // Try a few candidates (deterministic sequence) until we land on a reasonable tile.
+            for (int attempt = 0; attempt < 10; ++attempt) {
+                const uint32_t h = hashCombine(base, static_cast<uint32_t>(attempt));
+                const Vec2i off = noiseInvestigateOffset(h, r);
+                const Vec2i cand{pos.x + off.x, pos.y + off.y};
+                if (!validInvestigateTile(cand)) continue;
+                investigatePos = cand;
+                break;
+            }
+        }
+
         m.alerted = true;
-        m.lastKnownPlayerPos = pos;
+        m.lastKnownPlayerPos = investigatePos;
         m.lastKnownPlayerAge = 0;
     }
 }

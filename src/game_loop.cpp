@@ -2727,6 +2727,10 @@ void Game::listen() {
     const int W = dung.width;
     auto idx = [&](int x, int y) { return y * W + x; };
 
+    // Ensure deterministic substrate cache so sound propagation can incorporate
+    // material acoustics (moss/dirt dampen; metal/crystal carry).
+    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
     const std::vector<int> sound = dung.computeSoundMap(p.pos.x, p.pos.y, range);
 
     struct DirInfo {
@@ -2840,6 +2844,10 @@ bool Game::throwVoiceAt(Vec2i target) {
 
     // Use the dungeon-aware sound propagation map as the validity check:
     // you can only throw a voice where sound could plausibly travel.
+    // Ensure deterministic substrate cache so sound propagation can incorporate
+    // material acoustics (moss/dirt dampen; metal/crystal carry).
+    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
     const std::vector<int> sound = dung.computeSoundMap(p.pos.x, p.pos.y, range);
     const int dist = sound[static_cast<size_t>(idx(target.x, target.y))];
 

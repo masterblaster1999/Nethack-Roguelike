@@ -4,6 +4,8 @@
 ## [0.22.0] - Unreleased
 
 ### Added
+- **Procedural rune tablets**: new `RuneTablet` item kind with deterministic per-seed rune-spell naming (via `generateProcSpell`) and glowing rune tablet sprite art. (Spell learning/casting wiring will follow in a later round.)
+- Rune Tablets are now flagged as **consumables** (read/use) in item definitions, in preparation for the upcoming procedural casting vertical slice.
 - Procedural terrain palette: per-run/per-floor HSL tints with room-style accents; configurable via settings and the new `#palette` command.
 - Procedural palette upgrades: added **HSV hue/saturation/brightness** controls plus a smooth per-floor **spatial chroma field** (low-frequency noise) to reduce large-area flatness while keeping doors readable.
 - **Procedural biolum terrain**: a deterministic Gray-Scott reaction-diffusion lichen/crystal glow field that injects **colored ambient light sources** in darkness mode (plus subtle biolum motes); see `docs/PROCGEN_TERRAIN_BIOLUM.md`.
@@ -23,6 +25,7 @@
 - **Procedural bounties**: introduces **Bounty Contracts** (guild kill contracts) that track progress inside the item; complete the objective to redeem a deterministic reward (use `#bounty` to list active contracts).
 - **Crafting Insight**: inventory crafting now shows a live **workstation + recipe preview** and assigns each recipe a deterministic **sigil name**; use `#recipes` to list recipes you've learned this run.
 - Material acoustics + scent absorption: substrate materials now modulate **footstep/dig noise** and **scent trail decay/spread** (moss/dirt dampen; metal/crystal ring out).
+- **Material acoustics now also affect sound propagation**: `Dungeon::soundTileCost()` incorporates substrate materials (moss/dirt/wood dampen; metal/crystal carry), so `computeSoundMap`-based systems (noise alerting, LOOK sound preview, `#listen`, and sneak-aware auto-travel) reflect the floor you're moving on.
 - **Wind-biased scent trails**: the existing per-level deterministic wind now also nudges scent propagation, stretching trails downwind and sharpening upwind drop-off.
 - Smell tracking AI now escapes local scent plateaus via a small bounded BFS, improving animal tracking behavior in tight corridors when diffusion is conservative.
 - **Procedural monster ecology (spawn theming)**: dungeon **terrain materials** and **room types** now apply mild, deterministic biases to the monster spawn tables — and certain affinity spawns can roll 1–2 nearby **nestmates** (shared groupId) — creating emergent ecology (spiders/snakes in dirt & moss, undead in marble/brick, kobolds in metal seams) without overriding content-mod spawn weights.
@@ -316,11 +319,15 @@
   - The HUD now shows your current PIETY and remaining prayer cooldown.
 
 - **Procedural particle VFX engine**: renderer-owned, procedurally generated spark/smoke/ember textures with lightweight simulation; used for hits, explosions, fire-field embers, and projectile trails.
+
+- **Procedural rune spells (foundation)**: added a deterministic rune-spell generator (`src/proc_spells.hpp`) that derives spell names + gameplay parameters from a packed 32-bit id (tier + seed), plus unit test coverage.
+
 ### Save compatibility
 - Save version bumped to **v43** (v41 adds `Item.flags`; v42 adds merchant guild pursuit; v43 adds shrine piety + prayer cooldown).
 
 - Added `tag32("...")` compile-time seed salt helper (FNV-1a) in `src/rng.hpp` for readable domain separation when mixing deterministic procedural seeds.
 ### Changed
+- Sound alerts now use deterministic **localization uncertainty**: quiet or distant noises no longer pinpoint the exact source tile, so monsters may investigate an approximate area (loud/near noises remain effectively exact).
 - WFC solver: upgraded `src/wfc.hpp` with bounded DFS backtracking (fewer full restarts) and a per-attempt RNG stream for more stable procgen; added WFC unit tests.
 - Procedural entity/projectile flipbooks: added sprite-space idle warps (slime squash & stretch, bat wing flap, snake slither, spider scuttle, wolf/dog tail wag) and replaced per-frame sprite shading jitter with a seamless looping shimmer; projectile arrow/rock now have 4-frame glint/tumble cues.
 - Procedural VFX flipbooks: **confusion/poison gas** and **fire** overlays now apply a lightweight **curl-noise flow warp** (divergence-free) before the existing domain-warp masks, producing more "advected" motion and richer turbulence in both top-down and isometric views.

@@ -37,6 +37,7 @@ inline constexpr ActionInfo kActionInfoTable[] = {
     {Action::Confirm, "confirm", "Confirm / interact / select"},
     {Action::Cancel,  "cancel",  "Cancel / close"},
     {Action::Wait,    "wait",    "Wait a turn"},
+    {Action::Parry,   "parry",   "Parry (ready a riposte)"},
     {Action::Rest,    "rest",    "Rest until healed / interrupted"},
     {Action::ToggleSneak, "sneak", "Toggle sneak (quieter movement)"},
     {Action::Evade,   "evade",   "Smart step away from visible threats"},

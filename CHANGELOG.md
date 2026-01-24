@@ -4,8 +4,11 @@
 ## [0.22.0] - Unreleased
 
 ### Added
-- **Procedural rune tablets**: new `RuneTablet` item kind with deterministic per-seed rune-spell naming (via `generateProcSpell`) and glowing rune tablet sprite art. (Spell learning/casting wiring will follow in a later round.)
+- **Spell miscasts**: Learned spells now have a failure chance (0..95%) influenced by Focus, character level, armor/encumbrance, confusion, and hallucination. Miscasts still consume a turn and some mana, create noise, and can cause backlash; **Blink** miscasts can drift. Spells UI + targeting preview now show **FAIL%**.
+- **Procedural rune tablets**: Rune Tablets now spawn and are fully usable — each tablet carries a deterministic proc-spell id, displays its rune-spell name, and can be invoked from the inventory to cast procedural rune magic (with targeting UI + mana costs).
 - Rune Tablets are now flagged as **consumables** (read/use) in item definitions, in preparation for the upcoming procedural casting vertical slice.
+- Rune Tablet **procedural spell targeting/casting**: `TargetingMode::RuneTablet`, plus `canCastProcSpell` / `castProcSpell` / `castProcSpellAt` for deterministic rune spells, now fully wired to inventory item use.
+- Rune Tablets now appear as rare loot (Treasure/Vault/Secret rooms), can be found on Shrines, and may be stocked in Magic shops (with depth-based rune tier).
 - Procedural terrain palette: per-run/per-floor HSL tints with room-style accents; configurable via settings and the new `#palette` command.
 - Procedural palette upgrades: added **HSV hue/saturation/brightness** controls plus a smooth per-floor **spatial chroma field** (low-frequency noise) to reduce large-area flatness while keeping doors readable.
 - **Procedural biolum terrain**: a deterministic Gray-Scott reaction-diffusion lichen/crystal glow field that injects **colored ambient light sources** in darkness mode (plus subtle biolum motes); see `docs/PROCGEN_TERRAIN_BIOLUM.md`.
@@ -28,11 +31,25 @@
 - **Material acoustics now also affect sound propagation**: `Dungeon::soundTileCost()` incorporates substrate materials (moss/dirt/wood dampen; metal/crystal carry), so `computeSoundMap`-based systems (noise alerting, LOOK sound preview, `#listen`, and sneak-aware auto-travel) reflect the floor you're moving on.
 - **Wind-biased scent trails**: the existing per-level deterministic wind now also nudges scent propagation, stretching trails downwind and sharpening upwind drop-off.
 - Smell tracking AI now escapes local scent plateaus via a small bounded BFS, improving animal tracking behavior in tight corridors when diffusion is conservative.
+- **Noise uncertainty investigation**: monsters now remember how imprecise a sound-based alert was (from noise localization) and perform a deterministic perimeter sweep within that uncertainty radius once they reach the anchor, instead of taking a single random “search” step. This makes stealth + **Throw Voice** lures feel more coherent.
+- **Monster torches**: on dark floors, some humanoid monsters can spawn with torches and will sometimes **light them** when alerted but unable to see you, creating **moving light sources** that interact with darkness stealth. Lit torches flicker visually, burn down over time, and drop as loot.
+- **Procedural artifact powers**: artifacts now have real, deterministic power effects (FLAME/VENOM/DAZE/WARD/VITALITY). Power tags grant small passive bonuses while equipped and can trigger lightweight combat procs (burn, poison, confusion, shimmering wards, life surge regen).
+  - Natural healing now respects **total Vigor** (base + ring + artifact bonuses), so Vitality-themed gear has an immediate impact beyond level-up math.
+- **Parry + Riposte stance**: New Parry action (default **Shift+P**) that grants a brief defensive stance (+AC). If an enemy misses you in melee while parrying, you can instantly **riposte**; the first turn is a **perfect parry** window that also staggers attackers (confusion).
+- **Confused melee swings**: Confusion now also scrambles **melee attacks** for monsters and companions (biased toward the intended target), enabling wild whiffs and occasional accidental **friendly fire / infighting** when multiple creatures are adjacent.
+- **Kick-rolled boulders**: You can now **kick boulders to set them rolling**, crushing anything in their path. Rolling-boulder traps and kicked boulders share a unified boulder-roll simulator with momentum-based damage falloff.
+
+- Fixed save v54 Parry persistence: entity deserialization now correctly reads and assigns `parryTurns` (previously a missing temp could break builds / loads).
+- **Wolf pack encirclement**: wolves now coordinate as a pack when they have line-of-sight, using a tiny min-cost matching solver to claim distinct adjacent tiles and reduce pileups while applying surround pressure.
+- **Expanded floor wards**: `#engrave` can now create multiple warding words (**ELBERETH**, **SALT**, **IRON**, **FIRE**) with different monster affinities.
+  - LOOK now displays the **ward type** and **uses remaining**.
+  - Cornered brutes can now attempt to **smudge** a ward away instead of freezing forever.
 - **Procedural monster ecology (spawn theming)**: dungeon **terrain materials** and **room types** now apply mild, deterministic biases to the monster spawn tables — and certain affinity spawns can roll 1–2 nearby **nestmates** (shared groupId) — creating emergent ecology (spiders/snakes in dirt & moss, undead in marble/brick, kobolds in metal seams) without overriding content-mod spawn weights.
 - **Procedural monster variants**: rare monsters now roll a persistent **rank** (Elite/Champion/Mythic) plus 1-3 **affixes** at spawn.
-- **Procedural monster abilities**: Elite+ monsters can roll 1–2 active abilities (pounce, toxic miasma, cinder nova, arcane ward, summoning, screech) with cooldowns, saved/loaded per-entity.
+- **Procedural monster abilities**: Elite+ monsters can roll 1–2 active abilities (pounce, toxic miasma, cinder nova, arcane ward, summoning, screech, void hook) with cooldowns, saved/loaded per-entity.
   - Affixes implemented this round: **Swift**, **Stonehide**, **Savage**, **Blinking** (panic blink reposition), and **Gilded** (bonus gold + higher key/drop odds).
   - New combat-proc affixes: **Venomous** (poison), **Flaming** (burn), **Vampiric** (life drain), and **Webbing** (ensnare).
+- **New procedural monster affix: Commander**: Commander-marked elites project a small, line-of-sight **aura** that **inspires** nearby allies (+accuracy, a small damage bump at higher tiers, and faster fear recovery). LOOK shows **INSPIRED** on affected monsters.
   - LOOK/targeting now surfaces rank + affixes, and XP rewards scale with procedural rank/affixes.
   - HP pip color hints rank (hidden while hallucinating).
   - Rolls are deterministic per monster (seeded from its sprite seed + depth + room type) and are **saved/loaded** so variants survive reloads.
@@ -370,6 +387,10 @@
 - Renderer: special overlay tiles (stairs, altars, fountains) now get a subtle deterministic **glint** modulation (scaled by proc_palette strength) so interactables pop without breaking pixel-art.
 
 ### Fixed
+- Fixed a proc-spell Shadow invisibility duration bug (typo: `invisibilityTurns` -> `invisTurns`).
+- Forced movement now recomputes FOV immediately (knockback, door-smash, and forced pulls), preventing stale vision after being shoved around.
+- Rune Tablet targeting now matches display-name generation for legacy tablets (spriteSeed=0), ensuring the spell you see is the spell you cast.
+- Magic shop item table thresholds are now fully reachable within the 0..99 roll (previously some high-end outcomes were unreachable).
 - Monster timed-effect timers now tick correctly for enemies as well (regen/shield/invisibility no longer last forever if a monster uses a potion or ability).
 - Shielding now contributes to **monster damage reduction**, making shield potions and Arcane Ward meaningful.
 - Fixed MSVC build break: LOOK/targeting HUD no longer references an out-of-scope `fitToChars` lambda (shared helper lives in render.cpp).
@@ -446,4 +467,3 @@
 - **Monster tracking (last known position)**: monsters now hunt toward the **last seen/heard** player location instead of having perfect information when line-of-sight is broken.
   - If they reach the spot and still can't see you, they will **search** nearby briefly and can eventually **give up**.
 - **Noise alerting**: **opening doors** and **attacking** (melee/ranged) will alert nearby monsters to investigate.
-

@@ -788,6 +788,7 @@ void Game::alertMonstersTo(Vec2i pos, int radius) {
         m.alerted = true;
         m.lastKnownPlayerPos = pos;
         m.lastKnownPlayerAge = 0;
+        m.lastKnownPlayerUncertainty = 0;
     }
 }
 
@@ -868,6 +869,7 @@ void Game::emitNoise(Vec2i pos, int volume) {
         m.alerted = true;
         m.lastKnownPlayerPos = investigatePos;
         m.lastKnownPlayerAge = 0;
+        m.lastKnownPlayerUncertainty = static_cast<uint8_t>(clampi(r, 0, 255));
     }
 }
 
@@ -1124,7 +1126,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 53u; // v53: corrosive gas field + corrosion effect
+constexpr uint32_t SAVE_VERSION = 54u; // v54: parry stance effect
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -1367,6 +1369,10 @@ void writeEntity(std::ostream& out, const Entity& e) {
     int32_t corrosionTurns = e.effects.corrosionTurns;
     writePod(out, corrosionTurns);
 
+    // v54+: parry stance
+    int32_t parryTurns = e.effects.parryTurns;
+    writePod(out, parryTurns);
+
     // v14+: ranged ammo count (ammo-based ranged monsters)
     int32_t ammoCount = e.rangedAmmoCount;
     writePod(out, ammoCount);
@@ -1465,6 +1471,8 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
 
     int32_t corrosionTurns = 0;
 
+    int32_t parryTurns = 0;
+
     int32_t stolenGold = 0;
 
     Item pocketConsumable;
@@ -1553,6 +1561,10 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
 
         if (version >= 53u) {
             if (!readPod(in, corrosionTurns)) return false;
+        }
+
+        if (version >= 54u) {
+            if (!readPod(in, parryTurns)) return false;
         }
     }
 
@@ -1675,6 +1687,7 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     e.effects.fearTurns = fearTurns;
     e.effects.hallucinationTurns = hallucinationTurns;
     e.effects.corrosionTurns = corrosionTurns;
+    e.effects.parryTurns = (version >= 54u) ? parryTurns : 0;
 
 
     if (version >= 17u) {

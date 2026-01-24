@@ -303,6 +303,7 @@ KeyBinds KeyBinds::defaults() {
 
     add(Action::Wait, SDLK_SPACE);
     add(Action::Wait, SDLK_PERIOD);
+    add(Action::Parry, SDLK_p, KMOD_SHIFT);
     add(Action::Rest, SDLK_r);
     add(Action::ToggleSneak, SDLK_n);
     add(Action::Evade, SDLK_e, KMOD_CTRL);
@@ -594,6 +595,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::Rest,
         Action::ToggleSneak,
         Action::Evade,
+        Action::Parry,
         Action::Wait,
 
         Action::Confirm,

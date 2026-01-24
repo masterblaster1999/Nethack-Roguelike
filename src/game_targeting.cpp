@@ -3,6 +3,7 @@
 #include "combat_rules.hpp"
 #include "fishing_gen.hpp"
 #include "projectile_utils.hpp"
+#include "proc_spells.hpp"
 
 namespace {
 static bool isTargetCandidateHostile(const Game& g, const Entity& e) {
@@ -260,6 +261,12 @@ std::string Game::targetingCombatPreviewText() const {
         ss << " | MANA " << sd.manaCost;
         if (sd.range > 0) ss << " | RNG " << sd.range;
 
+        if (player().effects.hallucinationTurns > 0) {
+            ss << " | FAIL ?%";
+        } else {
+            ss << " | FAIL " << spellFailChancePct(sk) << "%";
+        }
+
         if (sk == SpellKind::Blink) {
             // Teleport, no damage.
             return ss.str();
@@ -316,6 +323,47 @@ std::string Game::targetingCombatPreviewText() const {
 
         return ss.str();
     }
+
+    // Rune tablet targeting preview (procedural spell id stored on the tablet).
+    if (targetingMode_ == TargetingMode::RuneTablet) {
+        const ProcSpell ps = generateProcSpell(targetingProcSpellId_);
+
+        std::ostringstream ss;
+        ss << ps.name;
+        ss << " | MANA " << ps.manaCost;
+        if (ps.range > 0) ss << " | RNG " << ps.range;
+
+        switch (ps.form) {
+            case ProcSpellForm::Ward:
+                ss << " | SELF";
+                break;
+            case ProcSpellForm::Hex:
+                ss << " | HEX";
+                if (ps.durationTurns > 0) ss << " " << ps.durationTurns << "T";
+                break;
+            case ProcSpellForm::Cloud:
+                ss << " | GAS R" << std::max(1, ps.aoeRadius);
+                if (ps.durationTurns > 0) ss << " " << ps.durationTurns << "T";
+                break;
+            case ProcSpellForm::Burst:
+                ss << " | AOE";
+                break;
+            case ProcSpellForm::Bolt:
+            case ProcSpellForm::Beam:
+            case ProcSpellForm::Echo:
+            default:
+                break;
+        }
+
+        if (ps.damageDiceCount > 0 && ps.damageDiceSides > 0) {
+            DiceExpr d{ps.damageDiceCount, ps.damageDiceSides, ps.damageFlat};
+            ss << " | DMG " << diceToString(d, true);
+        }
+
+        if (player().effects.confusionTurns > 0) ss << " | CONFUSED";
+        return ss.str();
+    }
+
 
     // Capture sphere targeting preview.
     if (targetingMode_ == TargetingMode::Capture) {
@@ -545,6 +593,41 @@ void Game::cycleTargetCursor(int dir) {
     int range = playerRangedRange();
     if (targetingMode_ == TargetingMode::Spell) {
         range = spellDef(targetingSpell_).range;
+    } else if (targetingMode_ == TargetingMode::RuneTablet) {
+        // Validate rune tablet spell prerequisites (mainly mana).
+        std::string reason;
+        if (!canCastProcSpell(targetingProcSpellId_, &reason)) {
+            targetStatusText_ = reason;
+            return;
+        }
+
+        const ProcSpell ps = generateProcSpell(targetingProcSpellId_);
+        if (!ps.needsTarget) {
+            targetStatusText_ = "NO TARGET";
+            return;
+        }
+
+        // Clouds only make sense on walkable tiles.
+        if (ps.form == ProcSpellForm::Cloud) {
+            if (!dung.isWalkable(targetPos.x, targetPos.y)) {
+                targetStatusText_ = "CAN'T TARGET THERE";
+                return;
+            }
+        }
+
+        // Hexes require a living creature target (not yourself).
+        if (ps.form == ProcSpellForm::Hex) {
+            if (const Entity* e = entityAt(targetPos.x, targetPos.y)) {
+                if (e->hp <= 0 || e->id == player().id) {
+                    targetStatusText_ = "NO TARGET";
+                    return;
+                }
+            } else {
+                targetStatusText_ = "NO TARGET";
+                return;
+            }
+        }
+
     } else if (targetingMode_ == TargetingMode::Capture) {
         const int idx = findItemIndexById(inv, targetingCaptureItemId_);
         if (idx >= 0) {
@@ -803,6 +886,59 @@ void Game::beginFishingTargeting(int rodItemId) {
     pushMsg("CAST YOUR LINE...", MessageKind::System, true);
 }
 
+void Game::beginRuneTabletTargeting(int runeTabletItemId) {
+    const int idx = findItemIndexById(inv, runeTabletItemId);
+    if (idx < 0) {
+        pushMsg("YOU DON'T HAVE THAT ANYMORE.", MessageKind::Warning, true);
+        return;
+    }
+
+    const Item& tab = inv[static_cast<size_t>(idx)];
+    if (tab.kind != ItemKind::RuneTablet) {
+        pushMsg("THAT IS NOT A RUNE TABLET.", MessageKind::Warning, true);
+        return;
+    }
+
+    uint32_t procId = tab.spriteSeed;
+    if (procId == 0u) procId = hash32(static_cast<uint32_t>(tab.id) ^ 0x52C39A7Bu);
+
+    const ProcSpell ps = generateProcSpell(procId);
+    if (!ps.needsTarget) {
+        pushMsg("THAT RUNE TABLET DOES NOT REQUIRE A TARGET.", MessageKind::System, true);
+        return;
+    }
+
+    std::string reason;
+    if (!canCastProcSpell(procId, &reason)) {
+        if (!reason.empty()) pushMsg(reason + ".", MessageKind::Warning, true);
+        return;
+    }
+
+    targeting = true;
+    targetingMode_ = TargetingMode::RuneTablet;
+    targetingRuneTabletItemId_ = runeTabletItemId;
+    targetingProcSpellId_ = procId;
+    targetingCaptureItemId_ = 0;
+    targetingFishingRodItemId_ = 0;
+
+    invOpen = false;
+    spellsOpen = false;
+    closeChestOverlay();
+    helpOpen = false;
+    looking = false;
+    minimapOpen = false;
+    statsOpen = false;
+    msgScroll = 0;
+
+    targetPos = player().pos;
+    targetStatusText_.clear();
+    recomputeTargetLine();
+
+    pushMsg(std::string("INVOKE ") + ps.name + "...", MessageKind::System, true);
+}
+
+
+
 
 
 bool Game::endTargeting(bool fire) {
@@ -819,6 +955,8 @@ bool Game::endTargeting(bool fire) {
         targetingMode_ = TargetingMode::Ranged;
         targetingCaptureItemId_ = 0;
         targetingFishingRodItemId_ = 0;
+        targetingRuneTabletItemId_ = 0;
+        targetingProcSpellId_ = 0u;
     };
 
     // Spell targeting: cast the selected spell instead of firing ranged weapons.
@@ -857,6 +995,65 @@ bool Game::endTargeting(bool fire) {
         // If the cast failed (target changed, etc.), keep targeting open.
         return false;
     }
+
+    // Rune Tablet targeting: cast the selected procedural rune spell instead of firing ranged weapons.
+    if (targetingMode_ == TargetingMode::RuneTablet) {
+        if (!fire) {
+            closeTargeting();
+            return false;
+        }
+
+        if (!targetValid) {
+            if (!targetStatusText_.empty()) pushMsg(targetStatusText_ + ".");
+            else pushMsg("NO CLEAR TARGET.");
+            // Keep targeting open; do not consume the turn.
+            return false;
+        }
+
+        // Safety: require a second press to confirm risky casts (friendly fire / self-damage).
+        if (targetUnsafe_ && !targetUnsafeConfirmed_) {
+            targetUnsafeConfirmed_ = true;
+            if (!targetWarningText_.empty()) {
+                targetWarningText_ += " (FIRE AGAIN)";
+            } else {
+                targetWarningText_ = "UNSAFE TARGET (FIRE AGAIN)";
+            }
+            pushMsg("UNSAFE TARGET - PRESS FIRE AGAIN TO CONFIRM.", MessageKind::Warning, true);
+            return false;
+        }
+
+        const bool casted = castProcSpellAt(targetingProcSpellId_, targetPos);
+        if (casted) {
+            // Consume the rune tablet (non-stackable). If it was unpaid shop goods, add to debt.
+            const int itemIdx = findItemIndexById(inv, targetingRuneTabletItemId_);
+            if (itemIdx >= 0) {
+                const Item it = inv[static_cast<size_t>(itemIdx)];
+                if (it.shopPrice > 0 && it.shopDepth > 0) {
+                    const int d = it.shopDepth;
+                    if (d >= 0 && d < static_cast<int>(shopDebtLedger_.size())) {
+                        // Debt ledger stores total value owed for that shop depth.
+                        const int add = std::max(0, it.shopPrice);
+                        const int cur = shopDebtLedger_[static_cast<size_t>(d)];
+                        const long long nextLL = static_cast<long long>(cur) + static_cast<long long>(add);
+                        const int next = static_cast<int>(std::min<long long>(nextLL, 2000000000LL));
+                        shopDebtLedger_[static_cast<size_t>(d)] = next;
+                    }
+                }
+
+                inv.erase(inv.begin() + itemIdx);
+                // Keep selection index in bounds.
+                if (inv.empty()) invSel = 0;
+                else invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
+            }
+
+            closeTargeting();
+            return true;
+        }
+
+        // If the cast failed (target changed, etc.), keep targeting open.
+        return false;
+    }
+
 
     // Capture sphere targeting.
     if (targetingMode_ == TargetingMode::Capture) {
@@ -1394,6 +1591,41 @@ void Game::recomputeTargetLine() {
     int range = playerRangedRange();
     if (targetingMode_ == TargetingMode::Spell) {
         range = spellDef(targetingSpell_).range;
+    } else if (targetingMode_ == TargetingMode::RuneTablet) {
+        // Validate rune tablet spell prerequisites (mainly mana).
+        std::string reason;
+        if (!canCastProcSpell(targetingProcSpellId_, &reason)) {
+            targetStatusText_ = reason;
+            return;
+        }
+
+        const ProcSpell ps = generateProcSpell(targetingProcSpellId_);
+        if (!ps.needsTarget) {
+            targetStatusText_ = "NO TARGET";
+            return;
+        }
+
+        // Clouds only make sense on walkable tiles.
+        if (ps.form == ProcSpellForm::Cloud) {
+            if (!dung.isWalkable(targetPos.x, targetPos.y)) {
+                targetStatusText_ = "CAN'T TARGET THERE";
+                return;
+            }
+        }
+
+        // Hexes require a living creature target (not yourself).
+        if (ps.form == ProcSpellForm::Hex) {
+            if (const Entity* e = entityAt(targetPos.x, targetPos.y)) {
+                if (e->hp <= 0 || e->id == player().id) {
+                    targetStatusText_ = "NO TARGET";
+                    return;
+                }
+            } else {
+                targetStatusText_ = "NO TARGET";
+                return;
+            }
+        }
+
     } else if (targetingMode_ == TargetingMode::Capture) {
         const int idx = findItemIndexById(inv, targetingCaptureItemId_);
         if (idx >= 0) {
@@ -1409,6 +1641,9 @@ void Game::recomputeTargetLine() {
         } else {
             range = 6;
         }
+    } else if (targetingMode_ == TargetingMode::RuneTablet) {
+        const ProcSpell ps = generateProcSpell(targetingProcSpellId_);
+        range = ps.range;
     }
     if (range > 0 && static_cast<int>(targetLine.size()) > range + 1) {
         targetLine.resize(static_cast<size_t>(range + 1));
@@ -1452,6 +1687,41 @@ void Game::recomputeTargetLine() {
                 return;
             }
         }
+    } else if (targetingMode_ == TargetingMode::RuneTablet) {
+        // Validate rune tablet spell prerequisites (mainly mana).
+        std::string reason;
+        if (!canCastProcSpell(targetingProcSpellId_, &reason)) {
+            targetStatusText_ = reason;
+            return;
+        }
+
+        const ProcSpell ps = generateProcSpell(targetingProcSpellId_);
+        if (!ps.needsTarget) {
+            targetStatusText_ = "NO TARGET";
+            return;
+        }
+
+        // Clouds only make sense on walkable tiles.
+        if (ps.form == ProcSpellForm::Cloud) {
+            if (!dung.isWalkable(targetPos.x, targetPos.y)) {
+                targetStatusText_ = "CAN'T TARGET THERE";
+                return;
+            }
+        }
+
+        // Hexes require a living creature target (not yourself).
+        if (ps.form == ProcSpellForm::Hex) {
+            if (const Entity* e = entityAt(targetPos.x, targetPos.y)) {
+                if (e->hp <= 0 || e->id == player().id) {
+                    targetStatusText_ = "NO TARGET";
+                    return;
+                }
+            } else {
+                targetStatusText_ = "NO TARGET";
+                return;
+            }
+        }
+
     } else if (targetingMode_ == TargetingMode::Capture) {
         // Capture spheres require a valid sphere item in the inventory.
         const int idx = findItemIndexById(inv, targetingCaptureItemId_);
@@ -1642,6 +1912,29 @@ void Game::recomputeTargetLine() {
             default:
                 break;
         }
+    } else if (targetingMode_ == TargetingMode::RuneTablet) {
+        const ProcSpell ps = generateProcSpell(targetingProcSpellId_);
+        switch (ps.form) {
+            case ProcSpellForm::Bolt:
+            case ProcSpellForm::Beam:
+            case ProcSpellForm::Echo:
+            case ProcSpellForm::Hex:
+                checkLine = true;
+                break;
+            case ProcSpellForm::Burst:
+                checkLine = true;
+                checkAoe = true;
+                // Current proc burst implementation uses the existing Fireball explosion (R1).
+                aoeRadius = 1;
+                break;
+            case ProcSpellForm::Cloud:
+                checkAoe = true;
+                aoeRadius = std::max(1, ps.aoeRadius);
+                break;
+            default:
+                break;
+        }
+
     } else {
         // Ranged weapons / throwing.
         ProjectileKind pk = ProjectileKind::Arrow;

@@ -1,4 +1,5 @@
 #include "game.hpp"
+#include "artifact_gen.hpp"
 
 #include "pet_gen.hpp"
 
@@ -7,6 +8,7 @@
 #include "projectile_utils.hpp"
 
 #include <algorithm>
+#include <array>
 #include <sstream>
 
 namespace {
@@ -111,6 +113,8 @@ int damageReduction(const Game& game, const Entity& e) {
             const Item& a = e.gearArmor;
             const int b = (a.buc < 0) ? -1 : (a.buc > 0 ? 1 : 0);
             dr += itemDef(a.kind).defense + a.enchant + b;
+            // Artifact wards add extra "toughness" for monsters (DR).
+            dr += artifactgen::passiveBonusDefense(a);
         }
 
         // Temporary shielding (from potions or procedural abilities) adds flat damage
@@ -305,6 +309,12 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
         backstab = (attackerWasSneaking || attackerWasInvisible);
     }
 
+    // Commander aura: nearby commander-type allies can boost monster accuracy.
+    const int inspireTier = (attacker.kind != EntityKind::Player) ? commanderAuraTierFor(attacker) : 0;
+    if (inspireTier > 0) {
+        atkBonus += inspireTier;
+    }
+
     const int ac = targetAC(*this, defender);
     const HitCheck hc = rollToHit(rng, atkBonus, ac);
 
@@ -324,7 +334,53 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
             // Even a miss makes noise.
             emitNoise(attacker.pos, 7);
         }
+
+        // Parry stance: if the player is parrying and an enemy misses in melee,
+        // they may instantly counterattack (riposte). The first turn after you
+        // enter the stance is a guaranteed "perfect parry" window.
+        if (defender.kind == EntityKind::Player && attacker.kind != EntityKind::Player && defender.effects.parryTurns > 0) {
+            const bool perfect = (defender.effects.parryTurns >= 2);
+
+            float chance = 1.0f;
+            if (!perfect) {
+                // Base riposte chance is modest; agility helps.
+                const int agi = playerAgility();
+                chance = 0.35f + 0.03f * static_cast<float>(agi);
+
+                // Heavy armor makes clean ripostes harder.
+                if (const Item* a = equippedArmor()) {
+                    if (a->kind == ItemKind::ChainArmor) chance -= 0.10f;
+                    if (a->kind == ItemKind::PlateArmor) chance -= 0.15f;
+                }
+
+                if (chance < 0.35f) chance = 0.35f;
+                if (chance > 0.75f) chance = 0.75f;
+            }
+
+            if (rng.chance(chance)) {
+                if (perfect) pushMsg("YOU PERFECTLY PARRY!", MessageKind::Combat, true);
+                else pushMsg("YOU RIPOSTE!", MessageKind::Combat, true);
+
+                // Perfect parry staggers the attacker briefly.
+                if (perfect) {
+                    attacker.effects.confusionTurns = std::max(attacker.effects.confusionTurns, 2);
+                }
+
+                // Parry stance is consumed on the first riposte attempt to prevent
+                // multi-ripostes in a single monster phase.
+                defender.effects.parryTurns = 0;
+
+                // Riposte attack (does not consume an extra turn).
+                attackMelee(defender, attacker, false);
+            }
+        }
+
         return;
+    }
+
+    // A successful melee hit can partially disrupt a parry stance.
+    if (defender.kind == EntityKind::Player && attacker.kind != EntityKind::Player && defender.effects.parryTurns > 0) {
+        defender.effects.parryTurns = std::max(0, defender.effects.parryTurns - 1);
     }
 
     // Roll damage.
@@ -364,6 +420,12 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
             // Add an extra weapon dice roll (roughly doubles dice damage).
             dmg += rollDice(rng, baseDice);
         }
+    }
+
+    // Commander aura adds a small damage bump (scaled gently) to inspired monsters.
+    if (attacker.kind != EntityKind::Player && inspireTier > 0) {
+        if (inspireTier >= 2) dmg += 1;
+        if (inspireTier >= 3) dmg += 1;
     }
 
     // Damage reduction (armor/hide). Criticals punch through a bit.
@@ -476,6 +538,244 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
             }
             default:
                 break;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Artifact power procs (procedural artifacts)
+    //
+    // Artifacts already have deterministic titles and power tags; this layer makes
+    // those tags actually matter in combat. Kept lightweight and readable:
+    // - at most one offensive status proc per melee hit (FLAME/VENOM/DAZE)
+    // - WARD can grant temporary shielding
+    // - VITALITY can heal/grant regeneration
+    {
+        using AP = artifactgen::Power;
+        constexpr size_t AP_N = static_cast<size_t>(AP::COUNT);
+
+        auto canSeeEnt = [&](const Entity& e) -> bool {
+            if (e.kind == EntityKind::Player) return true;
+            if (!dung.inBounds(e.pos.x, e.pos.y)) return false;
+            return dung.at(e.pos.x, e.pos.y).visible;
+        };
+
+        auto consider = [&](const Item& it, std::array<int, AP_N>& best) {
+            if (!artifactgen::isArtifactGear(it)) return;
+            const int lvl = artifactgen::powerLevel(it);
+            if (lvl <= 0) return;
+            const AP p = artifactgen::artifactPower(it);
+            const size_t idx = static_cast<size_t>(p);
+            if (idx < best.size()) best[idx] = std::max(best[idx], lvl);
+        };
+
+        auto gatherForMelee = [&](const Entity& e, std::array<int, AP_N>& best) {
+            // For melee procs we only consider "relevant" worn gear:
+            // - attacker: melee weapon + worn armor + rings
+            // - defender: held melee + worn armor + rings
+            // Ranged weapons are excluded here to avoid e.g. a bow's artifact power
+            // applying to a sword strike.
+            if (e.kind == EntityKind::Player) {
+                if (const Item* w = equippedMelee()) consider(*w, best);
+                if (const Item* a = equippedArmor()) consider(*a, best);
+                if (const Item* r = equippedRing1()) consider(*r, best);
+                if (const Item* r = equippedRing2()) consider(*r, best);
+            } else {
+                if (e.gearMelee.id != 0) consider(e.gearMelee, best);
+                if (e.gearArmor.id != 0) consider(e.gearArmor, best);
+            }
+        };
+
+        std::array<int, AP_N> atkBest{};
+        std::array<int, AP_N> defBest{};
+        gatherForMelee(attacker, atkBest);
+        gatherForMelee(defender, defBest);
+
+        auto chanceFromLvl = [](int lvl, float base, float perLevel, float cap = 0.75f) -> float {
+            float c = base + perLevel * static_cast<float>(lvl);
+            return std::clamp(c, 0.0f, cap);
+        };
+
+        // Offensive status: pick at most one of {FLAME, VENOM, DAZE}.
+        struct Cand { AP p; int lvl; int w; };
+        Cand cands[3];
+        int nCand = 0;
+        auto addCand = [&](AP p) {
+            const int lvl = atkBest[static_cast<size_t>(p)];
+            if (lvl <= 0) return;
+            const int w = 3 + lvl; // slightly favor higher potency
+            cands[nCand++] = Cand{p, lvl, w};
+        };
+        addCand(AP::Flame);
+        addCand(AP::Venom);
+        addCand(AP::Daze);
+
+        if (nCand > 0 && defender.hp > 0) {
+            int totalW = 0;
+            for (int i = 0; i < nCand; ++i) totalW += cands[i].w;
+            int roll = rng.range(1, totalW);
+            AP chosen = cands[0].p;
+            int lvl = cands[0].lvl;
+            for (int i = 0; i < nCand; ++i) {
+                if (roll <= cands[i].w) {
+                    chosen = cands[i].p;
+                    lvl = cands[i].lvl;
+                    break;
+                }
+                roll -= cands[i].w;
+            }
+
+            switch (chosen) {
+                case AP::Flame: {
+                    const float chance = chanceFromLvl(lvl, 0.12f, 0.07f, 0.65f);
+                    if (rng.chance(chance)) {
+                        const int before = defender.effects.burnTurns;
+                        const int turns = clampi(rng.range(2 + lvl, 4 + lvl), 2, 16);
+                        defender.effects.burnTurns = std::max(defender.effects.burnTurns, turns);
+                        if (before == 0 && defender.effects.burnTurns > 0) {
+                            if (defender.kind == EntityKind::Player) {
+                                pushMsg("YOU ARE SET AFLAME!", MessageKind::Warning, false);
+                            } else if (canSeeEnt(defender)) {
+                                std::ostringstream ss2;
+                                ss2 << kindName(defender.kind) << " CATCHES FIRE!";
+                                pushMsg(ss2.str(), MessageKind::Info, true);
+                            }
+                        }
+                    }
+                    break;
+                }
+                case AP::Venom: {
+                    const float chance = chanceFromLvl(lvl, 0.14f, 0.07f, 0.70f);
+                    if (rng.chance(chance)) {
+                        const int before = defender.effects.poisonTurns;
+                        const int turns = clampi(rng.range(3 + lvl * 2, 6 + lvl * 2), 3, 20);
+                        defender.effects.poisonTurns = std::max(defender.effects.poisonTurns, turns);
+                        if (before == 0 && defender.effects.poisonTurns > 0) {
+                            if (defender.kind == EntityKind::Player) {
+                                pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
+                            } else if (canSeeEnt(defender)) {
+                                std::ostringstream ss2;
+                                ss2 << kindName(defender.kind) << " IS POISONED!";
+                                pushMsg(ss2.str(), MessageKind::Info, true);
+                            }
+                            if (canSeeEnt(defender)) pushFxParticle(FXParticlePreset::Poison, defender.pos, 18, 0.35f);
+                        }
+                    }
+                    break;
+                }
+                case AP::Daze: {
+                    const float chance = chanceFromLvl(lvl, 0.10f, 0.06f, 0.55f);
+                    if (rng.chance(chance)) {
+                        const int before = defender.effects.confusionTurns;
+                        const int turns = clampi(rng.range(2 + lvl, 3 + lvl), 2, 14);
+                        defender.effects.confusionTurns = std::max(defender.effects.confusionTurns, turns);
+                        if (before == 0 && defender.effects.confusionTurns > 0) {
+                            if (defender.kind == EntityKind::Player) {
+                                pushMsg("YOU ARE DAZED!", MessageKind::Warning, false);
+                            } else if (canSeeEnt(defender)) {
+                                std::ostringstream ss2;
+                                ss2 << kindName(defender.kind) << " LOOKS DAZED!";
+                                pushMsg(ss2.str(), MessageKind::Info, true);
+                            }
+                        }
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+
+        // VITALITY: heal the attacker from damage dealt.
+        {
+            const int lvl = atkBest[static_cast<size_t>(AP::Vitality)];
+            if (lvl > 0 && dmg > 0 && attacker.hp > 0) {
+                const float chance = chanceFromLvl(lvl, 0.18f, 0.07f, 0.70f);
+                if (rng.chance(chance)) {
+                    const int heal = clampi(1 + (lvl >= 3 ? 1 : 0), 1, 2);
+                    const int before = attacker.hp;
+                    attacker.hp = std::min(attacker.hpMax, attacker.hp + heal);
+                    if (attacker.hp > before) {
+                        if (attacker.kind == EntityKind::Player) {
+                            pushMsg("LIFE SURGES THROUGH YOU!", MessageKind::Success, true);
+                            pushFxParticle(FXParticlePreset::Heal, attacker.pos, 18, 0.35f);
+                        } else if (defender.kind == EntityKind::Player) {
+                            pushMsg("THE FOE SURGES WITH VITALITY!", MessageKind::Warning, false);
+                        } else if (canSeeEnt(attacker)) {
+                            std::ostringstream ss2;
+                            ss2 << kindName(attacker.kind) << " LOOKS REINVIGORATED.";
+                            pushMsg(ss2.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+            }
+        }
+
+        // WARD: chance to grant shielding to the bearer.
+        {
+            const int lvlAtk = atkBest[static_cast<size_t>(AP::Ward)];
+            if (lvlAtk > 0 && attacker.hp > 0) {
+                const float chance = chanceFromLvl(lvlAtk, 0.10f, 0.06f, 0.55f);
+                if (rng.chance(chance)) {
+                    const int before = attacker.effects.shieldTurns;
+                    const int turns = clampi(rng.range(2 + lvlAtk, 3 + lvlAtk), 2, 16);
+                    attacker.effects.shieldTurns = std::max(attacker.effects.shieldTurns, turns);
+                    if (before == 0 && attacker.effects.shieldTurns > 0) {
+                        if (attacker.kind == EntityKind::Player) {
+                            pushMsg("A WARD SHIMMERS AROUND YOU!", MessageKind::Success, true);
+                            pushFxParticle(FXParticlePreset::Buff, attacker.pos, 18, 0.25f);
+                        } else if (defender.kind == EntityKind::Player) {
+                            pushMsg("THE FOE RAISES A SHIMMERING WARD!", MessageKind::Warning, false);
+                        } else if (canSeeEnt(attacker)) {
+                            std::ostringstream ss2;
+                            ss2 << kindName(attacker.kind) << " IS SURROUNDED BY A WARD.";
+                            pushMsg(ss2.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+            }
+
+            const int lvlDef = defBest[static_cast<size_t>(AP::Ward)];
+            if (lvlDef > 0 && defender.hp > 0) {
+                const float chance = chanceFromLvl(lvlDef, 0.14f, 0.06f, 0.65f);
+                if (rng.chance(chance)) {
+                    const int before = defender.effects.shieldTurns;
+                    const int turns = clampi(rng.range(2 + lvlDef, 4 + lvlDef), 2, 18);
+                    defender.effects.shieldTurns = std::max(defender.effects.shieldTurns, turns);
+                    if (before == 0 && defender.effects.shieldTurns > 0) {
+                        if (defender.kind == EntityKind::Player) {
+                            pushMsg("YOUR WARD SHIELDS YOU!", MessageKind::Success, true);
+                            pushFxParticle(FXParticlePreset::Buff, defender.pos, 18, 0.25f);
+                        } else if (canSeeEnt(defender)) {
+                            std::ostringstream ss2;
+                            ss2 << kindName(defender.kind) << " IS PROTECTED BY A WARD.";
+                            pushMsg(ss2.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+            }
+        }
+
+        // VITALITY (defensive): chance to grant brief regeneration when struck.
+        {
+            const int lvl = defBest[static_cast<size_t>(AP::Vitality)];
+            if (lvl > 0 && dmg > 0 && defender.hp > 0) {
+                const float chance = chanceFromLvl(lvl, 0.16f, 0.06f, 0.60f);
+                if (rng.chance(chance)) {
+                    const int before = defender.effects.regenTurns;
+                    const int turns = clampi(rng.range(2 + lvl, 4 + lvl), 2, 18);
+                    defender.effects.regenTurns = std::max(defender.effects.regenTurns, turns);
+                    if (before == 0 && defender.effects.regenTurns > 0) {
+                        if (defender.kind == EntityKind::Player) {
+                            pushMsg("YOU FEEL YOUR WOUNDS KNIT.", MessageKind::Success, true);
+                            pushFxParticle(FXParticlePreset::Heal, defender.pos, 18, 0.25f);
+                        } else if (canSeeEnt(defender)) {
+                            std::ostringstream ss2;
+                            ss2 << kindName(defender.kind) << " LOOKS HEALTHIER.";
+                            pushMsg(ss2.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -776,6 +1076,13 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                     fs << kindName(defender.kind) << " DODGES THE CHASM.";
                     pushMsg(fs.str(), MessageKind::Info, msgFromPlayer);
                 }
+
+            }
+
+            // If the player's position changed (or a door got smashed open), refresh FOV immediately.
+            // Forced movement can otherwise leave vision stale until the next player action.
+            if (player().hp > 0 && ((defender.kind == EntityKind::Player && kb.stepsMoved > 0) || kb.doorChanged)) {
+                recomputeFov();
             }
         }
     }
@@ -855,12 +1162,22 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
         }
     }
 
-// Wind drift: physical projectiles are biased by the level's deterministic wind.
-// This is intentionally simple and readable: players can compensate by aiming into the wind.
-if (projKind == ProjectileKind::Arrow || projKind == ProjectileKind::Rock || projKind == ProjectileKind::Torch) {
-    const WindShotAdjust wa = windAdjustShot(attacker.pos, target, range, projKind);
-    target = wa.adjustedTarget;
-}
+    // Commander aura: inspired monsters gain accuracy and a touch of extra damage.
+    if (attacker.kind != EntityKind::Player) {
+        const int inspireTier = commanderAuraTierFor(attacker);
+        if (inspireTier > 0) {
+            atkBonus += inspireTier;
+            if (inspireTier >= 2) dmgBonus += 1;
+            if (inspireTier >= 3) dmgBonus += 1;
+        }
+    }
+
+    // Wind drift: physical projectiles are biased by the level's deterministic wind.
+    // This is intentionally simple and readable: players can compensate by aiming into the wind.
+    if (projKind == ProjectileKind::Arrow || projKind == ProjectileKind::Rock || projKind == ProjectileKind::Torch) {
+        const WindShotAdjust wa = windAdjustShot(attacker.pos, target, range, projKind);
+        target = wa.adjustedTarget;
+    }
 
     std::vector<Vec2i> line = bresenhamLine(attacker.pos, target);
     if (line.size() <= 1) return;

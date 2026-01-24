@@ -1,5 +1,7 @@
 #include "game_internal.hpp"
 
+#include "wards.hpp"
+
 #include "combat_rules.hpp"
 #include "hallucination.hpp"
 #include "monster_pathing.hpp"
@@ -732,7 +734,17 @@ ss << baseDesc;
             }
         } else {
             ss << " | ENGRAVING: \"" << eg->text << "\"";
-            if (eg->isWard) ss << " (WARD)";
+            if (eg->isWard) {
+                WardWord ww = wardWordFromText(eg->text);
+                ss << " (WARD";
+                const char* wn = wardWordName(ww);
+                if (wn && wn[0]) ss << ": " << wn;
+                if (eg->strength != 255) {
+                    const int uses = std::max(0, static_cast<int>(eg->strength));
+                    ss << ", " << uses << " USE" << (uses == 1 ? "" : "S") << " LEFT";
+                }
+                ss << ")";
+            }
         }
     }
 
@@ -827,6 +839,13 @@ ss << baseDesc;
 
                 if (e->effects.fearTurns > 0) {
                     ss << " | FEARED";
+                }
+
+                if (!hallu) {
+                    const int inspireTier = commanderAuraTierFor(*e);
+                    if (inspireTier > 0) {
+                        ss << " | INSPIRED";
+                    }
                 }
 
                 // Don't leak extra information while hallucinating: the player is already

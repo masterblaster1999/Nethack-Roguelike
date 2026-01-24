@@ -226,6 +226,24 @@ void Game::recomputeLightMap() {
         }
     }
 
+    // Monster / NPC light sources (carried lit torches).
+    // These are intentionally a bit dimmer than the player torch so enemies that
+    // bring light into corridors feel readable without totally erasing the dark.
+    {
+        int count = 0;
+        for (const auto& e : ents) {
+            if (e.hp <= 0) continue;
+            if (!dung.inBounds(e.pos.x, e.pos.y)) continue;
+
+            const Item& pc = e.pocketConsumable;
+            if (pc.id == 0 || pc.count <= 0) continue;
+            if (pc.kind != ItemKind::TorchLit || pc.charges <= 0) continue;
+
+            sources.push_back({ e.pos, 6, 220, Color{ 255, 196, 152, 255 } });
+            if (++count >= 24) break; // hard cap for perf
+        }
+    }
+
     // Fire field (tile-based hazard) as a dynamic warm light source.
     // We keep this bounded for performance: if there are many burning tiles, only the
     // strongest few contribute as LOS-aware sources (the renderer still draws all flames).

@@ -5,6 +5,8 @@
 #include "crafting_gen.hpp"
 
 #include "bounty_gen.hpp"
+#include "proc_spells.hpp"
+
 
 static ChestContainer* findChestContainer(std::vector<ChestContainer>& containers, int chestId) {
     for (auto& c : containers) {
@@ -1982,6 +1984,36 @@ bool Game::useSelected() {
 
         consumeOneNonStackable();
         return true;
+    }
+
+    // ------------------------------------------------------------
+    // Rune Tablets (procedural rune magic)
+    // ------------------------------------------------------------
+    // Rune Tablets encode a deterministic procedural spell id in spriteSeed. When used,
+    // they either cast immediately (self/ward spells) or open the targeting overlay.
+    if (it.kind == ItemKind::RuneTablet) {
+        uint32_t procId = it.spriteSeed;
+        if (procId == 0u) procId = hash32(static_cast<uint32_t>(it.id) ^ 0x52C39A7Bu);
+
+        const ProcSpell ps = generateProcSpell(procId);
+
+        std::string reason;
+        if (!canCastProcSpell(procId, &reason)) {
+            if (!reason.empty()) pushMsg(reason + ".", MessageKind::Warning, true);
+            return false;
+        }
+
+        if (ps.needsTarget) {
+            beginRuneTabletTargeting(it.id);
+            return false; // targeting will consume the turn on cast
+        }
+
+        const bool casted = castProcSpell(procId);
+        if (casted) {
+            consumeOneNonStackable();
+            return true;
+        }
+        return false;
     }
 
     if (it.kind == ItemKind::PotionHealing) {

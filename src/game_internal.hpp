@@ -1424,7 +1424,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.pushSystemMessage("SLOTS: slot [name], save [slot], load [slot], loadauto [slot], saves");
         game.pushSystemMessage("EXPORT: exportlog/exportmap/export/exportall/dump");
         game.pushSystemMessage("MARKS: mark [note|danger|loot] <label> | unmark | marks | travel <index|label>");
-        game.pushSystemMessage("ENGRAVE: engrave <text> (costs a turn; try 'ELBERETH' for a ward)");
+        game.pushSystemMessage("ENGRAVE: engrave <text> (costs a turn; wards: 'ELBERETH' | 'SALT' | 'IRON' | 'FIRE')");
         game.pushSystemMessage("SOUND: shout | whistle | listen | throwvoice [x y] (TIP: LOOK cursor works)");
         game.pushSystemMessage("TACTICS: evade (smart step away from visible threats; respects sneak/audibility)");
         game.pushSystemMessage("COMPANIONS: pet [follow|stay|fetch|guard] | tame (needs a FOOD RATION)");

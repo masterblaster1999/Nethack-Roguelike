@@ -5086,6 +5086,13 @@ SpritePixels generateEffectIcon(EffectKind kind, int frame, int pxSize) {
             rect(s, 7, 10, 2, 3, withAlpha(good, 180));
             setPx(s, 8, 13, withAlpha(good, 180));
             break;
+        case EffectKind::Parry:
+            // A simple sword + buckler icon.
+            rect(s, 3, 6, 4, 6, withAlpha(good, 180));
+            line(s, 8, 3, 8, 13, ink);
+            line(s, 7, 4, 9, 4, ink);
+            line(s, 6, 7, 10, 7, ink);
+            break;
     }
 
     return (pxSize == 16) ? s : resampleSpriteToSizeInternal(s, pxSize);

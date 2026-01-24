@@ -1,6 +1,7 @@
 #include "game_internal.hpp"
 #include "overworld.hpp"
 #include "bounty_gen.hpp"
+#include "artifact_gen.hpp"
 #include <cmath>
 
 uint32_t dailySeedUtc(std::string* outDateIso) {
@@ -714,6 +715,41 @@ const Entity* Game::entityAt(int x, int y) const {
     return nullptr;
 }
 
+int Game::commanderAuraTierFor(const Entity& e) const {
+    if (e.hp <= 0) return 0;
+    if (e.id == playerId_ || e.kind == EntityKind::Player) return 0;
+
+    // Only allies on the same side (friendly flag) can benefit. This avoids
+    // hostile commanders buffing the player (player.friendly==false).
+    const bool side = e.friendly;
+
+    // Keep it intentionally small so positioning and killing the commander matters.
+    const int radius = 6;
+
+    int bestTier = 0;
+    for (const auto& c : ents) {
+        if (c.hp <= 0) continue;
+        if (c.id == e.id) continue;
+        if (c.id == playerId_ || c.kind == EntityKind::Player) continue;
+        if (c.friendly != side) continue;
+        if (!procHasAffix(c.procAffixMask, ProcMonsterAffix::Commander)) continue;
+
+        const int dx = std::abs(c.pos.x - e.pos.x);
+        const int dy = std::abs(c.pos.y - e.pos.y);
+        const int dist = (dx > dy) ? dx : dy; // Chebyshev
+        if (dist > radius) continue;
+
+        // Require line-of-sight so doors and walls can break the aura.
+        if (!dung.hasLineOfSight(c.pos.x, c.pos.y, e.pos.x, e.pos.y)) continue;
+
+        int tier = procRankTier(c.procRank);
+        if (tier <= 0) tier = 1;
+        if (tier > bestTier) bestTier = tier;
+    }
+
+    return bestTier;
+}
+
 int Game::equippedMeleeIndex() const {
     return findItemIndexById(inv, equipMeleeId);
 }
@@ -866,6 +902,76 @@ int Game::ringTalentBonusFocus() const {
     return b;
 }
 
+int Game::artifactTalentBonusMight() const {
+    int b = 0;
+    auto add = [&](const Item* it) {
+        if (!it) return;
+        b += artifactgen::passiveBonusMight(*it);
+    };
+    add(equippedMelee());
+    add(equippedRanged());
+    add(equippedArmor());
+    add(equippedRing1());
+    add(equippedRing2());
+    return b;
+}
+
+int Game::artifactTalentBonusAgility() const {
+    int b = 0;
+    auto add = [&](const Item* it) {
+        if (!it) return;
+        b += artifactgen::passiveBonusAgility(*it);
+    };
+    add(equippedMelee());
+    add(equippedRanged());
+    add(equippedArmor());
+    add(equippedRing1());
+    add(equippedRing2());
+    return b;
+}
+
+int Game::artifactTalentBonusVigor() const {
+    int b = 0;
+    auto add = [&](const Item* it) {
+        if (!it) return;
+        b += artifactgen::passiveBonusVigor(*it);
+    };
+    add(equippedMelee());
+    add(equippedRanged());
+    add(equippedArmor());
+    add(equippedRing1());
+    add(equippedRing2());
+    return b;
+}
+
+int Game::artifactTalentBonusFocus() const {
+    int b = 0;
+    auto add = [&](const Item* it) {
+        if (!it) return;
+        b += artifactgen::passiveBonusFocus(*it);
+    };
+    add(equippedMelee());
+    add(equippedRanged());
+    add(equippedArmor());
+    add(equippedRing1());
+    add(equippedRing2());
+    return b;
+}
+
+int Game::artifactDefenseBonus() const {
+    int b = 0;
+    auto add = [&](const Item* it) {
+        if (!it) return;
+        b += artifactgen::passiveBonusDefense(*it);
+    };
+    add(equippedMelee());
+    add(equippedRanged());
+    add(equippedArmor());
+    add(equippedRing1());
+    add(equippedRing2());
+    return b;
+}
+
 int Game::ringDefenseBonus() const {
     int b = 0;
     if (const Item* r = equippedRing1()) {
@@ -902,11 +1008,17 @@ int Game::playerDefense() const {
     // Temporary shielding buff
     if (player().effects.shieldTurns > 0) def += 2;
 
+    // Parry stance: smaller AC boost; the first "perfect" turn is slightly stronger.
+    if (player().effects.parryTurns > 0) def += (player().effects.parryTurns >= 2 ? 2 : 1);
+
     // Corrosion reduces effective protection (represents pitted armor / burned skin).
     if (player().effects.corrosionTurns > 0) {
         const int p = clampi(1 + player().effects.corrosionTurns / 4, 1, 3);
         def -= p;
     }
+
+    // Artifact wards are treated as magical protection (not reduced by corrosion).
+    def += artifactDefenseBonus();
     return def;
 }
 
@@ -2736,6 +2848,9 @@ void Game::spawnGraffiti() {
         "THE DEAD CAN SMELL YOU.",
         "TRUST YOUR NOSE.",
         "WORDS CAN BE WEAPONS.",
+        "SALT KEEPS THE DEAD BACK.",
+        "COLD IRON STOPS TRICKSTERS.",
+        "FIRE MAKES SLIME WARY.",
         "YOU ARE NOT THE FIRST.",
         "BONES DON'T LIE.",
         "GREED GETS YOU KILLED.",
@@ -3927,6 +4042,7 @@ static void hashEffects(Hash64& hh, const Effects& ef) {
     hh.addI32(ef.fearTurns);
     hh.addI32(ef.hallucinationTurns);
     hh.addI32(ef.corrosionTurns);
+    hh.addI32(ef.parryTurns);
 }
 
 static void hashEntity(Hash64& hh, const Entity& e) {

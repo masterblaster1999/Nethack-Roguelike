@@ -1,5 +1,7 @@
 #include "game_internal.hpp"
 
+#include "wards.hpp"
+
 int Game::playerFootstepNoiseVolumeAt(Vec2i pos) const {
     if (!dung.inBounds(pos.x, pos.y)) return 0;
 
@@ -64,6 +66,11 @@ int Game::playerFootstepNoiseVolumeAt(Vec2i pos) const {
 bool Game::tryMove(Entity& e, int dx, int dy) {
     if (e.hp <= 0) return false;
     if (dx == 0 && dy == 0) return false;
+
+    // Moving breaks a parry stance (parry is meant to be a stationary defensive choice).
+    if (e.id == playerId_ && e.effects.parryTurns > 0) {
+        e.effects.parryTurns = 0;
+    }
 
     const bool phasing = entityCanPhase(e.kind);
     const bool levitating = (e.effects.levitationTurns > 0);
@@ -393,6 +400,220 @@ Trap* Game::trapAtMut(int x, int y) {
         if (t.pos.x == x && t.pos.y == y) return &t;
     }
     return nullptr;
+}
+
+int Game::rollBoulderFrom(Vec2i start, Vec2i dir, const BoulderRollConfig& cfg, bool* playerMovedOut) {
+    if (playerMovedOut) *playerMovedOut = false;
+    if (gameOver || gameWon) return 0;
+
+    dir.x = clampi(dir.x, -1, 1);
+    dir.y = clampi(dir.y, -1, 1);
+    if (dir.x == 0 && dir.y == 0) return 0;
+
+    if (!dung.inBounds(start.x, start.y)) return 0;
+
+    const bool startSeen = dung.at(start.x, start.y).visible;
+
+    auto canStand = [&](const Entity& e, Vec2i p) -> bool {
+        if (!dung.inBounds(p.x, p.y)) return false;
+        if (entityAt(p.x, p.y) != nullptr) return false;
+        const TileType tt = dung.at(p.x, p.y).type;
+        if (dung.isWalkable(p.x, p.y)) return true;
+        if (tt == TileType::Chasm && e.effects.levitationTurns > 0) return true;
+        return false;
+    };
+
+    auto scatterFrom = [&](Entity& e, Vec2i from, Vec2i rollDir) -> bool {
+        // Prefer sideways relative to roll direction.
+        Vec2i left{-rollDir.y, rollDir.x};
+        Vec2i right{rollDir.y, -rollDir.x};
+        Vec2i back{-rollDir.x, -rollDir.y};
+
+        const Vec2i choices[8] = {
+            {from.x + left.x, from.y + left.y},
+            {from.x + right.x, from.y + right.y},
+            {from.x + back.x, from.y + back.y},
+            {from.x + left.x + back.x, from.y + left.y + back.y},
+            {from.x + right.x + back.x, from.y + right.y + back.y},
+            {from.x + left.x + rollDir.x, from.y + left.y + rollDir.y},
+            {from.x + right.x + rollDir.x, from.y + right.y + rollDir.y},
+            {from.x + rollDir.x, from.y + rollDir.y},
+        };
+
+        for (const Vec2i& p : choices) {
+            if (!canStand(e, p)) continue;
+            e.pos = p;
+            return true;
+        }
+        return false;
+    };
+
+    auto hitDamage = [&](int curMomentum) -> int {
+        const int lo = std::min(cfg.dmgMin, cfg.dmgMax);
+        const int hi = std::max(cfg.dmgMin, cfg.dmgMax);
+        int dmg = rng.range(lo, hi);
+        dmg += std::min(cfg.dmgDepthBonusMax, depth_);
+        if (cfg.dmgMomentumDiv > 0) {
+            dmg += std::max(0, curMomentum) / cfg.dmgMomentumDiv;
+        }
+        return std::max(0, dmg);
+    };
+
+    auto applyBoulderHit = [&](Entity& e, bool isPlayer, int curMomentum) {
+        const int dmg = hitDamage(curMomentum);
+        e.hp -= dmg;
+
+        if (isPlayer) {
+            std::ostringstream ss;
+            ss << "A BOULDER CRUSHES YOU! YOU TAKE " << dmg << ".";
+            pushMsg(ss.str(), MessageKind::Combat, false);
+            if (e.hp <= 0) {
+                pushMsg("YOU DIE.", MessageKind::Combat, false);
+                if (endCause_.empty() && cfg.playerDeathCause) endCause_ = cfg.playerDeathCause;
+                gameOver = true;
+            }
+        } else if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) {
+            std::ostringstream ss;
+            ss << "A BOULDER CRUSHES " << kindName(e.kind) << "!";
+            pushMsg(ss.str(), MessageKind::Combat, false);
+            if (e.hp <= 0) {
+                std::ostringstream ds;
+                ds << kindName(e.kind) << " DIES.";
+                pushMsg(ds.str(), MessageKind::Combat, false);
+            }
+        }
+    };
+
+    // Spawn mode: used by rolling boulder traps.
+    if (cfg.spawnAtStart) {
+        if (dung.at(start.x, start.y).type != TileType::Floor) return 0;
+
+        // If someone is standing on the start tile, hit and shove them away first.
+        if (cfg.hitOccupantAtStart) {
+            if (Entity* occ = entityAtMut(start.x, start.y)) {
+                const bool occIsPlayer = (occ->kind == EntityKind::Player);
+                int initMom = cfg.momentum;
+                if (initMom <= 0) initMom = cfg.maxSteps;
+                applyBoulderHit(*occ, occIsPlayer, initMom);
+                if (gameOver) return 0;
+
+                if (occ->hp > 0) {
+                    if (!scatterFrom(*occ, start, dir)) {
+                        // Trap jams: no room to clear the square.
+                        return 0;
+                    }
+                    if (occIsPlayer && playerMovedOut) *playerMovedOut = true;
+                }
+            }
+        }
+
+        // Place the boulder.
+        if (entityAt(start.x, start.y) != nullptr) return 0;
+        dung.at(start.x, start.y).type = TileType::Boulder;
+    } else {
+        // Normal mode: expects a boulder already exists.
+        if (dung.at(start.x, start.y).type != TileType::Boulder) return 0;
+    }
+
+    Vec2i bpos = start;
+    int movedTiles = 0;
+
+    int momentum = cfg.momentum;
+    if (momentum <= 0) momentum = cfg.maxSteps;
+    if (momentum <= 0) momentum = 1;
+
+    const int maxSteps = std::max(1, cfg.maxSteps);
+
+    for (int step = 0; step < maxSteps && momentum > 0; ++step) {
+        Vec2i nxt{ bpos.x + dir.x, bpos.y + dir.y };
+        if (!dung.inBounds(nxt.x, nxt.y)) break;
+
+        // Prevent diagonal corner-cutting.
+        if (dir.x != 0 && dir.y != 0 && !diagonalPassable(dung, bpos, dir.x, dir.y)) break;
+
+        TileType tt = dung.at(nxt.x, nxt.y).type;
+
+        // Avoid rolling onto stairs (blocking stairs is just annoying).
+        if (cfg.avoidStairs && (tt == TileType::StairsUp || tt == TileType::StairsDown)) break;
+
+        // Hard blocks.
+        if (tt == TileType::Wall || tt == TileType::Pillar || tt == TileType::DoorSecret || tt == TileType::Boulder) {
+            break;
+        }
+
+        // Doors: boulders can smash open some doors.
+        if (tt == TileType::DoorClosed || tt == TileType::DoorLocked) {
+            if (!cfg.allowDoorSmash) break;
+            float smashP = (tt == TileType::DoorClosed) ? cfg.smashClosedP : cfg.smashLockedP;
+            smashP = std::clamp(smashP, 0.0f, 1.0f);
+
+            if (rng.chance(smashP)) {
+                if (tt == TileType::DoorLocked) dung.unlockDoor(nxt.x, nxt.y);
+                dung.openDoor(nxt.x, nxt.y);
+                onDoorOpened(nxt, false);
+                if (dung.at(nxt.x, nxt.y).visible) {
+                    pushMsg("A DOOR BURSTS OPEN!", MessageKind::System, false);
+                }
+                emitNoise(nxt, cfg.doorSmashNoise);
+                tt = dung.at(nxt.x, nxt.y).type;
+
+                momentum = std::max(0, momentum - std::max(0, cfg.momentumLossOnDoor));
+                if (momentum <= 0) break;
+            } else {
+                // Can't break through.
+                break;
+            }
+        }
+
+        // Chasm: boulder fills it and disappears.
+        if (tt == TileType::Chasm) {
+            if (!cfg.consumeIntoChasm) break;
+
+            dung.at(bpos.x, bpos.y).type = TileType::Floor;
+            dung.at(nxt.x, nxt.y).type = TileType::Floor;
+
+            if (dung.at(nxt.x, nxt.y).visible || dung.at(bpos.x, bpos.y).visible || (cfg.reportEventsIfStartVisible && startSeen)) {
+                pushMsg("THE BOULDER CRASHES INTO THE CHASM, FORMING A ROUGH BRIDGE.", MessageKind::Info, false);
+            }
+            emitNoise(nxt, cfg.chasmNoise);
+
+            movedTiles += 1;
+            return movedTiles;
+        }
+
+        // Check entity collision.
+        if (Entity* hit = entityAtMut(nxt.x, nxt.y)) {
+            const bool hitIsPlayer = (hit->kind == EntityKind::Player);
+            applyBoulderHit(*hit, hitIsPlayer, momentum);
+            if (gameOver) break;
+
+            if (hit->hp > 0) {
+                if (!scatterFrom(*hit, hit->pos, dir)) {
+                    // Can't move the victim: boulder stops.
+                    break;
+                }
+                if (hitIsPlayer && playerMovedOut) *playerMovedOut = true;
+            }
+
+            momentum = std::max(0, momentum - std::max(0, cfg.momentumLossOnHit));
+            if (momentum <= 0) break;
+        }
+
+        // Still blocked (couldn't scatter).
+        if (entityAt(nxt.x, nxt.y) != nullptr) break;
+
+        // Move boulder forward.
+        dung.at(nxt.x, nxt.y).type = TileType::Boulder;
+        dung.at(bpos.x, bpos.y).type = TileType::Floor;
+        bpos = nxt;
+        movedTiles += 1;
+
+        emitNoise(bpos, cfg.stepNoise);
+
+        momentum = std::max(0, momentum - std::max(0, cfg.momentumLossPerStep));
+    }
+
+    return movedTiles;
 }
 
 void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
@@ -823,160 +1044,31 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
                 }
             }
 
-            auto canStand = [&](const Entity& e, Vec2i p) -> bool {
-                if (!dung.inBounds(p.x, p.y)) return false;
-                if (entityAt(p.x, p.y) != nullptr) return false;
-                const TileType tt = dung.at(p.x, p.y).type;
-                if (dung.isWalkable(p.x, p.y)) return true;
-                if (tt == TileType::Chasm && e.effects.levitationTurns > 0) return true;
-                return false;
-            };
-
-            auto scatterFrom = [&](Entity& e, Vec2i from, Vec2i dir) -> bool {
-                // Prefer sideways relative to roll direction.
-                Vec2i left{-dir.y, dir.x};
-                Vec2i right{dir.y, -dir.x};
-                Vec2i back{-dir.x, -dir.y};
-
-                const Vec2i choices[8] = {
-                    {from.x + left.x, from.y + left.y},
-                    {from.x + right.x, from.y + right.y},
-                    {from.x + back.x, from.y + back.y},
-                    {from.x + left.x + back.x, from.y + left.y + back.y},
-                    {from.x + right.x + back.x, from.y + right.y + back.y},
-                    {from.x + left.x + dir.x, from.y + left.y + dir.y},
-                    {from.x + right.x + dir.x, from.y + right.y + dir.y},
-                    {from.x + dir.x, from.y + dir.y},
-                };
-
-                for (const Vec2i& p : choices) {
-                    if (!canStand(e, p)) continue;
-                    e.pos = p;
-                    return true;
-                }
-                return false;
-            };
-
-            auto hitDmg = [&]() -> int {
-                // Keep damage in a NetHack-like range; slightly scale with depth so it stays relevant.
-                return rng.range(1, 20) + std::min(6, depth_);
-            };
-
-            auto applyBoulderHit = [&](Entity& e, bool isP) {
-                const int dmg = hitDmg();
-                e.hp -= dmg;
-
-                if (isP) {
-                    std::ostringstream ss;
-                    ss << "A BOULDER CRUSHES YOU! YOU TAKE " << dmg << ".";
-                    pushMsg(ss.str(), MessageKind::Combat, false);
-                    if (e.hp <= 0) {
-                        pushMsg("YOU DIE.", MessageKind::Combat, false);
-                        if (endCause_.empty()) endCause_ = "CRUSHED BY BOULDER TRAP";
-                        gameOver = true;
-                    }
-                } else if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) {
-                    std::ostringstream ss;
-                    ss << "A BOULDER CRUSHES " << kindName(e.kind) << "!";
-                    pushMsg(ss.str(), MessageKind::Combat, false);
-                    if (e.hp <= 0) {
-                        std::ostringstream ds;
-                        ds << kindName(e.kind) << " DIES.";
-                        pushMsg(ds.str(), MessageKind::Combat, false);
-                    }
-                }
-            };
+            BoulderRollConfig cfgRoll;
+            cfgRoll.maxSteps = 24;
+            cfgRoll.momentum = 24;
+            cfgRoll.spawnAtStart = true;
+            cfgRoll.hitOccupantAtStart = true;
+            cfgRoll.allowDoorSmash = true;
+            cfgRoll.smashClosedP = 0.90f;
+            cfgRoll.smashLockedP = 0.65f;
+            cfgRoll.avoidStairs = true;
+            cfgRoll.consumeIntoChasm = true;
+            cfgRoll.reportEventsIfStartVisible = (isPlayer || tileVisible);
+            cfgRoll.stepNoise = 12;
+            cfgRoll.doorSmashNoise = 14;
+            cfgRoll.chasmNoise = 18;
+            cfgRoll.dmgMin = 1;
+            cfgRoll.dmgMax = 20;
+            cfgRoll.dmgDepthBonusMax = 6;
+            cfgRoll.dmgMomentumDiv = 0;
+            cfgRoll.momentumLossPerStep = 1;
+            cfgRoll.momentumLossOnHit = 0;
+            cfgRoll.momentumLossOnDoor = 0;
+            cfgRoll.playerDeathCause = "CRUSHED BY BOULDER TRAP";
 
             bool playerMoved = false;
-
-            // If the victim is on the trap square, they take the brunt of it and get shoved aside.
-            if (victim.pos == pos) {
-                applyBoulderHit(victim, isPlayer);
-                if (victim.hp > 0) {
-                    if (!scatterFrom(victim, pos, rollDir)) {
-                        // Can't move them off the square: the trap jams after the hit.
-                        trapsCur.erase(trapsCur.begin() + tIndex);
-                        return;
-                    }
-                    if (isPlayer) playerMoved = true;
-                }
-            }
-
-            // Spawn the boulder at the trap location (now empty), then roll it.
-            if (dung.inBounds(pos.x, pos.y) && dung.at(pos.x, pos.y).type == TileType::Floor && entityAt(pos.x, pos.y) == nullptr) {
-                dung.at(pos.x, pos.y).type = TileType::Boulder;
-            }
-
-            Vec2i bpos = pos;
-            const int maxSteps = 24;
-            for (int step = 0; step < maxSteps; ++step) {
-                Vec2i nxt{ bpos.x + rollDir.x, bpos.y + rollDir.y };
-                if (!dung.inBounds(nxt.x, nxt.y)) break;
-
-                TileType tt = dung.at(nxt.x, nxt.y).type;
-
-                if (tt == TileType::StairsUp || tt == TileType::StairsDown) break;
-
-                // Hard blocks.
-                if (tt == TileType::Wall || tt == TileType::Pillar || tt == TileType::DoorSecret || tt == TileType::Boulder) {
-                    break;
-                }
-
-                // Doors: boulders can smash open some doors.
-                if (tt == TileType::DoorClosed || tt == TileType::DoorLocked) {
-                    float smashP = (tt == TileType::DoorClosed) ? 0.90f : 0.65f;
-                    if (rng.chance(smashP)) {
-                        if (tt == TileType::DoorLocked) dung.unlockDoor(nxt.x, nxt.y);
-                        dung.openDoor(nxt.x, nxt.y);
-                        onDoorOpened(nxt, false);
-                        if (dung.at(nxt.x, nxt.y).visible) {
-                            pushMsg("A DOOR BURSTS OPEN!", MessageKind::System, false);
-                        }
-                        emitNoise(nxt, 14);
-                        tt = dung.at(nxt.x, nxt.y).type;
-                    } else {
-                        // Can't break through.
-                        break;
-                    }
-                }
-
-                // Chasm: boulder fills it and disappears.
-                if (tt == TileType::Chasm) {
-                    dung.at(bpos.x, bpos.y).type = TileType::Floor;
-                    dung.at(nxt.x, nxt.y).type = TileType::Floor;
-                    if (dung.at(nxt.x, nxt.y).visible || tileVisible) {
-                        pushMsg("THE BOULDER CRASHES INTO THE CHASM!", MessageKind::Info, false);
-                    }
-                    emitNoise(nxt, 18);
-                    // Consumed.
-                    bpos = nxt;
-                    break;
-                }
-
-                // Check entity collision.
-                Entity* hit = entityAtMut(nxt.x, nxt.y);
-                if (hit) {
-                    const bool hitIsPlayer = (hit->kind == EntityKind::Player);
-                    applyBoulderHit(*hit, hitIsPlayer);
-                    if (hit->hp > 0) {
-                        if (!scatterFrom(*hit, hit->pos, rollDir)) {
-                            // Can't move the victim: boulder stops.
-                            break;
-                        }
-                        if (hitIsPlayer) playerMoved = true;
-                    }
-                }
-
-                // Still blocked (couldn't scatter).
-                if (entityAt(nxt.x, nxt.y) != nullptr) break;
-
-                // Move boulder forward.
-                dung.at(nxt.x, nxt.y).type = TileType::Boulder;
-                dung.at(bpos.x, bpos.y).type = TileType::Floor;
-                bpos = nxt;
-
-                emitNoise(bpos, 12);
-            }
+            (void)rollBoulderFrom(pos, rollDir, cfgRoll, &playerMoved);
 
             // Single-use: boulder traps are spent once triggered.
             trapsCur.erase(trapsCur.begin() + tIndex);
@@ -2234,8 +2326,59 @@ bool Game::kickInDirection(int dx, int dy) {
         return true;
     }
 
-    // Doors and secret doors.
     Tile& t = dung.at(tgt.x, tgt.y);
+
+    // Kicking a boulder can set it rolling (a crude, player-directed rolling-boulder trap).
+    if (t.type == TileType::Boulder) {
+        const int might = playerMight();
+        const int power = might + (charLevel / 2);
+        const int momentum = clampi(5 + 2 * might + (charLevel / 3), 5, 28);
+
+        BoulderRollConfig cfgRoll;
+        cfgRoll.maxSteps = momentum;
+        cfgRoll.momentum = momentum;
+        cfgRoll.spawnAtStart = false;
+        cfgRoll.hitOccupantAtStart = false;
+        cfgRoll.allowDoorSmash = true;
+        cfgRoll.smashClosedP = std::clamp(0.45f + 0.06f * static_cast<float>(power), 0.20f, 0.90f);
+        cfgRoll.smashLockedP = std::clamp(0.20f + 0.05f * static_cast<float>(power), 0.05f, 0.75f);
+        cfgRoll.avoidStairs = true;
+        cfgRoll.consumeIntoChasm = true;
+        cfgRoll.reportEventsIfStartVisible = true;
+        cfgRoll.stepNoise = 12;
+        cfgRoll.doorSmashNoise = 14;
+        cfgRoll.chasmNoise = 18;
+        cfgRoll.dmgMin = 1;
+        cfgRoll.dmgMax = clampi(8 + power, 8, 18);
+        cfgRoll.dmgDepthBonusMax = 4;
+        cfgRoll.dmgMomentumDiv = 3;
+        cfgRoll.momentumLossPerStep = 1;
+        cfgRoll.momentumLossOnHit = 2;
+        cfgRoll.momentumLossOnDoor = 2;
+        cfgRoll.playerDeathCause = "CRUSHED BY BOULDER";
+
+        // Starting the boulder is loud.
+        emitNoise(tgt, 14);
+
+        const int movedTiles = rollBoulderFrom(tgt, {dx, dy}, cfgRoll, nullptr);
+        if (movedTiles > 0) {
+            pushMsg("YOU KICK THE BOULDER. IT STARTS ROLLING!", MessageKind::Info, true);
+        } else {
+            pushMsg("THUD! THE BOULDER DOESN'T BUDGE.", MessageKind::Info, true);
+            // Chance to hurt your foot when you fail to move it.
+            if (rng.chance(0.20f)) {
+                p.hp -= 1;
+                pushMsg("OUCH!", MessageKind::Warning, true);
+                if (p.hp <= 0) {
+                    if (endCause_.empty()) endCause_ = "KICKED A BOULDER";
+                    gameOver = true;
+                }
+            }
+        }
+        return true;
+    }
+
+    // Doors and secret doors.
     if (t.type == TileType::DoorClosed) {
         dung.openDoor(tgt.x, tgt.y);
         onDoorOpened(tgt, true);
@@ -3405,9 +3548,9 @@ bool Game::engraveHere(const std::string& rawText) {
     // Keep message log and look UI readable.
     if (text.size() > 72) text.resize(72);
 
-    // Warding word: classic NetHack nod.
-    const std::string canon = toUpper(text);
-    const bool isWard = (canon == "ELBERETH");
+    // Warding words: NetHack nod + a few additional thematic wards.
+    const WardWord ww = wardWordFromText(text);
+    const bool isWard = (ww != WardWord::None);
 
     // For wards, durability depends on what you're holding.
     uint8_t strength = 255; // permanent for non-wards
@@ -3430,7 +3573,13 @@ bool Game::engraveHere(const std::string& rawText) {
             e.isWard = isWard;
             e.isGraffiti = false;
             e.strength = strength;
-            pushMsg(isWard ? "YOU ENGRAVE THE WARDING WORD." : "YOU ENGRAVE A MESSAGE INTO THE FLOOR.", MessageKind::Info, true);
+            if (isWard) {
+                std::ostringstream ss;
+                ss << "YOU ENGRAVE THE WARD OF " << wardWordName(ww) << ".";
+                pushMsg(ss.str(), MessageKind::Info, true);
+            } else {
+                pushMsg("YOU ENGRAVE A MESSAGE INTO THE FLOOR.", MessageKind::Info, true);
+            }
             advanceAfterPlayerAction();
             return true;
         }
@@ -3456,7 +3605,13 @@ bool Game::engraveHere(const std::string& rawText) {
     e.strength = strength;
     engravings_.push_back(std::move(e));
 
-    pushMsg(isWard ? "YOU ENGRAVE THE WARDING WORD." : "YOU ENGRAVE A MESSAGE INTO THE FLOOR.", MessageKind::Info, true);
+    if (isWard) {
+        std::ostringstream ss;
+        ss << "YOU ENGRAVE THE WARD OF " << wardWordName(ww) << ".";
+        pushMsg(ss.str(), MessageKind::Info, true);
+    } else {
+        pushMsg("YOU ENGRAVE A MESSAGE INTO THE FLOOR.", MessageKind::Info, true);
+    }
     advanceAfterPlayerAction();
     return true;
 }

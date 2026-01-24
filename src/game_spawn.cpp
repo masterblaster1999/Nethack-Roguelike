@@ -1,6 +1,7 @@
 #include "game_internal.hpp"
 #include "content.hpp"
 #include "proc_rd.hpp"
+#include "proc_spells.hpp"
 
 namespace {
 
@@ -218,6 +219,20 @@ static void buildProcAffixPool(std::vector<ProcAffixWeight>& out, EntityKind k, 
         if (humanoid && depth >= 9) wVamp += 2;
     }
 
+    // Aura affix: COMMANDER.
+    // Leaders are more common among humanoids and organized foes.
+    int wCommander = 0;
+    if (humanoid) wCommander += 6;
+    if (cunning) wCommander += 2;
+    if (undead) wCommander += 1;
+    if (k == EntityKind::Orc) wCommander += 4;
+    if (k == EntityKind::Goblin) wCommander += 3;
+    if (k == EntityKind::KoboldSlinger) wCommander += 3;
+    if (k == EntityKind::Wizard) wCommander += 2;
+    if (rt == RoomType::Vault || rt == RoomType::Treasure || rt == RoomType::Secret) wCommander += 2;
+    if (rt == RoomType::Lair) wCommander = std::max(0, wCommander - 1);
+    if (beast) wCommander = 0;
+
     // Humanoid-ish enemies are more likely to be gilded.
     if (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k)) wGold += 3;
 
@@ -229,6 +244,7 @@ static void buildProcAffixPool(std::vector<ProcAffixWeight>& out, EntityKind k, 
     add(ProcMonsterAffix::Savage, wSavage);
     add(ProcMonsterAffix::Blinking, wBlink);
     add(ProcMonsterAffix::Gilded, wGold);
+    add(ProcMonsterAffix::Commander, wCommander);
 
     // Proc affixes that add on-hit status effects / sustain.
     add(ProcMonsterAffix::Venomous, wVenom);
@@ -352,12 +368,27 @@ static void buildProcAbilityPool(std::vector<ProcAbilityWeight>& out,
     if (rt == RoomType::Lair) wScreech += 3;
     if (undead) wScreech = std::max(0, wScreech - 2);
 
+    // Void hook: reposition the player (brutes/humanoids).
+    int wHook = 0;
+    if (depth >= 4) {
+        if (humanoid) wHook += 7;
+        if (brute) wHook += 10;
+        if (k == EntityKind::Ogre) wHook += 6;
+        if (k == EntityKind::Orc) wHook += 3;
+        if (caster) wHook += 2;
+        if (rt == RoomType::Vault || rt == RoomType::Treasure) wHook += 3;
+        if (procHasAffix(affixMask, ProcMonsterAffix::Savage)) wHook += 2;
+        if (procHasAffix(affixMask, ProcMonsterAffix::Stonehide)) wHook += 1;
+        if (undead) wHook = std::max(0, wHook - 2);
+    }
+
     add(ProcMonsterAbility::Pounce, wPounce);
     add(ProcMonsterAbility::ToxicMiasma, wToxic);
     add(ProcMonsterAbility::CinderNova, wCinder);
     add(ProcMonsterAbility::ArcaneWard, wWard);
     add(ProcMonsterAbility::SummonMinions, wSummon);
     add(ProcMonsterAbility::Screech, wScreech);
+    add(ProcMonsterAbility::VoidHook, wHook);
 }
 
 static void rollProcAbilities(RNG& rr, EntityKind k, ProcMonsterRank rank, RoomType rt, int depth, uint32_t affixMask,
@@ -704,6 +735,70 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
             }
         }
     }
+
+    // Torch carriers: some humanoid-ish monsters may spawn with a spare torch on
+    // dark floors. This makes darkness less binary: the player can play around
+    // pockets of light that *move*.
+    //
+    // We intentionally keep this separate from the Wizard pocket potion logic
+    // (single pocket slot) and only assign a torch when the slot is empty.
+    if (allowGear && darknessActive() && e.pocketConsumable.id == 0) {
+        auto makePocketTorch = [&](bool lit) -> Item {
+            Item it;
+            it.id = 1; // non-zero => present
+            it.kind = lit ? ItemKind::TorchLit : ItemKind::Torch;
+            it.count = 1;
+            it.spriteSeed = rng.nextU32();
+            it.shopPrice = 0;
+            it.shopDepth = 0;
+            // Torches carried by monsters are always uncursed.
+            it.buc = 0;
+            it.enchant = 0;
+            it.ego = ItemEgo::None;
+
+            if (lit) {
+                int fuel = 160 + rng.range(0, 140);
+                // Guards tend to have higher quality torches.
+                if (k == EntityKind::Guard) fuel += 40;
+                it.charges = fuel;
+            }
+            return it;
+        };
+
+        float chance = 0.0f;
+        switch (k) {
+            case EntityKind::Goblin:
+                chance = 0.10f + 0.02f * static_cast<float>(std::min(6, depth_));
+                break;
+            case EntityKind::Orc:
+                chance = 0.18f + 0.03f * static_cast<float>(std::min(6, depth_));
+                break;
+            case EntityKind::Guard:
+                chance = 0.45f;
+                break;
+            case EntityKind::Shopkeeper:
+                // Shopkeepers generally stay in lit shops, but if they chase you into a
+                // corridor, a torch prevents them from being trivially kited in darkness.
+                chance = 0.35f;
+                break;
+            case EntityKind::KoboldSlinger:
+                chance = 0.12f + 0.02f * static_cast<float>(std::min(6, depth_));
+                break;
+            default:
+                break;
+        }
+
+        // Avoid handing out too much free mobile light in already-lit rooms.
+        if (rtHere == RoomType::Shop || rtHere == RoomType::Shrine || rtHere == RoomType::Library) {
+            chance *= 0.35f;
+        }
+
+        if (chance > 0.0f && rng.chance(std::clamp(chance, 0.0f, 0.75f))) {
+            const bool startLit = rng.chance((k == EntityKind::Guard) ? 0.65f : 0.40f);
+            e.pocketConsumable = makePocketTorch(startLit);
+        }
+    }
+
 
     // Procedural monster variants (rank + affixes + abilities).
     // Applied after baseline stats/gear so modifiers scale the final creature.
@@ -1140,6 +1235,24 @@ void Game::spawnItems() {
         const ItemDef& d = itemDef(k);
         if (d.maxCharges > 0) it.charges = d.maxCharges;
 
+        // Procedural rune tablets: spriteSeed encodes a packed proc spell id (tier + seed),
+        // not a purely cosmetic variation seed.
+        if (k == ItemKind::RuneTablet) {
+            const RoomType rt = roomTypeAt(dung, pos);
+
+            // Tier loosely tracks depth with small room-based adjustments.
+            int tier = 1 + depth_ / 2;
+            if (rt == RoomType::Treasure || rt == RoomType::Vault || rt == RoomType::Shrine) tier += 1;
+            if (rt == RoomType::Shop) tier = std::max(1, tier - 1);
+
+            // A small depth-based chance to bump tier upward so deep tablets feel spicy.
+            if (depth_ >= 6 && rng.chance(0.18f)) tier += 1;
+
+            tier = clampi(tier, 1, 15);
+            const uint32_t seed28 = rng.nextU32() & PROC_SPELL_SEED_MASK;
+            it.spriteSeed = makeProcSpellId(static_cast<uint8_t>(tier), seed28);
+        }
+
         // Roll BUC (blessed/uncursed/cursed) for gear; and light enchant chance on deeper floors.
         if (isWearableGear(k)) {
             const RoomType rt = roomTypeAt(dung, pos);
@@ -1194,6 +1307,18 @@ void Game::spawnItems() {
 
         const ItemDef& d = itemDef(k);
         if (d.maxCharges > 0) it.charges = d.maxCharges;
+
+        // Procedural rune tablets: shops can stock tablets too.
+        if (k == ItemKind::RuneTablet) {
+            int tier = 1 + depth_ / 2;
+            // Magic shops tend to have slightly better rune stock deeper down.
+            if (depth_ >= 4 && rng.chance(0.20f)) tier += 1;
+            if (depth_ >= 7 && rng.chance(0.10f)) tier += 1;
+
+            tier = clampi(tier, 1, 15);
+            const uint32_t seed28 = rng.nextU32() & PROC_SPELL_SEED_MASK;
+            it.spriteSeed = makeProcSpellId(static_cast<uint8_t>(tier), seed28);
+        }
 
         // Shops sell mostly "clean" gear.
         RoomType rt = RoomType::Shop;
@@ -1305,7 +1430,8 @@ void Game::spawnItems() {
         else if (roll < 181) dropItemAt(ItemKind::RingFocus, randomFreeTileInRoom(r), 1);
         else if (roll < 184) dropItemAt(ItemKind::RingSearching, randomFreeTileInRoom(r), 1);
         else if (roll < 187) dropItemAt(ItemKind::RingSustenance, randomFreeTileInRoom(r), 1);
-        else if (roll < 193) dropItemAt(ItemKind::PotionEnergy, randomFreeTileInRoom(r), 1);
+        else if (roll < 190) dropItemAt(ItemKind::RuneTablet, randomFreeTileInRoom(r), 1);
+        else if (roll < 194) dropItemAt(ItemKind::PotionEnergy, randomFreeTileInRoom(r), 1);
         else {
             // Rare: a spellbook (or occasionally a collectible VTuber merch drop).
             // Cards are a bit more common than figurines.
@@ -1477,28 +1603,30 @@ void Game::spawnItems() {
                     else if (roll < 98) { k = ItemKind::ChainArmor; }
                     else { k = (depth_ >= 6 ? ItemKind::PlateArmor : ItemKind::ChainArmor); }
                 } else if (theme == 2) {
-                    // Magic shop (wands/scrolls/potions + occasional spellbooks)
-                    if (roll < 8) { k = pickSpellbookKind(rng, depth_); }
-                    else if (roll < 20) { k = ItemKind::WandSparks; }
-                    else if (roll < 28) { k = ItemKind::WandDigging; }
-                    else if (roll < 32) { k = (depth_ >= 6 ? ItemKind::WandFireball : ItemKind::WandDigging); }
-                    else if (roll < 40) { k = ItemKind::ScrollTeleport; }
-                    else if (roll < 52) { k = ItemKind::ScrollMapping; }
-                    else if (roll < 66) { k = ItemKind::ScrollIdentify; }
-                    else if (roll < 72) { k = ItemKind::ScrollRemoveCurse; }
-                    else if (roll < 78) { k = ItemKind::ScrollFear; }
-                    else if (roll < 82) { k = ItemKind::ScrollEarth; }
-                    else if (roll < 84) { k = ItemKind::ScrollTaming; }
-                    else if (roll < 90) {
+                    // Magic shop (wands/scrolls/potions + spellbooks + rune tablets)
+                    // NOTE: Keep this table self-contained (0..99) so every outcome is reachable.
+                    if (roll < 6) { k = ItemKind::RuneTablet; }
+                    else if (roll < 14) { k = pickSpellbookKind(rng, depth_); }
+                    else if (roll < 26) { k = ItemKind::WandSparks; }
+                    else if (roll < 36) { k = ItemKind::WandDigging; }
+                    else if (roll < 40) { k = (depth_ >= 6 ? ItemKind::WandFireball : ItemKind::WandDigging); }
+                    else if (roll < 48) { k = ItemKind::ScrollTeleport; }
+                    else if (roll < 58) { k = ItemKind::ScrollMapping; }
+                    else if (roll < 70) { k = ItemKind::ScrollIdentify; }
+                    else if (roll < 76) { k = ItemKind::ScrollRemoveCurse; }
+                    else if (roll < 82) { k = ItemKind::ScrollFear; }
+                    else if (roll < 86) { k = ItemKind::ScrollEarth; }
+                    else if (roll < 88) { k = ItemKind::ScrollTaming; }
+                    else if (roll < 92) {
                         // Capture spheres: staple item for monster collecting.
                         k = (depth_ >= 6 && rng.chance(0.25f)) ? ItemKind::MegaSphere : ItemKind::CaptureSphere;
                         count = rng.range(1, 3);
                     }
-                    else if (roll < 92) { k = ItemKind::PotionStrength; }
-                    else if (roll < 98) { k = ItemKind::PotionRegeneration; }
-                    else if (roll < 102) { k = ItemKind::PotionHaste; }
-                    else if (roll < 104) { k = ItemKind::PotionEnergy; }
-                    else if (roll < 105) {
+                    else if (roll < 94) { k = ItemKind::PotionStrength; }
+                    else if (roll < 96) { k = ItemKind::PotionRegeneration; }
+                    else if (roll < 97) { k = ItemKind::PotionHaste; }
+                    else if (roll < 98) { k = ItemKind::PotionEnergy; }
+                    else if (roll < 99) {
                         // A small chance of rings showing up in the magic shop.
                         const int rr = rng.range(0, 99);
                         if (rr < 28) k = ItemKind::RingProtection;
@@ -1591,6 +1719,7 @@ void Game::spawnItems() {
             }
             if (rng.chance(0.45f)) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.35f)) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
+            if (depth_ >= 2 && rng.chance(0.10f)) dropItemAt(ItemKind::RuneTablet, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.50f)) dropItemAt(ItemKind::Gold, randomFreeTileInRoom(r), rng.range(6, 18));
             continue;
         }
@@ -3761,6 +3890,14 @@ void Game::applyEndOfTurnEffects() {
         }
     }
 
+    // Parry stance: improves defense briefly; expires at end of turn if not consumed.
+    if (p.effects.parryTurns > 0) {
+        p.effects.parryTurns = std::max(0, p.effects.parryTurns - 1);
+        if (p.effects.parryTurns == 0) {
+            pushMsg(effectEndMessage(EffectKind::Parry), MessageKind::System, true);
+        }
+    }
+
     // Timed vision boost
     if (p.effects.visionTurns > 0) {
         p.effects.visionTurns = std::max(0, p.effects.visionTurns - 1);
@@ -3891,7 +4028,9 @@ void Game::applyEndOfTurnEffects() {
         naturalRegenCounter = 0;
     } else if (p.effects.regenTurns <= 0) {
         // Faster natural regen as you level.
-        const int vigorBonus = std::min(4, talentVigor_);
+        // VIGOR bonuses from rings/artifacts now matter immediately (not just on level-up).
+        // Cursed vigor penalties can also slow healing, but we clamp the impact.
+        const int vigorBonus = clampi(playerVigor(), -2, 4);
         const int interval = std::max(6, 14 - charLevel - vigorBonus); // L1:13, L5:9, L10+:6 (vigor speeds this up)
         naturalRegenCounter++;
         if (naturalRegenCounter >= interval) {
@@ -4014,6 +4153,28 @@ void Game::applyEndOfTurnEffects() {
         }
         if (burntGroundVis > 0) {
             pushMsg(burntGroundVis == 1 ? "A TORCH FLICKERS OUT." : "SOME TORCHES FLICKER OUT.", MessageKind::System, true);
+        }
+
+        int burntMobVis = 0;
+        for (auto& e : ents) {
+            if (e.id == playerId_) continue;
+            if (e.hp <= 0) continue;
+
+            Item& pc = e.pocketConsumable;
+            if (pc.id == 0 || pc.count <= 0) continue;
+            if (pc.kind != ItemKind::TorchLit) continue;
+
+            if (pc.charges > 0) pc.charges -= 1;
+            if (pc.charges <= 0) {
+                if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) {
+                    ++burntMobVis;
+                }
+                // Clear the pocket slot.
+                pc = Item{};
+            }
+        }
+        if (burntMobVis > 0) {
+            pushMsg(burntMobVis == 1 ? "A MOVING TORCH FLICKERS OUT." : "SOME MOVING TORCHES FLICKER OUT.", MessageKind::System, true);
         }
     }
 

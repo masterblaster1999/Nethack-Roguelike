@@ -35,6 +35,9 @@ enum class EffectKind : uint8_t {
 
     // Material / corrosion (append-only)
     Corrosion,
+
+    // Combat stance (append-only)
+    Parry,
 };
 
 // Human-readable short tag for HUD/status lists.
@@ -53,6 +56,7 @@ inline const char* effectTag(EffectKind k) {
         case EffectKind::Fear:      return "FEAR";
         case EffectKind::Hallucination: return "HALL";
         case EffectKind::Corrosion: return "CORR";
+        case EffectKind::Parry:     return "PARRY";
         default:                    return "?";
     }
 }
@@ -73,6 +77,7 @@ inline const char* effectEndMessage(EffectKind k) {
         case EffectKind::Fear:      return "YOU FEEL YOUR COURAGE RETURN.";
         case EffectKind::Hallucination: return "REALITY STOPS SWIMMING.";
         case EffectKind::Corrosion: return "THE STINGING BURNS SUBSIDE.";
+        case EffectKind::Parry:     return "YOU LOWER YOUR GUARD.";
         default:                    return "";
     }
 }
@@ -102,6 +107,10 @@ struct Effects {
     // Corrosive damage over time + defense penalty while >0.
     int corrosionTurns = 0;
 
+
+    // Defensive stance: improves your odds of avoiding melee hits and can trigger ripostes.
+    int parryTurns = 0;
+
     bool has(EffectKind k) const { return get(k) > 0; }
 
     int get(EffectKind k) const {
@@ -119,6 +128,7 @@ struct Effects {
             case EffectKind::Fear:      return fearTurns;
             case EffectKind::Hallucination: return hallucinationTurns;
             case EffectKind::Corrosion: return corrosionTurns;
+            case EffectKind::Parry:     return parryTurns;
             default:                    return 0;
         }
     }
@@ -138,6 +148,7 @@ struct Effects {
             case EffectKind::Fear:      return fearTurns;
             case EffectKind::Hallucination: return hallucinationTurns;
             case EffectKind::Corrosion: return corrosionTurns;
+            case EffectKind::Parry:     return parryTurns;
             default:                    return poisonTurns; // should be unreachable
         }
     }
@@ -146,4 +157,4 @@ struct Effects {
 };
 
 // Keep in sync with EffectKind (append-only).
-inline constexpr int EFFECT_KIND_COUNT = static_cast<int>(EffectKind::Corrosion) + 1;
+inline constexpr int EFFECT_KIND_COUNT = static_cast<int>(EffectKind::Parry) + 1;

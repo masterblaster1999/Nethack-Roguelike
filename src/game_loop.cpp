@@ -232,6 +232,8 @@ void Game::handleAction(Action a) {
         closeChestOverlay();
         targeting = false;
         targetingMode_ = TargetingMode::Ranged;
+        targetingRuneTabletItemId_ = 0;
+        targetingProcSpellId_ = 0u;
         // Cancel any in-progress fishing fight prompt (UI-only).
         fishingFightActive_ = false;
         fishingFightRodItemId_ = 0;
@@ -2418,6 +2420,12 @@ if (optionsSel == 19) {
         case Action::DownRight: acted = tryMove(p, 1, 1); break;
         case Action::Wait:
             pushMsg("YOU WAIT.", MessageKind::Info);
+            acted = true;
+            break;
+        case Action::Parry:
+            if (p.effects.parryTurns > 0) pushMsg("YOU HOLD YOUR GUARD.", MessageKind::Info);
+            else pushMsg("YOU READY A PARRY.", MessageKind::Info);
+            p.effects.parryTurns = std::max(p.effects.parryTurns, 2);
             acted = true;
             break;
         case Action::Search:

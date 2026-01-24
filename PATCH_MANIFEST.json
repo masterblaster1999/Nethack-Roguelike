@@ -1,11 +1,13 @@
 {
-  "patch_id": "round131_patch",
-  "previous_patch_id": "round130_patch",
-  "round": 131,
-  "date": "2026-01-23",
+  "patch_id": "round144_patch",
+  "previous_patch_id": "round143_patch",
+  "round": 144,
+  "date": "2026-01-24",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Rune Tablets are now flagged as consumables (read/use) in item definitions. The broader Rune Tablet procedural spell casting/targeting vertical slice is still intentionally withheld until it can be delivered as a complete, compile-safe integration."
+    "Added kick-rolled boulders: kicking a boulder can now set it rolling like a low-momentum rolling-boulder trap, crushing entities in its path.",
+    "Refactored rolling-boulder trap simulation into a shared helper (rollBoulderFrom) so traps and kicked boulders use consistent movement, door interactions, and collision rules.",
+    "Chasm impacts now consistently describe forming a rough bridge when a boulder fills a chasm tile."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -15,12 +17,16 @@
     "docs/PROCGEN_TERRAIN_FLUVIAL.md",
     "docs/PROCGEN_TILE_BORDERS.md",
     "docs/PROCGEN_VAULT_WFC.md",
+    "docs/MONSTER_TORCHES.md",
+    "src/action_info.hpp",
     "src/ai.cpp",
+    "src/artifact_gen.hpp",
     "src/bounty_gen.hpp",
     "src/combat.cpp",
     "src/crafting_gen.hpp",
     "src/dungeon.cpp",
     "src/dungeon.hpp",
+    "src/effects.hpp",
     "src/farm_gen.hpp",
     "src/fishing_gen.hpp",
     "src/game.cpp",
@@ -32,11 +38,13 @@
     "src/game_loop.cpp",
     "src/game_save.cpp",
     "src/game_spawn.cpp",
+    "src/game_spellcasting.cpp",
     "src/game_targeting.cpp",
     "src/game_world.cpp",
     "src/hearing_field.hpp",
     "src/items.cpp",
     "src/items.hpp",
+    "src/keybinds.cpp",
     "src/main.cpp",
     "src/noise_localization.hpp",
     "src/pet_gen.hpp",
@@ -51,18 +59,21 @@
     "src/spatial_hash.hpp",
     "src/spritegen.cpp",
     "src/spritegen.hpp",
+    "src/wards.hpp",
     "src/wfc.hpp",
     "tests/test_main.cpp"
   ],
   "files_changed_this_round": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
-    "src/items.cpp"
+    "src/game.hpp",
+    "src/game_interact.cpp"
   ],
   "files_added": [],
   "notes": [
-    "This round ships a small, compile-safe Rune Tablet ergonomics tweak (marking Rune Tablets as consumables) while intentionally deferring the larger procedural casting/targeting wiring until it is fully implemented end-to-end.",
-    "No partial Rune Tablet targeting/casting changes are included in this patch."
+    "Kicked boulders reuse the same collision logic as boulder traps: they can smash doors (chance scales with Might/level), crush and scatter entities, and fill chasms into rough bridges.",
+    "The shared rollBoulderFrom helper also supports trap-style spawning (including an initial on-tile crush) to keep rolling-boulder behavior centralized and easier to extend.",
+    "Boulder roll damage includes a momentum-based bonus that decays as the boulder travels, so long rolls are less lethal than point-blank kicks."
   ],
-  "generated_at": "2026-01-23T06:56:34Z"
+  "generated_at": "2026-01-24T09:07:00Z"
 }

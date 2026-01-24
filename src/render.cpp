@@ -5,6 +5,8 @@
 #include "version.hpp"
 #include "action_info.hpp"
 #include "spritegen3d.hpp"
+#include "proc_spells.hpp"
+#include "artifact_gen.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -4825,6 +4827,18 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
                 torches.push_back(TorchSrc{ gi.pos, 7, 0.85f });
             }
         }
+
+        // Monster / NPC torches (carried lit torches).
+        for (const auto& e : game.entities()) {
+            if (e.hp <= 0) continue;
+            if (e.id == game.player().id) continue;
+
+            const Item& pc = e.pocketConsumable;
+            if (pc.id == 0 || pc.count <= 0) continue;
+            if (pc.kind != ItemKind::TorchLit || pc.charges <= 0) continue;
+
+            torches.push_back(TorchSrc{ e.pos, 7, 0.75f });
+        }
     }
 
     auto torchFlicker = [&](int x, int y) -> float {
@@ -7583,6 +7597,7 @@ void Renderer::drawHud(const Game& game) {
     addStatus("BURN", p.effects.burnTurns);
     addStatus("REGEN", p.effects.regenTurns);
     addStatus("SHIELD", p.effects.shieldTurns);
+    addStatus("PARRY", p.effects.parryTurns);
     addStatus("HASTE", p.effects.hasteTurns);
     addStatus("VISION", p.effects.visionTurns);
     addStatus("INVIS", p.effects.invisTurns);
@@ -7873,6 +7888,8 @@ void Renderer::drawSpellsOverlay(const Game& game) {
     for (int i = start; i < end; ++i) {
         const SpellKind sk = spells[static_cast<size_t>(i)];
         const SpellDef& sd = spellDef(sk);
+        const bool hall = (game.player().effects.hallucinationTurns > 0);
+        const int failPct = game.spellFailChancePct(sk);
 
         std::stringstream line;
         line << sd.name;
@@ -7880,6 +7897,10 @@ void Renderer::drawSpellsOverlay(const Game& game) {
         line << "M" << sd.manaCost;
         if (sd.needsTarget) line << ", R" << sd.range;
         else line << ", SELF";
+        line << ", F";
+        if (hall) line << "?";
+        else line << failPct;
+        line << "%";
         line << ")";
 
         const bool enough = game.playerMana() >= sd.manaCost;
@@ -7908,6 +7929,7 @@ void Renderer::drawSpellsOverlay(const Game& game) {
         std::stringstream meta;
         meta << "COST: " << sd.manaCost << "  |  " << (sd.needsTarget ? "TARGET" : "SELF") ;
         if (sd.needsTarget) meta << "  |  RANGE: " << sd.range;
+        meta << "  |  FAIL: " << (game.player().effects.hallucinationTurns > 0 ? "?" : std::to_string(game.spellFailChancePct(sk))) << "%";
         drawText5x7(renderer, infoRect.x, infoRect.y + 18, scale, gray, meta.str());
     }
 
@@ -8009,6 +8031,18 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     auto itemEffectDesc = [&](const Item& it, bool identified) -> std::string {
         const ItemDef& def = itemDef(it.kind);
 		if (!identified && isIdentifiableKind(it.kind)) return "EFFECT: UNKNOWN";
+
+		// Procedural artifacts: surface the tag + a short description in the inventory panel.
+		if (itemIsArtifact(it) && isWearableGear(it.kind)) {
+			const auto p = artifactgen::artifactPower(it);
+			const int lvl = artifactgen::powerLevel(it);
+			std::ostringstream ss;
+			ss << "EFFECT: ARTIFACT " << artifactgen::artifactPowerTag(p);
+			if (lvl > 0) ss << " (LVL " << lvl << ")";
+			const char* shortDesc = artifactgen::powerShortDesc(p);
+			if (shortDesc && shortDesc[0]) ss << ": " << shortDesc;
+			return ss.str();
+		}
         switch (it.kind) {
 			case ItemKind::PotionHealing:
 				return "EFFECT: HEAL +" + std::to_string(std::max(0, def.healAmount)) + " HP";
@@ -8036,10 +8070,24 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             case ItemKind::ScrollFear: return "EFFECT: FEAR";
             case ItemKind::ScrollEarth: return "EFFECT: EARTH";
             case ItemKind::ScrollTaming: return "EFFECT: TAMING";
-			case ItemKind::FoodRation:
-				return def.hungerRestore > 0
-					? ("EFFECT: RESTORE HUNGER +" + std::to_string(def.hungerRestore))
-					: "EFFECT: FOOD";
+			            case ItemKind::FoodRation:
+                return def.hungerRestore > 0
+                    ? ("EFFECT: RESTORE HUNGER +" + std::to_string(def.hungerRestore))
+                    : "EFFECT: FOOD";
+            case ItemKind::RuneTablet: {
+                uint32_t procId = it.spriteSeed;
+                if (procId == 0u) procId = hash32(static_cast<uint32_t>(it.id) ^ 0x52C39A7Bu);
+                const ProcSpell ps = generateProcSpell(procId);
+
+                std::ostringstream ss;
+                ss << "EFFECT: CAST " << ps.name;
+                ss << " — MANA " << std::max(0, ps.manaCost);
+                if (ps.needsTarget) ss << ", RNG " << std::max(0, ps.range);
+                else ss << ", SELF";
+                if (ps.aoeRadius > 0) ss << ", AOE " << ps.aoeRadius;
+                if (ps.durationTurns > 0) ss << ", DUR " << ps.durationTurns;
+                return ss.str();
+            }
             default: break;
         }
         return "EFFECT: —";

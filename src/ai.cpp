@@ -9,6 +9,8 @@
 #include "pathfinding.hpp"
 #include "projectile_utils.hpp"
 
+#include "wards.hpp"
+
 #include <deque>
 #include <limits>
 #include <sstream>
@@ -16,6 +18,32 @@
 #include <unordered_set>
 
 namespace {
+
+// Investigation sweep offsets, indexed by Chebyshev radius.
+// Used by monsters when they only have an *approximate* last-known player position
+// (typically from noise localization).
+const std::vector<std::vector<Vec2i>>& investigationRings() {
+    static std::vector<std::vector<Vec2i>> rings;
+    if (!rings.empty()) return rings;
+
+    constexpr int MAXR = 8;
+    rings.resize(MAXR + 1);
+
+    rings[0].push_back({0, 0});
+
+    for (int r = 1; r <= MAXR; ++r) {
+        auto& v = rings[static_cast<size_t>(r)];
+        v.reserve(static_cast<size_t>(8 * r));
+
+        // Walk the perimeter clockwise starting from the north-west corner.
+        for (int dx = -r; dx <= r; ++dx) v.push_back({dx, -r});
+        for (int dy = -r + 1; dy <= r - 1; ++dy) v.push_back({r, dy});
+        for (int dx = r; dx >= -r; --dx) v.push_back({dx, r});
+        for (int dy = r - 1; dy >= -r + 1; --dy) v.push_back({-r, dy});
+    }
+
+    return rings;
+}
 
 const char* kindName(EntityKind k) {
     switch (k) {
@@ -120,6 +148,86 @@ void Game::monsterTurn() {
 
     auto sameSide = [&](const Entity& a, const Entity& b) -> bool {
         return isPlayerSide(a) == isPlayerSide(b);
+    };
+
+
+    // Confusion should scramble melee attacks just like it scrambles movement and ranged shots.
+    // Without this, confused monsters are still perfectly accurate in melee once adjacent.
+    //
+    // Design:
+    // - Hostile monsters can accidentally strike other nearby monsters (classic NetHack chaos).
+    // - Player-side companions will never intentionally hit the player or other companions; if the
+    //   scrambled swing would land on an ally, they simply whiff instead.
+    auto meleeAttackMaybeConfused = [&](Entity& attacker, Entity& intended, bool kick = false) {
+        if (attacker.hp <= 0 || intended.hp <= 0) return;
+
+        // If the attacker isn't confused, keep exact legacy behavior.
+        if (attacker.effects.confusionTurns <= 0) {
+            attackMelee(attacker, intended, kick);
+            return;
+        }
+
+        // Only scramble if the intended defender is adjacent; otherwise fall back to the normal call.
+        if (!isAdjacent8(attacker.pos, intended.pos)) {
+            attackMelee(attacker, intended, kick);
+            return;
+        }
+
+        // Pick a direction biased toward the intended target, so confusion hurts but doesn't fully
+        // nullify melee threats (especially important for Scroll of Confusion balance).
+        int adx = clampi(intended.pos.x - attacker.pos.x, -1, 1);
+        int ady = clampi(intended.pos.y - attacker.pos.y, -1, 1);
+
+        int intendedDir = -1;
+        for (int i = 0; i < 8; ++i) {
+            if (dirs[i][0] == adx && dirs[i][1] == ady) {
+                intendedDir = i;
+                break;
+            }
+        }
+
+        int dirIndex = rng.range(0, 7);
+        if (intendedDir >= 0) {
+            const int bonus = 3; // (1 + bonus)/(8 + bonus) chance to swing the right way.
+            const int pick = rng.range(0, 7 + bonus);
+            dirIndex = (pick >= 8) ? intendedDir : pick;
+        }
+
+        const int tx = attacker.pos.x + dirs[dirIndex][0];
+        const int ty = attacker.pos.y + dirs[dirIndex][1];
+
+        Entity* actual = nullptr;
+        if (dung.inBounds(tx, ty)) {
+            actual = entityAtMut(tx, ty);
+        }
+
+        // Don't allow player-side allies to "friendly fire" the player or other allies.
+        if (actual && actual->hp > 0 && actual->id != attacker.id) {
+            if (isPlayerSide(attacker) && isPlayerSide(*actual)) {
+                actual = nullptr;
+            }
+        } else {
+            actual = nullptr;
+        }
+
+        if (actual) {
+            attackMelee(attacker, *actual, kick);
+            return;
+        }
+
+        // Whiff: spend the turn doing a wild swing (still makes some noise).
+        const bool visSelf = dung.inBounds(attacker.pos.x, attacker.pos.y) && dung.at(attacker.pos.x, attacker.pos.y).visible;
+        if (visSelf && rng.chance(0.35f)) {
+            std::ostringstream ss;
+            if (isPlayerSide(attacker) && attacker.id != playerId_) {
+                ss << petDisplayNameFor(attacker) << " LASHES OUT WILDLY!";
+            } else {
+                ss << "THE " << kindName(attacker.kind) << " LASHES OUT WILDLY!";
+            }
+            pushMsg(ss.str(), MessageKind::Info, false);
+        }
+
+        emitNoise(attacker.pos, 6);
     };
 
     // Discovered traps are visible in the world; most creatures will try to route around them
@@ -456,10 +564,18 @@ void Game::monsterTurn() {
     };
 
 
-    // Pack monsters will "reserve" adjacent-to-player tiles so they spread out
-    // a bit more (reduced bumping / pileups).
+    // Pack monsters reserve adjacent-to-player tiles so they spread out and avoid pileups.
+    // Wolves go a step further: when they can *see* the player, the pack coordinates using a
+    // tiny min-cost matching solver to claim distinct adjacent tiles and form an encirclement.
     std::unordered_set<int> reservedAdj;
     reservedAdj.reserve(16);
+
+    // Wolf pack plan (anchored to the player's current position).
+    bool wolfPackPlanComputed = false;
+    std::unordered_map<int, Vec2i> wolfPackGoalById;
+    wolfPackGoalById.reserve(16);
+
+    bool wolfPackMsgShown = false;
 
     Vec2i reserveAnchor = p.pos;
 
@@ -468,7 +584,240 @@ void Game::monsterTurn() {
         // If that happens, refresh any pack reservations anchored to the old position.
         if (p.pos != reserveAnchor) {
             reservedAdj.clear();
+            wolfPackGoalById.clear();
+            wolfPackPlanComputed = false;
             reserveAnchor = p.pos;
+        }
+    };
+
+    auto buildWolfPackPlan = [&]() {
+        // Mark as computed even if we early-out; this avoids recomputing every wolf action.
+        wolfPackPlanComputed = true;
+        wolfPackGoalById.clear();
+
+        // Only meaningful if at least two wolves can see the player.
+        struct WolfInfo {
+            int id = 0;
+            Vec2i pos{0, 0};
+            int caps = 0;
+            int baseCost = 0; // cost-to-player
+        };
+
+        std::vector<WolfInfo> wolves;
+        wolves.reserve(12);
+
+        int unionCaps = 0;
+
+        // Compute LOS rules consistent with the per-monster logic below.
+        int losLimit = LOS_MANHATTAN;
+        if (sneakSightStealth > 0) {
+            losLimit = LOS_MANHATTAN - sneakSightStealth;
+            if (losLimit < 4) losLimit = 4;
+            if (losLimit > LOS_MANHATTAN) losLimit = LOS_MANHATTAN;
+        }
+
+        const bool dark = darknessActive();
+        const bool playerLit = (tileLightLevel(reserveAnchor.x, reserveAnchor.y) > 0);
+
+        // Gather pack wolves that can see the player.
+        for (const auto& e : ents) {
+            if (e.hp <= 0) continue;
+            if (e.friendly) continue;
+            if (!e.packAI) continue;
+            if (e.kind != EntityKind::Wolf) continue;
+
+            const int man0 = manhattan(e.pos, reserveAnchor);
+            bool sees = false;
+
+            if (man0 <= losLimit) {
+                sees = dung.hasLineOfSight(e.pos.x, e.pos.y, reserveAnchor.x, reserveAnchor.y);
+            }
+
+            // Invisibility: wolves only notice you when adjacent.
+            if (p.effects.invisTurns > 0) {
+                sees = isAdjacent8(e.pos, reserveAnchor);
+            }
+
+            // Darkness: if the player isn't lit, wolves only notice at very short range.
+            if (sees && dark && !playerLit && man0 > 2) {
+                sees = false;
+            }
+
+            if (!sees) continue;
+
+            // Don't plan for wolves that are already adjacent (they'll attack) or otherwise unable to act.
+            if (isAdjacent8(e.pos, reserveAnchor)) continue;
+            if (e.effects.fearTurns > 0) continue;
+            if (e.effects.webTurns > 0) continue;
+
+            const int caps = monsterPathCapsForEntity(e);
+            unionCaps |= caps;
+
+            const auto& cmP = getCostMap(reserveAnchor, caps);
+            const int bc = cmP[static_cast<size_t>(idx(e.pos.x, e.pos.y))];
+            if (bc < 0) continue;
+
+            wolves.push_back({e.id, e.pos, caps, bc});
+        }
+
+        if (wolves.size() < 2) return;
+
+        std::stable_sort(wolves.begin(), wolves.end(), [](const WolfInfo& a, const WolfInfo& b) {
+            return a.baseCost < b.baseCost;
+        });
+
+        // Candidate ring tiles around the player.
+        struct AdjCand {
+            Vec2i pos;
+            int bias = 0;
+        };
+        std::vector<AdjCand> cand;
+        cand.reserve(8);
+
+        for (auto& dv : dirs) {
+            const int ax = reserveAnchor.x + dv[0];
+            const int ay = reserveAnchor.y + dv[1];
+            if (!dung.inBounds(ax, ay)) continue;
+
+            // Tile must be potentially traversable by at least some pack member.
+            if (!monsterPassableForCaps(*this, ax, ay, unionCaps)) continue;
+
+            // Don't plan to stand on an occupied tile.
+            if (entityAt(ax, ay)) continue;
+
+            AdjCand c;
+            c.pos = {ax, ay};
+            c.bias = ((dv[0] == 0) || (dv[1] == 0)) ? -3 : 0; // cardinals are better at blocking escapes
+            cand.push_back(c);
+        }
+
+        const int M = static_cast<int>(cand.size());
+        if (M <= 0) return;
+
+        // Limit the optimization to a small neighborhood for speed and to avoid weird "long-range claiming".
+        const int N = std::min(8, static_cast<int>(wolves.size()));
+        wolves.resize(static_cast<size_t>(N));
+
+        constexpr int INF = 1'000'000'000;
+
+        std::vector<std::vector<int>> cost;
+        cost.assign(static_cast<size_t>(N), std::vector<int>(static_cast<size_t>(M), INF));
+
+        for (int i = 0; i < N; ++i) {
+            const WolfInfo& w = wolves[static_cast<size_t>(i)];
+            for (int j = 0; j < M; ++j) {
+                const auto& cm = getCostMap(cand[static_cast<size_t>(j)].pos, w.caps);
+                const int c0 = cm[static_cast<size_t>(idx(w.pos.x, w.pos.y))];
+                if (c0 < 0) continue;
+
+                int c = c0 + cand[static_cast<size_t>(j)].bias;
+
+                // Tiny nudge: prefer claiming a tile over "no assignment" when costs are close.
+                // (Encourages encirclement without forcing it.)
+                c -= 2;
+
+                if (c < 0) c = 0;
+                cost[static_cast<size_t>(i)][static_cast<size_t>(j)] = c;
+            }
+        }
+
+        std::vector<int> skipCost(static_cast<size_t>(N), 0);
+        for (int i = 0; i < N; ++i) {
+            // Not assigned: just chase the player, but pay a small penalty so matching wins ties.
+            skipCost[static_cast<size_t>(i)] = wolves[static_cast<size_t>(i)].baseCost + 10;
+        }
+
+        const int maxMask = 1 << M;
+
+        std::vector<int> dp(static_cast<size_t>(maxMask), INF);
+        std::vector<int> dp2(static_cast<size_t>(maxMask), INF);
+
+        std::vector<std::vector<int>> parentMask(static_cast<size_t>(N + 1), std::vector<int>(static_cast<size_t>(maxMask), -1));
+        std::vector<std::vector<int>> parentChoice(static_cast<size_t>(N + 1), std::vector<int>(static_cast<size_t>(maxMask), -2));
+
+        dp[0] = 0;
+        parentMask[0][0] = 0;
+        parentChoice[0][0] = -2;
+
+        for (int i = 0; i < N; ++i) {
+            std::fill(dp2.begin(), dp2.end(), INF);
+
+            for (int mask = 0; mask < maxMask; ++mask) {
+                const int cur = dp[static_cast<size_t>(mask)];
+                if (cur >= INF) continue;
+
+                // Skip assignment for this wolf.
+                {
+                    const int v = cur + skipCost[static_cast<size_t>(i)];
+                    if (v < dp2[static_cast<size_t>(mask)]) {
+                        dp2[static_cast<size_t>(mask)] = v;
+                        parentMask[static_cast<size_t>(i + 1)][static_cast<size_t>(mask)] = mask;
+                        parentChoice[static_cast<size_t>(i + 1)][static_cast<size_t>(mask)] = -1;
+                    }
+                }
+
+                // Assign to an unused tile.
+                for (int j = 0; j < M; ++j) {
+                    if (mask & (1 << j)) continue;
+                    const int c = cost[static_cast<size_t>(i)][static_cast<size_t>(j)];
+                    if (c >= INF) continue;
+
+                    const int nmask = mask | (1 << j);
+                    const int v = cur + c;
+                    if (v < dp2[static_cast<size_t>(nmask)]) {
+                        dp2[static_cast<size_t>(nmask)] = v;
+                        parentMask[static_cast<size_t>(i + 1)][static_cast<size_t>(nmask)] = mask;
+                        parentChoice[static_cast<size_t>(i + 1)][static_cast<size_t>(nmask)] = j;
+                    }
+                }
+            }
+
+            dp.swap(dp2);
+        }
+
+        int bestMask = 0;
+        int bestVal = dp[0];
+        for (int mask = 1; mask < maxMask; ++mask) {
+            const int v = dp[static_cast<size_t>(mask)];
+            if (v < bestVal) {
+                bestVal = v;
+                bestMask = mask;
+            }
+        }
+
+        // Reconstruct assignment and reserve claimed tiles.
+        int usedMask = bestMask;
+        int assigned = 0;
+
+        for (int i = N; i >= 1; --i) {
+            const int choice = parentChoice[static_cast<size_t>(i)][static_cast<size_t>(usedMask)];
+            const int prev = parentMask[static_cast<size_t>(i)][static_cast<size_t>(usedMask)];
+            if (prev < 0) break;
+
+            if (choice >= 0 && choice < M) {
+                const WolfInfo& w = wolves[static_cast<size_t>(i - 1)];
+                const Vec2i goal = cand[static_cast<size_t>(choice)].pos;
+                wolfPackGoalById[w.id] = goal;
+                reservedAdj.insert(idx(goal.x, goal.y));
+                ++assigned;
+            }
+
+            usedMask = prev;
+        }
+
+        // Flavor message (once per turn) if the player can actually see the wolves.
+        if (!wolfPackMsgShown && assigned >= 2 && wolves.size() >= 3) {
+            bool anyVis = false;
+            for (const auto& w : wolves) {
+                if (dung.inBounds(w.pos.x, w.pos.y) && dung.at(w.pos.x, w.pos.y).visible) {
+                    anyVis = true;
+                    break;
+                }
+            }
+            if (anyVis) {
+                pushMsg("THE WOLVES FAN OUT!", MessageKind::Warning, false);
+                wolfPackMsgShown = true;
+            }
         }
     };
 
@@ -485,6 +834,14 @@ void Game::monsterTurn() {
         // Proc ability cooldowns tick once per monster action.
         if (m.procAbility1Cd > 0) --m.procAbility1Cd;
         if (m.procAbility2Cd > 0) --m.procAbility2Cd;
+
+        // Commander aura (PROC AFFIX: COMMANDER): nearby commanders rally allies.
+        // Inspired creatures resist fear and fight a bit more accurately.
+        const int inspireTier = commanderAuraTierFor(m);
+        if (inspireTier > 0 && m.effects.fearTurns > 0) {
+            // Rally effect: bleed off an extra fear turn per action (doors/walls can break LoS to the commander).
+            m.effects.fearTurns = std::max(0, m.effects.fearTurns - 1);
+        }
 
         // Ally AI: friendly companions (dog, tamed beasts, etc.).
         if (m.friendly) {
@@ -588,7 +945,7 @@ void Game::monsterTurn() {
 
             if (best) {
                 if (isAdjacent8(m.pos, best->pos)) {
-                    attackMelee(m, *best);
+                    meleeAttackMaybeConfused(m, *best);
                     return;
                 }
 
@@ -950,6 +1307,7 @@ void Game::monsterTurn() {
             m.alerted = true;
             m.lastKnownPlayerPos = p.pos;
             m.lastKnownPlayerAge = 0;
+            m.lastKnownPlayerUncertainty = 0;
             agedThisTurn = true;
         } else if (m.alerted && !agedThisTurn) {
             // If this monster has a nose and is currently standing in a reasonably fresh scent
@@ -969,6 +1327,7 @@ void Game::monsterTurn() {
         if (m.alerted && m.lastKnownPlayerPos.x < 0) {
             m.lastKnownPlayerPos = p.pos;
             m.lastKnownPlayerAge = 0;
+            m.lastKnownPlayerUncertainty = 0;
             agedThisTurn = true;
         }
 
@@ -1037,6 +1396,7 @@ void Game::monsterTurn() {
             m.alerted = true;
             m.lastKnownPlayerPos = p.pos;
             m.lastKnownPlayerAge = 0;
+            m.lastKnownPlayerUncertainty = 0;
         }
 
         if (!hunting) {
@@ -1044,6 +1404,7 @@ void Game::monsterTurn() {
             m.alerted = false;
             m.lastKnownPlayerPos = {-1, -1};
             m.lastKnownPlayerAge = 9999;
+            m.lastKnownPlayerUncertainty = 0;
 
             float wanderChance = (m.kind == EntityKind::Bat) ? 0.65f : 0.25f;
             if (rng.chance(wanderChance)) {
@@ -1068,6 +1429,7 @@ void Game::monsterTurn() {
                 o.alerted = true;
                 o.lastKnownPlayerPos = p.pos;
                 o.lastKnownPlayerAge = 0;
+                o.lastKnownPlayerUncertainty = 0;
             }
 
             // Flavor: wolves occasionally howl when they first spot the player.
@@ -1079,8 +1441,131 @@ void Game::monsterTurn() {
             }
         }
 
+        // Investigation sweep: when hunting via a last-known position (especially one derived
+        // from *noise*), don't just stand on the anchor tile. Sweep around it within an
+        // uncertainty-dependent radius so stealthy players can be flushed out without
+        // giving monsters perfect information.
+        auto chooseInvestigationTarget = [&](const Entity& mm, Vec2i anchor) -> Vec2i {
+            constexpr int MAXR = 8;
+
+            // Base radius comes from noise localization uncertainty; let it expand a bit over time.
+            int baseR = std::max(1, static_cast<int>(mm.lastKnownPlayerUncertainty));
+            int r = baseR + std::min(4, mm.lastKnownPlayerAge / 6);
+            r = clampi(r, 1, MAXR);
+
+            // Only start sweeping once we arrive at the anchor (or are adjacent).
+            if (chebyshev(mm.pos, anchor) > 1) return anchor;
+
+            const auto& rings = investigationRings();
+            const auto& ring = rings[static_cast<size_t>(r)];
+            if (ring.empty()) return anchor;
+
+            // Deterministic index: doesn't consume RNG, and varies across monsters + time.
+            uint32_t h = hashCombine(seed_, "INVEST"_tag);
+            h = hashCombine(h, static_cast<uint32_t>(mm.id));
+            h = hashCombine(h, static_cast<uint32_t>(anchor.x));
+            h = hashCombine(h, static_cast<uint32_t>(anchor.y));
+            h = hashCombine(h, static_cast<uint32_t>(turnCount / 2));
+            h = hashCombine(h, static_cast<uint32_t>(mm.lastKnownPlayerAge));
+
+            const size_t base = static_cast<size_t>(h % ring.size());
+
+            // Try a few perimeter points until we find something sensible.
+            for (size_t attempt = 0; attempt < ring.size() && attempt < 16; ++attempt) {
+                const size_t i = (base + attempt) % ring.size();
+                const Vec2i off = ring[i];
+                const Vec2i cand{anchor.x + off.x, anchor.y + off.y};
+
+                if (!dung.inBounds(cand.x, cand.y)) continue;
+                if (cand.x == mm.pos.x && cand.y == mm.pos.y) continue;
+                if (!monsterPassableForCaps(*this, cand.x, cand.y, caps)) continue;
+
+                const Entity* occ = entityAt(cand.x, cand.y);
+                if (occ && occ->id != playerId_) continue;
+
+                return cand;
+            }
+
+            return anchor;
+        };
+
+        if (!seesPlayer && m.effects.fearTurns <= 0 &&
+            m.alerted && m.lastKnownPlayerPos.x >= 0 && m.lastKnownPlayerPos.y >= 0 &&
+            (m.kind == EntityKind::Shopkeeper || m.lastKnownPlayerAge <= TRACK_TURNS)) {
+            target = chooseInvestigationTarget(m, m.lastKnownPlayerPos);
+        }
+
         const std::vector<int>& costMap = getCostMap(target, caps);
         const int d0 = costMap[static_cast<size_t>(idx(m.pos.x, m.pos.y))];
+
+        // Torch use: on dark floors, some monsters may carry a torch and will
+        // spend a turn lighting it when alerted but unable to see the player.
+        if (!m.friendly && darknessActive() && m.pocketConsumable.id != 0 && m.pocketConsumable.count > 0) {
+            auto canLightTorch = [&](EntityKind kk) -> bool {
+                switch (kk) {
+                    case EntityKind::Goblin:
+                    case EntityKind::Orc:
+                    case EntityKind::Guard:
+                    case EntityKind::Shopkeeper:
+                    case EntityKind::KoboldSlinger:
+                        return true;
+                    default:
+                        return false;
+                }
+            };
+
+            Item& pc = m.pocketConsumable;
+            const bool hasUnlitTorch = (pc.kind == ItemKind::Torch);
+            const bool hasLitTorch = (pc.kind == ItemKind::TorchLit && pc.charges > 0);
+
+            // Monsters that are already self-illuminated don't need a torch.
+            const bool selfLit = (m.effects.burnTurns > 0) || (m.gearMelee.id != 0 && m.gearMelee.ego == ItemEgo::Flaming) || hasLitTorch;
+
+            if (!selfLit && hasUnlitTorch && canLightTorch(m.kind) && m.alerted && !seesPlayer) {
+                const bool playerLitNow = (tileLightLevel(p.pos.x, p.pos.y) > 0);
+                const int cheb = chebyshev(m.pos, p.pos);
+
+                // If the only reason we don't see the player is that it's dark,
+                // a torch is a sensible tactical "spend".
+                if (!playerLitNow && cheb > 2 && cheb <= 10) {
+                    float chance = 0.55f;
+                    if (m.kind == EntityKind::Guard) chance = 0.80f;
+                    else if (m.kind == EntityKind::Orc) chance = 0.65f;
+                    else if (m.kind == EntityKind::Shopkeeper) chance = 0.70f;
+
+                    // If the trail is very fresh, light sooner.
+                    if (m.lastKnownPlayerAge >= 0 && m.lastKnownPlayerAge <= 3) chance += 0.10f;
+
+                    chance = std::max(0.0f, std::min(1.0f, chance));
+
+                    if (rng.chance(chance)) {
+                        const bool visBefore = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+
+                        pc.kind = ItemKind::TorchLit;
+                        pc.count = 1;
+                        pc.buc = 0;
+                        pc.enchant = 0;
+                        pc.ego = ItemEgo::None;
+                        int fuel = 160 + rng.range(0, 140);
+                        if (m.kind == EntityKind::Guard) fuel += 40;
+                        pc.charges = fuel;
+
+                        // The flare is small but noticeable.
+                        emitNoise(m.pos, 4);
+
+                        // Lighting changes visibility on dark levels.
+                        recomputeFov();
+
+                        const bool visAfter = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
+                        if (visBefore || visAfter || cheb <= 3) {
+                            pushMsg(std::string("THE ") + kindName(m.kind) + " LIGHTS A TORCH!", MessageKind::Warning, false);
+                        }
+
+                        return;
+                    }
+                }
+            }
+        }
 
         // Pocket consumables: a few intelligent monsters can carry a potion and
         // will sometimes drink it mid-fight. This makes encounters with Wizards
@@ -1312,7 +1797,7 @@ void Game::monsterTurn() {
                             emitNoise(m.pos, 10);
 
                             if (isAdjacent8(m.pos, p.pos)) {
-                                attackMelee(m, playerMut());
+                                meleeAttackMaybeConfused(m, playerMut());
                             }
 
                             cd = 9 + rng.range(0, 4);
@@ -1463,6 +1948,94 @@ void Game::monsterTurn() {
                             return true;
                         }
 
+
+                        case ProcMonsterAbility::VoidHook: {
+                            if (!seesPlayer) return false;
+                            if (isAdjacent8(m.pos, p.pos)) return false;
+                            if (manToPlayer > 8) return false;
+                            if (!rng.chance(0.14f + 0.03f * tier)) return false;
+
+                            const int range = 8;
+                            std::vector<Vec2i> ray = bresenhamLine(m.pos, p.pos);
+                            if (!hasClearProjectileLine(dung, ray, p.pos, range)) return false;
+
+                            // Determine maximum pull distance based on tier, but never into the monster.
+                            int pullDist = 1;
+                            if (tier >= 2) pullDist = 2;
+                            if (tier >= 3) pullDist = 3;
+
+                            std::vector<Vec2i> back = bresenhamLine(p.pos, m.pos);
+                            pullDist = std::min(pullDist, std::max(0, static_cast<int>(back.size()) - 2));
+                            if (pullDist <= 0) return false;
+
+                            Entity& pm = playerMut();
+                            const Vec2i start = pm.pos;
+                            Vec2i cur = pm.pos;
+                            Vec2i dest = pm.pos;
+                            int pulled = 0;
+
+                            for (size_t i = 1; i < back.size() && pulled < pullDist; ++i) {
+                                const Vec2i step = back[i];
+                                if (step == m.pos) break;
+                                if (entityAt(step.x, step.y) != nullptr) break;
+
+                                const int sdx = step.x - cur.x;
+                                const int sdy = step.y - cur.y;
+                                if (sdx != 0 && sdy != 0 && !diagonalPassable(dung, cur, sdx, sdy)) break;
+
+                                if (!dung.inBounds(step.x, step.y)) break;
+                                const TileType tt = dung.at(step.x, step.y).type;
+
+                                if (tt == TileType::Chasm) {
+                                    // Void hook will not pull a grounded player into a bottomless chasm.
+                                    if (pm.effects.levitationTurns <= 0) break;
+                                } else {
+                                    if (!dung.isWalkable(step.x, step.y)) break;
+                                }
+
+                                dest = step;
+                                cur = step;
+                                pulled += 1;
+                            }
+
+                            if (pulled <= 0 || dest == start) return false;
+
+                            if (visSelf || visPlayer) {
+                                std::ostringstream ss;
+                                ss << "THE " << kindName(m.kind) << " LASHES OUT WITH A VOID HOOK!";
+                                pushMsg(ss.str(), MessageKind::Warning, false);
+                            }
+
+                            // Visual: reuse spark projectile FX.
+                            FXProjectile fxp;
+                            fxp.kind = ProjectileKind::Spark;
+                            fxp.path = ray;
+                            fxp.pathIndex = 0;
+                            fxp.stepTimer = 0.0f;
+                            fxp.stepTime = 0.02f;
+                            fx.push_back(fxp);
+
+                            pm.pos = dest;
+                            emitNoise(dest, 12);
+
+                            // Trigger traps on landing and update vision immediately (forced movement can change LOS).
+                            triggerTrapAt(pm.pos, pm);
+                            recomputeFov();
+
+                            // Higher-tier hooks briefly entangle.
+                            if (tier >= 2) {
+                                const int dur = 1 + (tier >= 3 ? 1 : 0);
+                                const int before = pm.effects.webTurns;
+                                pm.effects.webTurns = std::max(pm.effects.webTurns, dur);
+                                if (before == 0 && pm.effects.webTurns > 0) {
+                                    pushMsg("YOU ARE ENSNARED!", MessageKind::Warning, false);
+                                }
+                            }
+
+                            cd = 18 + rng.range(0, 7);
+                            return true;
+                        }
+
                         default:
                             break;
                     }
@@ -1504,8 +2077,8 @@ void Game::monsterTurn() {
             }
 
             // Floor wards (NetHack-style): if the player is standing on a warding
-            // engraving (e.g. "ELBERETH"), some monsters may hesitate and try to
-            // break contact instead of attacking.
+            // engraving, some monsters may hesitate and try to break contact instead
+            // of attacking.
             if (seesPlayer) {
                 // Find a ward on the player's tile (sparse list; linear scan is fine).
                 size_t wardIdx = static_cast<size_t>(-1);
@@ -1518,45 +2091,42 @@ void Game::monsterTurn() {
                 }
 
                 if (wardIdx != static_cast<size_t>(-1)) {
-                    auto wardImmune = [&](EntityKind k) {
-                        switch (k) {
-                            // Undead and "boss" monsters ignore wards.
-                            case EntityKind::SkeletonArcher:
-                            case EntityKind::Ghost:
-                            case EntityKind::Zombie:
-                            case EntityKind::Wizard:
-                            case EntityKind::Minotaur:
-                            case EntityKind::Shopkeeper:
-                                return true;
-                            default:
-                                return false;
-                        }
-                    };
+                    // Resolve which ward word this is (stored in the engraving text).
+                    WardWord ww = wardWordFromEngraving(engravings_[wardIdx]);
+                    if (ww != WardWord::None && wardAffectsMonster(ww, m.kind)) {
+                        const uint8_t strength0 = engravings_[wardIdx].strength;
+                        const float repelChance = wardRepelChance(ww, m.kind, strength0);
+                        const bool repelled = (repelChance > 0.0f) && rng.chance(repelChance);
 
-                    if (!wardImmune(m.kind)) {
-                        Engraving& eg = engravings_[wardIdx];
-                        const float repelChance = std::clamp(0.35f + 0.10f * static_cast<float>(eg.strength), 0.35f, 0.85f);
-                        const bool repelled = rng.chance(repelChance);
-
-                        // Wards degrade with contact (finite uses). Permanent graffiti wards
-                        // (strength=255) are treated as non-degrading.
-                        if (eg.strength != 255) {
-                            if (eg.strength > 0) --eg.strength;
-                            if (eg.strength == 0) {
-                                // Erase and optionally message.
+                        // Helper: apply durability wear and possibly erase the ward.
+                        auto wearWard = [&](int amount) {
+                            if (amount <= 0) return;
+                            if (wardIdx == static_cast<size_t>(-1)) return;
+                            if (wardIdx >= engravings_.size()) return;
+                            Engraving& eg = engravings_[wardIdx];
+                            if (eg.strength == 255) return; // permanent (shouldn't happen for player wards)
+                            int s = static_cast<int>(eg.strength);
+                            s -= amount;
+                            if (s <= 0) {
                                 const bool visWard = dung.inBounds(pm.pos.x, pm.pos.y) && dung.at(pm.pos.x, pm.pos.y).visible;
                                 engravings_.erase(engravings_.begin() + static_cast<std::ptrdiff_t>(wardIdx));
+                                wardIdx = static_cast<size_t>(-1);
                                 if (visWard) {
                                     pushMsg("THE WARDING WORDS FADE!", MessageKind::Info, false);
                                 }
+                            } else {
+                                eg.strength = static_cast<uint8_t>(std::clamp(s, 1, 254));
                             }
-                        }
+                        };
+
+                        // Wards wear down whenever a monster "tests" them (whether or not it is repelled).
+                        wearWard(1);
 
                         if (repelled) {
                             const bool vis = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
                             if (vis) {
                                 std::ostringstream ss;
-                                ss << "THE " << kindName(m.kind) << " SHRINKS FROM THE WARD!";
+                                ss << "THE " << kindName(m.kind) << " SHRINKS FROM THE WARD OF " << wardWordName(ww) << "!";
                                 pushMsg(ss.str(), MessageKind::Info, false);
                             }
 
@@ -1568,7 +2138,21 @@ void Game::monsterTurn() {
                                 }
                             }
 
-                            // No escape route: the monster loses its action.
+                            // No escape route: instead of freezing forever, strong monsters can
+                            // attempt to smudge the ward away.
+                            if (wardIdx != static_cast<size_t>(-1)) {
+                                const int bonus = wardSmudgeWearBonus(ww, m.kind);
+                                if (bonus > 0) {
+                                    if (vis) {
+                                        std::ostringstream ss;
+                                        ss << "THE " << kindName(m.kind) << " SCRATCHES AT THE WARD!";
+                                        pushMsg(ss.str(), MessageKind::Info, false);
+                                    }
+                                    wearWard(bonus);
+                                }
+                            }
+
+                            // Monster loses its action this tick.
                             return;
                         }
                     }
@@ -1751,7 +2335,7 @@ void Game::monsterTurn() {
             }
 
 
-            attackMelee(m, pm);
+            meleeAttackMaybeConfused(m, pm);
             return;
         }
         // Monsters will also fight your companions if they block them.
@@ -1759,7 +2343,7 @@ void Game::monsterTurn() {
             if (!a || a->hp <= 0) continue;
             if (a->id == m.id) continue;
             if (isAdjacent8(m.pos, a->pos)) {
-                attackMelee(m, *a);
+                meleeAttackMaybeConfused(m, *a);
                 return;
             }
         }
@@ -2053,7 +2637,7 @@ void Game::monsterTurn() {
 
                     if (m.hp > 0 && isAdjacent8(m.pos, p.pos)) {
                         Entity& pm = playerMut();
-                        attackMelee(m, pm);
+                        meleeAttackMaybeConfused(m, pm);
                     }
                     return;
                 }
@@ -2064,7 +2648,7 @@ void Game::monsterTurn() {
         const bool fleeLoot = ((m.kind == EntityKind::Leprechaun && m.stolenGold > 0 && seesPlayer) ||
                               (m.kind == EntityKind::Nymph && m.pocketConsumable.id != 0 && m.pocketConsumable.count > 0 && seesPlayer));
         const bool feared = (m.effects.fearTurns > 0);
-        const bool lowHpFlee = (m.willFlee && m.hp <= std::max(1, m.hpMax / 3));
+        const bool lowHpFlee = (m.willFlee && inspireTier < 2 && m.hp <= std::max(1, m.hpMax / 3));
         if ((feared || fleeLoot || lowHpFlee) && d0 >= 0) {
             Vec2i to = bestStepAway(m, costMap, caps);
             if (to != m.pos) {
@@ -2233,15 +2817,36 @@ void Game::monsterTurn() {
             }
         }
 
-        // Pack behavior: try to occupy adjacent tiles around player (only when seeing the player).
+        // Pack behavior:
+        // - Wolves: coordinated encirclement plan (min-cost matching) to claim distinct adjacent tiles.
+        // - Other packAI monsters (if any): fallback to the older greedy reservation behavior.
         if (m.packAI && seesPlayer) {
+            if (m.kind == EntityKind::Wolf) {
+                if (!wolfPackPlanComputed) {
+                    buildWolfPackPlan();
+                }
+
+                auto it = wolfPackGoalById.find(m.id);
+                if (it != wolfPackGoalById.end()) {
+                    const Vec2i goal = it->second;
+                    const std::vector<int>& cm = getCostMap(goal, caps);
+                    const Vec2i to = bestStepToward(m, cm, caps);
+                    if (to != m.pos) {
+                        tryMove(m, to.x - m.pos.x, to.y - m.pos.y);
+                        return;
+                    }
+                    // If we can't progress toward the assigned goal (blocked), fall through.
+                }
+            }
+
+            // Fallback: greedy reservation toward the nearest free adjacent tile.
             Vec2i bestAdj = m.pos;
             int bestCost = std::numeric_limits<int>::max();
             bool found = false;
 
             for (auto& dv : dirs) {
-                const int ax = p.pos.x + dv[0];
-                const int ay = p.pos.y + dv[1];
+                const int ax = reserveAnchor.x + dv[0];
+                const int ay = reserveAnchor.y + dv[1];
                 if (!dung.inBounds(ax, ay)) continue;
                 if (!monsterPassableForCaps(*this, ax, ay, caps)) continue;
                 if (entityAt(ax, ay)) continue;

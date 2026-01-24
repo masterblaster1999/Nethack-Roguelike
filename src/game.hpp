@@ -193,6 +193,9 @@ enum class ProcMonsterAffix : uint32_t {
     Flaming   = 1u << 6, // attacks can ignite (burn)
     Vampiric  = 1u << 7, // attacks can drain life (heal attacker)
     Webbing   = 1u << 8, // attacks can ensnare (web)
+
+    // Aura affixes.
+    Commander = 1u << 9, // rallies nearby allies (accuracy + fear resistance)
 };
 
 inline constexpr uint32_t procAffixBit(ProcMonsterAffix a) {
@@ -215,6 +218,7 @@ inline constexpr ProcMonsterAffix PROC_MONSTER_AFFIX_ALL[] = {
     ProcMonsterAffix::Flaming,
     ProcMonsterAffix::Vampiric,
     ProcMonsterAffix::Webbing,
+    ProcMonsterAffix::Commander,
 };
 
 inline const char* procMonsterAffixName(ProcMonsterAffix a) {
@@ -228,6 +232,7 @@ inline const char* procMonsterAffixName(ProcMonsterAffix a) {
         case ProcMonsterAffix::Flaming:   return "FLAMING";
         case ProcMonsterAffix::Vampiric:  return "VAMPIRIC";
         case ProcMonsterAffix::Webbing:   return "WEBBING";
+        case ProcMonsterAffix::Commander: return "COMMANDER";
         default:                          return "UNKNOWN";
     }
 }
@@ -286,6 +291,8 @@ enum class ProcMonsterAbility : uint8_t {
 
     // Debuff
     Screech = 6,       // sonic burst that confuses the player
+
+    VoidHook = 7,      // spectral chain that pulls the target closer
 };
 
 inline const char* procMonsterAbilityName(ProcMonsterAbility a) {
@@ -296,6 +303,7 @@ inline const char* procMonsterAbilityName(ProcMonsterAbility a) {
         case ProcMonsterAbility::ArcaneWard:    return "ARCANE WARD";
         case ProcMonsterAbility::SummonMinions: return "SUMMON";
         case ProcMonsterAbility::Screech:       return "SCREECH";
+        case ProcMonsterAbility::VoidHook:      return "VOID HOOK";
         case ProcMonsterAbility::None:
         default:                                return "NONE";
     }
@@ -308,6 +316,7 @@ inline constexpr ProcMonsterAbility PROC_MONSTER_ABILITY_ALL[] = {
     ProcMonsterAbility::ArcaneWard,
     ProcMonsterAbility::SummonMinions,
     ProcMonsterAbility::Screech,
+    ProcMonsterAbility::VoidHook,
 };
 
 inline int procMonsterAbilityCount(ProcMonsterAbility a, ProcMonsterAbility b) {
@@ -559,6 +568,9 @@ enum class Action : uint8_t {
 
     // LOOK helper (append-only)
     ToggleScentPreview, // Toggle the scent trail preview overlay (Look-mode helper)
+
+    // Combat stance (append-only)
+    Parry,
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -955,6 +967,7 @@ struct Entity {
     // This prevents monsters from having perfect information when they lose line of sight.
     Vec2i lastKnownPlayerPos{-1, -1};
     int lastKnownPlayerAge = 9999; // turns since last sight/hearing; large means "unknown"
+    uint8_t lastKnownPlayerUncertainty = 0; // 0=exact; higher => wider investigation/search around lastKnownPlayerPos
 
     // Timed status effects (buffs/debuffs). Kept as a separate struct so
     // adding new effects is append-only for save compatibility.
@@ -1471,10 +1484,10 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
 
     // Talents (earned on level-up). These provide build variety while keeping the
     // classic ATK/DEF progression intact.
-    int playerMight() const { return talentMight_ + ringTalentBonusMight(); }      // melee power / carry capacity
-    int playerAgility() const { return talentAgility_ + ringTalentBonusAgility(); }  // ranged accuracy / evasion / locks & traps
-    int playerVigor() const { return talentVigor_ + ringTalentBonusVigor(); }      // max HP growth
-    int playerFocus() const { return talentFocus_ + ringTalentBonusFocus(); }      // wand power / searching
+    int playerMight() const { return talentMight_ + ringTalentBonusMight() + artifactTalentBonusMight(); }      // melee power / carry capacity
+    int playerAgility() const { return talentAgility_ + ringTalentBonusAgility() + artifactTalentBonusAgility(); }  // ranged accuracy / evasion / locks & traps
+    int playerVigor() const { return talentVigor_ + ringTalentBonusVigor() + artifactTalentBonusVigor(); }      // max HP growth / regen
+    int playerFocus() const { return talentFocus_ + ringTalentBonusFocus() + artifactTalentBonusFocus(); }      // wand power / searching
     int pendingTalentPoints() const { return talentPointsPending_; }
 
     // Derived core stats (used by combat rules / UI).
@@ -1507,6 +1520,9 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     int playerMana() const { return mana_; }
     int playerManaMax() const;
     bool knowsSpell(SpellKind k) const;
+    // Percent chance (0..95) that a learned spell will fail when cast.
+    // Influenced by Focus, character level, armor/encumbrance, and mental status effects.
+    int spellFailChancePct(SpellKind k) const;
     std::vector<SpellKind> knownSpellsList() const;
     SpellKind selectedSpell() const;
     // Shops / economy
@@ -2021,6 +2037,71 @@ private:
     void dropGroundItem(Vec2i pos, ItemKind k, int count = 1, int enchant = 0);
     void dropGroundItemItem(Vec2i pos, Item it);
 
+    // Boulder rolling core (used by rolling boulder traps and kicked boulders).
+    //
+    // This is a purely tile-based simulation that moves an existing boulder along a line,
+    // interacting with doors, chasms, and creatures. It is intentionally deterministic
+    // given RNG state so it behaves consistently across save/load.
+    struct BoulderRollConfig {
+        // Maximum number of tile steps to simulate (hard cap).
+        int maxSteps = 24;
+
+        // Momentum budget; decreases as the boulder moves. If <=0, the boulder stops.
+        // If 0, we treat it as `maxSteps`.
+        int momentum = 24;
+
+        // If true, allow spawning a boulder at the start position (used by traps).
+        // The tile must be Floor; any occupant is handled via a start impact.
+        bool spawnAtStart = false;
+
+        // If spawnAtStart is true and an entity is standing on the start tile,
+        // they will be hit and (if alive) shoved aside before the boulder is placed.
+        bool hitOccupantAtStart = false;
+
+        // Door smashing.
+        bool allowDoorSmash = true;
+        float smashClosedP = 0.90f;
+        float smashLockedP = 0.65f;
+
+        // Path constraints.
+        bool avoidStairs = true;
+        bool consumeIntoChasm = true;
+
+        // If true, some events (currently chasm crashes) are reported even if the
+        // final tile isn't visible, as long as the start tile was visible.
+        bool reportEventsIfStartVisible = false;
+
+        // Noise volumes.
+        int stepNoise = 12;
+        int doorSmashNoise = 14;
+        int chasmNoise = 18;
+
+        // Damage model for impacts.
+        int dmgMin = 1;
+        int dmgMax = 20;
+        int dmgDepthBonusMax = 6;
+
+        // If > 0, add (currentMomentum / dmgMomentumDiv) to damage.
+        int dmgMomentumDiv = 0;
+
+        // Momentum drain.
+        int momentumLossPerStep = 1;
+        int momentumLossOnHit = 0;
+        int momentumLossOnDoor = 0;
+
+        // If the player dies from an impact, this string becomes the run's end cause.
+        const char* playerDeathCause = "CRUSHED BY BOULDER";
+    };
+
+    // Roll a boulder starting at `start` in direction `dir`.
+    //
+    // If cfg.spawnAtStart is false, the start tile must already be TileType::Boulder.
+    // If cfg.spawnAtStart is true, the start tile must be Floor and a boulder will be placed.
+    //
+    // Returns the number of tiles the boulder moved (0 if it didn't budge).
+    // If playerMovedOut is set and becomes true, the player was displaced (recompute FOV).
+    int rollBoulderFrom(Vec2i start, Vec2i dir, const BoulderRollConfig& cfg, bool* playerMovedOut = nullptr);
+
     // Bones files (persistent death remnants between runs).
     bool tryApplyBones();
     bool writeBonesFile();
@@ -2179,6 +2260,9 @@ private:
 
         // Fishing rod casting (UI-only; not serialized)
         Fish,
+
+        // Rune tablet procedural spell casting (UI-only; not serialized)
+        RuneTablet,
     };
     TargetingMode targetingMode_ = TargetingMode::Ranged;
     SpellKind targetingSpell_ = SpellKind::MagicMissile;
@@ -2190,6 +2274,13 @@ private:
     // Fishing rods: store the inventory item id that initiated fishing targeting.
     // UI-only; not serialized.
     int targetingFishingRodItemId_ = 0;
+
+    // Rune tablets: store the inventory item id that initiated rune targeting and
+    // the procedural spell id (typically the tablet's spriteSeed).
+    // UI-only; not serialized.
+    int targetingRuneTabletItemId_ = 0;
+    uint32_t targetingProcSpellId_ = 0u;
+
 
     // Fishing fight mini-mode (UI-only; not serialized). When you hook a large/rare fish,
     // the game enters a short tension/progress interaction where you REEL (Enter) or
@@ -2560,6 +2651,9 @@ private:
     // Bounty contracts: progress is stored in Item::enchant and updated on qualifying kills.
     void awardBountyProgress(EntityKind killedKind, bool showMsgs);
 
+    // Commander affix aura: return highest nearby commander tier (1..3) affecting `e`, or 0.
+    int commanderAuraTierFor(const Entity& e) const;
+
     void monsterTurn();
     void cleanupDead();
 
@@ -2597,16 +2691,28 @@ private:
     void closeSpells();
     void moveSpellsSelection(int dy);
     bool canCastSpell(SpellKind k, std::string* reasonOut = nullptr) const;
+    // Internal: roll spell failure and apply miscast side-effects (consumes mana/time).
+    bool checkSpellFailure(SpellKind k, Vec2i intendedTarget, bool hasTarget);
     // Cast immediately (no target selection).
     bool castSpell(SpellKind k);
     // Cast at an already-selected target (used by spell targeting).
     bool castSpellAt(SpellKind k, Vec2i target);
+
+
+    // Procedural rune spells (Rune Tablets). Not yet wired to inventory item use.
+    bool canCastProcSpell(uint32_t procId, std::string* reasonOut = nullptr) const;
+    // Cast immediately (no target selection).
+    bool castProcSpell(uint32_t procId);
+    // Cast at an already-selected target (used by rune tablet targeting).
+    bool castProcSpellAt(uint32_t procId, Vec2i target);
 
     // Targeting actions
     void beginTargeting();
     void beginSpellTargeting(SpellKind k);
     void beginCaptureTargeting(int sphereItemId);
     void beginFishingTargeting(int rodItemId);
+
+    void beginRuneTabletTargeting(int runeTabletItemId);
     bool endTargeting(bool fire);
     void moveTargetCursor(int dx, int dy);
     void recomputeTargetLine();
@@ -2664,11 +2770,18 @@ private:
     int equippedRing2Index() const;
 
 
-    // Passive equipment bonuses (currently only rings).
+    // Passive equipment bonuses.
     int ringTalentBonusMight() const;
     int ringTalentBonusAgility() const;
     int ringTalentBonusVigor() const;
     int ringTalentBonusFocus() const;
+
+    // Artifacts provide small passive bonuses themed by their power tag.
+    int artifactTalentBonusMight() const;
+    int artifactTalentBonusAgility() const;
+    int artifactTalentBonusVigor() const;
+    int artifactTalentBonusFocus() const;
+    int artifactDefenseBonus() const;
     int ringDefenseBonus() const;
     int playerRangedRange() const;
     bool playerHasRangedReady(std::string* reasonOut) const;

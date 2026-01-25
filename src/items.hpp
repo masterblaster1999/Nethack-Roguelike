@@ -217,21 +217,29 @@ enum class ItemKind : uint8_t {
 enum class ItemEgo : uint8_t {
     None = 0,
 
-    // Weapon egos
+    // Weapon egos (append-only)
     Flaming,
     Venom,
     Vampiric,
+
+    // New weapon egos (append-only to keep save compatibility).
+    Webbing,
+    Corrosive,
+    Dazing,
 };
 
 // Keep in sync with ItemEgo (append-only).
-inline constexpr int ITEM_EGO_COUNT = static_cast<int>(ItemEgo::Vampiric) + 1;
+inline constexpr int ITEM_EGO_COUNT = static_cast<int>(ItemEgo::Dazing) + 1;
 
 inline const char* egoPrefix(ItemEgo e) {
     switch (e) {
-        case ItemEgo::Flaming:  return "FLAMING";
-        case ItemEgo::Venom:    return "VENOM";
-        case ItemEgo::Vampiric: return "VAMPIRIC";
-        default:                return "";
+        case ItemEgo::Flaming:   return "FLAMING";
+        case ItemEgo::Venom:     return "VENOM";
+        case ItemEgo::Vampiric:  return "VAMPIRIC";
+        case ItemEgo::Webbing:   return "WEBBING";
+        case ItemEgo::Corrosive: return "CORROSIVE";
+        case ItemEgo::Dazing:    return "DAZING";
+        default:                 return "";
     }
 }
 
@@ -239,10 +247,13 @@ inline const char* egoPrefix(ItemEgo e) {
 // Returned as a percentage (100 = no change).
 inline int egoValueMultiplierPct(ItemEgo e) {
     switch (e) {
-        case ItemEgo::Flaming:  return 160;
-        case ItemEgo::Venom:    return 170;
-        case ItemEgo::Vampiric: return 220;
-        default:                return 100;
+        case ItemEgo::Flaming:   return 160;
+        case ItemEgo::Venom:     return 170;
+        case ItemEgo::Vampiric:  return 220;
+        case ItemEgo::Webbing:   return 175;
+        case ItemEgo::Corrosive: return 185;
+        case ItemEgo::Dazing:    return 190;
+        default:                 return 100;
     }
 }
 

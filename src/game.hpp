@@ -2644,6 +2644,14 @@ private:
     // with a stronger knockback profile.
     void attackMelee(Entity& attacker, Entity& defender, bool kick = false);
     void attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus, int dmgBonus, ProjectileKind projKind, bool fromPlayer, const Item* projectileTemplate = nullptr, bool wandPowered = false);
+
+    // Morale/intimidation: when the player (or a friendly companion) scores a kill,
+    // nearby hostiles that witness it can panic and flee for a few turns.
+    //
+    // This is intentionally deterministic (no RNG consumption) so it doesn't perturb
+    // unrelated simulation outcomes (important for replays and reproducibility).
+    void applyKillMoraleShock(const Entity& killer, const Entity& victim, int overkill, bool assassinationStyle);
+
     // Capture sphere pets: per-pet XP + bond progression is stored in the sphere item.
     // Awarding is centralized so melee/ranged/AoE kills stay consistent.
     void awardCapturedPetProgress(Entity& pet, int xpGain, int bondGain, bool showMsgs);

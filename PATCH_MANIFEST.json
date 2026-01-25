@@ -1,13 +1,12 @@
 {
-  "patch_id": "round144_patch",
-  "previous_patch_id": "round143_patch",
-  "round": 144,
-  "date": "2026-01-24",
+  "patch_id": "round155_patch",
+  "previous_patch_id": "round154_patch",
+  "round": 155,
+  "date": "2026-01-25",
   "project": "Nethack-Roguelike",
   "summary": [
-    "Added kick-rolled boulders: kicking a boulder can now set it rolling like a low-momentum rolling-boulder trap, crushing entities in its path.",
-    "Refactored rolling-boulder trap simulation into a shared helper (rollBoulderFrom) so traps and kicked boulders use consistent movement, door interactions, and collision rules.",
-    "Chasm impacts now consistently describe forming a rough bridge when a boulder fills a chasm tile."
+    "Expanded procedural item generation with an ego-weapon ecology pass: ego rolls are now biased by a deterministic per-floor theme plus room type + terrain material, making loot feel more coherent without becoming predictable.",
+    "Added three new ego weapon brands (WEBBING/CORROSIVE/DAZING) with fully implemented combat procs (web, corrosion, confusion) and shop valuation support."
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -61,19 +60,31 @@
     "src/spritegen.hpp",
     "src/wards.hpp",
     "src/wfc.hpp",
-    "tests/test_main.cpp"
+    "tests/test_main.cpp",
+    "docs/ELECTRIC_CONDUCTION.md",
+    "docs/CORROSION_GEAR_AND_DOORS.md",
+    "docs/MORALE_SHOCK.md",
+    "src/spritegen3d.cpp",
+    "docs/PROCGEN_SPRITE3D_RELIEF_EXTRUSION.md",
+    "docs/PROCGEN_SPRITE3D_MATERIAL_CHAMFER.md",
+    "docs/PROCGEN_SPRITE3D_BICONVEX_BEVEL.md",
+    "docs/PROCGEN_SPRITE3D_TEXTURE_SHELL.md",
+    "docs/PROCGEN_SPRITE3D_CHAMFER_DISTANCE.md",
+    "docs/PROCGEN_SPRITE3D_SOFT_BEVEL_ALPHA.md",
+    "docs/PROCGEN_SPRITE2D_HUESHIFT_AND_CLOTH.md",
+    "docs/PROCGEN_WEAPON_EGOS.md"
   ],
   "files_changed_this_round": [
+    "src/items.hpp",
+    "src/game_spawn.cpp",
+    "src/combat.cpp",
+    "docs/PROCGEN_WEAPON_EGOS.md",
     "CHANGELOG.md",
-    "PATCH_MANIFEST.json",
-    "src/game.hpp",
-    "src/game_interact.cpp"
+    "PATCH_MANIFEST.json"
   ],
-  "files_added": [],
-  "notes": [
-    "Kicked boulders reuse the same collision logic as boulder traps: they can smash doors (chance scales with Might/level), crush and scatter entities, and fill chasms into rough bridges.",
-    "The shared rollBoulderFrom helper also supports trap-style spawning (including an initial on-tile crush) to keep rolling-boulder behavior centralized and easier to extend.",
-    "Boulder roll damage includes a momentum-based bonus that decays as the boulder travels, so long rolls are less lethal than point-blank kicks."
+  "files_added": [
+    "docs/PROCGEN_WEAPON_EGOS.md"
   ],
-  "generated_at": "2026-01-24T09:07:00Z"
+  "notes": "Round 155 shifts procgen focus from sprite work to gameplay content generation. Weapon egos (rare melee brands) have been expanded with three new brands\u2014WEBBING, CORROSIVE, and DAZING\u2014and the ego roll now uses a lightweight \u201cecology\u201d weighting pass. A dominant ego is selected deterministically per floor (runSeed+depth) and then combined with room-type and terrain-material nudges (e.g., volcanic stone leans FLAMING; lairs lean WEBBING/VENOM; labs lean CORROSIVE). This makes branded loot feel like it belongs to the spaces you find it while preserving randomness. All new egos are appended to ItemEgo for save compatibility.",
+  "generated_at": "2026-01-25T07:46:02Z"
 }

@@ -210,15 +210,130 @@ Color lerp(Color a, Color b, float t) {
     return { lerp8(a.r, b.r), lerp8(a.g, b.g), lerp8(a.b, b.b), lerp8(a.a, b.a) };
 }
 
+// -----------------------------------------------------------------------------
+// HSV helpers
+//
+// Many procedural sprite routines shade via a small quantized ramp.
+// Doing that ramp purely in RGB tends to muddy saturated colors.
+// We instead do small hue shifts toward cool shadows / warm highlights.
+// -----------------------------------------------------------------------------
+
+struct HSV {
+    float h; // [0,360)
+    float s; // [0,1]
+    float v; // [0,1]
+};
+
+inline float wrapHueDeg(float h) {
+    // Wrap to [0,360).
+    h = std::fmod(h, 360.0f);
+    if (h < 0.0f) h += 360.0f;
+    return h;
+}
+
+inline float shortestHueDeltaDeg(float from, float to) {
+    // Return delta in [-180, 180].
+    float d = wrapHueDeg(to) - wrapHueDeg(from);
+    if (d > 180.0f) d -= 360.0f;
+    if (d < -180.0f) d += 360.0f;
+    return d;
+}
+
+HSV rgbToHsv(Color c) {
+    const float r = static_cast<float>(c.r) / 255.0f;
+    const float g = static_cast<float>(c.g) / 255.0f;
+    const float b = static_cast<float>(c.b) / 255.0f;
+
+    const float mx = std::max(r, std::max(g, b));
+    const float mn = std::min(r, std::min(g, b));
+    const float d = mx - mn;
+
+    HSV out;
+    out.v = mx;
+    out.s = (mx <= 0.0f) ? 0.0f : (d / mx);
+    out.h = 0.0f;
+
+    if (d > 1e-6f) {
+        if (mx == r) {
+            out.h = 60.0f * std::fmod(((g - b) / d), 6.0f);
+        } else if (mx == g) {
+            out.h = 60.0f * (((b - r) / d) + 2.0f);
+        } else {
+            out.h = 60.0f * (((r - g) / d) + 4.0f);
+        }
+    }
+
+    out.h = wrapHueDeg(out.h);
+    out.s = std::clamp(out.s, 0.0f, 1.0f);
+    out.v = std::clamp(out.v, 0.0f, 1.0f);
+    return out;
+}
+
+Color hsvToRgb(HSV hsv, uint8_t a) {
+    hsv.h = wrapHueDeg(hsv.h);
+    hsv.s = std::clamp(hsv.s, 0.0f, 1.0f);
+    hsv.v = std::clamp(hsv.v, 0.0f, 1.0f);
+
+    const float C = hsv.v * hsv.s;
+    const float hPrime = hsv.h / 60.0f;
+    const float X = C * (1.0f - std::fabs(std::fmod(hPrime, 2.0f) - 1.0f));
+    float r1 = 0.0f, g1 = 0.0f, b1 = 0.0f;
+    if (0.0f <= hPrime && hPrime < 1.0f) { r1 = C; g1 = X; b1 = 0.0f; }
+    else if (1.0f <= hPrime && hPrime < 2.0f) { r1 = X; g1 = C; b1 = 0.0f; }
+    else if (2.0f <= hPrime && hPrime < 3.0f) { r1 = 0.0f; g1 = C; b1 = X; }
+    else if (3.0f <= hPrime && hPrime < 4.0f) { r1 = 0.0f; g1 = X; b1 = C; }
+    else if (4.0f <= hPrime && hPrime < 5.0f) { r1 = X; g1 = 0.0f; b1 = C; }
+    else { r1 = C; g1 = 0.0f; b1 = X; }
+
+    const float m = hsv.v - C;
+    const int R = static_cast<int>(std::lround((r1 + m) * 255.0f));
+    const int G = static_cast<int>(std::lround((g1 + m) * 255.0f));
+    const int B = static_cast<int>(std::lround((b1 + m) * 255.0f));
+    return { clamp8(R), clamp8(G), clamp8(B), a };
+}
+
+inline float luma01(Color c) {
+    // ITU-R BT.709 relative luminance.
+    return (0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b) / 255.0f;
+}
+
+// Move hue a small amount toward a target hue (degrees), scaling by amount in [0,1].
+inline float hueToward(float h, float targetDeg, float amount01) {
+    amount01 = std::clamp(amount01, 0.0f, 1.0f);
+    return wrapHueDeg(h + shortestHueDeltaDeg(h, targetDeg) * amount01);
+}
+
 // Quantized shading ramp for crisp pixel-art lighting (4 tones), with ordered dithering.
 Color rampShade(Color base, float shade01, int x, int y) {
     shade01 = std::clamp(shade01, 0.0f, 1.0f);
 
+    // Hue-shifted 4-tone ramp.
+    // Shadows drift slightly toward blue, highlights drift slightly toward yellow.
+    // The shift intensity scales with saturation so near-greys remain stable.
+    const HSV hb = rgbToHsv(base);
+    const float sat = hb.s;
+
+    auto tone = [&](float vMul, float sMul, float hueToBlue, float hueToYellow) -> Color {
+        HSV h = hb;
+        h.v = std::clamp(h.v * vMul, 0.0f, 1.0f);
+        h.s = std::clamp(h.s * sMul, 0.0f, 1.0f);
+        // Mix hue shifts: darker tones bias toward blue; highlights toward yellow.
+        if (hueToBlue > 0.0f) {
+            h.h = hueToward(h.h, 240.0f, hueToBlue * sat);
+        }
+        if (hueToYellow > 0.0f) {
+            h.h = hueToward(h.h, 60.0f, hueToYellow * sat);
+        }
+        return hsvToRgb(h, base.a);
+    };
+
     Color ramp[4];
-    ramp[0] = mul(base, 0.45f);
-    ramp[1] = mul(base, 0.70f);
-    ramp[2] = base;
-    ramp[3] = add(mul(base, 1.12f), 12, 12, 14);
+    ramp[0] = tone(0.45f, 1.06f, 0.22f, 0.00f);
+    ramp[1] = tone(0.70f, 1.02f, 0.12f, 0.00f);
+    ramp[2] = tone(1.00f, 1.00f, 0.00f, 0.00f);
+    ramp[3] = tone(1.12f, 0.92f, 0.00f, 0.15f);
+    // Tiny specular lift (keeps the ramp crisp without needing a 5th tone).
+    ramp[3] = add(ramp[3], 10, 10, 12);
 
     // Map shade into 0..3 range.
     const float t = shade01 * 3.0f;
@@ -1517,6 +1632,104 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, boo
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Connectivity cleanup (8x8 mask)
+    //
+    // The CA pass above can occasionally leave tiny floating "islands" or
+    // 1-cell cavities (especially for low-density seeds). In 2D this reads as
+    // noise; in 3D extrusion it can create stray voxels.
+    //
+    // We keep the connected component that contains the most template-locked
+    // cells (and then the most area), and prune everything else.
+    // ---------------------------------------------------------------------
+    {
+        bool visited[8][8] = {};
+        std::vector<std::pair<int,int>> best;
+        int bestLock = -1;
+        int bestSize = -1;
+
+        auto inb = [](int x, int y) {
+            return x >= 0 && y >= 0 && x < 8 && y < 8;
+        };
+
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                if (!m[y][x] || visited[y][x]) continue;
+
+                std::vector<std::pair<int,int>> stack;
+                std::vector<std::pair<int,int>> comp;
+                stack.push_back({x, y});
+                visited[y][x] = true;
+
+                int lockCount = 0;
+
+                while (!stack.empty()) {
+                    auto [cx, cy] = stack.back();
+                    stack.pop_back();
+                    comp.push_back({cx, cy});
+                    if (lock[cy][cx]) ++lockCount;
+
+                    static constexpr int DX[4] = {1, -1, 0, 0};
+                    static constexpr int DY[4] = {0, 0, 1, -1};
+                    for (int i = 0; i < 4; ++i) {
+                        int nx = cx + DX[i];
+                        int ny = cy + DY[i];
+                        if (!inb(nx, ny)) continue;
+                        if (visited[ny][nx]) continue;
+                        if (!m[ny][nx]) continue;
+                        visited[ny][nx] = true;
+                        stack.push_back({nx, ny});
+                    }
+                }
+
+                const int sz = static_cast<int>(comp.size());
+                if (lockCount > bestLock || (lockCount == bestLock && sz > bestSize)) {
+                    bestLock = lockCount;
+                    bestSize = sz;
+                    best = std::move(comp);
+                }
+            }
+        }
+
+        bool keep[8][8] = {};
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                keep[y][x] = lock[y][x];
+            }
+        }
+        for (auto [cx, cy] : best) {
+            keep[cy][cx] = true;
+        }
+
+        // 1-step cavity fill (tiny holes inside dense silhouettes).
+        for (int y = 1; y < 7; ++y) {
+            for (int x = 1; x < 7; ++x) {
+                if (keep[y][x] || lock[y][x]) continue;
+                int n = 0;
+                for (int oy = -1; oy <= 1; ++oy) {
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        if (ox == 0 && oy == 0) continue;
+                        if (keep[y + oy][x + ox]) ++n;
+                    }
+                }
+                if (n >= 7) keep[y][x] = true;
+            }
+        }
+
+        // Re-apply perfect mirror symmetry.
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                keep[y][7 - x] = keep[y][x];
+            }
+        }
+
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                m[y][x] = keep[y][x];
+            }
+        }
+    }
+
     Color base = baseColorFor(kind, rngBase);
 
     // Expand mask into 16x16 with chunky pixels, but shade using a quantized ramp + dithering.
@@ -1724,6 +1937,133 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, boo
         setPx(s, 8, 8, {230, 200, 80, 255});
     }
 
+    // ---------------------------------------------------------------------
+    // Humanoid clothing & fabric pattern pass
+    //
+    // Procedural silhouettes look much more "intentional" when a small,
+    // deterministic clothing panel breaks up the body mass.
+    //
+    // Implementation notes:
+    //  - We recolor a torso rectangle using HSV hue replacement so the
+    //    underlying shade (value) is preserved.
+    //  - Patterns are subtle (1-step V/S modulation) to avoid overpowering
+    //    readability at tiny sizes.
+    //  - A very small cape column sometimes appears, adding asymmetry without
+    //    requiring authored frames.
+    // ---------------------------------------------------------------------
+    auto isClothedHumanoid = [&](EntityKind k) -> bool {
+        switch (k) {
+            case EntityKind::Player:
+            case EntityKind::Goblin:
+            case EntityKind::Orc:
+            case EntityKind::KoboldSlinger:
+            case EntityKind::Troll:
+            case EntityKind::Wizard:
+            case EntityKind::Ogre:
+            case EntityKind::Shopkeeper:
+            case EntityKind::Minotaur:
+            case EntityKind::Guard:
+            case EntityKind::Leprechaun:
+            case EntityKind::Zombie:
+            case EntityKind::Nymph:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    if (isClothedHumanoid(kind)) {
+        // Deterministic "fashion" stream (seeded separately from silhouette RNG).
+        RNG fash(hashCombine(seed, 0xC10C7B01u));
+
+        auto baseClothFor = [&](EntityKind k) -> Color {
+            switch (k) {
+                case EntityKind::Guard:      return { 90, 120, 190, 255 };
+                case EntityKind::Shopkeeper: return { 220, 200, 120, 255 };
+                case EntityKind::Wizard:     return { 140, 100, 200, 255 };
+                case EntityKind::Leprechaun: return { 70, 180, 100, 255 };
+                case EntityKind::Nymph:      return { 200, 120, 180, 255 };
+                case EntityKind::Goblin:     return { 120, 80, 45, 255 };
+                case EntityKind::Orc:        return { 95, 70, 55, 255 };
+                case EntityKind::KoboldSlinger: return { 150, 95, 55, 255 };
+                case EntityKind::Zombie:     return { 110, 140, 110, 255 };
+                default:                     return { 160, 110, 70, 255 };
+            }
+        };
+
+        Color cloth = baseClothFor(kind);
+        cloth = add(cloth, fash.range(-14, 14), fash.range(-14, 14), fash.range(-14, 14));
+        HSV clothHSV = rgbToHsv(cloth);
+
+        const int pattern = fash.range(0, 3);
+        const int off = fash.range(0, 7);
+        const bool hasCape = fash.chance(0.33f) && (kind != EntityKind::Wizard);
+        const int capeSide = fash.chance(0.5f) ? 1 : -1; // +1 right, -1 left
+
+        auto patternBit = [&](int x, int y) -> bool {
+            switch (pattern) {
+                default:
+                case 0: return ((x + off) & 1) == 0;                // vertical stripes
+                case 1: return ((y + off) & 1) == 0;                // horizontal stripes
+                case 2: return ((x + y + off) & 1) == 0;            // checker
+                case 3: return (((x - y) + off) & 1) == 0;          // diagonal
+            }
+        };
+
+        auto recolorPreserveValue = [&](Color src, float vMul, float sMul) -> Color {
+            HSV hv = rgbToHsv(src);
+            // Keep local shading (value), replace hue toward cloth.
+            hv.h = clothHSV.h;
+            hv.s = std::clamp(clothHSV.s * sMul, 0.0f, 1.0f);
+            hv.v = std::clamp(hv.v * vMul, 0.0f, 1.0f);
+            return hsvToRgb(hv, src.a);
+        };
+
+        // Torso band (x/y chosen to avoid the face and keep legs readable).
+        for (int y = 7; y <= 12; ++y) {
+            for (int x = 5; x <= 10; ++x) {
+                Color c = getPx(s, x, y);
+                if (c.a == 0) continue;
+
+                // Preserve extreme accents (eyes, highlights, very dark markings).
+                const float lum = luma01(c);
+                if (lum < 0.08f || lum > 0.95f) continue;
+
+                const bool bit = patternBit(x, y);
+                const float vMul = bit ? 0.92f : 1.00f;
+                const float sMul = bit ? 0.88f : 1.00f;
+                setPx(s, x, y, recolorPreserveValue(c, vMul, sMul));
+            }
+        }
+
+        // Belt / sash (skip kinds that already have explicit belts in accents).
+        if (kind != EntityKind::Ogre && kind != EntityKind::Minotaur) {
+            Color belt = {70, 50, 30, 255};
+            for (int x = 5; x <= 10; ++x) {
+                Color c = getPx(s, x, 12);
+                if (c.a == 0) continue;
+                setPx(s, x, 12, lerp(c, belt, 0.55f));
+            }
+            // Buckle shimmer.
+            if (getPx(s, 8, 12).a != 0) setPx(s, 8, 12, {235, 205, 95, 200});
+        }
+
+        // Tiny cape column (mostly cosmetic asymmetry).
+        if (hasCape) {
+            const int capeX = (capeSide > 0) ? 11 : 4;
+            const int bodyX = capeX - capeSide;
+            Color cape = mul(cloth, 0.82f);
+            cape.a = 210;
+            for (int y = 6; y <= 13; ++y) {
+                if (getPx(s, bodyX, y).a == 0) continue;
+                if (getPx(s, capeX, y).a != 0) continue;
+                // Slight taper at the bottom.
+                if (y >= 12 && fash.chance(0.35f)) continue;
+                setPx(s, capeX, y, cape);
+            }
+        }
+    }
+
     // Final pass: readable outlines + shadow.
 
     // Humanoid gear overlays: breaks symmetry and gives the procedural silhouettes a bit more
@@ -1914,9 +2254,9 @@ SpritePixels generateEntitySprite(EntityKind kind, uint32_t seed, int frame, boo
                 setPx(s, x, y, c);
             }
         }
-        finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/55);
+        if (!use3d) finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/55);
     } else {
-        finalizeSprite(s, seed, frame, /*outlineAlpha=*/255, /*shadowAlpha=*/90);
+        if (!use3d) finalizeSprite(s, seed, frame, /*outlineAlpha=*/255, /*shadowAlpha=*/90);
     }
     if (use3d) {
         return isometric ? renderSprite3DEntityIso(kind, s, seed, frame, pxSize, isoRaytrace)
@@ -1944,26 +2284,26 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
         const uint8_t app = static_cast<uint8_t>(seed & 0xFFu);
         if (isPotionKind(kind)) {
             drawPotionAppearance(s, seed, rng, app, frame);
-            finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+            if (!use3d) finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
             return use3d ? render3d(s)
                          : resampleSpriteToSize(s, pxSize);
         }
         if (isScrollKind(kind)) {
             drawScrollAppearance(s, seed, rng, app, frame);
-            finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+            if (!use3d) finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
             return use3d ? render3d(s)
                          : resampleSpriteToSize(s, pxSize);
         }
         if (kind == ItemKind::RingMight || kind == ItemKind::RingAgility || kind == ItemKind::RingFocus ||
             kind == ItemKind::RingProtection || kind == ItemKind::RingSearching || kind == ItemKind::RingSustenance) {
             drawRingAppearance(s, seed, rng, app, frame);
-            finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+            if (!use3d) finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
             return use3d ? render3d(s)
                          : resampleSpriteToSize(s, pxSize);
         }
         if (kind == ItemKind::WandSparks || kind == ItemKind::WandDigging || kind == ItemKind::WandFireball) {
             drawWandAppearance(s, seed, rng, app, frame);
-            finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+            if (!use3d) finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
             return use3d ? render3d(s)
                          : resampleSpriteToSize(s, pxSize);
         }
@@ -3249,7 +3589,7 @@ case ItemKind::Arrow: {
         }
     }
 
-    finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
+    if (!use3d) finalizeSprite(s, seed, frame, /*outlineAlpha=*/190, /*shadowAlpha=*/70);
     return use3d ? render3d(s)
                  : resampleSpriteToSize(s, pxSize);
 }

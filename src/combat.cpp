@@ -263,6 +263,131 @@ void Game::awardBountyProgress(EntityKind killedKind, bool showMsgs) {
     }
 }
 
+void Game::applyKillMoraleShock(const Entity& killer, const Entity& victim, int overkill, bool assassinationStyle) {
+    // Only apply morale shock for player-side kills of hostiles.
+    // Fear in this codebase is specifically "fear of the player" (AI flees from player position),
+    // so we keep this mechanic tightly scoped to avoid weird cross-faction behavior.
+    if (victim.hp > 0) return;
+    if (victim.kind == EntityKind::Player) return;
+    if (victim.friendly) return;
+    if (!(killer.kind == EntityKind::Player || killer.friendly)) return;
+
+    // Base "panic DC" is driven by how formidable the fallen enemy was.
+    int tier = procRankTier(victim.procRank); // 0..3
+    int dc = 8 + tier * 2; // 8,10,12,14
+    if (procHasAffix(victim.procAffixMask, ProcMonsterAffix::Commander)) dc += 2;
+    if (victim.kind == EntityKind::Minotaur) dc += 2; // boss-like presence
+    if (overkill >= std::max(1, victim.hpMax / 2)) dc += 1;
+
+    // Assassinations are quieter and less likely to trigger a broad panic cascade.
+    if (assassinationStyle) dc -= 2;
+
+    dc = clampi(dc, 6, 18);
+
+    // Witness radius: tighter for assassinations so stealth stays meaningful.
+    int radius = assassinationStyle ? 5 : 7;
+    radius = clampi(radius, 4, 9);
+
+    int newlyFrightenedVisible = 0;
+    int newlyFrightenedAny = 0;
+    EntityKind sampleKind = EntityKind::Goblin;
+    bool sampleSet = false;
+
+    for (auto& e : ents) {
+        if (e.hp <= 0) continue;
+        if (e.kind == EntityKind::Player) continue;
+        if (e.friendly) continue; // only hostiles can be intimidated into fleeing the player
+        if (e.id == victim.id) continue;
+
+        // Chebyshev distance.
+        const int dx = std::abs(e.pos.x - victim.pos.x);
+        const int dy = std::abs(e.pos.y - victim.pos.y);
+        const int dist = (dx > dy) ? dx : dy;
+        if (dist > radius) continue;
+
+        // Must have a clear line of sight to the kill site.
+        if (!dung.hasLineOfSight(e.pos.x, e.pos.y, victim.pos.x, victim.pos.y)) continue;
+
+        int localDc = dc;
+        // Closer witnesses are more likely to panic.
+        if (dist <= 2) localDc += 1;
+        // Losing a packmate is extra destabilizing.
+        if (victim.groupId != 0 && e.groupId == victim.groupId) localDc += 1;
+        localDc = clampi(localDc, 6, 20);
+
+        // "Morale save" bonus: tougher monsters and those under commander aura resist panic.
+        int bonus = procRankTier(e.procRank);
+        bonus += commanderAuraTierFor(e);
+        if (e.kind == EntityKind::Guard || e.kind == EntityKind::Shopkeeper) bonus += 2;
+
+        // Mindless undead mostly ignore fear-of-player effects.
+        if (e.kind == EntityKind::Zombie || e.kind == EntityKind::Ghost || e.kind == EntityKind::SkeletonArcher) {
+            bonus += 6;
+        }
+
+        // Wounded creatures are easier to break.
+        if (e.hpMax > 0 && e.hp <= std::max(1, e.hpMax / 3)) {
+            bonus -= 1;
+        }
+
+        // Deterministic d20 roll (no RNG consumption).
+        // Domain-separated so other deterministic hashes don't collide in patterns.
+        uint32_t h = hashCombine(seed_, "MORALE_SHOCK"_tag);
+        h = hashCombine(h, turnCount);
+        h = hashCombine(h, static_cast<uint32_t>(killer.id));
+        h = hashCombine(h, static_cast<uint32_t>(victim.id));
+        h = hashCombine(h, static_cast<uint32_t>(e.id));
+        h = hashCombine(h, static_cast<uint32_t>(victim.kind));
+        h = hashCombine(h, static_cast<uint32_t>(e.kind));
+
+        const int roll = 1 + static_cast<int>(h % 20u);
+
+        bool fail = false;
+        if (roll == 1) fail = true;
+        else if (roll == 20) fail = false;
+        else fail = (roll + bonus) < localDc;
+
+        if (!fail) continue;
+
+        const int before = e.effects.fearTurns;
+        int diff = localDc - (roll + bonus);
+        if (diff < 1) diff = 1;
+
+        // Duration scales with how badly they failed the morale save.
+        const int turns = clampi(2 + diff, 2, 16);
+        e.effects.fearTurns = std::max(e.effects.fearTurns, turns);
+
+        if (before == 0 && e.effects.fearTurns > 0) {
+            ++newlyFrightenedAny;
+            if (!sampleSet) {
+                sampleKind = e.kind;
+                sampleSet = true;
+            }
+            if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) {
+                ++newlyFrightenedVisible;
+            }
+        }
+    }
+
+    // Player-facing feedback only when at least one panicking enemy is visible.
+    // (No "telepathic" off-screen panic messages.)
+    if (newlyFrightenedVisible > 0) {
+        if (newlyFrightenedVisible >= 3) {
+            pushMsg("ENEMIES PANIC!", MessageKind::Info, true);
+        } else if (newlyFrightenedVisible == 2) {
+            pushMsg("THE ENEMIES RECOIL IN TERROR!", MessageKind::Info, true);
+        } else {
+            std::ostringstream ss;
+            ss << "THE " << kindName(sampleKind) << " PANICS!";
+            pushMsg(ss.str(), MessageKind::Info, true);
+        }
+
+        if (dung.inBounds(victim.pos.x, victim.pos.y) && dung.at(victim.pos.x, victim.pos.y).visible) {
+            pushFxParticle(FXParticlePreset::Detect, victim.pos, 10, 0.20f);
+        }
+    }
+}
+
 
 
 void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
@@ -510,6 +635,63 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                         } else if (canSee(defender)) {
                             std::ostringstream ss2;
                             ss2 << kindName(defender.kind) << " IS POISONED!";
+                            pushMsg(ss2.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+                break;
+            }
+            case ItemEgo::Webbing: {
+                if (defender.hp > 0 && rng.chance(0.18f)) {
+                    const int base = 2 + std::min(2, depth_ / 6);
+                    const int turns = rng.range(base, base + 2);
+                    const int before = defender.effects.webTurns;
+                    defender.effects.webTurns = std::max(defender.effects.webTurns, turns);
+
+                    if (before == 0 && defender.effects.webTurns > 0) {
+                        if (defender.kind == EntityKind::Player) {
+                            pushMsg("YOU ARE CAUGHT IN STICKY WEBBING!", MessageKind::Warning, false);
+                        } else if (canSee(defender)) {
+                            std::ostringstream ss2;
+                            ss2 << kindName(defender.kind) << " IS CAUGHT IN STICKY WEBBING!";
+                            pushMsg(ss2.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+                break;
+            }
+            case ItemEgo::Corrosive: {
+                if (defender.hp > 0 && rng.chance(0.24f)) {
+                    const int base = 2 + std::min(3, depth_ / 5);
+                    const int turns = rng.range(base, base + 3);
+                    const int before = defender.effects.corrosionTurns;
+                    defender.effects.corrosionTurns = std::max(defender.effects.corrosionTurns, turns);
+
+                    if (before == 0 && defender.effects.corrosionTurns > 0) {
+                        if (defender.kind == EntityKind::Player) {
+                            pushMsg("ACID SIZZLES ON YOUR SKIN!", MessageKind::Warning, false);
+                        } else if (canSee(defender)) {
+                            std::ostringstream ss2;
+                            ss2 << kindName(defender.kind) << " IS SPLASHED WITH ACID!";
+                            pushMsg(ss2.str(), MessageKind::Info, true);
+                        }
+                    }
+                }
+                break;
+            }
+            case ItemEgo::Dazing: {
+                if (defender.hp > 0 && rng.chance(0.20f)) {
+                    const int base = 2 + std::min(2, depth_ / 7);
+                    const int turns = rng.range(base, base + 2);
+                    const int before = defender.effects.confusionTurns;
+                    defender.effects.confusionTurns = std::max(defender.effects.confusionTurns, turns);
+
+                    if (before == 0 && defender.effects.confusionTurns > 0) {
+                        if (defender.kind == EntityKind::Player) {
+                            pushMsg("YOU ARE DAZED!", MessageKind::Warning, false);
+                        } else if (canSee(defender)) {
+                            std::ostringstream ss2;
+                            ss2 << kindName(defender.kind) << " LOOKS DAZED!";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -1134,6 +1316,9 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                         awardCapturedPetProgress(e, share, /*bondGain=*/0, show);
                     }
                 }
+                const int overkill = std::max(0, -defender.hp);
+                const bool assassinationStyle = (attacker.kind == EntityKind::Player) && (attackerWasSneaking || attackerWasInvisible);
+                applyKillMoraleShock(attacker, defender, overkill, assassinationStyle);
             }
         }
     }
@@ -1205,8 +1390,63 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
     Entity* hit = nullptr;
     size_t stopIdx = line.size() - 1;
 
+    bool sparkCrit = false;
+
     // Whether Spark/Fireball use the stronger wand damage profile.
     // Provided by the caller so player spellcasting can use the weaker baseline.
+
+    // Shared death + XP bookkeeping for this attack, so chained effects (like spark arcs)
+    // can award kills consistently without duplicating long blocks of logic.
+    auto handleRangedDeath = [&](Entity& victim) {
+        if (victim.hp > 0) return;
+
+        if (victim.kind == EntityKind::Player) {
+            pushMsg("YOU DIE.", MessageKind::Combat, false);
+            if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindName(attacker.kind);
+            gameOver = true;
+            return;
+        }
+
+        std::ostringstream ds;
+        if (victim.friendly) ds << "YOUR " << kindName(victim.kind) << " DIES.";
+        else ds << kindName(victim.kind) << " DIES.";
+        pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
+
+        if ((attacker.kind == EntityKind::Player || attacker.friendly) && !victim.friendly) {
+            ++killCount;
+
+            const size_t kidx = static_cast<size_t>(victim.kind);
+            if (kidx < codexKills_.size()) {
+                codexSeen_[kidx] = 1;
+                if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
+            }
+
+            const int xpAward = xpFor(victim);
+            grantXp(xpAward);
+            awardBountyProgress(victim.kind, true);
+
+            // Captured pet progression:
+            // - If a captured pet gets the kill: it gains XP and bond.
+            // - If the player gets the kill: all currently-out captured pets gain a small XP share.
+            if (attacker.friendly) {
+                const int petXp = clampi((xpAward + 1) / 2, 1, 120);
+                const int bondGain = clampi(1 + xpAward / 20, 1, 5);
+                const bool show = dung.inBounds(attacker.pos.x, attacker.pos.y) && dung.at(attacker.pos.x, attacker.pos.y).visible;
+                awardCapturedPetProgress(attacker, petXp, bondGain, show);
+            } else if (attacker.kind == EntityKind::Player) {
+                const int share = std::max(1, xpAward / 3);
+                for (auto& ally : ents) {
+                    if (ally.hp <= 0) continue;
+                    if (!ally.friendly) continue;
+                    if (ally.id == player().id) continue;
+                    const bool show = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
+                    awardCapturedPetProgress(ally, share, /*bondGain=*/0, show);
+                }
+            }
+            const int overkill = std::max(0, -victim.hp);
+            applyKillMoraleShock(attacker, victim, overkill, /*assassinationStyle=*/false);
+        }
+    };
 
     // Projectiles travel the full line. If they miss a creature, they keep going.
     for (size_t i = 1; i < line.size(); ++i) {
@@ -1269,6 +1509,10 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
             break;
         }
 
+        if (projKind == ProjectileKind::Spark) {
+            sparkCrit = hc.crit;
+        }
+
         const DiceExpr baseDice = rangedDiceForProjectile(projKind, wandPowered);
         const int dice1 = rollDice(rng, baseDice);
         const int dice2 = (hc.crit ? rollDice(rng, baseDice) : 0);
@@ -1282,6 +1526,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
         const int absorbed = (dr > 0) ? rng.range(0, dr) : 0;
         dmg = std::max(0, dmg - absorbed);
 
+        const int hpBefore = hit->hp;
         hit->hp -= dmg;
 
         std::ostringstream ss;
@@ -1412,46 +1657,8 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
             }
         }
 
-        if (hit->hp <= 0) {
-            if (hit->kind == EntityKind::Player) {
-                pushMsg("YOU DIE.", MessageKind::Combat, false);
-                if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindName(attacker.kind);
-                gameOver = true;
-            } else {
-                std::ostringstream ds;
-                if (hit->friendly) ds << "YOUR " << kindName(hit->kind) << " DIES.";
-                else ds << kindName(hit->kind) << " DIES.";
-                pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
-                if ((attacker.kind == EntityKind::Player || attacker.friendly) && !hit->friendly) {
-                    ++killCount;
-
-                    const size_t kidx = static_cast<size_t>(hit->kind);
-                    if (kidx < codexKills_.size()) {
-                        codexSeen_[kidx] = 1;
-                        if (codexKills_[kidx] < 65535) ++codexKills_[kidx];
-                    }
-
-                    const int xpAward = xpFor(*hit);
-                    grantXp(xpAward);
-                    awardBountyProgress(hit->kind, true);
-
-                    if (attacker.friendly) {
-                        const int petXp = clampi((xpAward + 1) / 2, 1, 120);
-                        const int bondGain = clampi(1 + xpAward / 20, 1, 5);
-                        const bool show = dung.inBounds(attacker.pos.x, attacker.pos.y) && dung.at(attacker.pos.x, attacker.pos.y).visible;
-                        awardCapturedPetProgress(attacker, petXp, bondGain, show);
-                    } else if (attacker.kind == EntityKind::Player) {
-                        const int share = std::max(1, xpAward / 3);
-                        for (auto& ally : ents) {
-                            if (ally.hp <= 0) continue;
-                            if (!ally.friendly) continue;
-                            if (ally.id == player().id) continue;
-                            const bool show = dung.inBounds(ally.pos.x, ally.pos.y) && dung.at(ally.pos.x, ally.pos.y).visible;
-                            awardCapturedPetProgress(ally, share, /*bondGain=*/0, show);
-                        }
-                    }
-                }
-            }
+        if (hpBefore > 0 && hit->hp <= 0) {
+            handleRangedDeath(*hit);
         }
         break;
     }
@@ -1721,6 +1928,227 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
             }
         }
     }
+
+    // Conductive spark arcs: electric bolts can jump to nearby targets when they strike
+    // conductive terrain (metal/crystal substrates, water chasms) or land a critical hit.
+    //
+    // This is intentionally deterministic aside from the normal RNG rolls: the "best"
+    // arc target is chosen by a simple score (conductive path length + proximity).
+    if (projKind == ProjectileKind::Spark && !gameOver) {
+        const bool impacted = hitAny || hitWall;
+        if (impacted) {
+            // Ensure deterministic terrain materials are cached for this floor.
+            dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+
+            Vec2i impactTile = line[stopIdx];
+            Vec2i arcOrigin = impactTile;
+            if (hitWall && stopIdx > 0) {
+                // Use the last reachable tile as the arc origin; the wall tile remains
+                // the conductivity reference.
+                arcOrigin = line[stopIdx - 1];
+            }
+            if (hitAny && hit) {
+                impactTile = hit->pos;
+                arcOrigin = hit->pos;
+            }
+
+            auto isConductiveMaterial = [&](TerrainMaterial m) -> bool {
+                return (m == TerrainMaterial::Metal || m == TerrainMaterial::Crystal);
+            };
+            auto conductiveAt = [&](const Vec2i& p) -> bool {
+                if (!dung.inBounds(p.x, p.y)) return false;
+                const TileType tt = dung.at(p.x, p.y).type;
+                if (tt == TileType::Chasm) return true; // lakes/void act as strong conductors
+                const TerrainMaterial m = dung.materialAtCached(p.x, p.y);
+                return isConductiveMaterial(m);
+            };
+            auto conductionTierAt = [&](const Vec2i& p) -> int {
+                if (conductiveAt(p)) return 2;
+                // Adjacent conductive features can still induce a weaker arc.
+                static const int dirs4[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+                for (const auto& d : dirs4) {
+                    Vec2i q{p.x + d[0], p.y + d[1]};
+                    if (conductiveAt(q)) return 1;
+                }
+                return 0;
+            };
+
+            const int tier = conductionTierAt(impactTile);
+
+            float arcChance = 0.0f;
+            if (wandPowered) arcChance += 0.18f;
+            arcChance += 0.08f * static_cast<float>(tier);
+            if (sparkCrit) arcChance += 0.12f;
+            arcChance = std::clamp(arcChance, 0.0f, 0.55f);
+
+            if (arcChance > 0.0f && rng.chance(arcChance)) {
+                const int maxJumps = std::min(3, 1 + (tier >= 2 ? 1 : 0) + (wandPowered ? 1 : 0));
+                int radius = 4 + (tier >= 2 ? 2 : 0) + (wandPowered ? 1 : 0);
+                radius = std::min(radius, 8);
+
+                if (fromPlayer && tier > 0 && dung.inBounds(impactTile.x, impactTile.y) && dung.at(impactTile.x, impactTile.y).visible) {
+                    pushMsg("THE SPARKS DANCE ACROSS THE CONDUCTIVE SURFACE!", MessageKind::Info, true);
+                }
+
+                std::vector<int> alreadyHit;
+                alreadyHit.reserve(static_cast<size_t>(maxJumps + 2));
+                alreadyHit.push_back(attacker.id);
+                if (hitAny && hit) alreadyHit.push_back(hit->id);
+
+                auto already = [&](int id) -> bool {
+                    for (int v : alreadyHit) if (v == id) return true;
+                    return false;
+                };
+
+                auto isEligible = [&](const Entity& cand) -> bool {
+                    if (cand.hp <= 0) return false;
+                    if (already(cand.id)) return false;
+                    if (fromPlayer) {
+                        // Player-side arcs only seek hostiles (avoid zapping allies/pets).
+                        if (cand.kind == EntityKind::Player) return false;
+                        if (cand.friendly) return false;
+                    } else {
+                        // Monster-side arcs only seek the player side.
+                        if (!(cand.kind == EntityKind::Player || cand.friendly)) return false;
+                    }
+                    return true;
+                };
+
+                auto cheb = [&](const Vec2i& a, const Vec2i& b) -> int {
+                    return std::max(std::abs(a.x - b.x), std::abs(a.y - b.y));
+                };
+
+                auto hasClearArcLine = [&](const Vec2i& a, const Vec2i& b, std::vector<Vec2i>& outLine) -> bool {
+                    outLine = bresenhamLine(a, b);
+                    if (outLine.size() <= 1) return false;
+                    for (size_t ii = 1; ii < outLine.size(); ++ii) {
+                        const Vec2i p = outLine[ii];
+                        if (!dung.inBounds(p.x, p.y)) return false;
+
+                        if (projectileCornerBlocked(dung, outLine[ii - 1], p)) return false;
+
+                        if (dung.blocksProjectiles(p.x, p.y) && p != b) return false;
+
+                        // Don't allow arcs to 'skip' over a nearer body.
+                        if (p != b) {
+                            Entity* block = entityAtMut(p.x, p.y);
+                            if (block && block->hp > 0) return false;
+                        }
+                    }
+                    return true;
+                };
+
+                const DiceExpr baseDice = rangedDiceForProjectile(ProjectileKind::Spark, wandPowered);
+                Vec2i src = arcOrigin;
+
+                for (int jump = 0; jump < maxJumps; ++jump) {
+                    Entity* best = nullptr;
+                    int bestScore = -999999;
+                    int bestDist = 999999;
+                    std::vector<Vec2i> bestLine;
+
+                    for (auto& cand : ents) {
+                        if (!isEligible(cand)) continue;
+                        const int dist = cheb(src, cand.pos);
+                        if (dist <= 0 || dist > radius) continue;
+
+                        std::vector<Vec2i> l;
+                        if (!hasClearArcLine(src, cand.pos, l)) continue;
+
+                        int conductiveCount = 0;
+                        for (const Vec2i& pp : l) {
+                            if (conductiveAt(pp)) ++conductiveCount;
+                        }
+
+                        int score = 0;
+                        score += conductiveCount * 10;
+                        score -= dist * 8;
+                        if (conductiveAt(cand.pos)) score += 12;
+
+                        if (score > bestScore || (score == bestScore && (dist < bestDist || (dist == bestDist && (!best || cand.id < best->id))))) {
+                            bestScore = score;
+                            bestDist = dist;
+                            best = &cand;
+                            bestLine = std::move(l);
+                        }
+                    }
+
+                    if (!best) break;
+
+                    if (fromPlayer && best->kind == EntityKind::Shopkeeper && !best->alerted) {
+                        triggerShopTheftAlarm(best->pos, attacker.pos);
+                    }
+
+                    int dmg = rollDice(rng, baseDice);
+                    const int arcBonus = (dmgBonus + statDamageBonusFromAtk(attacker.baseAtk)) / 2;
+                    dmg += arcBonus;
+                    const int scale = (jump == 0) ? 7 : (jump == 1 ? 5 : 4);
+                    dmg = (dmg * scale) / 10;
+                    const int dr = damageReduction(*this, *best);
+                    const int absorbed = (dr > 0) ? rng.range(0, dr) : 0;
+                    dmg = std::max(0, dmg - absorbed);
+
+                    const int beforeHp = best->hp;
+                    best->hp -= dmg;
+
+                    const bool show = fromPlayer || best->kind == EntityKind::Player ||
+                        (dung.inBounds(best->pos.x, best->pos.y) && dung.at(best->pos.x, best->pos.y).visible);
+                    if (show) {
+                        std::ostringstream ss;
+                        if (fromPlayer) {
+                            ss << "LIGHTNING ARCS TO " << kindName(best->kind);
+                        } else if (best->kind == EntityKind::Player) {
+                            ss << "LIGHTNING ARCS TO YOU";
+                        } else if (best->friendly) {
+                            ss << "LIGHTNING ARCS TO YOUR " << kindName(best->kind);
+                        } else {
+                            ss << "LIGHTNING ARCS TO " << kindName(best->kind);
+                        }
+                        if (dmg > 0) ss << " FOR " << dmg;
+                        else ss << " BUT DOES NO DAMAGE";
+                        ss << ".";
+                        pushMsg(ss.str(), MessageKind::Combat, fromPlayer);
+                    }
+
+                    FXProjectile arcFx;
+                    arcFx.kind = ProjectileKind::Spark;
+                    arcFx.path = std::move(bestLine);
+                    arcFx.pathIndex = (arcFx.path.size() > 1) ? 1 : 0;
+                    arcFx.stepTimer = 0.0f;
+                    arcFx.stepTime = 0.015f;
+                    fx.push_back(std::move(arcFx));
+
+                    alreadyHit.push_back(best->id);
+
+                    // Chance to briefly confuse/stun the victim.
+                    if (dmg > 0) {
+                        float stunChance = 0.12f + 0.05f * static_cast<float>(tier);
+                        if (wandPowered) stunChance += 0.05f;
+                        stunChance = std::clamp(stunChance, 0.0f, 0.35f);
+                        if (rng.chance(stunChance)) {
+                            const int turns = 1 + rng.range(0, 1);
+                            best->effects.confusionTurns = std::max(best->effects.confusionTurns, turns);
+                            if (best->kind == EntityKind::Player) {
+                                pushMsg("YOU ARE STUNNED BY THE SHOCK!", MessageKind::Warning, false);
+                            } else if (dung.inBounds(best->pos.x, best->pos.y) && dung.at(best->pos.x, best->pos.y).visible) {
+                                std::ostringstream cs;
+                                cs << kindName(best->kind) << " REELS FROM THE SHOCK!";
+                                pushMsg(cs.str(), MessageKind::Info, fromPlayer);
+                            }
+                        }
+                    }
+
+                    if (beforeHp > 0 && best->hp <= 0) {
+                        handleRangedDeath(*best);
+                        if (gameOver) break;
+                    }
+
+                    src = best->pos;
+                }
+            }
+        }
+    }
+
     // Recoverable ammo: arrows/rocks may remain on the ground after firing.
     // We treat this as "breakage/loss" rather than a raw drop chance, and we preserve the projectile's
     // metadata (shopPrice/shopDepth, etc.) when a template is provided (player ammo).

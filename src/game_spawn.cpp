@@ -11,16 +11,21 @@ bool canHaveWeaponEgo(ItemKind k) {
     return k == ItemKind::Dagger || k == ItemKind::Sword || k == ItemKind::Axe;
 }
 
-ItemEgo rollWeaponEgo(RNG& rng, ItemKind k, int depth, RoomType rt, bool fromShop, bool forMonster) {
+ItemEgo rollWeaponEgo(RNG& rng, uint32_t runSeed, ItemKind k, int depth, RoomType rt, TerrainMaterial mat, bool fromShop, bool forMonster) {
     if (!canHaveWeaponEgo(k)) return ItemEgo::None;
     if (depth < 3) return ItemEgo::None;
 
     // Base chance grows gently with depth.
-    float chance = 0.04f + 0.01f * static_cast<float>(std::min(10, std::max(0, depth - 3)));
+    float chance = 0.04f + 0.012f * static_cast<float>(std::min(10, std::max(0, depth - 3)));
 
     // Treasure-y rooms are more likely to contain branded gear.
     if (rt == RoomType::Treasure || rt == RoomType::Vault || rt == RoomType::Secret) chance += 0.06f;
+    if (rt == RoomType::Armory || rt == RoomType::Shrine) chance += 0.03f;
     if (rt == RoomType::Lair) chance -= 0.03f;
+
+    // Substrate nudges: volcanic stone tends to yield more branded weapons.
+    if (mat == TerrainMaterial::Obsidian || mat == TerrainMaterial::Basalt) chance += 0.015f;
+    if (mat == TerrainMaterial::Moss || mat == TerrainMaterial::Dirt) chance -= 0.008f;
 
     // Shops occasionally stock a premium item.
     if (fromShop) chance += 0.05f;
@@ -28,14 +33,176 @@ ItemEgo rollWeaponEgo(RNG& rng, ItemKind k, int depth, RoomType rt, bool fromSho
     // Monsters shouldn't carry too many premium weapons.
     if (forMonster) chance *= 0.60f;
 
-    chance = std::max(0.0f, std::min(0.22f, chance));
+    chance = std::max(0.0f, std::min(0.26f, chance));
     if (!rng.chance(chance)) return ItemEgo::None;
 
-    // Vampiric is deeper + rarer.
-    const int roll = rng.range(0, 99);
-    if (depth >= 6 && roll >= 92) return ItemEgo::Vampiric;
-    if (roll < 48) return ItemEgo::Flaming;
-    return ItemEgo::Venom;
+    // ---------------------------------------------------------------------
+    // Ego ecology
+    //
+    // We don't just roll a flat distribution; we bias brands by:
+    // - floor theme (deterministic by runSeed + depth)
+    // - room type
+    // - substrate material
+    // This makes floors feel more coherent without making outcomes predictable.
+    // ---------------------------------------------------------------------
+
+    auto floorDominant = [&]() -> ItemEgo {
+        // Pick a dominant ego per depth in a deterministic way.
+        // (This doesn't consume RNG, so it stays stable under reorderings.)
+        uint32_t h = hash32(runSeed ^ (static_cast<uint32_t>(depth) * 0x9E3779B1u) ^ 0xA11CE5EDu);
+
+        struct Pair { ItemEgo e; int minDepth; };
+        static constexpr Pair pool[] = {
+            { ItemEgo::Flaming,   3 },
+            { ItemEgo::Venom,     3 },
+            { ItemEgo::Webbing,   3 },
+            { ItemEgo::Corrosive, 4 },
+            { ItemEgo::Dazing,    4 },
+            { ItemEgo::Vampiric,  6 },
+        };
+
+        ItemEgo allowed[sizeof(pool) / sizeof(pool[0])]{};
+        int n = 0;
+        for (const auto& p : pool) {
+            if (depth >= p.minDepth) {
+                allowed[n++] = p.e;
+            }
+        }
+        if (n <= 0) return ItemEgo::Flaming;
+        const int idx = static_cast<int>(h % static_cast<uint32_t>(n));
+        return allowed[idx];
+    }();
+
+    struct Opt { ItemEgo e; int w; };
+    std::vector<Opt> opts;
+    opts.reserve(6);
+
+    auto addOpt = [&](ItemEgo e, int w, int minDepth) {
+        if (depth < minDepth) return;
+        if (w <= 0) return;
+        opts.push_back(Opt{e, w});
+    };
+
+    // Baseline weights (before ecology biases).
+    addOpt(ItemEgo::Flaming,   54, 3);
+    addOpt(ItemEgo::Venom,     52, 3);
+    addOpt(ItemEgo::Webbing,   28, 3);
+    addOpt(ItemEgo::Corrosive, 24, 4);
+    addOpt(ItemEgo::Dazing,    22, 4);
+    addOpt(ItemEgo::Vampiric,  12, 6);
+
+    // Depth progression: gently tilt toward rarer brands on deeper floors.
+    const int deep = std::max(0, depth - 4);
+    for (auto& o : opts) {
+        if (o.e == ItemEgo::Vampiric) o.w += deep * 2;
+        else if (o.e == ItemEgo::Corrosive || o.e == ItemEgo::Dazing) o.w += deep;
+    }
+
+    // Deterministic floor theme bias.
+    for (auto& o : opts) {
+        if (o.e == floorDominant) {
+            o.w += std::max(2, o.w / 2);
+        }
+    }
+
+    // Room type ecology.
+    for (auto& o : opts) {
+        switch (rt) {
+            case RoomType::Laboratory:
+                if (o.e == ItemEgo::Corrosive) o.w += 18;
+                if (o.e == ItemEgo::Dazing) o.w += 10;
+                break;
+            case RoomType::Library:
+                if (o.e == ItemEgo::Dazing) o.w += 14;
+                break;
+            case RoomType::Shrine:
+                if (o.e == ItemEgo::Dazing) o.w += 10;
+                // Deep shrines can lean dark.
+                if (o.e == ItemEgo::Vampiric && depth >= 7) o.w += 6;
+                break;
+            case RoomType::Lair:
+                if (o.e == ItemEgo::Webbing) o.w += 18;
+                if (o.e == ItemEgo::Venom) o.w += 10;
+                break;
+            case RoomType::Armory:
+                if (o.e == ItemEgo::Flaming) o.w += 12;
+                break;
+            case RoomType::Vault:
+            case RoomType::Treasure:
+            case RoomType::Secret:
+                if (o.e == ItemEgo::Vampiric) o.w += 10;
+                if (o.e == ItemEgo::Flaming) o.w += 6;
+                break;
+            default:
+                break;
+        }
+    }
+
+    // Substrate ecology.
+    for (auto& o : opts) {
+        switch (mat) {
+            case TerrainMaterial::Obsidian:
+            case TerrainMaterial::Basalt:
+                if (o.e == ItemEgo::Flaming) o.w += 16;
+                break;
+            case TerrainMaterial::Moss:
+            case TerrainMaterial::Dirt:
+                if (o.e == ItemEgo::Venom) o.w += 14;
+                if (o.e == ItemEgo::Webbing) o.w += 10;
+                break;
+            case TerrainMaterial::Bone:
+                if (o.e == ItemEgo::Vampiric) o.w += 10;
+                if (o.e == ItemEgo::Venom) o.w += 6;
+                break;
+            case TerrainMaterial::Metal:
+                if (o.e == ItemEgo::Corrosive) o.w += 14;
+                break;
+            case TerrainMaterial::Crystal:
+                if (o.e == ItemEgo::Dazing) o.w += 12;
+                break;
+            case TerrainMaterial::Marble:
+            case TerrainMaterial::Brick:
+                if (o.e == ItemEgo::Dazing) o.w += 6;
+                break;
+            case TerrainMaterial::Wood:
+                if (o.e == ItemEgo::Webbing) o.w += 6;
+                break;
+            default:
+                break;
+        }
+    }
+
+    // Shop bias: skew toward mid/rare brands (premium inventory).
+    if (fromShop) {
+        for (auto& o : opts) {
+            if (o.e == ItemEgo::Corrosive || o.e == ItemEgo::Dazing) o.w += 8;
+            if (o.e == ItemEgo::Vampiric) o.w += 4;
+        }
+    }
+
+    // Monster bias: avoid too much hard-disable frustration.
+    if (forMonster) {
+        for (auto& o : opts) {
+            if (o.e == ItemEgo::Webbing || o.e == ItemEgo::Dazing) {
+                o.w = std::max(1, (o.w * 2) / 3);
+            }
+            if (o.e == ItemEgo::Vampiric) {
+                o.w = std::max(1, (o.w * 3) / 4);
+            }
+        }
+    }
+
+    int total = 0;
+    for (const auto& o : opts) total += std::max(0, o.w);
+    if (total <= 0) return ItemEgo::None;
+
+    int roll = rng.range(1, total);
+    for (const auto& o : opts) {
+        roll -= std::max(0, o.w);
+        if (roll <= 0) return o.e;
+    }
+
+    return ItemEgo::None;
 }
 
 bool canBeArtifact(ItemKind k) {
@@ -597,6 +764,7 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
     // and creates emergent difficulty when monsters pick up better weapons/armor.
     if (allowGear && (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k))) {
         const RoomType rt = rtHere;
+        const TerrainMaterial matHere = dung.materialAtCached(e.pos.x, e.pos.y);
 
         auto makeGear = [&](ItemKind kind) -> Item {
             Item it;
@@ -618,7 +786,7 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
             }
 
             // Rare ego weapons.
-            it.ego = rollWeaponEgo(rng, kind, depth_, rt, /*fromShop=*/false, /*forMonster=*/true);
+            it.ego = rollWeaponEgo(rng, seed_, kind, depth_, rt, matHere, /*fromShop=*/false, /*forMonster=*/true);
 
             // Rare artifacts on monster gear.
             if (rollArtifact(rng, kind, depth_, rt, /*fromShop=*/false, /*forMonster=*/true)) {
@@ -1273,7 +1441,7 @@ void Game::spawnItems() {
             }
 
             // Rare ego weapons (brands).
-            it.ego = rollWeaponEgo(rng, k, depth_, rt, /*fromShop=*/false, /*forMonster=*/false);
+            it.ego = rollWeaponEgo(rng, seed_, k, depth_, rt, dung.materialAtCached(pos.x, pos.y), /*fromShop=*/false, /*forMonster=*/false);
 
 
             // Rare artifacts.
@@ -1333,7 +1501,7 @@ void Game::spawnItems() {
             }
 
             // Rare premium ego weapons.
-            it.ego = rollWeaponEgo(rng, k, depth_, rt, /*fromShop=*/true, /*forMonster=*/false);
+            it.ego = rollWeaponEgo(rng, seed_, k, depth_, rt, dung.materialAtCached(pos.x, pos.y), /*fromShop=*/true, /*forMonster=*/false);
 
 
             // Extremely rare artifacts in shops.
@@ -3864,6 +4032,53 @@ void Game::applyEndOfTurnEffects() {
                 gameOver = true;
                 return;
             }
+
+            // Secondary effect: acid can pit exposed equipment, reducing enchantment.
+            // Shielding acts like a barrier against gear damage.
+            if (p.effects.shieldTurns <= 0) {
+                uint8_t g = 0u;
+                if (dung.inBounds(p.pos.x, p.pos.y) && !corrosiveGas_.empty()) {
+                    const size_t gi = static_cast<size_t>(p.pos.y * dung.width + p.pos.x);
+                    if (gi < corrosiveGas_.size()) g = corrosiveGas_[gi];
+                }
+
+                // Consider equipped gear (armor / melee / ranged).
+                std::array<int, 3> slots = {equippedArmorIndex(), equippedMeleeIndex(), equippedRangedIndex()};
+                std::array<int, 3> picks = {-1, -1, -1};
+                int n = 0;
+                for (int idx : slots) {
+                    if (idx < 0) continue;
+                    if (idx >= static_cast<int>(inv.size())) continue;
+                    const Item& it = inv[static_cast<size_t>(idx)];
+                    if (!(isArmor(it.kind) || isWeapon(it.kind))) continue;
+                    if (itemIsArtifact(it)) continue;
+                    picks[n++] = idx;
+                }
+
+                if (n > 0) {
+                    const int idx = picks[static_cast<size_t>(rng.range(0, n - 1))];
+                    Item& it = inv[static_cast<size_t>(idx)];
+
+                    int chancePct = 12 + p.effects.corrosionTurns * 3 + static_cast<int>(g) / 12;
+                    chancePct = clampi(chancePct, 8, 60);
+
+                    // Blessed gear resists; cursed gear suffers.
+                    if (it.buc > 0) chancePct = std::max(0, chancePct - 10);
+                    else if (it.buc < 0) chancePct = std::min(90, chancePct + 10);
+
+                    if (chancePct > 0 && rng.range(1, 100) <= chancePct) {
+                        const int before = it.enchant;
+                        const int after = std::max(-3, before - 1);
+                        if (after != before) {
+                            const std::string nm = itemDisplayName(it);
+                            it.enchant = after;
+                            std::ostringstream ss;
+                            ss << "YOUR " << nm << " CORRODES!";
+                            pushMsg(ss.str(), MessageKind::Warning, true);
+                        }
+                    }
+                }
+            }
         }
 
         if (p.effects.corrosionTurns == 0) {
@@ -4397,6 +4612,50 @@ void Game::applyEndOfTurnEffects() {
             // Corrosion ticks every other turn (slower than poison/burn).
             if ((turnCount & 1u) == 0u) {
                 m.hp -= 1;
+
+                // Acid can pit monster gear too (mostly affects dropped loot).
+                // Shielding protects gear the same way it protects skin/hide.
+                if (m.hp > 0 && m.effects.shieldTurns <= 0) {
+                    uint8_t g = 0u;
+                    if (dung.inBounds(m.pos.x, m.pos.y) && !corrosiveGas_.empty()) {
+                        const size_t gi = static_cast<size_t>(m.pos.y * dung.width + m.pos.x);
+                        if (gi < corrosiveGas_.size()) g = corrosiveGas_[gi];
+                    }
+
+                    std::array<Item*, 2> picks = {nullptr, nullptr};
+                    int n = 0;
+                    if (m.gearArmor.id != 0 && isArmor(m.gearArmor.kind) && !itemIsArtifact(m.gearArmor)) {
+                        picks[n++] = &m.gearArmor;
+                    }
+                    if (m.gearMelee.id != 0 && isWeapon(m.gearMelee.kind) && !itemIsArtifact(m.gearMelee)) {
+                        picks[n++] = &m.gearMelee;
+                    }
+
+                    if (n > 0) {
+                        Item& it = *picks[static_cast<size_t>(rng.range(0, n - 1))];
+
+                        int chancePct = 10 + m.effects.corrosionTurns * 3 + static_cast<int>(g) / 12;
+                        chancePct = clampi(chancePct, 6, 45);
+
+                        if (it.buc > 0) chancePct = std::max(0, chancePct - 8);
+                        else if (it.buc < 0) chancePct = std::min(90, chancePct + 8);
+
+                        if (chancePct > 0 && rng.range(1, 100) <= chancePct) {
+                            const int before = it.enchant;
+                            const int after = std::max(-3, before - 1);
+                            if (after != before) {
+                                const std::string nm = itemDisplayName(it);
+                                it.enchant = after;
+
+                                if (vis) {
+                                    std::ostringstream ss;
+                                    ss << kindName(m.kind) << "'S " << nm << " CORRODES!";
+                                    pushMsg(ss.str(), MessageKind::Info, false);
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             if (m.hp <= 0) {
@@ -4888,6 +5147,134 @@ void Game::applyEndOfTurnEffects() {
             leakAcrossVentedDoors(corrosiveGas_, 8, 26, 5);
         }
     }
+
+    
+    // ------------------------------------------------------------
+    // Field chemistry: Corrosive vapor can pit gear and eat through doors.
+    //
+    // This makes Corrosive Gas a long-term, dungeon-shaping hazard: leaving
+    // equipment in acid is bad, but clever players can also weaken locks at a cost.
+    // ------------------------------------------------------------
+    {
+        const int w = dung.width;
+        const int h = dung.height;
+        const size_t expect = static_cast<size_t>(w * h);
+
+        if (expect > 0 && corrosiveGas_.size() == expect) {
+            auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
+            auto gasAt = [&](Vec2i p) -> uint8_t {
+                if (!dung.inBounds(p.x, p.y)) return 0u;
+                const size_t i = idx2(p.x, p.y);
+                if (i >= corrosiveGas_.size()) return 0u;
+                return corrosiveGas_[i];
+            };
+
+            // Doors: high acid exposure can unlock locks and eventually force doors open.
+            int unlockSeen = 0;
+            int openSeen = 0;
+
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const TileType tt = dung.at(x, y).type;
+                    if (tt != TileType::DoorLocked && tt != TileType::DoorClosed) continue;
+
+                    Vec2i a{0, 0}, b{0, 0};
+                    if (!doorOpposingSides(dung, {x, y}, a, b)) continue;
+
+                    const uint8_t ga = gasAt(a);
+                    const uint8_t gb = gasAt(b);
+                    const uint8_t g = (ga > gb) ? ga : gb;
+                    if (g == 0u) continue;
+
+                    DoorSealKind seal = doorSealKindAt(x, y);
+
+                    int threshUnlock = 20;
+                    int threshOpen = 18;
+                    int maxChance = 22;
+
+                    // Airlocks are sturdier; vented doors are a bit weaker.
+                    if (seal == DoorSealKind::Airlock) {
+                        threshUnlock += 6;
+                        threshOpen += 6;
+                        maxChance = 16;
+                    } else if (seal == DoorSealKind::Vented) {
+                        threshUnlock = std::max(0, threshUnlock - 2);
+                        threshOpen = std::max(0, threshOpen - 2);
+                        maxChance = 26;
+                    }
+
+                    if (tt == TileType::DoorLocked) {
+                        if (g < static_cast<uint8_t>(threshUnlock)) continue;
+                        int chancePct = 2 + (static_cast<int>(g) - threshUnlock) / 3;
+                        chancePct = clampi(chancePct, 2, maxChance);
+
+                        if (rng.range(1, 100) <= chancePct) {
+                            dung.at(x, y).type = TileType::DoorClosed;
+                            emitNoise({x, y}, 8);
+
+                            if (dung.at(x, y).visible) ++unlockSeen;
+                        }
+                    } else { // DoorClosed
+                        if (g < static_cast<uint8_t>(threshOpen)) continue;
+                        int chancePct = 2 + (static_cast<int>(g) - threshOpen) / 3;
+                        chancePct = clampi(chancePct, 2, maxChance);
+
+                        if (rng.range(1, 100) <= chancePct) {
+                            dung.at(x, y).type = TileType::DoorOpen;
+                            emitNoise({x, y}, 10);
+
+                            // Opening a door can cause a pressure/gas puff (esp. airlocks).
+                            onDoorOpened({x, y}, /*openerIsPlayer=*/false);
+
+                            if (dung.at(x, y).visible) ++openSeen;
+                        }
+                    }
+                }
+            }
+
+            if (unlockSeen > 0) {
+                pushMsg(unlockSeen == 1 ? "A LOCK HISSES AND FAILS." : "SOME LOCKS HISS AND FAIL.", MessageKind::System, true);
+            }
+            if (openSeen > 0) {
+                pushMsg(openSeen == 1 ? "A DOOR SIZZLES OPEN." : "SOME DOORS SIZZLE OPEN.", MessageKind::System, true);
+            }
+
+            // Ground gear: items left in strong acid can slowly lose enchantment (rare).
+            int pittedSeen = 0;
+            if ((turnCount & 1u) == 0u) {
+                for (auto& gi : ground) {
+                    const Item& it0 = gi.item;
+                    if (!(isArmor(it0.kind) || isWeapon(it0.kind))) continue;
+                    if (itemIsArtifact(it0)) continue;
+                    if (!dung.inBounds(gi.pos.x, gi.pos.y)) continue;
+
+                    const uint8_t gv = gasAt(gi.pos);
+                    if (gv < 20u) continue;
+
+                    int chancePct = 1 + (static_cast<int>(gv) - 20) / 6;
+                    chancePct = clampi(chancePct, 1, 10);
+
+                    // Blessed gear resists; cursed gear suffers.
+                    if (gi.item.buc > 0) chancePct = std::max(0, chancePct - 2);
+                    else if (gi.item.buc < 0) chancePct = std::min(90, chancePct + 2);
+
+                    if (chancePct > 0 && rng.range(1, 100) <= chancePct) {
+                        const int before = gi.item.enchant;
+                        const int after = std::max(-3, before - 1);
+                        if (after != before) {
+                            gi.item.enchant = after;
+                            if (dung.at(gi.pos.x, gi.pos.y).visible) ++pittedSeen;
+                        }
+                    }
+                }
+            }
+
+            if (pittedSeen > 0) {
+                pushMsg(pittedSeen == 1 ? "SOMETHING SIZZLES IN THE ACID." : "SOME THINGS SIZZLE IN THE ACID.", MessageKind::System, true);
+            }
+        }
+    }
+
 
     // Update fire field decay/spread.
     // The fire field generally decays over time, with a small chance to spread when strong.

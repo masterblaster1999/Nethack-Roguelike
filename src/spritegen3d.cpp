@@ -74,6 +74,75 @@ inline int signum(float v) {
     return (v > 0.0f) - (v < 0.0f);
 }
 
+inline float luminance01(Color c) {
+    const float r = static_cast<float>(c.r) / 255.0f;
+    const float g = static_cast<float>(c.g) / 255.0f;
+    const float b = static_cast<float>(c.b) / 255.0f;
+    // Rec.709 luma; close enough for tiny sprite-derived materials.
+    return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+}
+
+inline float saturation01(Color c) {
+    const float r = static_cast<float>(c.r) / 255.0f;
+    const float g = static_cast<float>(c.g) / 255.0f;
+    const float b = static_cast<float>(c.b) / 255.0f;
+    const float mx = std::max(r, std::max(g, b));
+    const float mn = std::min(r, std::min(g, b));
+    if (mx <= 1e-6f) return 0.0f;
+    return (mx - mn) / mx; // HSV saturation
+}
+
+struct MaterialParams {
+    float specMul = 1.0f;
+    float shininessMul = 1.0f;
+    float rimMul = 1.0f;
+    float emissive = 0.0f; // 0..1 scaled additive glow
+};
+
+// Extremely cheap, sprite-friendly material inference.
+//
+// We only have per-voxel albedo + alpha, but we can still make highlights feel less
+// "one-size-fits-all" by biasing specular and shininess based on:
+//  - transparency (glass/gel)
+//  - saturation (painted/matte)
+//  - luminance + neutrality (metal/stone)
+//
+// This is *not* full PBR; it is a stylized heuristic tuned for tiny voxel sprites.
+MaterialParams estimateMaterial(Color c) {
+    MaterialParams m;
+
+    const float a = static_cast<float>(c.a) / 255.0f;
+    const float lum = luminance01(c);
+    const float sat = saturation01(c);
+    const float neutral = 1.0f - sat;
+
+    // "Glass" is driven primarily by transparency.
+    const float glass = (a < 0.92f) ? clampf((0.92f - a) / 0.45f, 0.0f, 1.0f) : 0.0f;
+
+    // "Metal" is approximated by bright + low-saturation colors.
+    const float metal = clampf((lum - 0.35f) / 0.55f, 0.0f, 1.0f)
+                      * clampf((neutral - 0.55f) / 0.45f, 0.0f, 1.0f);
+
+    // "Matte paint" tends to be more saturated.
+    const float matte = clampf((sat - 0.20f) / 0.60f, 0.0f, 1.0f);
+
+    m.specMul = clampf(0.85f + 0.95f * metal + 1.35f * glass - 0.35f * matte, 0.55f, 2.75f);
+    m.shininessMul = clampf(0.90f + 1.25f * metal + 2.20f * glass - 0.35f * matte, 0.55f, 3.65f);
+    m.rimMul = clampf(0.95f + 0.25f * neutral + 0.20f * glass, 0.85f, 1.35f);
+
+    // Emissive: very bright + (somewhat) saturated colors.
+    // Keep it conservative so we don't turn normal highlights into glow.
+    float emiss = clampf((lum - 0.74f) / 0.26f, 0.0f, 1.0f)
+                * clampf((sat - 0.06f) / 0.40f, 0.0f, 1.0f);
+
+    // Very translucent voxels shouldn't "glow" strongly (glass already reads via specular).
+    emiss *= (0.35f + 0.65f * a);
+
+    m.emissive = clampf(emiss * 0.55f, 0.0f, 0.65f);
+    return m;
+}
+
+
 struct VoxelModel {
     int w = 0;
     int h = 0;
@@ -133,6 +202,85 @@ VoxelModel scaleVoxelModelNearest(const VoxelModel& src, int s) {
     }
     return dst;
 }
+
+
+// Surface chamfer + alpha feathering for higher-resolution voxel sprites.
+//
+// When we upscale a tiny voxel model (16×16×8 -> 64×64×32), the geometry gets
+// denser but the silhouette can still read a little "stair-steppy" and flat.
+// This post-pass gently brightens convex edges/corners and slightly feathers their
+// alpha so the occupancy-gradient normals used by the raytracer become smoother.
+//
+// We intentionally apply this only to near-opaque voxels; translucent materials
+// (potion glass, ghosts/slimes) already read well via transparency and should keep
+// their authored look.
+void applyVoxelSurfaceChamfer(VoxelModel& m, uint32_t seed, float strength = 1.0f) {
+    if (m.w <= 0 || m.h <= 0 || m.d <= 0) return;
+    if (m.vox.empty()) return;
+    if (strength <= 1e-3f) return;
+
+    std::vector<Color> orig = m.vox;
+
+    auto atOrig = [&](int x, int y, int z) -> Color {
+        if (x < 0 || y < 0 || z < 0 || x >= m.w || y >= m.h || z >= m.d) return {0,0,0,0};
+        return orig[static_cast<size_t>((z * m.h + y) * m.w + x)];
+    };
+
+    auto isEmpty = [&](int x, int y, int z) -> bool {
+        return atOrig(x,y,z).a == 0;
+    };
+
+    auto noise01 = [&](int x, int y, int z) -> float {
+        // Deterministic per-voxel noise (does not consume RNG).
+        const uint32_t h = hash32(hashCombine(seed ^ 0xC14EFADEu,
+            static_cast<uint32_t>((x * 73856093) ^ (y * 19349663) ^ (z * 83492791))));
+        return rand01(h);
+    };
+
+    for (int z = 0; z < m.d; ++z) {
+        for (int y = 0; y < m.h; ++y) {
+            for (int x = 0; x < m.w; ++x) {
+                const size_t i = static_cast<size_t>((z * m.h + y) * m.w + x);
+                const Color c = orig[i];
+                if (c.a == 0) continue;
+
+                // Only chamfer near-opaque voxels.
+                if (c.a < 240) continue;
+
+                const bool exXn = isEmpty(x - 1, y, z);
+                const bool exXp = isEmpty(x + 1, y, z);
+                const bool exYn = isEmpty(x, y - 1, z);
+                const bool exYp = isEmpty(x, y + 1, z);
+                const bool exZn = isEmpty(x, y, z - 1);
+                const bool exZp = isEmpty(x, y, z + 1);
+
+                const int exposed = static_cast<int>(exXn) + static_cast<int>(exXp) + static_cast<int>(exYn) +
+                                   static_cast<int>(exYp) + static_cast<int>(exZn) + static_cast<int>(exZp);
+                if (exposed == 0) continue;
+
+                const float edge01 = static_cast<float>(exposed) / 6.0f;
+                const float corner01 = clampf((static_cast<float>(exposed) - 1.0f) / 5.0f, 0.0f, 1.0f);
+
+                // Subtle highlight on convex edges/corners.
+                float highlight = strength * (0.035f + 0.085f * corner01 + 0.030f * edge01);
+                highlight *= (0.92f + 0.10f * (noise01(x,y,z) * 2.0f - 1.0f));
+                highlight = clampf(highlight, 0.0f, 0.18f);
+
+                // Tiny alpha feathering at edges/corners.
+                float alphaMul = 1.0f - strength * (0.05f * edge01 + 0.18f * corner01);
+                alphaMul = clampf(alphaMul, 0.70f, 1.0f);
+
+                Color out = c;
+                out = lerp(out, {255,255,255,out.a}, highlight);
+                out.a = clamp8(static_cast<int>(std::lround(static_cast<float>(out.a) * alphaMul)));
+                if (out.a < 180) out.a = 180;
+
+                m.vox[i] = out;
+            }
+        }
+    }
+}
+
 
 struct Palette {
     Color primary{180,180,180,255};
@@ -229,54 +377,200 @@ VoxelModel voxelizeExtrude(const SpritePixels& base2d, uint32_t seed, int maxDep
     VoxelModel m;
     m.w = base2d.w;
     m.h = base2d.h;
-    m.d = maxDepth;
+    m.d = std::max(1, maxDepth);
     m.vox.assign(static_cast<size_t>(m.w * m.h * m.d), {0,0,0,0});
 
     const int w = base2d.w;
     const int h = base2d.h;
 
-    // Mask (alpha>0)
+    // ---------------------------------------------------------------------
+    // 2D -> 3D voxelization
+    //
+    // A tiny 16×16 sprite gets "lifted" into a small voxel model.
+    //
+    // Improvements over the original cardboard extrusion:
+    //  - Strip obvious 2D drop-shadows so they don't inflate the voxel silhouette.
+    //  - Bas-relief depth modulation: use per-pixel luminance to vary thickness,
+    //    producing subtle surface relief that reads better under 3D lighting.
+    //  - Accent-preserving albedo flattening: flatten baked-in 2D shading toward
+    //    the dominant palette color, but keep high-contrast details (eyes, runes,
+    //    trim) so models don't turn to mud.
+    // ---------------------------------------------------------------------
+
+    auto idx = [&](int x, int y){ return static_cast<size_t>(y*w + x); };
+    auto in2 = [&](int x, int y){ return x >= 0 && y >= 0 && x < w && y < h; };
+
+    auto luminance01 = [&](Color c) -> float {
+        const float r = static_cast<float>(c.r) / 255.0f;
+        const float g = static_cast<float>(c.g) / 255.0f;
+        const float b = static_cast<float>(c.b) / 255.0f;
+        // Rec.601 luma (good enough at sprite scale).
+        return 0.299f * r + 0.587f * g + 0.114f * b;
+    };
+
+    // Mask (alpha>0), with a small heuristic to ignore finalizeSprite() drop-shadows.
     std::vector<uint8_t> mask(static_cast<size_t>(w * h), 0);
+
+    auto isLikelyDropShadow = [&](int x, int y) -> bool {
+        const Color c = base2d.at(x,y);
+        if (c.a == 0) return false;
+
+        // Shadows are semi-transparent and near-black.
+        if (c.a > 140) return false;
+        const int bright = static_cast<int>(c.r) + static_cast<int>(c.g) + static_cast<int>(c.b);
+        if (bright > 40) return false;
+
+        // finalizeSprite() uses applyDropShadow(s, +1, +1): shadow pixels have a source at (-1,-1).
+        if (!in2(x - 1, y - 1)) return false;
+        const Color src = base2d.at(x - 1, y - 1);
+        return src.a > c.a;
+    };
+
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const Color c = base2d.at(x,y);
-            if (c.a > 0) mask[static_cast<size_t>(y*w + x)] = 1;
+            if (c.a == 0) continue;
+            if (isLikelyDropShadow(x,y)) continue;
+            mask[idx(x,y)] = 1;
         }
     }
 
-    // Average color (try to ignore near-black outlines).
-    uint64_t sr=0, sg=0, sb=0, n=0;
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            if (!mask[static_cast<size_t>(y*w + x)]) continue;
-            const Color c = base2d.at(x,y);
-            const int bright = static_cast<int>(c.r) + static_cast<int>(c.g) + static_cast<int>(c.b);
-            if (c.a > 120 && bright > 140) { // skip the darkest pixels
-                sr += c.r; sg += c.g; sb += c.b; n++;
+    // ---------------------------------------------------------------------
+    // Mask preconditioning:
+    //
+    // Pixel-art sprites sometimes contain tiny interior transparent "pinholes"
+    // (from dithering/AA/hand editing). When extruded into voxels, those become
+    // unintended through-holes/cracks that break the 3D read.
+    //
+    // We conservatively fill only *very small* enclosed holes, leaving large,
+    // intentional negative space (rings, keyholes) intact.
+    // ---------------------------------------------------------------------
+    auto fillTinyMaskHoles = [&]() {
+        const int area = w * h;
+        if (area <= 0) return;
+
+        const int maxHole = std::clamp(area / 96, 2, 24); // 16×16 -> 2, 32×32 -> 10, capped.
+        std::vector<uint8_t> outside(static_cast<size_t>(area), 0);
+
+        std::queue<Vec2i> qb;
+        auto pushBg = [&](int x, int y) {
+            if (!in2(x,y)) return;
+            const size_t i = idx(x,y);
+            if (outside[i]) return;
+            if (mask[i] != 0) return; // not background
+            outside[i] = 1;
+            qb.push({x,y});
+        };
+
+        for (int x = 0; x < w; ++x) { pushBg(x, 0); pushBg(x, h - 1); }
+        for (int y = 0; y < h; ++y) { pushBg(0, y); pushBg(w - 1, y); }
+
+        const int dx4[4] = {-1, 1, 0, 0};
+        const int dy4[4] = {0, 0, -1, 1};
+
+        while (!qb.empty()) {
+            Vec2i p = qb.front();
+            qb.pop();
+            for (int k = 0; k < 4; ++k) {
+                const int nx = p.x + dx4[k];
+                const int ny = p.y + dy4[k];
+                if (!in2(nx,ny)) continue;
+                const size_t ni = idx(nx,ny);
+                if (outside[ni]) continue;
+                if (mask[ni] != 0) continue;
+                outside[ni] = 1;
+                qb.push({nx,ny});
             }
         }
-    }
-    if (n == 0) {
+
+        std::vector<uint8_t> vis(static_cast<size_t>(area), 0);
+        std::queue<Vec2i> qc;
+
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
-                if (!mask[static_cast<size_t>(y*w + x)]) continue;
-                const Color c = base2d.at(x,y);
-                sr += c.r; sg += c.g; sb += c.b; n++;
+                const size_t i = idx(x,y);
+                if (mask[i] != 0) continue;      // not background
+                if (outside[i]) continue;        // reachable from boundary -> real background
+                if (vis[i]) continue;
+
+                // Flood the hole component.
+                std::vector<size_t> comp;
+                comp.reserve(16);
+
+                vis[i] = 1;
+                qc.push({x,y});
+
+                while (!qc.empty()) {
+                    Vec2i p = qc.front();
+                    qc.pop();
+                    const size_t pi = idx(p.x,p.y);
+                    comp.push_back(pi);
+
+                    for (int k = 0; k < 4; ++k) {
+                        const int nx = p.x + dx4[k];
+                        const int ny = p.y + dy4[k];
+                        if (!in2(nx,ny)) continue;
+                        const size_t ni = idx(nx,ny);
+                        if (vis[ni]) continue;
+                        if (mask[ni] != 0) continue;
+                        if (outside[ni]) continue;
+
+                        vis[ni] = 1;
+                        qc.push({nx,ny});
+                    }
+                }
+
+                if (static_cast<int>(comp.size()) <= maxHole) {
+                    for (size_t pi : comp) mask[pi] = 1;
+                }
             }
         }
-    }
-    Color avg = {180,180,180,255};
-    if (n > 0) {
-        avg = { clamp8(static_cast<int>(sr / n)), clamp8(static_cast<int>(sg / n)), clamp8(static_cast<int>(sb / n)), 255 };
-    }
+    };
 
-    // Distance-to-edge inside the mask (4-neighborhood BFS).
-    constexpr int INF = 9999;
-    std::vector<int> dist(static_cast<size_t>(w * h), INF);
-    std::queue<Vec2i> q;
-    auto idx = [&](int x, int y){ return static_cast<size_t>(y*w + x); };
+    fillTinyMaskHoles();
+
+    // Dominant palette color: use as the "albedo anchor" we flatten toward.
+    const Palette pal = extractPalette(base2d);
+    Color avg = pal.primary;
+    avg.a = 255;
+
+    // Average luminance of the masked pixels for bas-relief thickness modulation.
+    float lumSum = 0.0f;
+    float wSum = 0.0f;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            if (!mask[idx(x,y)]) continue;
+            Color c = base2d.at(x,y);
+            float wA = static_cast<float>(c.a) / 255.0f;
+
+            // Tiny filled holes have no authored color; use the dominant palette color.
+            if (c.a == 0) {
+                c = avg;
+                c.a = 255;
+                wA = 1.0f;
+            }
+
+            lumSum += luminance01(c) * wA;
+            wSum += wA;
+        }
+    }
+    const float avgLum = (wSum > 1e-6f) ? (lumSum / wSum) : luminance01(avg);
+
+    // Distance-to-edge inside the mask: quasi-Euclidean chamfer distance (8-neighborhood).
+    //
+    // A 4-neighborhood BFS yields a Manhattan distance (diamond iso-contours),
+    // which can produce slightly "boxy" bevels and thickness curves. We instead
+    // compute a small 8-neighborhood chamfer distance (ORTH=10, DIAG=14) via a
+    // tiny Dijkstra, which better approximates the Euclidean distance while
+    // staying extremely cheap at 16×16.
+    constexpr int INF = 1000000000;
+    constexpr int ORTH = 10;
+    constexpr int DIAG = 14;
+
+    std::vector<int> distCost(static_cast<size_t>(w * h), INF);
+
     auto isMask = [&](int x, int y)->bool {
-        if (x < 0 || y < 0 || x >= w || y >= h) return false;
+        if (!in2(x,y)) return false;
         return mask[idx(x,y)] != 0;
     };
     auto isEdgePix = [&](int x, int y)->bool {
@@ -284,67 +578,251 @@ VoxelModel voxelizeExtrude(const SpritePixels& base2d, uint32_t seed, int maxDep
         // If any neighbor is outside mask, it's an edge pixel.
         return !isMask(x-1,y) || !isMask(x+1,y) || !isMask(x,y-1) || !isMask(x,y+1);
     };
+
+    struct PQNode { int c; int x; int y; };
+    auto cmp = [](const PQNode& a, const PQNode& b) { return a.c > b.c; };
+    std::priority_queue<PQNode, std::vector<PQNode>, decltype(cmp)> pq(cmp);
+
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             if (isEdgePix(x,y)) {
-                dist[idx(x,y)] = 0;
-                q.push({x,y});
+                distCost[idx(x,y)] = 0;
+                pq.push({0, x, y});
             }
         }
     }
-    const int dx4[4] = {-1,1,0,0};
-    const int dy4[4] = {0,0,-1,1};
-    while (!q.empty()) {
-        Vec2i p = q.front();
-        q.pop();
-        const int base = dist[idx(p.x,p.y)];
-        for (int k = 0; k < 4; ++k) {
-            const int nx = p.x + dx4[k];
-            const int ny = p.y + dy4[k];
+
+    const int dx8[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    const int dy8[8] = {-1,-1,-1,  0, 0,  1, 1, 1};
+
+    while (!pq.empty()) {
+        PQNode n = pq.top();
+        pq.pop();
+
+        const size_t ni = idx(n.x, n.y);
+        if (n.c != distCost[ni]) continue;
+
+        for (int k = 0; k < 8; ++k) {
+            const int nx = n.x + dx8[k];
+            const int ny = n.y + dy8[k];
             if (!isMask(nx,ny)) continue;
-            const size_t ni = idx(nx,ny);
-            if (dist[ni] > base + 1) {
-                dist[ni] = base + 1;
-                q.push({nx,ny});
+
+            const int wStep = (dx8[k] == 0 || dy8[k] == 0) ? ORTH : DIAG;
+            const int nc = n.c + wStep;
+
+            const size_t nni = idx(nx,ny);
+            if (nc < distCost[nni]) {
+                distCost[nni] = nc;
+                pq.push({nc, nx, ny});
             }
         }
     }
 
-    // Stable RNG noise (do NOT use frame; base2d already animates via frame).
-    RNG rng(hashCombine(seed, 0xBADC0FFEu));
+    auto colorDistL1 = [](Color a, Color b) -> int {
+        return std::abs(static_cast<int>(a.r) - static_cast<int>(b.r)) +
+               std::abs(static_cast<int>(a.g) - static_cast<int>(b.g)) +
+               std::abs(static_cast<int>(a.b) - static_cast<int>(b.b));
+    };
 
-    // Fill voxels: cardboard extrusion + bevel (deeper layers erode the silhouette slightly).
+    // Fill voxels: biconvex beveled extrusion with a tiny bas-relief height field.
+//
+// Upgrades over the prior "cardboard slab":
+//  - Shape-adaptive depth budget: use the silhouette's distance-to-edge radius as a proxy for how
+//    much depth the sprite can support (thin sprites stay thin; chunky sprites get more volume).
+//  - Biconvex bevel: instead of beveling only toward the back, we bevel toward the middle slice so
+//    *both* the front and back faces round inward. This reads less like a flat sticker and more like
+//    a small sculpted token under 3D lighting.
+{
+    const int maxD = m.d;
+
+    // The maximum interior distance (distance transform) acts like a 2D "radius" of the silhouette.
+    int maxDistCost = 0;
+    int filledCount = 0;
+    for (int yy = 0; yy < h; ++yy) {
+        for (int xx = 0; xx < w; ++xx) {
+            if (!mask[idx(xx,yy)]) continue;
+            const int d = distCost[idx(xx,yy)];
+            if (d >= INF) continue;
+            maxDistCost = std::max(maxDistCost, d);
+            filledCount++;
+        }
+    }
+    if (filledCount == 0) return m;
+
+    // Depth budget scales with the silhouette "radius", but is clamped to the caller-provided maxDepth.
+    // maxDist=0 (1px/line shapes) -> depth 2, maxDist=1 -> depth 4, maxDist=2 -> depth 6, etc.
+    const float maxDistF = static_cast<float>(maxDistCost) / static_cast<float>(ORTH);
+    const int depthBudget = std::clamp(2 + static_cast<int>(std::lround(maxDistF * 2.0f)), 1, maxD);
+
     for (int yImg = 0; yImg < h; ++yImg) {
         for (int x = 0; x < w; ++x) {
             if (!isMask(x,yImg)) continue;
 
-            const int dEdge = std::min(dist[idx(x,yImg)], maxDepth);
-            int thickness = 2 + std::min(dEdge, maxDepth - 2);
-            if (rng.chance(0.20f)) thickness += rng.range(-1, 1);
-            thickness = std::clamp(thickness, 1, maxDepth);
+            const int dRaw = distCost[idx(x,yImg)];
+            const int dEdge = (dRaw >= INF) ? 0 : std::min(dRaw, maxDistCost);
 
-            // Flatten the original shading a bit so we can re-light in 3D.
-            Color c = base2d.at(x, yImg);
-            c = lerp(c, avg, 0.55f);
-            c.a = 255;
+            // Shape-adaptive base thickness: edges start at ~2 voxels; the deepest interior approaches depthBudget.
+            int baseThickness = 1;
+            if (depthBudget <= 1) {
+                baseThickness = 1;
+            } else if (maxDistCost <= 0) {
+                baseThickness = std::min(2, depthBudget);
+            } else {
+                const float t01 = clampf(static_cast<float>(dEdge) / static_cast<float>(maxDistCost), 0.0f, 1.0f);
+                // Slight curve so the interior bulges a bit sooner than strict linear mapping.
+                const float curve = std::pow(t01, 0.75f);
+                baseThickness = 2 + static_cast<int>(std::lround(curve * static_cast<float>(std::max(0, depthBudget - 2))));
+                baseThickness = std::clamp(baseThickness, 1, depthBudget);
+            }
+
+            Color c0 = base2d.at(x, yImg);
+            if (c0.a == 0) { c0 = avg; c0.a = 255; }
+
+            // Bas-relief modulation: per-pixel luminance relative to the sprite mean.
+            //
+            // This is intentionally subtle; we just want small bumps/indents so the
+            // 3D lighting has something to bite on (especially on flat sprites).
+            float rel = (luminance01(c0) - avgLum); // [-1, 1] (usually small)
+            const float interior01 = (maxDistCost > 0)
+                ? clampf(static_cast<float>(dEdge) / static_cast<float>(maxDistCost), 0.0f, 1.0f)
+                : 0.0f;
+            rel *= (0.85f + 0.55f * interior01); // stronger away from edges
+            rel = clampf(rel, -0.36f, 0.36f);
+            int reliefDz = static_cast<int>(std::lround(rel * 3.0f)); // ≈ [-1, +1]
+
+            // Stable, per-pixel micro-variation (suppressed near edges).
+            int noiseDz = 0;
+            if (dEdge > 2 * ORTH) {
+                const uint32_t hN = hashCombine(seed ^ 0xD00D1E5u, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(yImg)));
+                const float n01 = rand01(hN);
+                if (n01 < 0.06f) noiseDz = +1;
+                else if (n01 > 0.94f) noiseDz = -1;
+            }
+
+            int thickness = baseThickness + reliefDz + noiseDz;
+            thickness = std::clamp(thickness, 1, depthBudget);
+
+            // Accent-preserving albedo flattening:
+            // Flatten baked 2D lighting toward the dominant palette color, but keep
+            // details (high distance from avg) so faces/runes don't vanish.
+            const int dCol = colorDistL1(c0, avg);
+            const float accent01 = clampf((static_cast<float>(dCol) - 18.0f) / 140.0f, 0.0f, 1.0f);
+
+            const float flattenBase = 0.62f;
+            const float flatten = flattenBase * (1.0f - 0.72f * accent01);
+
+            // Treat the 2D sprite as a *front-facing texture* rather than solid volume.
+            //
+            // If we simply extrude per-pixel colors through the entire depth, dark outlines
+            // and high-contrast details turn into thick "striped" side walls. Instead, we:
+            //   - Keep the authored pixel color on a thin front "texture shell".
+            //   - Fill deeper layers with a palette-derived material color that is less
+            //     influenced by ink/outline pixels.
+            //
+            // This preserves 2D readability while making the 3D volume feel more coherent.
+            Color tex = lerp(c0, avg, flatten);
+            tex.a = 255;
+
+            // Detect likely "ink" pixels (dark, low-saturation, especially near the silhouette).
+            const float lumPix = luminance01(c0);
+            const float satPix = saturation01(c0);
+            const float neutral01 = 1.0f - satPix;
+            const float edge01 = 1.0f - interior01;
+            const float dark01 = clampf((0.32f - lumPix) / 0.32f, 0.0f, 1.0f);
+            float ink01 = dark01 * (0.55f + 0.45f * edge01) * (0.55f + 0.45f * neutral01);
+            ink01 = clampf(ink01, 0.0f, 1.0f);
+
+            // Material fill color: mostly palette primary, but allow some hue carry for non-ink accents.
+            float carry01 = (1.0f - ink01) * (0.20f + 0.65f * accent01);
+            carry01 = clampf(carry01, 0.12f, 0.90f);
+
+            Color mat = lerp(avg, tex, carry01);
+            mat.a = 255;
+            mat = mul(mat, 0.92f);
+
+            // How many layers keep the 2D "texture" before transitioning to material fill.
+            int shellFront = 1;
+            if (accent01 > 0.65f && ink01 < 0.55f) shellFront = 2;
+            if (accent01 > 0.88f && ink01 < 0.35f) shellFront = 3;
+            shellFront = std::clamp(shellFront, 1, std::max(1, thickness));
 
             const int yVox = (h - 1 - yImg); // sprite space (down) -> voxel space (up)
 
-            for (int z = 0; z < thickness; ++z) {
-                // Bevel: deeper layers shrink toward the silhouette interior.
-                const int requiredDist = z / 2; // 0,0,1,1,2,2...
-                if (dEdge < requiredDist) continue;
+            // Biconvex bevel profile in depth: cross-sections expand toward the middle slice.
+            //
+            // Instead of a purely linear bevel ramp, we use a smooth *sagitta* curve
+            // (p(u)=1-sqrt(1-u^2)) where u is normalized distance from the mid-slice.
+            // This keeps most interior slices close to the full silhouette, while still
+            // rounding the "caps" near the front/back. The distance field (in chamfer
+            // cost units) then drives a *soft* bevel: voxels near the cutoff fade their
+            // alpha rather than hard-disappearing, which improves silhouette smoothness
+            // at larger tile sizes (and reduces 1-voxel popping when yaw animates).
+            const float zMid = 0.5f * static_cast<float>(thickness - 1);
+            const float bevelSlope = 0.50f; // how quickly the silhouette shrinks per depth step
+            const float maxErode = bevelSlope * zMid * static_cast<float>(ORTH);
 
-                // Slight color variation by layer for richness.
-                float layerTint = 1.0f - 0.06f * static_cast<float>(z);
-                Color cc = mul(c, layerTint);
-                m.set(x, yVox, z, cc);
+            for (int zLocal = 0; zLocal < thickness; ++zLocal) {
+                const float zDist = std::abs(static_cast<float>(zLocal) - zMid);
+
+                float u = (zMid > 1e-6f) ? (zDist / zMid) : 0.0f;
+                u = clampf(u, 0.0f, 1.0f);
+
+                // Sagitta-based biconvex profile (convex curve in u).
+                const float profile = 1.0f - std::sqrt(std::max(0.0f, 1.0f - u * u));
+                const int requiredDist = static_cast<int>(std::lround(profile * maxErode));
+
+                // Soft bevel coverage: fade alpha when we're within ~1 pixel (ORTH)
+                // of the cutoff instead of hard-culling. Keep the very front layer
+                // fully opaque for crisp silhouette + texture readability.
+                float coverage = 1.0f;
+                if (zLocal != 0) {
+                    const int margin = requiredDist - dEdge;
+                    if (margin > 0) {
+                        coverage = 1.0f - static_cast<float>(margin) / static_cast<float>(ORTH);
+                        coverage = clampf(coverage, 0.0f, 1.0f);
+                        coverage = std::pow(coverage, 1.25f);
+                    }
+                    if (coverage <= 0.05f) continue;
+                }
+
+                // Front "texture shell" -> interior material fill blend.
+                const float shellMix = (shellFront <= 1)
+                    ? ((zLocal == 0) ? 0.0f : 1.0f)
+                    : clampf(static_cast<float>(zLocal) / static_cast<float>(shellFront), 0.0f, 1.0f);
+
+                Color base = lerp(tex, mat, shellMix);
+
+                // Depth tint: deeper layers read slightly darker, and material-filled layers
+                // darken a touch more than the texture shell.
+                float layerTint = 1.0f - (0.05f + 0.03f * shellMix) * static_cast<float>(zLocal);
+                layerTint = clampf(layerTint, 0.68f, 1.0f);
+
+                // Micro-variation to avoid perfectly flat side walls on upscaled models.
+                if (shellMix > 0.65f && zLocal > 0 && dEdge > 0) {
+                    const uint32_t hV = hash32(hashCombine(seed ^ 0x71E57A11u,
+                        static_cast<uint32_t>((x * 73856093) ^ (yImg * 19349663) ^ (zLocal * 83492791))));
+                    const float n01 = rand01(hV) * 2.0f - 1.0f;
+                    layerTint = clampf(layerTint * (1.0f + n01 * 0.025f), 0.62f, 1.0f);
+                }
+
+                Color cc = mul(base, layerTint);
+
+                // Apply the soft-bevel coverage as voxel alpha. Very low alpha voxels
+                // contribute mostly noise, so we drop them.
+                if (coverage < 0.999f) {
+                    cc.a = clamp8(static_cast<int>(std::lround(static_cast<float>(cc.a) * coverage)));
+                    if (cc.a < 12) continue;
+                }
+
+                m.set(x, yVox, zLocal, cc);
             }
         }
     }
-
-    return m;
 }
+
+return m;
+}
+
 
 VoxelModel makeModel(int w, int h, int d) {
     VoxelModel m;
@@ -1257,21 +1735,38 @@ SpritePixels renderVoxel(const VoxelModel& m, int outW, int outH, int frame, flo
         shade *= ao;
         shade = clampf(shade, 0.0f, 1.25f);
 
-        // Specular (Blinn-Phong) + rim for readability.
+        // Material-aware specular + rim: inferred from albedo/alpha.
+        const MaterialParams mat = estimateMaterial(c);
+        const float aF = static_cast<float>(c.a) / 255.0f;
+
         Vec3f h = normalize(lightDir + vv);
-        float spec = std::pow(std::max(0.0f, dot(nn, h)), shininess) * specular * shadow;
+        const float specExp = shininess * mat.shininessMul;
+        float spec = std::pow(std::max(0.0f, dot(nn, h)), specExp) * (specular * mat.specMul) * shadow;
 
         const float vdn = clampf(dot(nn, vv), 0.0f, 1.0f);
-        float rim = std::pow(1.0f - vdn, 2.2f) * rimStrength;
+        float rim = std::pow(1.0f - vdn, 2.2f) * (rimStrength * mat.rimMul);
 
         Color out = mul(c, shade);
 
-        const float boost = clampf(spec + rim, 0.0f, 0.85f);
+        float boost = clampf(spec + rim, 0.0f, 0.85f);
+        // Avoid over-boosting very translucent materials (glass/ghosts).
+        boost *= (0.30f + 0.70f * aF);
+
         if (boost > 0.0f) {
             const int addv = static_cast<int>(std::round(255.0f * boost));
             out.r = clamp8(static_cast<int>(out.r) + addv);
             out.g = clamp8(static_cast<int>(out.g) + addv);
             out.b = clamp8(static_cast<int>(out.b) + addv);
+        }
+
+        // Emissive lift for extremely bright, saturated voxels (sparks/flames/runes).
+        if (mat.emissive > 0.0f) {
+            const int er = static_cast<int>(std::round(static_cast<float>(c.r) * mat.emissive));
+            const int eg = static_cast<int>(std::round(static_cast<float>(c.g) * mat.emissive));
+            const int eb = static_cast<int>(std::round(static_cast<float>(c.b) * mat.emissive));
+            out.r = clamp8(static_cast<int>(out.r) + er);
+            out.g = clamp8(static_cast<int>(out.g) + eg);
+            out.b = clamp8(static_cast<int>(out.b) + eb);
         }
 
         return out;
@@ -1689,11 +2184,14 @@ Color shadeIsoFace(Color base, IsoFaceType t, const VoxelModel& m, int x, int y,
     Color out = mul(base, shade);
 
     // Tiny spec + rim to help 3D readability.
+    const MaterialParams mat = estimateMaterial(base);
+
     const Vec3f h = normalize(lightDir + viewDir);
-    float spec = std::pow(std::max(0.0f, dot(n, h)), shininess) * specular;
+    const float specExp = shininess * mat.shininessMul;
+    float spec = std::pow(std::max(0.0f, dot(n, h)), specExp) * (specular * mat.specMul);
 
     const float vdn = clampf(dot(n, viewDir), 0.0f, 1.0f);
-    float rim = std::pow(1.0f - vdn, 2.2f) * rimStrength;
+    float rim = std::pow(1.0f - vdn, 2.2f) * (rimStrength * mat.rimMul);
 
     float boost = clampf(spec + rim, 0.0f, 0.65f);
 
@@ -1706,6 +2204,16 @@ Color shadeIsoFace(Color base, IsoFaceType t, const VoxelModel& m, int x, int y,
         out.r = clamp8(static_cast<int>(out.r) + addv);
         out.g = clamp8(static_cast<int>(out.g) + addv);
         out.b = clamp8(static_cast<int>(out.b) + addv);
+    }
+
+    // Emissive lift for very bright, saturated voxels.
+    if (mat.emissive > 0.0f) {
+        const int er = static_cast<int>(std::round(static_cast<float>(base.r) * mat.emissive));
+        const int eg = static_cast<int>(std::round(static_cast<float>(base.g) * mat.emissive));
+        const int eb = static_cast<int>(std::round(static_cast<float>(base.b) * mat.emissive));
+        out.r = clamp8(static_cast<int>(out.r) + er);
+        out.g = clamp8(static_cast<int>(out.g) + eg);
+        out.b = clamp8(static_cast<int>(out.b) + eb);
     }
 
     return out;
@@ -2320,10 +2828,13 @@ SpritePixels renderVoxelIsometricRaytrace(const VoxelModel& m, int outW, int out
                     const float occl = (wSum > 0.0f) ? (occSum / wSum) : 0.0f;
                     const float ao = std::clamp(1.0f - occl * 0.55f, 0.45f, 1.0f);
 
+                    const MaterialParams mat = estimateMaterial(vox);
+
                     const float ndl = std::max(0.0f, dot(n, lightDir));
                     const Vec3f h = normalize(lightDir + viewDir);
                     const float ndh = std::max(0.0f, dot(n, h));
-                    const float spec = std::pow(ndh, shininess);
+                    const float specExp = shininess * mat.shininessMul;
+                    const float spec = std::pow(ndh, specExp);
                     const float rim = std::pow(1.0f - std::max(0.0f, dot(n, viewDir)), 2.0f);
 
                     // Approximate hit position at the entry boundary for this cell.
@@ -2331,12 +2842,22 @@ SpritePixels renderVoxelIsometricRaytrace(const VoxelModel& m, int outW, int out
                     const float shadow = traceShadow(hitPos, n);
 
                     float shade = (ambient + diffuse * ndl * shadow) * ao;
-                    shade += specular * spec * shadow;
-                    shade += rimStrength * rim;
+
+                    // Avoid over-bright spec/rim on translucent materials.
+                    const float aF = static_cast<float>(vox.a) / 255.0f;
+                    const float boostScale = (0.30f + 0.70f * aF);
+
+                    shade += (specular * mat.specMul) * spec * shadow * boostScale;
+                    shade += (rimStrength * mat.rimMul) * rim * boostScale;
                     shade = std::clamp(shade, 0.0f, 1.35f);
 
                     Vec3f baseC{vox.r / 255.0f, vox.g / 255.0f, vox.b / 255.0f};
                     Vec3f lit = baseC * shade;
+
+                    // Emissive lift for very bright, saturated voxels.
+                    if (mat.emissive > 0.0f) {
+                        lit = lit + baseC * mat.emissive;
+                    }
 
                     // Subtle gel lift for translucent voxels.
                     if (a < 0.98f) {
@@ -2414,7 +2935,10 @@ SpritePixels renderSprite3DExtruded(const SpritePixels& base2d, uint32_t seed, i
 
     constexpr int maxDepth = 6;
     VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
-    if (detailScale > 1) vox = scaleVoxelModelNearest(vox, detailScale);
+    if (detailScale > 1) {
+        vox = scaleVoxelModelNearest(vox, detailScale);
+        applyVoxelSurfaceChamfer(vox, seed ^ 0x51EAA11u, 1.0f);
+    }
 
     const int hiW = (outPx <= 32) ? outPx * 2 : outPx;
     const int hiH = hiW;
@@ -2431,7 +2955,10 @@ SpritePixels renderSprite3DEntity(EntityKind kind, const SpritePixels& base2d, u
     const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
     VoxelModel m = buildEntityModel(kind, seed, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
-        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
+        if (detailScale > 1) {
+            m = scaleVoxelModelNearest(m, detailScale);
+            applyVoxelSurfaceChamfer(m, seed ^ 0x51EAA11u, 1.0f);
+        }
         return renderModelToSprite(m, frame, /*yawScale=*/0.65f, outPx);
     }
     return renderSprite3DExtruded(base2d, seed, frame, outPx);
@@ -2441,7 +2968,10 @@ SpritePixels renderSprite3DItem(ItemKind kind, const SpritePixels& base2d, uint3
     const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
     VoxelModel m = buildItemModel(kind, seed, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
-        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
+        if (detailScale > 1) {
+            m = scaleVoxelModelNearest(m, detailScale);
+            applyVoxelSurfaceChamfer(m, seed ^ 0x51EAA11u, 1.0f);
+        }
         return renderModelToSprite(m, frame, /*yawScale=*/0.95f, outPx);
     }
     return renderSprite3DExtruded(base2d, seed, frame, outPx);
@@ -2452,7 +2982,11 @@ SpritePixels renderSprite3DProjectile(ProjectileKind kind, const SpritePixels& b
     const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
     VoxelModel m = buildProjectileModel(kind, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
-        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
+        if (detailScale > 1) {
+            m = scaleVoxelModelNearest(m, detailScale);
+            const uint32_t chamferSeed = hashCombine(static_cast<uint32_t>(kind), hashCombine(static_cast<uint32_t>(frame), 0x51EAA11u));
+            applyVoxelSurfaceChamfer(m, chamferSeed, 1.0f);
+        }
         return renderModelToSprite(m, frame, /*yawScale=*/1.35f, outPx);
     }
     return renderSprite3DExtruded(base2d, seed, frame, outPx);
@@ -2466,7 +3000,10 @@ SpritePixels renderSprite3DExtrudedTurntable(const SpritePixels& base2d, uint32_
 
     constexpr int maxDepth = 6;
     VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
-    if (detailScale > 1) vox = scaleVoxelModelNearest(vox, detailScale);
+    if (detailScale > 1) {
+        vox = scaleVoxelModelNearest(vox, detailScale);
+        applyVoxelSurfaceChamfer(vox, seed ^ 0x51EAA11u, 1.0f);
+    }
 
     return renderModelToSpriteTurntable(vox, frame, yawRad, outPx);
 }
@@ -2476,7 +3013,10 @@ SpritePixels renderSprite3DEntityTurntable(EntityKind kind, const SpritePixels& 
     const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
     VoxelModel m = buildEntityModel(kind, seed, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
-        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
+        if (detailScale > 1) {
+            m = scaleVoxelModelNearest(m, detailScale);
+            applyVoxelSurfaceChamfer(m, seed ^ 0x51EAA11u, 1.0f);
+        }
         return renderModelToSpriteTurntable(m, frame, yawRad, outPx);
     }
 
@@ -2485,7 +3025,10 @@ SpritePixels renderSprite3DEntityTurntable(EntityKind kind, const SpritePixels& 
     const int d = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
     constexpr int maxDepth = 6;
     VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
-    if (d > 1) vox = scaleVoxelModelNearest(vox, d);
+    if (d > 1) {
+        vox = scaleVoxelModelNearest(vox, d);
+        applyVoxelSurfaceChamfer(vox, seed ^ 0x51EAA11u, 1.0f);
+    }
     return renderModelToSpriteTurntable(vox, frame, yawRad, outPx);
 }
 
@@ -2493,7 +3036,10 @@ SpritePixels renderSprite3DItemTurntable(ItemKind kind, const SpritePixels& base
     const int detailScale = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
     VoxelModel m = buildItemModel(kind, seed, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
-        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
+        if (detailScale > 1) {
+            m = scaleVoxelModelNearest(m, detailScale);
+            applyVoxelSurfaceChamfer(m, seed ^ 0x51EAA11u, 1.0f);
+        }
         return renderModelToSpriteTurntable(m, frame, yawRad, outPx);
     }
 
@@ -2502,7 +3048,10 @@ SpritePixels renderSprite3DItemTurntable(ItemKind kind, const SpritePixels& base
     const int d = voxelDetailScaleForOutPx(outPx, /*isoRaytrace=*/false);
     constexpr int maxDepth = 6;
     VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
-    if (d > 1) vox = scaleVoxelModelNearest(vox, d);
+    if (d > 1) {
+        vox = scaleVoxelModelNearest(vox, d);
+        applyVoxelSurfaceChamfer(vox, seed ^ 0x51EAA11u, 1.0f);
+    }
     return renderModelToSpriteTurntable(vox, frame, yawRad, outPx);
 }
 
@@ -2514,7 +3063,10 @@ SpritePixels renderSprite3DExtrudedIso(const SpritePixels& base2d, uint32_t seed
 
     constexpr int maxDepth = 6;
     VoxelModel vox = voxelizeExtrude(base2d, seed, maxDepth);
-    if (detailScale > 1) vox = scaleVoxelModelNearest(vox, detailScale);
+    if (detailScale > 1) {
+        vox = scaleVoxelModelNearest(vox, detailScale);
+        applyVoxelSurfaceChamfer(vox, seed ^ 0x51EAA11u, 1.0f);
+    }
 
     return renderModelToSpriteIsometric(vox, frame, outPx, isoRaytrace);
 }
@@ -2523,7 +3075,10 @@ SpritePixels renderSprite3DEntityIso(EntityKind kind, const SpritePixels& base2d
     const int detailScale = voxelDetailScaleForOutPx(outPx, isoRaytrace);
     VoxelModel m = buildEntityModel(kind, seed, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
-        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
+        if (detailScale > 1) {
+            m = scaleVoxelModelNearest(m, detailScale);
+            applyVoxelSurfaceChamfer(m, seed ^ 0x51EAA11u, 1.0f);
+        }
         return renderModelToSpriteIsometric(m, frame, outPx, isoRaytrace);
     }
     return renderSprite3DExtrudedIso(base2d, seed, frame, outPx, isoRaytrace);
@@ -2533,7 +3088,10 @@ SpritePixels renderSprite3DItemIso(ItemKind kind, const SpritePixels& base2d, ui
     const int detailScale = voxelDetailScaleForOutPx(outPx, isoRaytrace);
     VoxelModel m = buildItemModel(kind, seed, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
-        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
+        if (detailScale > 1) {
+            m = scaleVoxelModelNearest(m, detailScale);
+            applyVoxelSurfaceChamfer(m, seed ^ 0x51EAA11u, 1.0f);
+        }
         return renderModelToSpriteIsometric(m, frame, outPx, isoRaytrace);
     }
     return renderSprite3DExtrudedIso(base2d, seed, frame, outPx, isoRaytrace);
@@ -2544,7 +3102,11 @@ SpritePixels renderSprite3DProjectileIso(ProjectileKind kind, const SpritePixels
     const int detailScale = voxelDetailScaleForOutPx(outPx, isoRaytrace);
     VoxelModel m = buildProjectileModel(kind, frame, base2d);
     if (m.w > 0 && m.h > 0 && m.d > 0) {
-        if (detailScale > 1) m = scaleVoxelModelNearest(m, detailScale);
+        if (detailScale > 1) {
+            m = scaleVoxelModelNearest(m, detailScale);
+            const uint32_t chamferSeed = hashCombine(static_cast<uint32_t>(kind), hashCombine(static_cast<uint32_t>(frame), 0x51EAA11u));
+            applyVoxelSurfaceChamfer(m, chamferSeed, 1.0f);
+        }
         return renderModelToSpriteIsometric(m, frame, outPx, isoRaytrace);
     }
     return renderSprite3DExtrudedIso(base2d, seed, frame, outPx, isoRaytrace);

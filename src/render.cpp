@@ -8037,7 +8037,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			const auto p = artifactgen::artifactPower(it);
 			const int lvl = artifactgen::powerLevel(it);
 			std::ostringstream ss;
-			ss << "EFFECT: ARTIFACT " << artifactgen::artifactPowerTag(p);
+				ss << "EFFECT: ARTIFACT " << artifactgen::powerTag(p);
 			if (lvl > 0) ss << " (LVL " << lvl << ")";
 			const char* shortDesc = artifactgen::powerShortDesc(p);
 			if (shortDesc && shortDesc[0]) ss << ": " << shortDesc;
@@ -8327,6 +8327,98 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             iy += 18;
         };
 
+			auto statWrap = [&](const std::string& s, const Color& c, int maxLines = 3) {
+				const auto lines = wrapToChars(s, 32, maxLines);
+				for (const auto& ln : lines) {
+					statLine(ln, c);
+				}
+			};
+
+			// Surface special properties that are otherwise easy to miss.
+			// (Ego weapons + procedural artifact powers.)
+			auto drawEgoInfo = [&](const Item& it2) {
+				if (it2.ego == ItemEgo::None) return;
+				const char* pre = egoPrefix(it2.ego);
+				if (!pre || pre[0] == '\0') return;
+
+				std::ostringstream ss;
+				ss << "EGO: " << pre;
+				const char* desc = egoShortDesc(it2.ego);
+				if (desc && desc[0]) ss << " — " << desc;
+				statWrap(ss.str(), gray, 2);
+			};
+
+			auto drawArtifactInfo = [&](const Item& it2) {
+				if (!itemIsArtifact(it2) || !isWearableGear(it2.kind)) return;
+				using AP = artifactgen::Power;
+				const AP p = artifactgen::artifactPower(it2);
+				const int lvl = artifactgen::powerLevel(it2);
+
+				std::ostringstream header;
+				header << "ARTIFACT: " << artifactgen::powerTag(p);
+				if (lvl > 0) header << " (LVL " << lvl << ")";
+				else header << " (DORMANT)";
+				statLine(header.str(), yellow);
+
+				if (lvl <= 0) {
+					statLine("INERT: ENCHANT/UNCURSE", gray);
+					return;
+				}
+
+				int bonus = 0;
+				const char* stat = nullptr;
+				const char* proc = nullptr;
+
+				switch (p) {
+					case AP::Flame:
+						bonus = artifactgen::passiveBonusMight(it2);
+						stat = "MIGHT";
+						proc = "BURN";
+						break;
+					case AP::Venom:
+						bonus = artifactgen::passiveBonusAgility(it2);
+						stat = "AGI";
+						proc = "POISON";
+						break;
+					case AP::Daze:
+						bonus = artifactgen::passiveBonusFocus(it2);
+						stat = "FOCUS";
+						proc = "DAZE";
+						break;
+					case AP::Ward:
+						bonus = artifactgen::passiveBonusDefense(it2);
+						stat = "DEF";
+						proc = "WARD";
+						break;
+					case AP::Vitality:
+						bonus = artifactgen::passiveBonusVigor(it2);
+						stat = "VIG";
+						proc = "VITALITY";
+						break;
+					default:
+						break;
+				}
+
+				std::ostringstream meta;
+				bool any = false;
+				if (stat && bonus != 0) {
+					meta << "PASSIVE: +" << stat << " " << bonus;
+					any = true;
+				}
+				if (proc && proc[0]) {
+					if (any) meta << " | ";
+					meta << "PROC: " << proc;
+					any = true;
+				}
+
+				if (any) {
+					statWrap(meta.str(), gray, 2);
+				} else {
+					const char* shortDesc = artifactgen::powerShortDesc(p);
+					if (shortDesc && shortDesc[0]) statWrap(shortDesc, gray, 2);
+				}
+			};
+
         // Crafting preview (when crafting mode is active)
         if (invCraft) {
             statLine("CRAFTING", yellow);
@@ -8397,6 +8489,8 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			newAtk += cand;
 
 			statCompare("ATK", curAtk, newAtk);
+				drawEgoInfo(it);
+				drawArtifactInfo(it);
 		} else if (isArmor(it.kind)) {
 			statLine("TYPE: ARMOR", white);
 			const int cand = def.defense + it.enchant + bucScalar(it);
@@ -8412,6 +8506,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			if (shieldBonus > 0) {
 				statLine("(INCLUDES SHIELD +2)", gray);
 			}
+				drawArtifactInfo(it);
 		} else if (isWand) {
 			statLine(identifiable ? "TYPE: WAND (IDENTIFIABLE)" : "TYPE: WAND", white);
 
@@ -8444,6 +8539,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 					statLine("IDENTIFIED: YES", gray);
 				}
 			}
+				drawArtifactInfo(it);
 		} else if (isRangedWeapon(it.kind)) {
 			statLine("TYPE: RANGED WEAPON", white);
 			const int thisRAtk = std::max(1, baseAtk + def.rangedAtk + it.enchant + bucScalar(it));
@@ -8463,6 +8559,8 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 			const bool ammoOk = (def.ammo == AmmoKind::None) || (ammoCount(inv, def.ammo) > 0);
 			const bool ready = (def.range > 0) && chargesOk && ammoOk;
 			statLine(std::string("READY: ") + (ready ? "YES" : "NO"), gray);
+				drawEgoInfo(it);
+				drawArtifactInfo(it);
 		} else if (isRingKind(it.kind)) {
 			statLine(identifiable ? "TYPE: RING (IDENTIFIABLE)" : "TYPE: RING", white);
 
@@ -8491,6 +8589,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 					statLine("IDENTIFIED: YES", gray);
 				}
 			}
+				drawArtifactInfo(it);
 		} else if (def.consumable) {
 			statLine(identifiable ? "TYPE: CONSUMABLE (IDENTIFIABLE)" : "TYPE: CONSUMABLE", white);
 			statLine(itemEffectDesc(it, identified), gray);
@@ -8513,6 +8612,76 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 		statLine("A: " + game.equippedArmorName(), gray);
 		statLine("1: " + game.equippedRing1Name(), gray);
 		statLine("2: " + game.equippedRing2Name(), gray);
+
+			// Loadout trait summary: ego + artifact procs at a glance.
+			{
+				std::vector<std::string> traits;
+				traits.reserve(8);
+
+				auto addTrait = [&](const char* t) {
+					if (!t || !t[0]) return;
+					const std::string s(t);
+					if (std::find(traits.begin(), traits.end(), s) == traits.end()) {
+						traits.push_back(s);
+					}
+				};
+
+				auto addArtifactTrait = [&](const Item& it2) {
+					if (!itemIsArtifact(it2) || !isWearableGear(it2.kind)) return;
+					using AP = artifactgen::Power;
+					const AP p = artifactgen::artifactPower(it2);
+					switch (p) {
+						case AP::Flame:    addTrait("BURN"); break;
+						case AP::Venom:    addTrait("POISON"); break;
+						case AP::Daze:     addTrait("DAZE"); break;
+						case AP::Ward:     addTrait("WARD"); break;
+						case AP::Vitality: addTrait("VITALITY"); break;
+						default: break;
+					}
+				};
+
+				auto addFromItem = [&](const Item* pit) {
+					if (!pit) return;
+					addTrait(egoTraitTag(pit->ego));
+					addArtifactTrait(*pit);
+				};
+
+				addFromItem(eqM);
+				addFromItem(eqR);
+				addFromItem(eqA);
+				addFromItem(game.equippedRing1());
+				addFromItem(game.equippedRing2());
+
+				if (traits.empty()) {
+					statLine("TRAITS: —", gray);
+				} else {
+					auto order = [&](const std::string& t) -> int {
+						if (t == "BURN") return 0;
+						if (t == "POISON") return 1;
+						if (t == "DAZE") return 2;
+						if (t == "WEB") return 3;
+						if (t == "CORRODE") return 4;
+						if (t == "LIFE DRAIN") return 5;
+						if (t == "WARD") return 6;
+						if (t == "VITALITY") return 7;
+						return 100;
+					};
+
+					std::sort(traits.begin(), traits.end(), [&](const std::string& a, const std::string& b) {
+						const int oa = order(a);
+						const int ob = order(b);
+						if (oa != ob) return oa < ob;
+						return a < b;
+					});
+
+					std::ostringstream ss;
+					for (size_t i = 0; i < traits.size(); ++i) {
+						if (i) ss << ", ";
+						ss << traits[i];
+					}
+					statWrap("TRAITS: " + ss.str(), gray, 2);
+				}
+			}
     }
 }
 

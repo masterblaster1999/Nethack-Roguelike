@@ -243,6 +243,33 @@ inline const char* egoPrefix(ItemEgo e) {
     }
 }
 
+// Short UI-friendly description of an ego's primary effect.
+inline const char* egoShortDesc(ItemEgo e) {
+    switch (e) {
+        case ItemEgo::Flaming:   return "BURN ON HIT";
+        case ItemEgo::Venom:     return "POISON ON HIT";
+        case ItemEgo::Vampiric:  return "LIFE DRAIN";
+        case ItemEgo::Webbing:   return "WEB ON HIT";
+        case ItemEgo::Corrosive: return "CORRODE ON HIT";
+        case ItemEgo::Dazing:    return "DAZE ON HIT";
+        default:                 return "";
+    }
+}
+
+// Compact "trait tag" used in loadout summaries / UI badges.
+// These are intentionally short, upper-case keywords.
+inline const char* egoTraitTag(ItemEgo e) {
+    switch (e) {
+        case ItemEgo::Flaming:   return "BURN";
+        case ItemEgo::Venom:     return "POISON";
+        case ItemEgo::Vampiric:  return "LIFE DRAIN";
+        case ItemEgo::Webbing:   return "WEB";
+        case ItemEgo::Corrosive: return "CORRODE";
+        case ItemEgo::Dazing:    return "DAZE";
+        default:                 return "";
+    }
+}
+
 // A rough shop/value multiplier for ego gear.
 // Returned as a percentage (100 = no change).
 inline int egoValueMultiplierPct(ItemEgo e) {

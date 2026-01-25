@@ -36,6 +36,7 @@
 - **Monster torches**: on dark floors, some humanoid monsters can spawn with torches and will sometimes **light them** when alerted but unable to see you, creating **moving light sources** that interact with darkness stealth. Lit torches flicker visually, burn down over time, and drop as loot.
 - **Procedural artifact powers**: artifacts now have real, deterministic power effects (FLAME/VENOM/DAZE/WARD/VITALITY). Power tags grant small passive bonuses while equipped and can trigger lightweight combat procs (burn, poison, confusion, shimmering wards, life surge regen).
   - Natural healing now respects **total Vigor** (base + ring + artifact bonuses), so Vitality-themed gear has an immediate impact beyond level-up math.
+- **Inventory trait tooltips**: inventory preview now surfaces **EGO** and **ARTIFACT** proc/passive lines for gear, and adds a compact **TRAITS** summary line for your equipped loadout.
 - **Parry + Riposte stance**: New Parry action (default **Shift+P**) that grants a brief defensive stance (+AC). If an enemy misses you in melee while parrying, you can instantly **riposte**; the first turn is a **perfect parry** window that also staggers attackers (confusion).
 - **Confused melee swings**: Confusion now also scrambles **melee attacks** for monsters and companions (biased toward the intended target), enabling wild whiffs and occasional accidental **friendly fire / infighting** when multiple creatures are adjacent.
 - **Kick-rolled boulders**: You can now **kick boulders to set them rolling**, crushing anything in their path. Rolling-boulder traps and kicked boulders share a unified boulder-roll simulator with momentum-based damage falloff.
@@ -399,6 +400,7 @@
 
 ### Fixed
 - Fixed a proc-spell Shadow invisibility duration bug (typo: `invisibilityTurns` -> `invisTurns`).
+- Fixed MSVC build break in the inventory renderer: artifact effect tag now calls `artifactgen::powerTag(...)` (correct signature).
 - Forced movement now recomputes FOV immediately (knockback, door-smash, and forced pulls), preventing stale vision after being shoved around.
 - Rune Tablet targeting now matches display-name generation for legacy tablets (spriteSeed=0), ensuring the spell you see is the spell you cast.
 - Magic shop item table thresholds are now fully reachable within the 0..99 roll (previously some high-end outcomes were unreachable).

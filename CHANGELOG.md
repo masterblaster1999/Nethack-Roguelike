@@ -496,6 +496,12 @@
 
 
 
+- Fixed MSVC build errors in inventory/butchering: use `Effects.confusionTurns`/`hallucinationTurns`, remove stale `Item.ownerId`, and respect `equippedMelee()` constness.
+- Added `FXParticlePreset::EmberBurst` (renderer + preset name) and wired it to EMBER-tagged meat burn FX for a punchier fire burst.
+- Fixed MSVC build break in artifact crafting preview by adding `artifactgen::powerDesc(...)` (long-form tooltip text).
+- Added `Room::contains(Vec2i)` overload so interaction code can pass positions directly (and fixed a minor overworld lambda shadowing warning).
+- Crafting outcomes now store essence tag pairs in a canonical (order-independent) order, matching recipe hashing and restoring determinism tests.
+
 
 ## [0.20.6] - 2025-12-27
 

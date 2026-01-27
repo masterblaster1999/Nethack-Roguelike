@@ -74,6 +74,19 @@ inline const char* powerShortDesc(Power p) {
     }
 }
 
+inline const char* powerDesc(Power p) {
+    // Slightly longer (still UI-friendly) description used by crafting / inspect panes.
+    // Keep this stable: it appears in saved recipes and player-facing logs/screenshots.
+    switch (p) {
+        case Power::Flame:    return "IGNITES FOES ON HIT. PASSIVE: +MIGHT.";
+        case Power::Venom:    return "POISONS FOES ON HIT. PASSIVE: +AGILITY.";
+        case Power::Daze:     return "CONFUSES FOES ON HIT. PASSIVE: +FOCUS.";
+        case Power::Ward:     return "OCCASIONALLY SHIELDS YOU. PASSIVE: +DEFENSE.";
+        case Power::Vitality: return "LIFE SURGES ON STRIKES. PASSIVE: +VIGOR.";
+        default:              return "";
+    }
+}
+
 // Artifact power level (0..4). Level 0 means the artifact is currently inert
 // (typically due to strong curses/negative enchant).
 inline int powerLevel(const Item& it) {

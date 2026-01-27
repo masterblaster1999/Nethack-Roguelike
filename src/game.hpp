@@ -1052,6 +1052,7 @@ enum class FXParticlePreset : uint8_t {
     Poison,
     Dig,
     Detect,
+    EmberBurst,
 };
 
 inline const char* fxParticlePresetName(FXParticlePreset p) {
@@ -1063,6 +1064,7 @@ inline const char* fxParticlePresetName(FXParticlePreset p) {
         case FXParticlePreset::Poison:       return "poison";
         case FXParticlePreset::Dig:          return "dig";
         case FXParticlePreset::Detect:       return "detect";
+        case FXParticlePreset::EmberBurst:   return "ember_burst";
         default:                             return "unknown";
     }
 }

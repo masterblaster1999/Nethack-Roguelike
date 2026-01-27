@@ -1,10 +1,10 @@
 {
-  "patch_id": "round178_patch",
-  "previous_patch_id": "round177_patch",
-  "round": 178,
-  "round_number": 178,
-  "created_utc": "2026-01-27T08:27:31Z",
-  "summary": "Improve overworld chunk generation performance by caching per-tile elevation/moisture/variance noise fields (avoids recomputing multi-octave FBM across terrain passes).",
+  "patch_id": "round179_patch",
+  "previous_patch_id": "round178_patch",
+  "round": 179,
+  "round_number": 179,
+  "created_utc": "2026-01-27T09:16:47Z",
+  "summary": "Fix MSVC build breaks (effects fields, artifact crafting preview, Room::contains Vec2i), add EmberBurst particle FX, and canonicalize crafting tags for determinism.",
   "files_in_patch_zip": [
     "CHANGELOG.md",
     "PATCH_MANIFEST.json",
@@ -96,23 +96,30 @@
     "tests/test_main.cpp"
   ],
   "changed_or_added_this_round": [
-    "src/overworld.hpp",
+    "src/game_inventory.cpp",
+    "src/game.hpp",
+    "src/render.cpp",
+    "src/artifact_gen.hpp",
+    "src/dungeon.hpp",
+    "src/crafting_gen.hpp",
     "src/game.cpp",
-    "tests/test_main.cpp",
-    "docs/PROCGEN_OVERWORLD_GATES.md",
+    "src/overworld.hpp",
     "CHANGELOG.md",
-    "PATCH_MANIFEST.json"
+    "PATCH_MANIFEST.json",
+    "tests/test_main.cpp"
   ],
   "key_features": [
-    "Boundary-shared overworld gate offsets (V/H boundaries hashed from run seed + boundary coords).",
-    "Home-camp-adjacent boundaries pinned to mid-edge to preserve camp layout while keeping neighbors aligned.",
-    "Travel arrival uses destination gate positions (so cross-chunk roads stay aligned).",
-    "New unit test: overworld gate alignment + carving integration checks."
+    "New FX particle preset: EmberBurst (fiery burst visuals for EMBER/burn procs).",
+    "Artifact crafting preview now supports long-form power descriptions via artifactgen::powerDesc().",
+    "Room::contains now accepts Vec2i directly (fixes interaction call sites).",
+    "Crafting Outcome tag pairs are now canonicalized so A+B == B+A (restores determinism expectations).",
+    "MSVC compile fixes in inventory/butchering code paths (Effects fields, const correctness, stale members)."
   ],
   "notes": [
-    "API change: overworld::ensureBorderGates now takes (runSeed, chunkX, chunkY).",
-    "API change: overworld::gatePositions now takes (runSeed, chunkX, chunkY).",
-    "If you have any external code that called ensureBorderGates/gatePositions directly, update call sites accordingly."
+    "No save format changes.",
+    "Minor API addition: Room::contains(Vec2i) overload.",
+    "Crafting outcomes now store tagA/tagB in canonical order (previously preserved input order).",
+    "Minor cleanup: removed an unused local in an overworld determinism unit test (quiets -Wunused-but-set-variable)."
   ],
   "parent_patch_id": "round176_patch",
   "changed_files": [

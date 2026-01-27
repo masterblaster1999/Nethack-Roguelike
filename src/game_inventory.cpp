@@ -1919,7 +1919,7 @@ bool Game::butcherSelected() {
         return false;
     }
 
-    Item* tool = equippedMelee();
+    const Item* tool = equippedMelee();
     if (!tool || !canButcherWith(tool->kind)) {
         pushMsg("YOU NEED A SHARP TOOL EQUIPPED TO BUTCHER.", MessageKind::Bad);
         return false;
@@ -1970,8 +1970,7 @@ bool Game::butcherSelected() {
         out.id = nextItemId++;
         out.shopPrice = 0;
         out.shopDepth = 0;
-        out.ownerId = 0;
-
+        
         if (!tryStackItem(inv, out)) {
             if (static_cast<int>(inv.size()) < maxInv) {
                 inv.push_back(out);
@@ -2039,7 +2038,7 @@ bool Game::butcherSelected() {
 }
 
 bool Game::butcherAtFeetOrPrompt() {
-    Item* tool = equippedMelee();
+    const Item* tool = equippedMelee();
     if (!tool || !canButcherWith(tool->kind)) {
         pushMsg("YOU NEED A SHARP TOOL EQUIPPED TO BUTCHER.", MessageKind::Bad);
         return false;
@@ -2099,8 +2098,7 @@ bool Game::butcherAtFeetOrPrompt() {
             out.id = nextItemId++;
             out.shopPrice = 0;
             out.shopDepth = 0;
-            out.ownerId = 0;
-            if (!tryStackItem(inv, out)) {
+                        if (!tryStackItem(inv, out)) {
                 if (static_cast<int>(inv.size()) < maxInv) {
                     inv.push_back(out);
                 } else {
@@ -3392,9 +3390,9 @@ bool Game::useSelected() {
                 pushMsg("YOUR VISION SHARPENS.", MessageKind::Loot, true);
                 recomputeFov();
             } else if (t == "CLARITY") {
-                if (p.effects.confuseTurns > 0 || p.effects.halluTurns > 0) {
-                    p.effects.confuseTurns = 0;
-                    p.effects.halluTurns = 0;
+                if (p.effects.confusionTurns > 0 || p.effects.hallucinationTurns > 0) {
+                    p.effects.confusionTurns = 0;
+                    p.effects.hallucinationTurns = 0;
                     pushMsg("YOUR MIND CLEARS.", MessageKind::Loot, true);
                 } else {
                     pushMsg("YOU FEEL A LITTLE MORE FOCUSED.", MessageKind::Loot, true);

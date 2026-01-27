@@ -217,6 +217,8 @@ struct Room {
     bool contains(int px, int py) const {
         return px >= x && px < x2() && py >= y && py < y2();
     }
+
+    bool contains(Vec2i p) const { return contains(p.x, p.y); }
 };
 
 // Generation-only item spawn requests. These are set by the dungeon generator

@@ -2708,6 +2708,7 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
                 case FXParticlePreset::Poison:       baseRate = 110.0f; break;
                 case FXParticlePreset::Dig:          baseRate = 150.0f; break;
                 case FXParticlePreset::Detect:       baseRate = 120.0f; break;
+                case FXParticlePreset::EmberBurst:   baseRate = 260.0f; break;
                 default: break;
             }
 
@@ -2905,6 +2906,38 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
                         p.drag = 1.35f;
                         break;
                     }
+                    case FXParticlePreset::EmberBurst: {
+                        // A hot, aggressive burst (used for burning/EMBER procs).
+                        // Mostly embers with a few sharp sparks.
+                        const bool ember = (rand01(s) < 0.70f);
+                        if (ember) {
+                            p.kind = ParticleEngine::Kind::Ember;
+                            p.var = static_cast<uint8_t>(static_cast<int>(
+                                randRange(s, 0.0f, static_cast<float>(ParticleEngine::EMBER_VARS))));
+                            p.c0 = Color{255, 215, 120, 215};
+                            p.c1 = Color{255, 80, 25, 0};
+                            p.life = randRange(s, 0.16f, 0.42f);
+                            p.size0 = randRange(s, 0.05f, 0.12f);
+                            p.size1 = p.size0 * 0.55f;
+                            p.vz = randRange(s, 1.4f, 3.4f);
+                            p.az = -9.0f;
+                            p.drag = 1.45f;
+                        } else {
+                            p.kind = ParticleEngine::Kind::Spark;
+                            p.var = static_cast<uint8_t>(static_cast<int>(
+                                randRange(s, 0.0f, static_cast<float>(ParticleEngine::SPARK_VARS))));
+                            p.c0 = Color{255, 240, 180, 220};
+                            p.c1 = Color{255, 120, 40, 0};
+                            p.life = randRange(s, 0.10f, 0.28f);
+                            p.size0 = randRange(s, 0.05f, 0.11f);
+                            p.size1 = p.size0 * 0.55f;
+                            p.vz = randRange(s, 1.0f, 2.9f);
+                            p.az = -8.0f;
+                            p.drag = 1.40f;
+                        }
+                        break;
+                    }
+
 
                     default:
                         break;

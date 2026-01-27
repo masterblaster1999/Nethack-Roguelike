@@ -1193,7 +1193,7 @@ inline void generateWildernessChunk(Dungeon& d, uint32_t runSeed, int chunkX, in
             const int rw = stationRng.range(7, 11);
             const int rh = stationRng.range(6, 9);
 
-            auto farFromGates = [&](Vec2i c) {
+            auto farFromChunkGates = [&](Vec2i c) {
                 const int minD = 10;
                 auto md = [&](Vec2i a, Vec2i b) { return std::abs(a.x - b.x) + std::abs(a.y - b.y); };
                 if (md(c, gates.north) < minD) return false;
@@ -1222,7 +1222,7 @@ inline void generateWildernessChunk(Dungeon& d, uint32_t runSeed, int chunkX, in
                 c.x = std::clamp(c.x, 3 + rw / 2, d.width - 4 - rw / 2);
                 c.y = std::clamp(c.y, 3 + rh / 2, d.height - 4 - rh / 2);
 
-                if (!farFromGates(c)) continue;
+                if (!farFromChunkGates(c)) continue;
 
                 const int x0 = c.x - rw / 2;
                 const int y0 = c.y - rh / 2;

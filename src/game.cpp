@@ -4677,7 +4677,7 @@ int countButcherTrophiesMatching(const std::vector<Item>& inv, ItemKind kind, in
         if (it.count <= 0) continue;
         if (it.kind != kind) continue;
 
-        const uint8_t q = butcherMaterialQualityFromEnchant(it.enchant);
+        const uint8_t q = static_cast<uint8_t>(butcherMaterialQualityFromEnchant(it.enchant));
         const int tier = butcherQualityTierFromQuality(q);
         if (tier < minQualityTier) continue;
 

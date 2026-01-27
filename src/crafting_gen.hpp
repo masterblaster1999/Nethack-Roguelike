@@ -775,8 +775,6 @@ inline Outcome craft(uint32_t runSeed, const Item& a0, const Item& b0) {
     const Essence eb = essenceFor(b0);
 
     Outcome o;
-    o.tagA = ea.tag;
-    o.tagB = eb.tag;
 
     // Combine tiers; shiny ingredients slightly bias up.
     int t = (ea.tier + eb.tier + 1) / 2;
@@ -791,6 +789,9 @@ inline Outcome craft(uint32_t runSeed, const Item& a0, const Item& b0) {
     const bool swap = (ea.tag > eb.tag) || (ea.tag == eb.tag && ingredientFingerprint(a0) > ingredientFingerprint(b0));
     const std::string lo = swap ? eb.tag : ea.tag;
     const std::string hi = swap ? ea.tag : eb.tag;
+
+    o.tagA = lo;
+    o.tagB = hi;
 
     // Decide whether this is a consumable craft or a forge.
     const bool forgeMode = isWearableGear(a0.kind) || isWearableGear(b0.kind) || isGearMaterialKind(a0.kind) || isGearMaterialKind(b0.kind);

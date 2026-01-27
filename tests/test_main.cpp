@@ -956,8 +956,6 @@ bool test_overworld_chunk_determinism() {
 
     const int cx = 7;
     const int cy = -3;
-    const auto prof = overworld::profileFor(seed, cx, cy, /*maxDepth=*/25);
-
     overworld::generateWildernessChunk(a, seed, cx, cy);
     overworld::generateWildernessChunk(b, seed, cx, cy);
 

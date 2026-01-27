@@ -3651,10 +3651,14 @@ case ItemKind::Arrow: {
 
                 break;
             }
-	            if (kind == ItemKind::EssenceShard) {
-	                const int tagId = essenceShardTagFromEnchant(it.enchant);
-	                const int tier = essenceShardTierFromEnchant(it.enchant);
-	                const bool shiny = essenceShardIsShinyFromEnchant(it.enchant);
+		            if (kind == ItemKind::EssenceShard) {
+		                // Essence shard metadata is packed into the low bits of the sprite seed.
+		                // bits 0..4: craft tag id (0..31)
+		                // bits 5..8: tier (0..15)
+		                // bit 9:     shiny flag
+		                const int tagId = static_cast<int>(seed & 0x1Fu);
+		                const int tier  = static_cast<int>((seed >> 5) & 0xFu);
+		                const bool shiny = ((seed >> 9) & 0x1u) != 0u;
 
 	                const crafttags::Tag tg = crafttags::tagFromIndex(tagId);
 	                Color base = {200, 200, 200, 255};

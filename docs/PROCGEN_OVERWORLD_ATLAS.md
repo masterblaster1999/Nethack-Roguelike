@@ -34,9 +34,9 @@ Each chunk is rendered as **two characters**:
   - `S` Swamp
   - `D` Desert
   - `T` Tundra
-  - `H` Hills
+	  - `H` Highlands
   - `B` Badlands
-  - `C` Crystal
+	  - `C` Coast
 
 - Second character: **marker**
   - `@` your current chunk

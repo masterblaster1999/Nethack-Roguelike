@@ -3434,6 +3434,26 @@ namespace {
         if (!isIdentifiableKind(it.kind)) return;
         it.spriteSeed = identAppearanceSpriteSeed(game, it.kind);
     }
+
+	// Some items pack gameplay-relevant metadata in fields other than spriteSeed
+	// (e.g., Item::enchant). For those, we derive a stable per-item *visual* seed
+	// for procedural sprite generation by embedding the metadata into the seed.
+	//
+	// This keeps the sprite cache key consistent with the art output and avoids
+	// sprites that don't match the item's UI/name.
+	inline uint32_t itemVisualSpriteSeed(const Item& it) {
+		uint32_t seed = it.spriteSeed;
+		if (it.kind == ItemKind::EssenceShard) {
+			const uint32_t tagId = static_cast<uint32_t>(essenceShardTagFromEnchant(it.enchant) & 0x1F);
+			const uint32_t tier  = static_cast<uint32_t>(essenceShardTierFromEnchant(it.enchant) & 0xF);
+			const uint32_t shiny = essenceShardIsShinyFromEnchant(it.enchant) ? 1u : 0u;
+			// Encode shard metadata into low bits so spritegen can color/animate properly.
+			// bits 0..4: tagId, bits 5..8: tier, bit 9: shiny.
+			const uint32_t packed = tagId | (tier << 5) | (shiny << 9) | (1u << 10);
+			seed = (seed & 0xFFFFF800u) | (packed & 0x7FFu);
+		}
+		return seed;
+	}
 }
 
 SDL_Texture* Renderer::entityTexture(const Entity& e, int frame) {
@@ -3471,15 +3491,16 @@ SDL_Texture* Renderer::itemTexture(const Item& it, int frame) {
     const uint16_t flags = (voxelSpritesCached && viewMode_ == ViewMode::Isometric)
         ? static_cast<uint16_t>(1u | (isoVoxelRaytraceCached ? 2u : 0u))
         : 0u;
-    const uint64_t key = makeSpriteKey(CAT_ITEM, static_cast<uint8_t>(it.kind), it.spriteSeed, flags);
+	const uint32_t seed = itemVisualSpriteSeed(it);
+	const uint64_t key = makeSpriteKey(CAT_ITEM, static_cast<uint8_t>(it.kind), seed, flags);
 
     auto arr = spriteTex.get(key);
     if (!arr) {
         std::array<SDL_Texture*, FRAMES> tex{};
         tex.fill(nullptr);
-        for (int f = 0; f < FRAMES; ++f) {
-            tex[static_cast<size_t>(f)] = textureFromSprite(generateItemSprite(it.kind, it.spriteSeed, f, voxelSpritesCached, spritePx, viewMode_ == ViewMode::Isometric, isoVoxelRaytraceCached));
-        }
+		for (int f = 0; f < FRAMES; ++f) {
+			tex[static_cast<size_t>(f)] = textureFromSprite(generateItemSprite(it.kind, seed, f, voxelSpritesCached, spritePx, viewMode_ == ViewMode::Isometric, isoVoxelRaytraceCached));
+		}
 
         const size_t bytes = static_cast<size_t>(spritePx) * static_cast<size_t>(spritePx)
             * sizeof(uint32_t) * static_cast<size_t>(FRAMES);
@@ -7529,6 +7550,7 @@ void Renderer::drawHud(const Game& game) {
     }
 
     const Entity& p = game.player();
+	const Dungeon& dung = game.dungeon();
 
     // Status effect icons (right side of the top HUD row).
     {
@@ -9996,16 +10018,16 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
     const int detailsX0 = gridX0 + gridWpx + 18;
     const int detailsW = (x0 + panelW - pad) - detailsX0;
 
-    auto biomeLetter = [](overworld::Biome b) -> char {
+	    auto biomeLetter = [](overworld::Biome b) -> char {
         switch (b) {
             case overworld::Biome::Plains:  return 'P';
             case overworld::Biome::Forest:  return 'F';
             case overworld::Biome::Swamp:   return 'S';
             case overworld::Biome::Desert:  return 'D';
             case overworld::Biome::Tundra:  return 'T';
-            case overworld::Biome::Hills:   return 'H';
+	            case overworld::Biome::Highlands: return 'H';
             case overworld::Biome::Badlands:return 'B';
-            case overworld::Biome::Crystal: return 'C';
+	            case overworld::Biome::Coast:     return 'C';
         }
         return '?';
     };
@@ -10017,9 +10039,9 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
             case overworld::Biome::Swamp:    return {120, 220, 190, 255};
             case overworld::Biome::Desert:   return {245, 220, 140, 255};
             case overworld::Biome::Tundra:   return {215, 235, 255, 255};
-            case overworld::Biome::Hills:    return {220, 190, 140, 255};
+	            case overworld::Biome::Highlands:return {220, 190, 140, 255};
             case overworld::Biome::Badlands: return {240, 165, 140, 255};
-            case overworld::Biome::Crystal:  return {225, 170, 255, 255};
+	            case overworld::Biome::Coast:    return {140, 210, 245, 255};
         }
         return gray;
     };

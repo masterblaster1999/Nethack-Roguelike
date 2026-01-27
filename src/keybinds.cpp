@@ -324,6 +324,7 @@ KeyBinds KeyBinds::defaults() {
     add(Action::CloseDoor, SDLK_k);
     add(Action::LockDoor, SDLK_k, KMOD_SHIFT);
     add(Action::Kick, SDLK_b);
+    add(Action::Butcher, {SDLK_b, KMOD_SHIFT});
     add(Action::Dig, SDLK_d, KMOD_SHIFT);
     add(Action::Look, SDLK_l);
     add(Action::Look, SDLK_v);
@@ -354,6 +355,7 @@ KeyBinds KeyBinds::defaults() {
     add(Action::Command, SDLK_p, KMOD_CTRL);
 
     add(Action::ToggleMinimap, SDLK_m);
+    add(Action::ToggleOverworldMap, SDLK_m, KMOD_SHIFT);
     add(Action::MinimapZoomOut, SDLK_LEFTBRACKET);
     add(Action::MinimapZoomIn, SDLK_RIGHTBRACKET);
     add(Action::MessageHistory, SDLK_F3);

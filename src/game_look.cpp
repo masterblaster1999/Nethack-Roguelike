@@ -1,5 +1,9 @@
 #include "game_internal.hpp"
 
+#include "proc_names.hpp"
+
+#include "shrine_profile_gen.hpp"
+
 #include "wards.hpp"
 
 #include "combat_rules.hpp"
@@ -334,7 +338,7 @@ void Game::refreshSoundPreview() {
 
     // Ensure deterministic substrate cache so sound propagation can incorporate
     // material acoustics (moss/dirt dampen; metal/crystal carry).
-    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
     soundPreviewDist = dung.computeSoundMap(soundPreviewSrc.x, soundPreviewSrc.y, maxEff);
 }
@@ -403,7 +407,7 @@ void Game::refreshHearingPreview() {
     hearingPreviewFootstepVol.assign(static_cast<size_t>(W * H), 0);
 
     // Prep deterministic materials once (saves repeated keying work).
-    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
     int baseVol = 4;
     if (encumbranceEnabled_) {
@@ -632,9 +636,9 @@ if (!hallu) {
     if (allowMat) {
         const TerrainMaterial mat =
             dung.materialAt(p.x, p.y,
-                            static_cast<uint32_t>(seed_),
+                            materialWorldSeed(),
                             branch_,
-                            depth_,
+                            materialDepth(),
                             dungeonMaxDepth());
 
         baseDesc = std::string(terrainMaterialAdj(mat)) + " " + baseDesc;
@@ -642,6 +646,18 @@ if (!hallu) {
 }
 
 ss << baseDesc;
+
+
+    // Procedural shrine patron tag for altars.
+    if (!hallu && t.type == TileType::Altar) {
+        if (const Room* sr = shrinegen::shrineRoomAt(dung, p)) {
+            const shrinegen::ShrineProfile prof = shrinegen::profileFor(static_cast<uint32_t>(seed_), depth_, *sr);
+            ss << " | SHRINE: " << shrinegen::hudLabelFor(prof);
+        } else if (atCamp()) {
+            ss << " | CAMP ALTAR";
+        }
+    }
+
 
     // Lab door seal tags (visible doors only; avoids spoiling secret doors).
     if (t.visible && (t.type == TileType::DoorClosed || t.type == TileType::DoorLocked || t.type == TileType::DoorOpen)) {
@@ -776,9 +792,14 @@ ss << baseDesc;
                 }
 
                 // Friendly companions show a given name to disambiguate multiple allies.
+                // Procedural hostile variants get a deterministic codename for extra flavor.
                 std::string label;
                 if (e->friendly) {
                     label = petGivenNameFor(*e);
+                    label += " THE ";
+                    label += kindLabel;
+                } else if (!hallu && procname::shouldShowCodename(*e)) {
+                    label = procname::codename(*e);
                     label += " THE ";
                     label += kindLabel;
                 } else {

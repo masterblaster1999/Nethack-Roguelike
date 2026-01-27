@@ -1,6 +1,7 @@
 #include "game.hpp"
 
 #include "pet_gen.hpp"
+#include "proc_names.hpp"
 
 #include "combat_rules.hpp"
 
@@ -70,6 +71,19 @@ const char* kindName(EntityKind k) {
         case EntityKind::Minotaur: return "MINOTAUR";
         default: return "THING";
     }
+}
+
+// Hostile procedural variants: deterministic codename for message text.
+static std::string kindNameForMsg(const Entity& e, bool hallu) {
+    std::string base = kindName(e.kind);
+    if (hallu) return base;
+    if (procname::shouldShowCodename(e)) {
+        const std::string code = procname::codename(e);
+        if (!code.empty()) {
+            return code + " " + base;
+        }
+    }
+    return base;
 }
 
 
@@ -222,7 +236,7 @@ void Game::monsterTurn() {
             if (isPlayerSide(attacker) && attacker.id != playerId_) {
                 ss << petDisplayNameFor(attacker) << " LASHES OUT WILDLY!";
             } else {
-                ss << "THE " << kindName(attacker.kind) << " LASHES OUT WILDLY!";
+                ss << "THE " << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " LASHES OUT WILDLY!";
             }
             pushMsg(ss.str(), MessageKind::Info, false);
         }
@@ -1350,7 +1364,7 @@ void Game::monsterTurn() {
 
                         if (wasVisible) {
                             pushFxParticle(FXParticlePreset::Blink, m.pos, 10, 0.18f);
-                            pushMsg(std::string("THE ") + kindName(m.kind) + " BLINKS!", MessageKind::Info, false);
+                            pushMsg(std::string("THE ") + kindNameForMsg(m, player().effects.hallucinationTurns > 0) + " BLINKS!", MessageKind::Info, false);
                         }
 
                         m.pos = cand;
@@ -1558,7 +1572,7 @@ void Game::monsterTurn() {
 
                         const bool visAfter = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
                         if (visBefore || visAfter || cheb <= 3) {
-                            pushMsg(std::string("THE ") + kindName(m.kind) + " LIGHTS A TORCH!", MessageKind::Warning, false);
+                            pushMsg(std::string("THE ") + kindNameForMsg(m, player().effects.hallucinationTurns > 0) + " LIGHTS A TORCH!", MessageKind::Warning, false);
                         }
 
                         return;
@@ -1576,7 +1590,7 @@ void Game::monsterTurn() {
                 if (vis) {
                     Item tmp = m.pocketConsumable;
                     tmp.count = 1;
-                    pushMsg(std::string("THE ") + kindName(m.kind) + " DRINKS A " + displayItemName(tmp) + "!", MessageKind::Warning, false);
+                    pushMsg(std::string("THE ") + kindNameForMsg(m, player().effects.hallucinationTurns > 0) + " DRINKS A " + displayItemName(tmp) + "!", MessageKind::Warning, false);
                 }
 
                 // Apply a subset of potion effects that make sense for monsters.
@@ -1786,7 +1800,7 @@ void Game::monsterTurn() {
 
                             if (visSelf) {
                                 std::ostringstream ss;
-                                ss << "THE " << kindName(m.kind) << " POUNCES!";
+                                ss << "THE " << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " POUNCES!";
                                 pushMsg(ss.str(), MessageKind::Warning, false);
                             }
 
@@ -1815,7 +1829,7 @@ void Game::monsterTurn() {
 
                             if (visSelf || visPlayer) {
                                 std::ostringstream ss;
-                                ss << "THE " << kindName(m.kind) << " EXHALES TOXIC VAPOR!";
+                                ss << "THE " << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " EXHALES TOXIC VAPOR!";
                                 pushMsg(ss.str(), MessageKind::Warning, false);
                             }
                             pushFxParticle(FXParticlePreset::Poison, p.pos, 18, 0.50f);
@@ -1836,7 +1850,7 @@ void Game::monsterTurn() {
 
                             if (visSelf || visPlayer) {
                                 std::ostringstream ss;
-                                ss << "THE " << kindName(m.kind) << " UNLEASHES A CINDER NOVA!";
+                                ss << "THE " << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " UNLEASHES A CINDER NOVA!";
                                 pushMsg(ss.str(), MessageKind::Warning, false);
                             }
                             emitNoise(m.pos, 10);
@@ -1857,7 +1871,7 @@ void Game::monsterTurn() {
 
                             if (visSelf) {
                                 std::ostringstream ss;
-                                ss << "THE " << kindName(m.kind) << " RAISES A WARD!";
+                                ss << "THE " << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " RAISES A WARD!";
                                 pushMsg(ss.str(), MessageKind::Warning, false);
                             }
                             pushFxParticle(FXParticlePreset::Buff, m.pos, 14, 0.35f);
@@ -1919,7 +1933,7 @@ void Game::monsterTurn() {
 
                             if (visSelf) {
                                 std::ostringstream ss;
-                                ss << "THE " << kindName(m.kind) << " SUMMONS REINFORCEMENTS!";
+                                ss << "THE " << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " SUMMONS REINFORCEMENTS!";
                                 pushMsg(ss.str(), MessageKind::Warning, false);
                             }
                             emitNoise(m.pos, 14);
@@ -1939,7 +1953,7 @@ void Game::monsterTurn() {
 
                             if (visSelf || visPlayer) {
                                 std::ostringstream ss;
-                                ss << "THE " << kindName(m.kind) << " SCREECHES!";
+                                ss << "THE " << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " SCREECHES!";
                                 pushMsg(ss.str(), MessageKind::Warning, false);
                             }
                             emitNoise(m.pos, 16);
@@ -2002,7 +2016,7 @@ void Game::monsterTurn() {
 
                             if (visSelf || visPlayer) {
                                 std::ostringstream ss;
-                                ss << "THE " << kindName(m.kind) << " LASHES OUT WITH A VOID HOOK!";
+                                ss << "THE " << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " LASHES OUT WITH A VOID HOOK!";
                                 pushMsg(ss.str(), MessageKind::Warning, false);
                             }
 
@@ -2126,7 +2140,7 @@ void Game::monsterTurn() {
                             const bool vis = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
                             if (vis) {
                                 std::ostringstream ss;
-                                ss << "THE " << kindName(m.kind) << " SHRINKS FROM THE WARD OF " << wardWordName(ww) << "!";
+                                ss << "THE " << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " SHRINKS FROM THE WARD OF " << wardWordName(ww) << "!";
                                 pushMsg(ss.str(), MessageKind::Info, false);
                             }
 
@@ -2145,7 +2159,7 @@ void Game::monsterTurn() {
                                 if (bonus > 0) {
                                     if (vis) {
                                         std::ostringstream ss;
-                                        ss << "THE " << kindName(m.kind) << " SCRATCHES AT THE WARD!";
+                                        ss << "THE " << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " SCRATCHES AT THE WARD!";
                                         pushMsg(ss.str(), MessageKind::Info, false);
                                     }
                                     wearWard(bonus);
@@ -2268,7 +2282,9 @@ void Game::monsterTurn() {
                 auto eligible = [&](const Item& it) -> bool {
                     if (it.count <= 0) return false;
                     if (it.kind == ItemKind::Gold) return false;
-                    if (it.kind == ItemKind::AmuletYendor) return false; // don't trivialize the win condition
+                    // If the current run's victory plan requires the Amulet, don't let nymphs
+                    // steal it and potentially make the run unwinnable.
+                    if (it.kind == ItemKind::AmuletYendor && winConditionRequiresAmulet()) return false;
                     if (it.shopPrice > 0) return false; // don't launder shop debt
                     if (isEquipped(it.id) && it.buc < 0) return false; // cursed worn gear can't be removed
                     return true;
@@ -2367,7 +2383,7 @@ void Game::monsterTurn() {
                 const bool vis = dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible;
                 if (vis) {
                     std::ostringstream ss;
-                    ss << kindName(m.kind) << " PICKS UP " << (ammoK == ItemKind::Arrow ? "ARROWS." : "ROCKS.");
+                    ss << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " PICKS UP " << (ammoK == ItemKind::Arrow ? "ARROWS." : "ROCKS.");
                     pushMsg(ss.str(), MessageKind::Info, false);
                 }
 
@@ -2470,7 +2486,7 @@ void Game::monsterTurn() {
 
                     if (vis) {
                         std::ostringstream ss;
-                        ss << kindName(m.kind) << " PICKS UP " << itemDisplayNameSingle(picked.kind) << ".";
+                        ss << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " PICKS UP " << itemDisplayNameSingle(picked.kind) << ".";
                         pushMsg(ss.str(), MessageKind::Info, false);
                     }
                     return;
@@ -2484,7 +2500,7 @@ void Game::monsterTurn() {
 
                     if (vis) {
                         std::ostringstream ss;
-                        ss << kindName(m.kind) << " PUTS ON " << itemDisplayNameSingle(picked.kind) << ".";
+                        ss << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " PUTS ON " << itemDisplayNameSingle(picked.kind) << ".";
                         pushMsg(ss.str(), MessageKind::Info, false);
                     }
                     return;
@@ -2948,7 +2964,7 @@ void Game::monsterTurn() {
             // Only message if the monster is currently visible to the player.
             if (dung.inBounds(m.pos.x, m.pos.y) && dung.at(m.pos.x, m.pos.y).visible) {
                 std::ostringstream ss;
-                ss << kindName(m.kind) << " REGENERATES.";
+                ss << kindNameForMsg(m, player().effects.hallucinationTurns > 0) << " REGENERATES.";
                 pushMsg(ss.str());
             }
         }

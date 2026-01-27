@@ -7,6 +7,7 @@
 - **Spell miscasts**: Learned spells now have a failure chance (0..95%) influenced by Focus, character level, armor/encumbrance, confusion, and hallucination. Miscasts still consume a turn and some mana, create noise, and can cause backlash; **Blink** miscasts can drift. Spells UI + targeting preview now show **FAIL%**.
 - **Procedural rune tablets**: Rune Tablets now spawn and are fully usable — each tablet carries a deterministic proc-spell id, displays its rune-spell name, and can be invoked from the inventory to cast procedural rune magic (with targeting UI + mana costs).
 - **Procedural weapon ego ecology**: expanded ego weapon brands (WEBBING/CORROSIVE/DAZING) and made ego rolls bias toward a per-floor theme plus room type + terrain material, so loot feels more coherent without becoming predictable.
+- **Procedural victory plans (win conditions)**: Victory plans now support 1–2 run-seeded key clauses (shown as "ALSO:"), including templates such as foodless/vegetarian/atheist/illiterate conducts, hide/bone trophy hunts, and **fish trophy hunts** (rarity-tiered, optionally tagged) while still supporting classic Amulet wins. Goals are shown at run start, in the HUD, and in the stats overlay; the camp exit checks the plan and lists missing requirements.
 - Rune Tablets are now flagged as **consumables** (read/use) in item definitions, in preparation for the upcoming procedural casting vertical slice.
 - Rune Tablet **procedural spell targeting/casting**: `TargetingMode::RuneTablet`, plus `canCastProcSpell` / `castProcSpell` / `castProcSpellAt` for deterministic rune spells, now fully wired to inventory item use.
 - Rune Tablets now appear as rare loot (Treasure/Vault/Secret rooms), can be found on Shrines, and may be stocked in Magic shops (with depth-based rune tier).
@@ -14,6 +15,14 @@
 - Procedural palette upgrades: added **HSV hue/saturation/brightness** controls plus a smooth per-floor **spatial chroma field** (low-frequency noise) to reduce large-area flatness while keeping doors readable.
 - **Procedural biolum terrain**: a deterministic Gray-Scott reaction-diffusion lichen/crystal glow field that injects **colored ambient light sources** in darkness mode (plus subtle biolum motes); see `docs/PROCGEN_TERRAIN_BIOLUM.md`.
 - Procedural terrain materials: deterministic, depth-aware cellular-noise substrate (STONE/BRICK/BASALT/...) used for subtle tinting (scaled by proc_palette strength) and LOOK descriptions.
+- **Overworld wilderness chunk profiles**: wilderness chunks now have deterministic biome/name/danger identities, continuous terrain noise across chunk borders, meandering trail connections between edge gates, lightweight biome landmarks, per-chunk material palettes, and HUD/travel messaging that surfaces region identity.
+- **Overworld macro rivers**: surface wilderness chunks now include world-space continuous river ribbons carved as camp-water chasms; river width is biome-tuned and can widen in wet microclimates; trails are carved after rivers so edge-gate traversal stays reliable.
+- **Overworld weather**: wilderness chunks now have deterministic weather profiles (wind/fog/rain/snow/dust) derived from run seed + chunk coords; fog reduces FOV on the surface, precipitation quenches fire/burning, and the HUD/travel log show WX/WIND.
+- **Overworld waystations**: wilderness chunks now have rare, biome-aware **traveling merchant caravans** (small `RoomType::Shop` setpieces) connected to the chunk trail hub; waystations reuse the normal shopkeeper + stocking system for surface trading.
+- **Overworld atlas (world map)**: new **Shift+M** overlay that shows your discovered overworld chunks as a biome grid, with cursor inspection for region name, danger depth, and deterministic weather (plus lightweight terrain stats when the chunk is loaded).
+- **Overworld boundary-shared gates**: wilderness chunk edge gates are now offset per shared chunk boundary (deterministic and aligned with neighbors), forming continuous cross-chunk roads; home-camp-adjacent gates remain centered to preserve the camp layout.
+- **Overworld danger-depth scaling for surface loot/traps/fountains**: overworld chunks now use their computed danger depth for item, trap, and fountain generation (matching monsters) so the wilderness difficulty curve stays coherent as you travel farther from camp.
+- Added `docs/PROCGEN_OVERWORLD_RIVERS.md` and a deterministic overworld chunk unit test.
 - **Procedural companion behaviors**: new companion traits (**Scenthound**, **Shiny**, **Pack Mule**) with gameplay hooks (trap sniff pings, opportunistic gold fetching while following, and a modest carry-capacity bonus when nearby). LOOK and `#pet` status now surface companion names + traits.
 - **Capture spheres (Palworld/Pokemon-inspired)**: you can now capture eligible monsters into **Capture Spheres** / **Mega Spheres**, then **recall** or **release** them later; captured pals persist as items in your inventory.
   - **Pet progression**: captured pals store **Level / XP / Bond / HP%** inside their sphere, gain XP from kills (plus a small party share when *you* kill), and receive modest stat growth as they level and bond.
@@ -26,7 +35,9 @@
 - **Procedural farming foundations**: introduces deterministic crop/soil generation (names, rarity, yield/quality hooks) and adds farming item kinds (hoe, seeds, tilled soil, crop stages, produce) with save-compatible metadata packing.
 - **Procedural crafting foundations**: adds a **Crafting Kit** item kind and a deterministic, ingredient-driven crafting generator (`craftgen`) that maps two ingredients into a stable, procedurally chosen output.
 - **Procedural crafting mechanics**: the Crafting Kit is now usable to craft by selecting two ingredients in a dedicated inventory prompt; crafting in themed rooms acts like a location-based 'workstation' that can nudge item quality.
+- **Procedural forging (crafting)**: crafting with gear and/or butchery materials now yields **forged wearable items** (weapons/armor/rings/ranged) with deterministic enchant/BUC/ego rolls, plus a rare **artifact infusion** that is tuned to the recipe's essence tags (e.g., VENOM/EMBER/WARD/VITALITY). High-tier recipes can also output spellbooks and rune tablets.
 - **Procedural bounties**: introduces **Bounty Contracts** (guild kill contracts) that track progress inside the item; complete the objective to redeem a deterministic reward (use `#bounty` to list active contracts).
+- **Procedural shrine patrons**: each Shrine room now has a deterministic **patron** (name + domain) shown in the HUD/LOOK; shrine prayer costs are biased toward the patron, and prayers grant a small domain "resonance" boon (with **Insight** shrines also offering cheaper augury).
 - **Crafting Insight**: inventory crafting now shows a live **workstation + recipe preview** and assigns each recipe a deterministic **sigil name**; use `#recipes` to list recipes you've learned this run.
 - Material acoustics + scent absorption: substrate materials now modulate **footstep/dig noise** and **scent trail decay/spread** (moss/dirt dampen; metal/crystal ring out).
 - **Material acoustics now also affect sound propagation**: `Dungeon::soundTileCost()` incorporates substrate materials (moss/dirt/wood dampen; metal/crystal carry), so `computeSoundMap`-based systems (noise alerting, LOOK sound preview, `#listen`, and sneak-aware auto-travel) reflect the floor you're moving on.
@@ -38,6 +49,8 @@
   - Natural healing now respects **total Vigor** (base + ring + artifact bonuses), so Vitality-themed gear has an immediate impact beyond level-up math.
 - **Inventory trait tooltips**: inventory preview now surfaces **EGO** and **ARTIFACT** proc/passive lines for gear, and adds a compact **TRAITS** summary line for your equipped loadout.
 - **Parry + Riposte stance**: New Parry action (default **Shift+P**) that grants a brief defensive stance (+AC). If an enemy misses you in melee while parrying, you can instantly **riposte**; the first turn is a **perfect parry** window that also staggers attackers (confusion).
+- **Butchering**: New Butcher action (default **Shift+B**) to carve corpses into meat/hide/bones. Butchered meat inherits freshness and can carry a small essence tag when eaten.
+- **Procedural butchering (expanded)**: Corpses now carve into multiple distinct meat cuts (including prime cuts), and hides/bones gain material variants (pelts, scales, chitin, horns/fangs/teeth, robe scraps) plus per-yield quality. Quality/variant is reflected in names and sprites, and hide/bone products now contribute meaningful essences to crafting.
 - **Confused melee swings**: Confusion now also scrambles **melee attacks** for monsters and companions (biased toward the intended target), enabling wild whiffs and occasional accidental **friendly fire / infighting** when multiple creatures are adjacent.
 - **Kick-rolled boulders**: You can now **kick boulders to set them rolling**, crushing anything in their path. Rolling-boulder traps and kicked boulders share a unified boulder-roll simulator with momentum-based damage falloff.
 - **Morale shock (intimidation)**: when you (or a friendly companion) kill a hostile, nearby hostiles with line-of-sight may **panic and flee** for a few turns. Tougher enemies and commander-led groups resist; assassinations have a tighter panic radius. (Deterministic d20 save; no RNG consumption.)
@@ -48,8 +61,11 @@
 - **Expanded floor wards**: `#engrave` can now create multiple warding words (**ELBERETH**, **SALT**, **IRON**, **FIRE**) with different monster affinities.
   - LOOK now displays the **ward type** and **uses remaining**.
   - Cornered brutes can now attempt to **smudge** a ward away instead of freezing forever.
+- **Procedural graffiti rumors**: generated dungeon graffiti is now produced by a deterministic grammar that can emit floor-specific **hints** (secret doors, vaults, chasms, boulder-bridges, shops) with 8-way direction + distance buckets, while preserving classic one-liners; see `docs/PROCGEN_GRAFFITI_RUMORS.md`.
+- **Procedural sigils**: rare `SIGIL: ...` floor inscriptions are now procedurally parameterized (radius/intensity/duration) per (run seed, depth, position) and expanded with new archetypes (**VENOM**, **RUST**, **AEGIS**, **REGEN**, **LETHE**) plus generated epithets; see `docs/PROCGEN_SIGILS.md`.
 - **Procedural monster ecology (spawn theming)**: dungeon **terrain materials** and **room types** now apply mild, deterministic biases to the monster spawn tables — and certain affinity spawns can roll 1–2 nearby **nestmates** (shared groupId) — creating emergent ecology (spiders/snakes in dirt & moss, undead in marble/brick, kobolds in metal seams) without overriding content-mod spawn weights.
 - **Procedural monster variants**: rare monsters now roll a persistent **rank** (Elite/Champion/Mythic) plus 1-3 **affixes** at spawn.
+- **Procedural elite monster codenames**: Elite+ procedural variants now get deterministic two-word **codenames** (derived from their saved proc seed + rank/affixes/abilities) that surface in LOOK and in many combat/AI messages for clearer disambiguation and extra flavor.
 - **Procedural monster abilities**: Elite+ monsters can roll 1–2 active abilities (pounce, toxic miasma, cinder nova, arcane ward, summoning, screech, void hook) with cooldowns, saved/loaded per-entity.
   - Affixes implemented this round: **Swift**, **Stonehide**, **Savage**, **Blinking** (panic blink reposition), and **Gilded** (bonus gold + higher key/drop odds).
   - New combat-proc affixes: **Venomous** (poison), **Flaming** (burn), **Vampiric** (life drain), and **Webbing** (ensnare).
@@ -181,6 +197,10 @@
   - Uses the LOOK cursor (if active), otherwise your inventory selection, otherwise the first identifiable item underfoot.
   - `#call clear|none|off|-` clears the label; `#label` is an alias.
   - Labels persist in saves and render as a `{LABEL}` suffix on unidentified items (inventory/LOOK) and in Discoveries.
+
+- **Procedural identification appearance phrases**: unidentified potion/scroll/ring/wand appearance labels are now procedurally generated per run (deterministic from run seed + appearance id).
+  - Potions/rings/wands keep their base material word (e.g. **RUBY**, **OAK**) but gain a short descriptor (e.g. **BUBBLING RUBY**, **CARVED OAK**).
+  - Scroll labels now form a 2–3 word incantation (e.g. **ZELGO VORPAL**), while staying safe for quoting in HUD/inventory.
 
 - **Acoustic preview (Sound lens)**: LOOK mode can now toggle a **sound propagation heatmap** that shows where noise would travel (respecting door muffling) **without revealing unexplored tiles**.
   - Defaults to your current **real** footstep loudness (sneak/armor/encumbrance/substrate); adjust volume bias with `[` / `]` while in LOOK.
@@ -346,11 +366,20 @@
 
 - **Procedural rune spells (foundation)**: added a deterministic rune-spell generator (`src/proc_spells.hpp`) that derives spell names + gameplay parameters from a packed 32-bit id (tier + seed), plus unit test coverage.
 
+- **Procedural trap salvage**: successful disarms can yield deterministic **Essence Shards** based on the trap's type (STONE/VENOM/RUNE/ARC/SHIELD/DAZE/CLARITY/ALCH), rewarding careful trap work without consuming extra RNG; see `docs/PROCGEN_TRAP_SALVAGE.md`.
+
+
+- **Procedural shop identities**: each shop room now gets a deterministic **name**, **shopkeeper name**, and **personality** derived from the run seed + room geometry.
+  - Shop personalities apply small, theme-aware buy/sell price biases (armory/magic/supplies/general).
+  - Entering a shop announces the shop name + greeting, and the HUD shows the current shop name while inside.
+  - See `docs/PROCGEN_SHOPS.md` for details.
+
 ### Save compatibility
 - Save version bumped to **v43** (v41 adds `Item.flags`; v42 adds merchant guild pursuit; v43 adds shrine piety + prayer cooldown).
 
 - Added `tag32("...")` compile-time seed salt helper (FNV-1a) in `src/rng.hpp` for readable domain separation when mixing deterministic procedural seeds.
 ### Changed
+- Crafting recipe sigils/seeds now incorporate ingredient fingerprints (kind + packed metadata) for more variety and more meaningful material use.
 - Sound alerts now use deterministic **localization uncertainty**: quiet or distant noises no longer pinpoint the exact source tile, so monsters may investigate an approximate area (loud/near noises remain effectively exact).
 - WFC solver: upgraded `src/wfc.hpp` with bounded DFS backtracking (fewer full restarts) and a per-attempt RNG stream for more stable procgen; added WFC unit tests.
 - Procedural entity/projectile flipbooks: added sprite-space idle warps (slime squash & stretch, bat wing flap, snake slither, spider scuttle, wolf/dog tail wag) and replaced per-frame sprite shading jitter with a seamless looping shimmer; projectile arrow/rock now have 4-frame glint/tumble cues.
@@ -361,6 +390,7 @@
 - Procedural VFX flipbooks: **confusion/poison gas** and **fire** overlays now apply a lightweight **curl-noise flow warp** (divergence-free) before the existing domain-warp masks, producing more "advected" motion and richer turbulence in both top-down and isometric views.
 - **Dungeon length**: increased the default run from **20** to **25** floors.
 - **Dungeon generation**: the main branch is now **fully procedural** by default for depths **1–25** (no fixed handcrafted set-piece floors).
+- Overworld wilderness generation: cached per-tile elevation/moisture/variance noise fields so multi-pass chunk procgen (terrain + rivers) no longer recomputes multi-octave FBM, improving surface chunk generation performance.
 - Extended command prompt: **TAB completion** now extends to the **longest common prefix** and lets you **cycle** through ambiguous matches by pressing **TAB** repeatedly (also works for pasted NetHack-style `#cmd` inputs).
 - Extended command prompt: upgraded to a proper **caret editor** (LEFT/RIGHT, HOME/END, DEL forward-delete) with familiar shell/Readline shortcuts: **Ctrl+A/E** home/end, **Ctrl+W** delete previous word, **Ctrl+U** clear to start, **Ctrl+K** clear to end; plus **Ctrl+L** clears the whole line (consistent with filter UIs).
 - Extended command prompt: TAB completion now shows an in-overlay **dropdown match list** with the active selection highlighted; added a default **Ctrl+P** binding to open the prompt when `#` is awkward on some layouts.
@@ -400,6 +430,7 @@
 
 ### Fixed
 - Fixed a proc-spell Shadow invisibility duration bug (typo: `invisibilityTurns` -> `invisTurns`).
+- Direct kill tracking is now incremented when the player lands the killing blow, making pacifist conducts/victory plans accurate.
 - Fixed MSVC build break in the inventory renderer: artifact effect tag now calls `artifactgen::powerTag(...)` (correct signature).
 - Forced movement now recomputes FOV immediately (knockback, door-smash, and forced pulls), preventing stale vision after being shoved around.
 - Rune Tablet targeting now matches display-name generation for legacy tablets (spriteSeed=0), ensuring the spell you see is the spell you cast.

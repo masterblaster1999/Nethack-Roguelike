@@ -8013,6 +8013,146 @@ static EndlessStratumInfo computeEndlessStratum(uint32_t worldSeed, DungeonBranc
 
 
 // ------------------------------------------------------------
+// Campaign Strata (finite 1..maxDepth macro theming)
+//
+// The Infinite World uses endless, run-seeded strata to keep deep floors from
+// feeling like uncorrelated noise. The fixed-length main campaign benefits from
+// the same idea: group the 1..maxDepth arc into a handful of themed bands.
+//
+// This is intentionally lightweight and deterministic: it never needs saving.
+// ------------------------------------------------------------
+
+static int campaignStratumCountForMaxDepth(int maxDepth) {
+    if (maxDepth <= 1) return 1;
+
+    // Aim for ~5 floors per stratum; clamp so the arc stays readable.
+    int k = (maxDepth + 4) / 5;
+    k = std::clamp(k, 2, 7);
+
+    // Very short campaigns shouldn't explode into many strata.
+    if (maxDepth <= 8) k = std::min(k, 2);
+
+    // Never exceed maxDepth (avoids degenerate 1-tile strata in tiny test runs).
+    k = std::min(k, maxDepth);
+    return std::max(1, k);
+}
+
+static EndlessStratumTheme campaignThemeForIndex(uint32_t worldSeed, int idx, int count, EndlessStratumTheme prev) {
+    if (idx <= 0) return EndlessStratumTheme::Ruins;
+
+    // Progress 0..1 across the campaign strata.
+    const float u = (count > 1)
+        ? (static_cast<float>(idx) / static_cast<float>(count - 1))
+        : 0.0f;
+
+    // Deterministic hash per (run, stratumIdx).
+    const uint32_t base = hashCombine(worldSeed, 0xC0A11E5Eu);
+    const uint32_t v = hash32(base ^ static_cast<uint32_t>(idx));
+
+    // Stage weights (coarse and readable).
+    // Order: Ruins, Caverns, Labyrinth, Warrens, Mines, Catacombs.
+    int w[6] = {0, 0, 0, 0, 0, 0};
+
+    if (u < 0.34f) {
+        w[0] = 7;  // Ruins (onboarding: readable rooms)
+        w[1] = 2;  // Caverns
+        w[2] = 1;  // Labyrinth
+        w[3] = 3;  // Warrens
+        w[4] = 4;  // Mines
+        w[5] = 1;  // Catacombs
+    } else if (u < 0.67f) {
+        w[0] = 2;
+        w[1] = 4;
+        w[2] = 2;
+        w[3] = 3;
+        w[4] = 3;
+        w[5] = 4;
+    } else {
+        w[0] = 1;
+        w[1] = 4;
+        w[2] = 5;
+        w[3] = 2;
+        w[4] = 2;
+        w[5] = 6;  // Catacombs (late game identity)
+    }
+
+    int total = 0;
+    for (int i = 0; i < 6; ++i) total += std::max(0, w[i]);
+    if (total <= 0) return EndlessStratumTheme::Ruins;
+
+    int r = static_cast<int>(v % static_cast<uint32_t>(total));
+    int t = 0;
+    for (int i = 0; i < 6; ++i) {
+        r -= std::max(0, w[i]);
+        if (r < 0) { t = i; break; }
+    }
+
+    if (t == static_cast<int>(prev)) {
+        // Deterministically pick a different theme using higher bits.
+        const int bump = 1 + static_cast<int>((v / static_cast<uint32_t>(total)) % 5u);
+        t = (t + bump) % 6;
+        if (t == static_cast<int>(prev)) t = (t + 1) % 6;
+    }
+
+    return static_cast<EndlessStratumTheme>(t);
+}
+
+static EndlessStratumInfo computeCampaignStratum(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) {
+    EndlessStratumInfo out;
+    if (worldSeed == 0u) return out;
+    if (branch != DungeonBranch::Main) return out;
+    if (depth <= 0 || depth > maxDepth) return out;
+
+    const int count = campaignStratumCountForMaxDepth(maxDepth);
+    if (count <= 0) return out;
+
+    // Evenly split maxDepth into `count` bands (difference at most 1).
+    const int baseLen = std::max(1, maxDepth / count);
+    const int rem = std::max(0, maxDepth - baseLen * count); // 0..count-1
+
+    int start = 1;
+    EndlessStratumTheme prev = EndlessStratumTheme::Ruins;
+
+    for (int idx = 0; idx < count; ++idx) {
+        const int len = baseLen + ((idx < rem) ? 1 : 0);
+
+        const EndlessStratumTheme theme =
+            (idx == 0) ? EndlessStratumTheme::Ruins
+                       : campaignThemeForIndex(worldSeed, idx, count, prev);
+
+        if (depth >= start && depth < start + len) {
+            out.index = idx;
+            out.startDepth = start;
+            out.len = len;
+            out.local = depth - start;
+            out.theme = theme;
+
+            out.seed = hash32(hashCombine(hashCombine(worldSeed, 0xD1A6E5EDu), static_cast<uint32_t>(idx)));
+            if (out.seed == 0u) out.seed = 1u;
+            return out;
+        }
+
+        prev = theme;
+        start += len;
+        if (start > maxDepth + 1) break;
+    }
+
+    return out;
+}
+
+static EndlessStratumInfo computeRunStratum(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) {
+    // For the Main branch we use:
+    //   - campaign strata for depth 1..maxDepth
+    //   - endless strata for depth > maxDepth (Infinite World)
+    if (depth > maxDepth) {
+        return computeEndlessStratum(worldSeed, branch, depth, maxDepth);
+    }
+    return computeCampaignStratum(worldSeed, branch, depth, maxDepth);
+}
+
+
+
+// ------------------------------------------------------------
 // Endless Rift (Infinite World macro terrain continuity)
 //
 // Infinite World turns the dungeon into an effectively unbounded descent.
@@ -8796,7 +8936,7 @@ static bool maybeCarveRunFaultline(Dungeon& d, DungeonBranch branch, int depth, 
 }
 
 
-GenKind chooseGenKind(int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
+GenKind chooseGenKind(DungeonBranch branch, int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
     // The default run now spans ~20 floors, so we pace variety in two arcs:
     // - Early: classic rooms (with occasional "ruins" variant)
     // - Early spikes: mines + grotto + an early maze/warrens band
@@ -8804,6 +8944,11 @@ GenKind chooseGenKind(int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
 	// - Late: a second set of themed generator hits (lower mines/catacombs/cavern)
 	// - Endgame: the deepest floors lean harder into irregular layouts (still fully procedural)
     if (maxDepth < 1) maxDepth = 1;
+
+    // Only the Main branch uses the full suite of generator pacing rules.
+    if (branch != DungeonBranch::Main) {
+        return GenKind::RoomsBsp;
+    }
 
     // Endless depths (depth > maxDepth) only occur when Infinite World mode is enabled.
     // Instead of "locking" the generator into a single late-game distribution forever,
@@ -8830,7 +8975,7 @@ GenKind chooseGenKind(int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
         // Macro theming: group endless depths into run-seeded "strata" (5-9 floors each).
         // Each stratum biases generator choice so infinite descent has large-scale texture
         // (ruins -> mines -> catacombs...) rather than independent per-floor noise.
-        const EndlessStratumInfo st = computeEndlessStratum(worldSeed, DungeonBranch::Main, depth, maxDepth);
+        const EndlessStratumInfo st = computeEndlessStratum(worldSeed, branch, depth, maxDepth);
         const EndlessStratumTheme theme = st.theme;
 
         float signatureBoost = 1.0f;
@@ -8948,27 +9093,163 @@ GenKind chooseGenKind(int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
 
     if (depth == Dungeon::GROTTO_DEPTH) return GenKind::Cavern;
 
-    // Early variety spike (originally the 10-floor "midpoint"; now closer to the first quarter).
-    if (depth == 5) {
-        const float r = rng.next01();
-        // Maze spike, organic warrens, or a "ruins" rooms floor.
-        if (r < 0.45f) return GenKind::Maze;
-        if (r < 0.65f) return GenKind::Warrens;
-        if (r < 0.90f) return GenKind::RoomsGraph;
-        return GenKind::RoomsBsp;
+// Early variety spike (originally the 10-floor "midpoint"; now closer to the first quarter).
+if (depth == 5) {
+    // Weighted selection (so campaign strata can bias it a bit without changing the pacing).
+    float wMaze    = 0.45f;
+    float wWarrens = 0.20f;
+    float wRoomsG  = 0.25f;
+    float wRoomsB  = 0.10f;
+
+    // Light campaign-stratum bias (keeps the spike feeling "of a piece" with the current band).
+    const EndlessStratumInfo cst = computeCampaignStratum(worldSeed, branch, depth, maxDepth);
+    if (cst.index >= 0 && cst.len > 0) {
+        const EndlessStratumTheme theme = cst.theme;
+
+        float signatureBoost = 1.0f;
+        if (cst.len > 1) {
+            const float tpos = static_cast<float>(cst.local) / static_cast<float>(cst.len - 1);
+            signatureBoost = 1.18f - 0.18f * std::clamp(tpos, 0.0f, 1.0f);
+        }
+
+        auto applyThemeBias = [&]() {
+            switch (theme) {
+                case EndlessStratumTheme::Ruins:
+                    wRoomsG *= 1.6f * signatureBoost;
+                    wRoomsB *= 1.4f;
+                    wMaze   *= 0.90f;
+                    wWarrens *= 0.95f;
+                    break;
+                case EndlessStratumTheme::Caverns:
+                    // Caverns strata prefer irregular layouts over room floors.
+                    wMaze   *= 1.05f;
+                    wWarrens *= 1.10f;
+                    wRoomsG *= 0.90f;
+                    wRoomsB *= 0.85f;
+                    break;
+                case EndlessStratumTheme::Labyrinth:
+                    wMaze   *= 1.30f * signatureBoost;
+                    wWarrens *= 1.05f;
+                    wRoomsG *= 0.85f;
+                    wRoomsB *= 0.80f;
+                    break;
+                case EndlessStratumTheme::Warrens:
+                    wWarrens *= 1.30f * signatureBoost;
+                    wMaze   *= 1.10f;
+                    wRoomsG *= 0.90f;
+                    wRoomsB *= 0.85f;
+                    break;
+                case EndlessStratumTheme::Mines:
+                    // Mines strata still allow the spike, but slightly prefer rooms to avoid
+                    // over-tunneling too early.
+                    wRoomsG *= 1.05f;
+                    wRoomsB *= 1.05f;
+                    wMaze   *= 0.95f;
+                    wWarrens *= 0.95f;
+                    break;
+                case EndlessStratumTheme::Catacombs:
+                    wMaze   *= 1.10f;
+                    wWarrens *= 1.00f;
+                    wRoomsG *= 0.90f;
+                    wRoomsB *= 0.85f;
+                    break;
+                default:
+                    break;
+            }
+        };
+
+        applyThemeBias();
     }
 
-    // True midpoint spike: lean harder into non-room layouts so the run's second half
-    // feels different even if the player has strong gear already.
-    if (depth == midpoint) {
-        const float r = rng.next01();
-        if (r < 0.30f) return GenKind::Maze;
-        if (r < 0.55f) return GenKind::Warrens;
-        if (r < 0.72f) return GenKind::Catacombs;
-        if (r < 0.84f) return GenKind::Cavern;
-        if (r < 0.94f) return GenKind::RoomsGraph;
-        return GenKind::RoomsBsp;
+    const float sum = wMaze + wWarrens + wRoomsG + wRoomsB;
+    if (sum <= 0.0001f) return GenKind::RoomsBsp;
+
+    float r = rng.next01() * sum;
+    if ((r -= wMaze) < 0.0f) return GenKind::Maze;
+    if ((r -= wWarrens) < 0.0f) return GenKind::Warrens;
+    if ((r -= wRoomsG) < 0.0f) return GenKind::RoomsGraph;
+    return GenKind::RoomsBsp;
+}
+
+// True midpoint spike: lean harder into non-room layouts so the run's second half
+// feels different even if the player has strong gear already.
+if (depth == midpoint) {
+    // Weighted selection (so campaign strata can bias it a bit without changing the pacing).
+    float wMaze      = 0.30f;
+    float wWarrens   = 0.25f;
+    float wCatacombs = 0.17f;
+    float wCavern    = 0.12f;
+    float wRoomsG    = 0.10f;
+    float wRoomsB    = 0.06f;
+
+    const EndlessStratumInfo cst = computeCampaignStratum(worldSeed, branch, depth, maxDepth);
+    if (cst.index >= 0 && cst.len > 0) {
+        const EndlessStratumTheme theme = cst.theme;
+
+        float signatureBoost = 1.0f;
+        if (cst.len > 1) {
+            const float tpos = static_cast<float>(cst.local) / static_cast<float>(cst.len - 1);
+            signatureBoost = 1.18f - 0.18f * std::clamp(tpos, 0.0f, 1.0f);
+        }
+
+        auto applyThemeBias = [&]() {
+            switch (theme) {
+                case EndlessStratumTheme::Ruins:
+                    wRoomsG *= 1.6f * signatureBoost;
+                    wRoomsB *= 1.4f;
+                    wMaze   *= 0.90f;
+                    wCavern *= 0.90f;
+                    break;
+                case EndlessStratumTheme::Caverns:
+                    wCavern *= 1.35f * signatureBoost;
+                    wMaze   *= 1.05f;
+                    wRoomsG *= 0.90f;
+                    wRoomsB *= 0.85f;
+                    break;
+                case EndlessStratumTheme::Labyrinth:
+                    wMaze *= 1.40f * signatureBoost;
+                    wCatacombs *= 1.10f;
+                    wRoomsG *= 0.85f;
+                    wRoomsB *= 0.80f;
+                    break;
+                case EndlessStratumTheme::Warrens:
+                    wWarrens *= 1.35f * signatureBoost;
+                    wMaze   *= 1.08f;
+                    wRoomsG *= 0.90f;
+                    wRoomsB *= 0.85f;
+                    break;
+                case EndlessStratumTheme::Mines:
+                    // Keep the midpoint spicy even in mines strata.
+                    wMaze *= 1.05f;
+                    wCatacombs *= 1.05f;
+                    wRoomsG *= 0.95f;
+                    wRoomsB *= 0.90f;
+                    break;
+                case EndlessStratumTheme::Catacombs:
+                    wCatacombs *= 1.45f * signatureBoost;
+                    wMaze *= 1.10f;
+                    wRoomsG *= 0.85f;
+                    wRoomsB *= 0.80f;
+                    break;
+                default:
+                    break;
+            }
+        };
+
+        applyThemeBias();
     }
+
+    const float sum = wMaze + wWarrens + wCatacombs + wCavern + wRoomsG + wRoomsB;
+    if (sum <= 0.0001f) return GenKind::RoomsBsp;
+
+    float r = rng.next01() * sum;
+    if ((r -= wMaze) < 0.0f) return GenKind::Maze;
+    if ((r -= wWarrens) < 0.0f) return GenKind::Warrens;
+    if ((r -= wCatacombs) < 0.0f) return GenKind::Catacombs;
+    if ((r -= wCavern) < 0.0f) return GenKind::Cavern;
+    if ((r -= wRoomsG) < 0.0f) return GenKind::RoomsGraph;
+    return GenKind::RoomsBsp;
+}
 
 	// Depth 6: keep a predictable rooms floor for pacing (and for endless/testing).
     if (depth == 6) return GenKind::RoomsBsp;
@@ -8992,27 +9273,137 @@ GenKind chooseGenKind(int depth, int maxDepth, uint32_t worldSeed, RNG& rng) {
     }
 
     // General case: sprinkle variety, with a slightly "nastier" distribution deeper
-    // than the midpoint.
-    const float r = rng.next01();
+    // than the midpoint. For the finite campaign we additionally apply a light
+    // run-seeded stratum bias so the 1..maxDepth arc develops recognizable bands.
+    float wMaze = 0.0f;
+    float wWarrens = 0.0f;
+    float wCatacombs = 0.0f;
+    float wCavern = 0.0f;
+    float wMines = 0.0f;
+    float wRoomsG = 0.0f;
+    float wRoomsB = 0.0f;
+
     if (depth > midpoint) {
-        if (r < 0.14f) return GenKind::Maze;
-        if (r < 0.32f) return GenKind::Warrens;
-        if (r < 0.46f) return GenKind::Catacombs;
-        if (r < 0.58f) return GenKind::Cavern;
-        if (r < 0.70f) return GenKind::Mines;
-        if (r < 0.86f) return GenKind::RoomsGraph;
-        return GenKind::RoomsBsp;
+        // Post-midpoint band: more irregular layouts.
+        wMaze      = 0.14f;
+        wWarrens   = 0.18f;
+        wCatacombs = 0.14f;
+        wCavern    = 0.12f;
+        wMines     = 0.12f;
+        wRoomsG    = 0.16f;
+        wRoomsB    = 0.14f;
+    } else {
+        // Pre-midpoint band: still mostly rooms, with occasional spice.
+        wMaze      = 0.08f;
+        wWarrens   = 0.10f;
+        wCatacombs = 0.08f;
+        wCavern    = 0.14f;
+        wMines     = 0.12f;
+        wRoomsG    = 0.20f;
+        wRoomsB    = 0.28f;
     }
 
-    // Pre-midpoint band: still mostly rooms, but with occasional spice.
-    if (r < 0.08f) return GenKind::Maze;
-    if (r < 0.18f) return GenKind::Warrens;
-    if (r < 0.26f) return GenKind::Catacombs;
-    if (r < 0.40f) return GenKind::Cavern;
-    if (r < 0.52f) return GenKind::Mines;
-    if (r < 0.72f) return GenKind::RoomsGraph;
+    // Campaign-stratum bias (finite run only).
+    const EndlessStratumInfo cst = computeCampaignStratum(worldSeed, branch, depth, maxDepth);
+    if (cst.index >= 0 && cst.len > 0) {
+        const EndlessStratumTheme theme = cst.theme;
+
+        float signatureBoost = 1.0f;
+        if (cst.len > 1) {
+            const float tpos = static_cast<float>(cst.local) / static_cast<float>(cst.len - 1);
+            // Start-of-stratum floors are more "pure"; later floors blend back toward the baseline mix.
+            signatureBoost = 1.18f - 0.18f * std::clamp(tpos, 0.0f, 1.0f);
+        }
+
+        auto clampW = [&](float& w) {
+            if (!std::isfinite(w) || w < 0.0001f) w = 0.0001f;
+        };
+
+        auto applyThemeBias = [&]() {
+            switch (theme) {
+                case EndlessStratumTheme::Ruins:
+                    wRoomsG *= 1.8f * signatureBoost;
+                    wRoomsB *= 1.6f;
+                    wMaze   *= 0.85f;
+                    wCavern *= 0.85f;
+                    wWarrens *= 0.90f;
+                    wCatacombs *= 0.90f;
+                    wMines *= 0.90f;
+                    break;
+                case EndlessStratumTheme::Caverns:
+                    wCavern *= 1.9f * signatureBoost;
+                    wWarrens *= 1.10f;
+                    wRoomsG *= 0.90f;
+                    wRoomsB *= 0.80f;
+                    wMaze *= 0.90f;
+                    wCatacombs *= 0.95f;
+                    wMines *= 0.95f;
+                    break;
+                case EndlessStratumTheme::Labyrinth:
+                    wMaze *= 2.0f * signatureBoost;
+                    wCatacombs *= 1.10f;
+                    wRoomsG *= 0.85f;
+                    wRoomsB *= 0.75f;
+                    wCavern *= 0.85f;
+                    wMines *= 0.95f;
+                    wWarrens *= 1.05f;
+                    break;
+                case EndlessStratumTheme::Warrens:
+                    wWarrens *= 2.0f * signatureBoost;
+                    wMaze *= 1.10f;
+                    wRoomsG *= 0.90f;
+                    wRoomsB *= 0.80f;
+                    wCavern *= 0.95f;
+                    wMines *= 0.95f;
+                    wCatacombs *= 0.95f;
+                    break;
+                case EndlessStratumTheme::Mines:
+                    wMines *= 2.1f * signatureBoost;
+                    wRoomsG *= 0.95f;
+                    wRoomsB *= 0.85f;
+                    wCavern *= 0.90f;
+                    wMaze *= 0.85f;
+                    wWarrens *= 0.95f;
+                    wCatacombs *= 0.95f;
+                    break;
+                case EndlessStratumTheme::Catacombs:
+                    wCatacombs *= 2.0f * signatureBoost;
+                    wMaze *= 1.10f;
+                    wRoomsG *= 0.85f;
+                    wRoomsB *= 0.75f;
+                    wCavern *= 0.90f;
+                    wMines *= 0.95f;
+                    wWarrens *= 1.00f;
+                    break;
+                default:
+                    break;
+            }
+        };
+
+        applyThemeBias();
+
+        clampW(wMaze);
+        clampW(wWarrens);
+        clampW(wCatacombs);
+        clampW(wCavern);
+        clampW(wMines);
+        clampW(wRoomsG);
+        clampW(wRoomsB);
+    }
+
+    const float sum = wMaze + wWarrens + wCatacombs + wCavern + wMines + wRoomsG + wRoomsB;
+    if (sum <= 0.0001f) return GenKind::RoomsBsp;
+
+    float r = rng.next01() * sum;
+    if ((r -= wMaze) < 0.0f) return GenKind::Maze;
+    if ((r -= wWarrens) < 0.0f) return GenKind::Warrens;
+    if ((r -= wCatacombs) < 0.0f) return GenKind::Catacombs;
+    if ((r -= wCavern) < 0.0f) return GenKind::Cavern;
+    if ((r -= wMines) < 0.0f) return GenKind::Mines;
+    if ((r -= wRoomsG) < 0.0f) return GenKind::RoomsGraph;
     return GenKind::RoomsBsp;
 }
+
 
 
 // ------------------------------------------------------------
@@ -20668,6 +21059,15 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     spineRoomCount = 0;
     specialRoomMinSep = 0;
 
+    // Campaign stratum debug info (filled only for depth 1..maxDepth in Main branch).
+    campaignStratumIndex = -1;
+    campaignStratumStartDepth = -1;
+    campaignStratumLen = 0;
+    campaignStratumLocal = 0;
+    campaignStratumTheme = EndlessStratumTheme::Ruins;
+    campaignStratumSeed = 0u;
+
+
     // Endless stratum debug info (filled only for depth > maxDepth in Main branch).
     endlessStratumIndex = -1;
     endlessStratumStartDepth = -1;
@@ -20724,9 +21124,9 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     // This is a lightweight "generate-and-test" meta-pass: it improves floor quality
     // (stairs redundancy, path length, density, dead-end ratio) without changing any
     // gameplay rules or requiring backtracking-heavy retries.
-    const EndlessStratumInfo stratum = computeEndlessStratum(worldSeed, branch, depth, maxDepth);
+    const EndlessStratumInfo stratum = computeRunStratum(worldSeed, branch, depth, maxDepth);
     [[maybe_unused]] const EndlessStratumTheme theme = stratum.theme;
-    const GenKind g = chooseGenKind(depth, maxDepth, worldSeed, rng);
+    const GenKind g = chooseGenKind(branch, depth, maxDepth, worldSeed, rng);
 
     int attempts = 1;
     if (depth >= 2) attempts = 2;
@@ -20776,15 +21176,25 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     genPickChosenIndex = bestIdx;
     genPickScore = bestScore;
     genPickSeed = attemptSeeds[static_cast<size_t>(bestIdx)];
-
-    // Persist endless stratum info for debug/UI (not serialized).
+    // Persist run stratum info for debug/UI (not serialized).
     if (stratum.index >= 0) {
-        endlessStratumIndex = stratum.index;
-        endlessStratumStartDepth = stratum.startDepth;
-        endlessStratumLen = stratum.len;
-        endlessStratumLocal = stratum.local;
-        endlessStratumTheme = stratum.theme;
-        endlessStratumSeed = stratum.seed;
+        if (depth > maxDepth) {
+            // Infinite World endless strata.
+            endlessStratumIndex = stratum.index;
+            endlessStratumStartDepth = stratum.startDepth;
+            endlessStratumLen = stratum.len;
+            endlessStratumLocal = stratum.local;
+            endlessStratumTheme = stratum.theme;
+            endlessStratumSeed = stratum.seed;
+        } else {
+            // Finite campaign strata.
+            campaignStratumIndex = stratum.index;
+            campaignStratumStartDepth = stratum.startDepth;
+            campaignStratumLen = stratum.len;
+            campaignStratumLocal = stratum.local;
+            campaignStratumTheme = stratum.theme;
+            campaignStratumSeed = stratum.seed;
+        }
     }
 }
 
@@ -20807,6 +21217,28 @@ void Dungeon::computeEndlessStratumInfo(uint32_t worldSeed, DungeonBranch branch
     endlessStratumTheme = st.theme;
     endlessStratumSeed = st.seed;
 }
+
+
+void Dungeon::computeCampaignStratumInfo(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) {
+    // Reset.
+    campaignStratumIndex = -1;
+    campaignStratumStartDepth = -1;
+    campaignStratumLen = 0;
+    campaignStratumLocal = 0;
+    campaignStratumTheme = EndlessStratumTheme::Ruins;
+    campaignStratumSeed = 0u;
+
+    const EndlessStratumInfo st = computeCampaignStratum(worldSeed, branch, depth, maxDepth);
+    if (st.index < 0) return;
+
+    campaignStratumIndex = st.index;
+    campaignStratumStartDepth = st.startDepth;
+    campaignStratumLen = st.len;
+    campaignStratumLocal = st.local;
+    campaignStratumTheme = st.theme;
+    campaignStratumSeed = st.seed;
+}
+
 
 
 // -----------------------------------------------------------------------------
@@ -20836,8 +21268,26 @@ TerrainMaterial pickSiteMaterial(uint32_t siteHash, DungeonBranch branch, int de
         };
         return pickFromPool(pool, sizeof(pool) / sizeof(pool[0]), r);
     }
+    // Signature floors (finite campaign): keep their identity even if the surrounding
+    // stratum theme is different.
+    if (depth == Dungeon::MINES_DEPTH || depth == Dungeon::DEEP_MINES_DEPTH) {
+        static const TerrainMaterial pool[] = {
+            TerrainMaterial::Basalt, TerrainMaterial::Stone, TerrainMaterial::Metal,
+            TerrainMaterial::Dirt, TerrainMaterial::Metal, TerrainMaterial::Crystal,
+        };
+        return pickFromPool(pool, sizeof(pool) / sizeof(pool[0]), r);
+    }
 
-    // Endless strata themes get stable macro material palettes.
+    if (depth == Dungeon::CATACOMBS_DEPTH) {
+        static const TerrainMaterial pool[] = {
+            TerrainMaterial::Bone, TerrainMaterial::Marble, TerrainMaterial::Basalt,
+            TerrainMaterial::Bone, TerrainMaterial::Obsidian,
+        };
+        return pickFromPool(pool, sizeof(pool) / sizeof(pool[0]), r);
+    }
+
+    // Strata themes (campaign + endless) get stable macro material palettes.
+
     if (st.index >= 0 && st.len > 0) {
         switch (st.theme) {
             case EndlessStratumTheme::Ruins: {
@@ -20889,21 +21339,6 @@ TerrainMaterial pickSiteMaterial(uint32_t siteHash, DungeonBranch branch, int de
 
     // Finite-depth "classic" dungeon: bias materials gradually as depth increases.
     // We keep this coarse and readable (not overly noisy).
-    if (depth == Dungeon::MINES_DEPTH || depth == Dungeon::DEEP_MINES_DEPTH) {
-        static const TerrainMaterial pool[] = {
-            TerrainMaterial::Basalt, TerrainMaterial::Stone, TerrainMaterial::Metal,
-            TerrainMaterial::Dirt, TerrainMaterial::Metal, TerrainMaterial::Crystal,
-        };
-        return pickFromPool(pool, sizeof(pool) / sizeof(pool[0]), r);
-    }
-
-    if (depth == Dungeon::CATACOMBS_DEPTH) {
-        static const TerrainMaterial pool[] = {
-            TerrainMaterial::Bone, TerrainMaterial::Marble, TerrainMaterial::Basalt,
-            TerrainMaterial::Bone, TerrainMaterial::Obsidian,
-        };
-        return pickFromPool(pool, sizeof(pool) / sizeof(pool[0]), r);
-    }
 
     if (depth <= 1) {
         static const TerrainMaterial pool[] = {

@@ -42,7 +42,7 @@ inline HearingFieldResult buildVisibleHostileHearingField(const Game& g, int max
 
     // Ensure deterministic per-floor material cache so sound propagation costs
     // can incorporate substrate acoustics (moss/dirt dampen; metal/crystal carry).
-    dung.ensureMaterials(g.seed(), g.branch(), g.depth(), g.dungeonMaxDepth());
+    dung.ensureMaterials(g.materialWorldSeed(), g.branch(), g.materialDepth(), g.dungeonMaxDepth());
 
     // Collect visible hostile listeners.
     struct Listener {

@@ -2,7 +2,14 @@
 #include "overworld.hpp"
 #include "bounty_gen.hpp"
 #include "artifact_gen.hpp"
+#include "graffiti_gen.hpp"
+#include "sigil_gen.hpp"
+#include "ident_gen.hpp"
+#include "victory_gen.hpp"
+#include "fishing_gen.hpp"
+#include <cstring>
 #include <cmath>
+#include <sstream>
 
 uint32_t dailySeedUtc(std::string* outDateIso) {
     const std::time_t t = std::time(nullptr);
@@ -31,6 +38,21 @@ uint32_t dailySeedUtc(std::string* outDateIso) {
 
 
 Game::Game() : dung(MAP_W, MAP_H) {}
+
+
+uint32_t Game::materialWorldSeed() const {
+    if (atCamp() && !atHomeCamp()) {
+        return overworld::materialSeed(seed_, overworldX_, overworldY_);
+    }
+    return seed_;
+}
+
+int Game::materialDepth() const {
+    if (atCamp() && !atHomeCamp()) {
+        return overworld::dangerDepthFor(overworldX_, overworldY_, dungeonMaxDepth());
+    }
+    return depth_;
+}
 
 namespace {
 // During early boot, main.cpp applies user settings before a run is created/loaded.
@@ -1571,28 +1593,29 @@ std::string Game::appearanceName(ItemKind k) const {
         static_assert(n > 0, "POTION_APPEARANCES must not be empty");
         uint8_t a = appearanceFor(k);
         if (a >= n) a = static_cast<uint8_t>(a % n);
-        return POTION_APPEARANCES[a];
+        return identgen::potionLabel(seed_, a, POTION_APPEARANCES[a]);
     }
     if (isScrollKind(k)) {
         constexpr size_t n = sizeof(SCROLL_APPEARANCES) / sizeof(SCROLL_APPEARANCES[0]);
         static_assert(n > 0, "SCROLL_APPEARANCES must not be empty");
         uint8_t a = appearanceFor(k);
         if (a >= n) a = static_cast<uint8_t>(a % n);
-        return SCROLL_APPEARANCES[a];
+        // Produce a NetHack-style multi-word incantation label.
+        return identgen::scrollLabel(seed_, a, SCROLL_APPEARANCES);
     }
     if (isRingKind(k)) {
         constexpr size_t n = sizeof(RING_APPEARANCES) / sizeof(RING_APPEARANCES[0]);
         static_assert(n > 0, "RING_APPEARANCES must not be empty");
         uint8_t a = appearanceFor(k);
         if (a >= n) a = static_cast<uint8_t>(a % n);
-        return RING_APPEARANCES[a];
+        return identgen::ringLabel(seed_, a, RING_APPEARANCES[a]);
     }
     if (isWandKind(k)) {
         constexpr size_t n = sizeof(WAND_APPEARANCES) / sizeof(WAND_APPEARANCES[0]);
         static_assert(n > 0, "WAND_APPEARANCES must not be empty");
         uint8_t a = appearanceFor(k);
         if (a >= n) a = static_cast<uint8_t>(a % n);
-        return WAND_APPEARANCES[a];
+        return identgen::wandLabel(seed_, a, WAND_APPEARANCES[a]);
     }
     return "";
 }
@@ -1766,6 +1789,8 @@ void Game::newGame(uint32_t seed) {
     overworldX_ = 0;
     overworldY_ = 0;
     overworldChunks_.clear();
+    overworldVisited_.clear();
+    overworldVisited_.insert(OverworldKey{0, 0});
 
     ents.clear();
     ground.clear();
@@ -1954,7 +1979,7 @@ void Game::newGame(uint32_t seed) {
     dung = Dungeon(msz.x, msz.y);
     dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH, seed_);
     if (atHomeCamp()) {
-        overworld::ensureBorderGates(dung);
+        overworld::ensureBorderGates(dung, seed_, 0, 0);
     }
     // Environmental fields reset per floor (no lingering gas on a fresh level).
     confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
@@ -2261,10 +2286,10 @@ void Game::newGame(uint32_t seed) {
     }
     pushMsg(companionIntroLine, MessageKind::System);
     {
-        std::ostringstream ss;
-        ss << "GOAL: FIND THE AMULET OF YENDOR (DEPTH " << QUEST_DEPTH
-           << "), THEN RETURN TO THE EXIT (<) TO WIN.";
-        pushMsg(ss.str(), MessageKind::System);
+        const auto goals = winConditionLines(false);
+        for (const auto& ln : goals) {
+            pushMsg(std::string("GOAL: ") + ln, MessageKind::System);
+        }
     }
     pushMsg("PRESS ? FOR HELP. I INVENTORY. F TARGET/FIRE. M MINIMAP. TAB STATS. F3 LOG. F4 CODEX. F12 SCREENSHOT.", MessageKind::System);
     if (controlPreset_ == ControlPreset::Nethack) {
@@ -2356,7 +2381,7 @@ bool Game::restoreLevel(LevelId id) {
     }
 
     if (id.branch == DungeonBranch::Camp && id.depth == 0) {
-        overworld::ensureBorderGates(dung);
+        overworld::ensureBorderGates(dung, seed_, 0, 0);
     }
 
     return true;
@@ -2419,9 +2444,82 @@ bool Game::restoreOverworldChunk(int x, int y) {
     }
 
     // Overworld chunks always have edge gates.
-    overworld::ensureBorderGates(dung);
+    overworld::ensureBorderGates(dung, seed_, x, y);
 
     return true;
+}
+
+
+bool Game::overworldChunkDiscovered(int x, int y) const {
+    // Home camp is always considered discovered.
+    if (x == 0 && y == 0) return true;
+
+    // Current surface chunk is always known while atCamp (even if not stored yet).
+    if (atCamp() && x == overworldX_ && y == overworldY_) return true;
+
+    return overworldVisited_.find(OverworldKey{x, y}) != overworldVisited_.end();
+}
+
+const Dungeon* Game::overworldChunkDungeon(int x, int y) const {
+    // Current in-memory chunk.
+    if (atCamp() && x == overworldX_ && y == overworldY_) return &dung;
+
+    // Home camp snapshot lives in the normal level store (Camp, depth 0).
+    if (x == 0 && y == 0) {
+        auto it = levels.find(LevelId{DungeonBranch::Camp, 0});
+        if (it != levels.end()) return &it->second.dung;
+        // If the camp is currently loaded but not stored, fall back.
+        if (atHomeCamp()) return &dung;
+        return nullptr;
+    }
+
+    auto it = overworldChunks_.find(OverworldKey{x, y});
+    if (it == overworldChunks_.end()) return nullptr;
+    return &it->second.dung;
+}
+
+
+
+void Game::markOverworldDiscovered(int x, int y) {
+    // Always remember the home camp chunk.
+    if (x == 0 && y == 0) {
+        overworldVisited_.insert(OverworldKey{0, 0});
+        return;
+    }
+
+    overworldVisited_.insert(OverworldKey{x, y});
+
+    // Safety cap: keep the atlas visitation set bounded so a pathological run
+    // cannot grow unbounded in RAM (UI-only; not serialized).
+    constexpr size_t kMaxVisited = 2048;
+    if (overworldVisited_.size() <= kMaxVisited) return;
+
+    // Cull farthest chunks first (except home camp).
+    // Use a simple manhattan distance from the player's current overworld coordinate.
+    auto dist = [&](const OverworldKey& k) -> int {
+        if (k.x == 0 && k.y == 0) return -1; // never cull home camp
+        const int dx = std::abs(k.x - overworldX_);
+        const int dy = std::abs(k.y - overworldY_);
+        return dx + dy;
+    };
+
+    while (overworldVisited_.size() > kMaxVisited) {
+        auto itFarthest = overworldVisited_.begin();
+        int best = dist(*itFarthest);
+
+        for (auto it = overworldVisited_.begin(); it != overworldVisited_.end(); ++it) {
+            const int d = dist(*it);
+            if (d < 0) continue;
+            if (d > best) {
+                best = d;
+                itFarthest = it;
+            }
+        }
+
+        // If we couldn't find a removable entry, break.
+        if (best < 0) break;
+        overworldVisited_.erase(itFarthest);
+    }
 }
 
 void Game::pruneOverworldChunks() {
@@ -2479,6 +2577,7 @@ bool Game::tryOverworldStep(int dx, int dy) {
 
     overworldX_ += dx;
     overworldY_ += dy;
+    markOverworldDiscovered(overworldX_, overworldY_);
 
     // Close transient effects; treat travel like a level transition.
     fx.clear();
@@ -2497,12 +2596,13 @@ bool Game::tryOverworldStep(int dx, int dy) {
 
     auto computeArrival = [&]() -> Vec2i {
         // You exit one side, enter the opposite side in the destination chunk.
-        const int w = dung.width;
-        const int h = dung.height;
-        if (dx ==  1) return Vec2i{0,      h / 2};
-        if (dx == -1) return Vec2i{w - 1,  h / 2};
-        if (dy ==  1) return Vec2i{w / 2,  0};
-        return Vec2i{w / 2,  h - 1};
+        // Overworld gates are shared per chunk boundary, so this keeps cross-chunk
+        // trail roads aligned (and preserves centered camp gates).
+        const overworld::ChunkGates g = overworld::gatePositions(dung, seed_, overworldX_, overworldY_);
+        if (dx ==  1) return g.west;
+        if (dx == -1) return g.east;
+        if (dy ==  1) return g.north;
+        return g.south;
     };
 
     // Helper: check for a free tile (optionally ignoring the player).
@@ -2556,7 +2656,7 @@ bool Game::tryOverworldStep(int dx, int dy) {
         const int h = std::max(16, dung.height);
         dung = Dungeon(w, h);
         overworld::generateWildernessChunk(dung, seed_, overworldX_, overworldY_);
-        dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+        dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
         confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
@@ -2581,7 +2681,7 @@ bool Game::tryOverworldStep(int dx, int dy) {
 
     // Ensure gates in destination chunk (home camp or wilderness).
     if (atCamp()) {
-        overworld::ensureBorderGates(dung);
+        overworld::ensureBorderGates(dung, seed_, overworldX_, overworldY_);
     }
 
     // Place player at the arrival gate; if blocked, step aside.
@@ -2634,13 +2734,35 @@ bool Game::tryOverworldStep(int dx, int dy) {
     // Flavor messages.
     if (overworldX_ == 0 && overworldY_ == 0) {
         pushMsg("YOU RETURN TO CAMP.", MessageKind::System, true);
-    } else if (oldX == 0 && oldY == 0) {
-        std::ostringstream ss;
-        ss << "YOU STEP INTO THE WILDERNESS (" << overworldX_ << "," << overworldY_ << ").";
-        pushMsg(ss.str(), MessageKind::System, true);
     } else {
+        const overworld::ChunkProfile prof = overworld::profileFor(seed_, overworldX_, overworldY_, dungeonMaxDepth());
+        const std::string name = overworld::chunkNameFor(prof);
+
         std::ostringstream ss;
-        ss << "YOU TRAVEL TO (" << overworldX_ << "," << overworldY_ << ").";
+        if (oldX == 0 && oldY == 0) {
+            ss << "YOU STEP INTO THE WILDERNESS: ";
+        } else {
+            ss << "YOU TRAVEL TO ";
+        }
+
+        const auto wx = overworld::weatherFor(seed_, overworldX_, overworldY_, prof.biome);
+
+        auto windChar = [&](const Vec2i& d) -> char {
+            if (d.x == 1) return 'E';
+            if (d.x == -1) return 'W';
+            if (d.y == 1) return 'S';
+            if (d.y == -1) return 'N';
+            return '-';
+        };
+
+        ss << name
+           << " [" << overworld::biomeName(prof.biome) << " D" << prof.dangerDepth
+           << " WX:" << overworld::weatherName(wx.kind);
+        if (wx.windStrength > 0) {
+            ss << " WIND:" << windChar(wx.windDir) << wx.windStrength;
+        }
+        ss << "] "
+           << "(" << overworldX_ << "," << overworldY_ << ").";
         pushMsg(ss.str(), MessageKind::System, true);
     }
 
@@ -2743,7 +2865,16 @@ void Game::spawnGraffiti() {
     engravings_.clear();
 
     // Keep graffiti sparse: it's a flavor accent, not a UI spam source.
-    constexpr size_t kMaxGraffitiPerFloor = 8;
+    const bool isWilderness = atCamp() && !atHomeCamp();
+    const size_t kMaxGraffitiPerFloor = isWilderness ? 4 : 8;
+
+    // Wilderness uses a depth-like scalar derived from distance to camp so that
+    // faraway chunks can surface more ominous/ancient lines and sigils.
+    const int gDepth = materialDepth();
+
+    // Salt sigil generation with the active material world seed so each chunk has
+    // its own glyph "dialect".
+    const uint32_t sigilSeed = materialWorldSeed();
 
     auto addGraffiti = [&](Vec2i pos, const std::string& text) {
         if (!dung.inBounds(pos.x, pos.y)) return;
@@ -2813,12 +2944,6 @@ void Game::spawnGraffiti() {
         engravings_.push_back(std::move(e));
     };
 
-    auto pickMsg = [&](const std::vector<std::string>& msgs) -> std::string {
-        if (msgs.empty()) return std::string();
-        const int idx = rng.range(0, static_cast<int>(msgs.size()) - 1);
-        return msgs[static_cast<size_t>(idx)];
-    };
-
     auto pickFloorInRoom = [&](const Room& r) -> Vec2i {
         // Prefer interior tiles (avoid walls).
         const int x0 = r.x + 1;
@@ -2840,72 +2965,12 @@ void Game::spawnGraffiti() {
         return Vec2i{r.cx(), r.cy()};
     };
 
-    // --- Message pools ---
-    static const std::vector<std::string> kGeneric = {
-        "DON'T PANIC.",
-        "KICKING DOORS HURTS.",
-        "THE WALLS HAVE EARS.",
-        "THE DEAD CAN SMELL YOU.",
-        "TRUST YOUR NOSE.",
-        "WORDS CAN BE WEAPONS.",
-        "SALT KEEPS THE DEAD BACK.",
-        "COLD IRON STOPS TRICKSTERS.",
-        "FIRE MAKES SLIME WARY.",
-        "YOU ARE NOT THE FIRST.",
-        "BONES DON'T LIE.",
-        "GREED GETS YOU KILLED.",
-        "THE FLOOR REMEMBERS.",
-        "SOME WORDS SCARE BEASTS.",
-        "WRITE IN THE DUST.",
-    };
-
-    static const std::vector<std::string> kShrine = {
-        "LEAVE AN OFFERING.",
-        "PRAY WITH CLEAN HANDS.",
-        "THE GODS DO NOT FORGET.",
-    };
-
-    static const std::vector<std::string> kLibrary = {
-        "SILENCE, PLEASE.",
-        "WORDS CUT DEEPER.",
-        "READ CAREFULLY.",
-    };
-
-    static const std::vector<std::string> kLaboratory = {
-        "DO NOT MIX POTIONS.",
-        "EYE PROTECTION ADVISED.",
-        "IF IT BUBBLES, RUN.",
-    };
-
-    static const std::vector<std::string> kArmory = {
-        "POINTY END OUT.",
-        "COUNT YOUR ARROWS.",
-        "BLADES RUST, SKILLS DON'T.",
-    };
-
-    static const std::vector<std::string> kVault = {
-        "LOCKS LIE.",
-        "TREASURE BITES.",
-        "NOT WORTH IT.",
-    };
-
-    static const std::vector<std::string> kSecret = {
-        "SHHH.",
-        "YOU FOUND IT.",
-        "LOOK BEHIND THE LOOK.",
-    };
-
     // Rare runic sigils (glyph-like floor inscriptions) that have small, local effects.
-    // These are deliberately terse so they read well in LOOK mode.
-    static const std::vector<std::string> kSigilAny = {
-        "SEER",
-        "NEXUS",
-        "MIASMA",
-        "EMBER",
-    };
+    // Sigils are now procedurally parameterized (radius/intensity/etc.) based on
+    // (run seed, depth, position, archetype), and get a tiny generated epithet.
 
     // Camp-specific: the surface is calmer, so the scribbles are more practical.
-    if (atCamp()) {
+    if (atHomeCamp()) {
         if (dung.inBounds(dung.campStashSpot.x, dung.campStashSpot.y)) {
             addGraffiti(dung.campStashSpot, "STASH");
         }
@@ -2913,6 +2978,12 @@ void Game::spawnGraffiti() {
         // Keep exit uncluttered: the upstairs tile is the real win condition.
         return;
     }
+
+    // Procedural hint pool for this floor.
+    const std::vector<graffitigen::Hint> hints = graffitigen::collectHints(dung);
+    auto genLine = [&](RoomType roomType, Vec2i at) -> std::string {
+        return graffitigen::generateLine(rng.nextU32(), dung, gDepth, roomType, at, hints);
+    };
 
     // Special rooms get a higher chance of graffiti.
     for (const auto& r : dung.rooms) {
@@ -2922,50 +2993,56 @@ void Game::spawnGraffiti() {
             case RoomType::Shrine: {
                 const Vec2i p = pickFloorInRoom(r);
                 if (rng.chance(0.18f)) {
-                    addSigil(p, "SEER", 1);
+                    const auto spec = sigilgen::makeSigilForSpawn(sigilSeed, gDepth, p, r.type);
+                    addSigil(p, sigilgen::keywordPlusEpithet(spec), spec.uses);
                 } else if (rng.chance(0.80f)) {
-                    addGraffiti(p, pickMsg(kShrine));
+                    addGraffiti(p, genLine(r.type, p));
                 }
             } break;
             case RoomType::Library: {
                 const Vec2i p = pickFloorInRoom(r);
                 if (rng.chance(0.12f)) {
-                    addSigil(p, "SEER", 1);
+                    const auto spec = sigilgen::makeSigilForSpawn(sigilSeed, gDepth, p, r.type);
+                    addSigil(p, sigilgen::keywordPlusEpithet(spec), spec.uses);
                 } else if (rng.chance(0.70f)) {
-                    addGraffiti(p, pickMsg(kLibrary));
+                    addGraffiti(p, genLine(r.type, p));
                 }
             } break;
             case RoomType::Laboratory: {
                 const Vec2i p = pickFloorInRoom(r);
                 if (rng.chance(0.22f)) {
                     // Labs are where alchemical accidents happen.
-                    addSigil(p, rng.chance(0.50f) ? "MIASMA" : "EMBER", 2);
+                    const auto spec = sigilgen::makeSigilForSpawn(sigilSeed, gDepth, p, r.type);
+                    addSigil(p, sigilgen::keywordPlusEpithet(spec), spec.uses);
                 } else if (rng.chance(0.70f)) {
-                    addGraffiti(p, pickMsg(kLaboratory));
+                    addGraffiti(p, genLine(r.type, p));
                 }
             } break;
             case RoomType::Armory: {
                 const Vec2i p = pickFloorInRoom(r);
                 if (rng.chance(0.15f)) {
-                    addSigil(p, "EMBER", 1);
+                    const auto spec = sigilgen::makeSigilForSpawn(sigilSeed, gDepth, p, r.type);
+                    addSigil(p, sigilgen::keywordPlusEpithet(spec), spec.uses);
                 } else if (rng.chance(0.60f)) {
-                    addGraffiti(p, pickMsg(kArmory));
+                    addGraffiti(p, genLine(r.type, p));
                 }
             } break;
             case RoomType::Vault: {
                 const Vec2i p = pickFloorInRoom(r);
                 if (rng.chance(0.18f)) {
-                    addSigil(p, "NEXUS", 1);
+                    const auto spec = sigilgen::makeSigilForSpawn(sigilSeed, gDepth, p, r.type);
+                    addSigil(p, sigilgen::keywordPlusEpithet(spec), spec.uses);
                 } else if (rng.chance(0.85f)) {
-                    addGraffiti(p, pickMsg(kVault));
+                    addGraffiti(p, genLine(r.type, p));
                 }
             } break;
             case RoomType::Secret: {
                 const Vec2i p = pickFloorInRoom(r);
                 if (rng.chance(0.30f)) {
-                    addSigil(p, "NEXUS", 1);
+                    const auto spec = sigilgen::makeSigilForSpawn(sigilSeed, gDepth, p, r.type);
+                    addSigil(p, sigilgen::keywordPlusEpithet(spec), spec.uses);
                 } else if (rng.chance(0.90f)) {
-                    addGraffiti(p, pickMsg(kSecret));
+                    addGraffiti(p, genLine(r.type, p));
                 }
             } break;
             default:
@@ -2979,12 +3056,11 @@ void Game::spawnGraffiti() {
         if (dung.rooms.empty()) break;
         const auto& r = dung.rooms[static_cast<size_t>(rng.range(0, static_cast<int>(dung.rooms.size()) - 1))];
         const Vec2i p = pickFloorInRoom(r);
-        if (rng.chance(0.08f) && depth_ >= 2) {
-            std::string sk = pickMsg(kSigilAny);
-            uint8_t uses = (sk == "MIASMA" || sk == "EMBER") ? 2 : 1;
-            addSigil(p, sk, uses);
+        if (rng.chance(0.08f) && gDepth >= 2) {
+            const auto spec = sigilgen::makeSigilForSpawn(sigilSeed, gDepth, p, r.type);
+            addSigil(p, sigilgen::keywordPlusEpithet(spec), spec.uses);
         } else {
-            addGraffiti(p, pickMsg(kGeneric));
+            addGraffiti(p, genLine(r.type, p));
         }
     }
 }
@@ -3535,12 +3611,13 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         dung.generate(rng, branch_, depth_, DUNGEON_MAX_DEPTH, seed_);
 
         if (branch_ == DungeonBranch::Camp && depth_ == 0) {
-            overworld::ensureBorderGates(dung);
+            overworld::ensureBorderGates(dung, seed_, 0, 0);
         }
 
         // In infinite mode, the sanctum (depth == max) gains a downstairs so depth 26+ is reachable.
         ensureEndlessSanctumDownstairs(newLevel, dung, rng);
         dung.computeEndlessStratumInfo(seed_, branch_, depth_, DUNGEON_MAX_DEPTH);
+        dung.computeCampaignStratumInfo(seed_, branch_, depth_, DUNGEON_MAX_DEPTH);
 
         confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
         poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
@@ -3620,6 +3697,7 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         // Returning to a visited level.
         ensureEndlessSanctumDownstairs(newLevel, dung, rng);
         dung.computeEndlessStratumInfo(seed_, branch_, depth_, DUNGEON_MAX_DEPTH);
+        dung.computeCampaignStratumInfo(seed_, branch_, depth_, DUNGEON_MAX_DEPTH);
 
         const Vec2i desiredArrival = goingDown ? dung.stairsUp : dung.stairsDown;
 
@@ -3797,6 +3875,15 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
             pushMsg("THE CATACOMBS STRETCH OUT IN EVERY DIRECTION.", MessageKind::System, true);
         }
 
+        // Finite campaign: depth 1..maxDepth is also grouped into run-seeded strata so the
+        // first 25 floors have macro structure (not just per-floor noise).
+        if (!restored && goingDown && depth_ <= DUNGEON_MAX_DEPTH && dung.campaignStratumIndex >= 0) {
+            if (dung.campaignStratumLocal == 0 && depth_ > 1) {
+                std::ostringstream ms;
+                ms << "YOU ENTER THE " << endlessStratumThemeName(dung.campaignStratumTheme) << " STRATUM.";
+                pushMsg(ms.str(), MessageKind::System, true);
+            }
+        }
         // Infinite World: endless depths are grouped into run-seeded strata (macro-themed bands).
         // Announce when we enter a new stratum so the player feels the large-scale progression.
         if (!restored && goingDown && infiniteWorldEnabled_ && depth_ > DUNGEON_MAX_DEPTH && dung.endlessStratumIndex >= 0) {
@@ -3847,12 +3934,23 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
             pushMsg("THE AIR GROWS THICK WITH OLD MAGIC.", MessageKind::System, true);
         }
 
+        // Procedural win plans may set a depth requirement lower than the quest floor.
+        // When the player first reaches that depth, call it out so they know the
+        // "go deep" clause is satisfied and they can focus on the remaining requirement.
+        if (goingDown && depth_ == winConditionTargetDepth()) {
+            pushMsg("YOU HAVE REACHED THE DEPTH REQUIRED FOR YOUR VICTORY PLAN.", MessageKind::System, true);
+        }
+
         if (goingDown && depth_ == QUEST_DEPTH - 1) {
 			pushMsg("THE DUNGEON TIGHTENS INTO CROOKED PASSAGES...", MessageKind::System, true);
 			pushMsg("YOU FEEL THE WEIGHT OF THE DEEP PLACES AHEAD.", MessageKind::System, true);
         }
         if (goingDown && depth_ == QUEST_DEPTH && !playerHasAmulet()) {
-            pushMsg("A SINISTER PRESENCE LURKS AHEAD. THE AMULET MUST BE NEAR...", MessageKind::System, true);
+            if (winConditionRequiresAmulet()) {
+                pushMsg("A SINISTER PRESENCE LURKS AHEAD. THE AMULET MUST BE NEAR...", MessageKind::System, true);
+            } else {
+                pushMsg("A SINISTER PRESENCE LURKS AHEAD. SOMETHING OF GREAT POWER IS NEAR...", MessageKind::System, true);
+            }
         }
 
     }
@@ -4203,6 +4301,12 @@ uint64_t Game::determinismHash() const {
     // Core counters that affect future simulation.
     hh.addI32(playerId_);
     hh.addU32(killCount);
+    hh.addU32(directKillCount_);
+    hh.addU32(conductFoodEaten_);
+    hh.addU32(conductCorpseEaten_);
+    hh.addU32(conductScrollsRead_);
+    hh.addU32(conductSpellbooksRead_);
+    hh.addU32(conductPrayers_);
     hh.addI32(naturalRegenCounter);
     hh.addBool(hastePhase);
     hh.addBool(gameOver);
@@ -4226,6 +4330,14 @@ uint64_t Game::determinismHash() const {
     // Shrine state.
     hh.addI32(piety_);
     hh.addU32(prayerCooldownUntilTurn_);
+
+    // Economy / guild state.
+    hh.addBool(merchantGuildAlerted_);
+    for (const int d : shopDebtLedger_) hh.addI32(d);
+
+    // Economy state.
+    hh.addBool(merchantGuildAlerted_);
+    for (int v : shopDebtLedger_) hh.addI32(v);
 
     // Endgame escalation.
     hh.addBool(yendorDoomEnabled_);
@@ -4355,8 +4467,35 @@ uint64_t Game::determinismHash() const {
 }
 
 
+Game::OverworldWeatherFx Game::overworldWeatherFx() const {
+    OverworldWeatherFx out;
+    if (!atCamp() || atHomeCamp()) return out;
+
+    const overworld::ChunkProfile prof = overworld::profileFor(seed_, overworldX_, overworldY_, dungeonMaxDepth());
+    const overworld::WeatherProfile wx = overworld::weatherFor(seed_, overworldX_, overworldY_, prof.biome);
+
+    out.active = true;
+    out.wind = wx.windDir;
+    out.windStrength = wx.windStrength;
+    out.fovPenalty = wx.fovPenalty;
+    out.fireQuench = wx.fireQuench;
+    out.burnQuench = wx.burnQuench;
+    out.name = overworld::weatherName(wx.kind);
+    return out;
+}
+
+
 Vec2i Game::windDir() const {
-    // Camp is sheltered; keep the surface calm.
+    // Home camp is sheltered; keep it calm.
+    if (atHomeCamp()) return {0, 0};
+
+    // Wilderness chunks (Camp depth 0 outside the hub) use overworld weather wind.
+    if (atCamp()) {
+        const OverworldWeatherFx wx = overworldWeatherFx();
+        return wx.wind;
+    }
+
+    // Non-camp branches: no wind on non-positive depths.
     if (branch_ == DungeonBranch::Camp || depth_ <= 0) return {0, 0};
 
     // Derive from run seed + level id without consuming RNG.
@@ -4376,6 +4515,16 @@ Vec2i Game::windDir() const {
 }
 
 int Game::windStrength() const {
+    // Home camp is sheltered.
+    if (atHomeCamp()) return 0;
+
+    // Wilderness chunks: strength comes from overworld weather.
+    if (atCamp()) {
+        const OverworldWeatherFx wx = overworldWeatherFx();
+        if (wx.wind.x == 0 && wx.wind.y == 0) return 0;
+        return clampi(wx.windStrength, 0, 3);
+    }
+
     const Vec2i w = windDir();
     if (w.x == 0 && w.y == 0) return 0;
 
@@ -4502,4 +4651,400 @@ std::string Game::runConductsTag() const {
         out += tags[i];
     }
     return out;
+}
+
+namespace {
+
+int countEssenceShardsMatching(const std::vector<Item>& inv, crafttags::Tag tag, int minTier) {
+    int n = 0;
+    const int tagId = crafttags::tagIndex(tag);
+    for (const auto& it : inv) {
+        if (it.count <= 0) continue;
+        if (it.kind != ItemKind::EssenceShard) continue;
+
+        const int itTag = essenceShardTagFromEnchant(it.enchant);
+        const int itTier = essenceShardTierFromEnchant(it.enchant);
+        if (tagId > 0 && itTag != tagId) continue;
+        if (itTier < minTier) continue;
+        n += it.count;
+    }
+    return n;
+}
+
+int countButcherTrophiesMatching(const std::vector<Item>& inv, ItemKind kind, int minQualityTier) {
+    int n = 0;
+    for (const auto& it : inv) {
+        if (it.count <= 0) continue;
+        if (it.kind != kind) continue;
+
+        const uint8_t q = butcherMaterialQualityFromEnchant(it.enchant);
+        const int tier = butcherQualityTierFromQuality(q);
+        if (tier < minQualityTier) continue;
+
+        n += it.count;
+    }
+    return n;
+}
+
+int countFishTrophiesMatching(const std::vector<Item>& inv, crafttags::Tag tag, int minRarity) {
+    int n = 0;
+    const char* reqTok = crafttags::tagToken(tag);
+    const int minR = clampi(minRarity, 0, 4);
+
+    for (const auto& it : inv) {
+        if (it.count <= 0) continue;
+        if (it.kind != ItemKind::Fish) continue;
+
+        // Fish seed is primarily stored in charges; fall back to spriteSeed/id for legacy cases.
+        uint32_t seed = static_cast<uint32_t>(it.charges);
+        if (seed == 0u) seed = it.spriteSeed;
+        if (seed == 0u) seed = hash32(static_cast<uint32_t>(it.id) ^ 0xF15B00Du);
+
+        const bool hasMeta = (it.enchant != 0);
+        const int rarityHint = hasMeta ? fishRarityFromEnchant(it.enchant) : -1;
+        const int sizeHint   = hasMeta ? fishSizeClassFromEnchant(it.enchant) : -1;
+        const int shinyHint  = hasMeta ? (fishIsShinyFromEnchant(it.enchant) ? 1 : 0) : -1;
+
+        const fishgen::FishSpec fs = fishgen::makeFish(seed, rarityHint, sizeHint, shinyHint);
+        if (static_cast<int>(fs.rarity) < minR) continue;
+
+        if (tag != crafttags::Tag::None) {
+            if (std::strcmp(fs.bonusTag, reqTok) != 0) continue;
+        }
+
+        n += it.count;
+    }
+
+    return n;
+}
+
+} // namespace
+
+int Game::winConditionTargetDepth() const {
+    const victorygen::VictoryPlan p = victorygen::planFor(seed_, dungeonMaxDepth(), infiniteWorldEnabled_);
+    return p.targetDepth;
+}
+
+bool Game::winConditionRequiresAmulet() const {
+    const victorygen::VictoryPlan p = victorygen::planFor(seed_, dungeonMaxDepth(), infiniteWorldEnabled_);
+    return victorygen::requiresAmulet(p);
+}
+
+std::vector<std::string> Game::winConditionLines(bool includeProgress) const {
+    const victorygen::VictoryPlan p = victorygen::planFor(seed_, dungeonMaxDepth(), infiniteWorldEnabled_);
+    if (!includeProgress) return victorygen::goalLines(p);
+
+    std::vector<std::string> out;
+    out.reserve(4);
+
+    out.push_back(
+        "DEPTH: " + std::to_string(maxDepth) + "/" + std::to_string(p.targetDepth)
+    );
+
+    for (int i = 0; i < static_cast<int>(p.reqCount); ++i) {
+        const victorygen::KeyReq& r = p.req[static_cast<size_t>(i)];
+
+        switch (r.kind) {
+            case victorygen::KeyKind::Amulet: {
+                out.push_back(std::string("AMULET OF YENDOR: ") + (playerHasAmulet() ? "FOUND" : "MISSING"));
+            } break;
+
+            case victorygen::KeyKind::Gold: {
+                out.push_back("GOLD: " + std::to_string(goldCount()) + "/" + std::to_string(r.amount));
+            } break;
+
+            case victorygen::KeyKind::EssenceShards: {
+                const int have = countEssenceShardsMatching(inv, r.tag, r.minTier);
+                std::string ln = "ESSENCE: " + std::to_string(have) + "/" + std::to_string(r.amount) + " ";
+                ln += crafttags::tagToken(r.tag);
+                if (r.minTier > 0) ln += " (T" + std::to_string(r.minTier) + "+)";
+                out.push_back(ln);
+            } break;
+
+            case victorygen::KeyKind::ClearDebt: {
+                out.push_back("DEBT: " + std::to_string(shopDebtTotal()) + " (MUST BE 0)");
+            } break;
+
+            case victorygen::KeyKind::Pacifist: {
+                out.push_back("DIRECT KILLS: " + std::to_string(directKillCount_) + " (MUST BE 0)");
+            } break;
+
+            case victorygen::KeyKind::Foodless: {
+                out.push_back("FOOD EATEN: " + std::to_string(conductFoodEaten_) + " (MUST BE 0)");
+            } break;
+
+            case victorygen::KeyKind::Vegetarian: {
+                out.push_back("CORPSES EATEN: " + std::to_string(conductCorpseEaten_) + " (MUST BE 0)");
+            } break;
+
+            case victorygen::KeyKind::Atheist: {
+                out.push_back("PRAYERS: " + std::to_string(conductPrayers_) + " (MUST BE 0)");
+            } break;
+
+            case victorygen::KeyKind::Illiterate: {
+                const int read = static_cast<int>(conductScrollsRead_ + conductSpellbooksRead_);
+                out.push_back("READ: " + std::to_string(read) + " (MUST BE 0)");
+            } break;
+
+            case victorygen::KeyKind::HideTrophies: {
+                const int have = countButcherTrophiesMatching(inv, ItemKind::ButcheredHide, r.minTier);
+                std::string ln = "HIDE TROPHIES: " + std::to_string(have) + "/" + std::to_string(r.amount);
+                ln += " ("; ln += victorygen::trophyTierLabel(r.minTier); ln += ")";
+                out.push_back(ln);
+            } break;
+
+            case victorygen::KeyKind::BoneTrophies: {
+                const int have = countButcherTrophiesMatching(inv, ItemKind::ButcheredBones, r.minTier);
+                std::string ln = "BONE TROPHIES: " + std::to_string(have) + "/" + std::to_string(r.amount);
+                ln += " ("; ln += victorygen::trophyTierLabel(r.minTier); ln += ")";
+                out.push_back(ln);
+            } break;
+
+            case victorygen::KeyKind::FishTrophies: {
+                const int have = countFishTrophiesMatching(inv, r.tag, r.minTier);
+                std::string ln = "FISH TROPHIES: " + std::to_string(have) + "/" + std::to_string(r.amount);
+                if (r.tag != crafttags::Tag::None) {
+                    ln += " ";
+                    ln += crafttags::tagToken(r.tag);
+                }
+                ln += " (";
+                ln += victorygen::fishRarityLabel(r.minTier);
+                ln += ")";
+                out.push_back(ln);
+            } break;
+
+            default:
+                out.push_back("ESCAPE.");
+                break;
+        }
+    }
+
+    out.push_back("EXIT: CAMP STAIRS UP");
+    return out;
+}
+
+std::string Game::winConditionHudTag() const {
+    const victorygen::VictoryPlan p = victorygen::planFor(seed_, dungeonMaxDepth(), infiniteWorldEnabled_);
+
+    std::stringstream ss;
+    ss << "WIN: D" << maxDepth << "/" << p.targetDepth;
+
+    for (int i = 0; i < static_cast<int>(p.reqCount); ++i) {
+        const victorygen::KeyReq& r = p.req[static_cast<size_t>(i)];
+
+        switch (r.kind) {
+            case victorygen::KeyKind::Amulet:
+                ss << " AMULET " << (playerHasAmulet() ? "1/1" : "0/1");
+                break;
+
+            case victorygen::KeyKind::Gold:
+                ss << " GOLD " << goldCount() << "/" << r.amount;
+                break;
+
+            case victorygen::KeyKind::EssenceShards: {
+                const int have = countEssenceShardsMatching(inv, r.tag, r.minTier);
+                ss << " " << crafttags::tagToken(r.tag);
+                if (r.minTier > 0) ss << "T" << r.minTier << "+";
+                ss << " " << have << "/" << r.amount;
+            } break;
+
+            case victorygen::KeyKind::ClearDebt:
+                ss << " DEBT " << shopDebtTotal() << "/0";
+                break;
+
+            case victorygen::KeyKind::Pacifist:
+                ss << " KILLS " << directKillCount_ << "/0";
+                break;
+
+            case victorygen::KeyKind::Foodless:
+                ss << " EATEN " << conductFoodEaten_ << "/0";
+                break;
+
+            case victorygen::KeyKind::Vegetarian:
+                ss << " CORPSE " << conductCorpseEaten_ << "/0";
+                break;
+
+            case victorygen::KeyKind::Atheist:
+                ss << " PRAY " << conductPrayers_ << "/0";
+                break;
+
+            case victorygen::KeyKind::Illiterate:
+                ss << " READ " << (conductScrollsRead_ + conductSpellbooksRead_) << "/0";
+                break;
+
+            case victorygen::KeyKind::HideTrophies: {
+                const int have = countButcherTrophiesMatching(inv, ItemKind::ButcheredHide, r.minTier);
+                ss << " HIDE " << have << "/" << r.amount;
+            } break;
+
+            case victorygen::KeyKind::BoneTrophies: {
+                const int have = countButcherTrophiesMatching(inv, ItemKind::ButcheredBones, r.minTier);
+                ss << " BONE " << have << "/" << r.amount;
+            } break;
+
+            case victorygen::KeyKind::FishTrophies: {
+                const int have = countFishTrophiesMatching(inv, r.tag, r.minTier);
+                if (r.tag != crafttags::Tag::None) {
+                    ss << " " << crafttags::tagToken(r.tag);
+                }
+                ss << " FISH" << victorygen::fishRarityCode(r.minTier);
+                ss << " " << have << "/" << r.amount;
+            } break;
+
+            default:
+                break;
+        }
+    }
+
+    return ss.str();
+}
+
+bool Game::winConditionsSatisfied(std::vector<std::string>* missing) const {
+    if (missing) missing->clear();
+
+    const victorygen::VictoryPlan p = victorygen::planFor(seed_, dungeonMaxDepth(), infiniteWorldEnabled_);
+
+    bool ok = true;
+
+    if (maxDepth < p.targetDepth) {
+        ok = false;
+        if (missing) {
+            missing->push_back("REACH DEPTH " + std::to_string(p.targetDepth) + " (DEEPEST: " + std::to_string(maxDepth) + ")");
+        }
+    }
+
+    for (int i = 0; i < static_cast<int>(p.reqCount); ++i) {
+        const victorygen::KeyReq& r = p.req[static_cast<size_t>(i)];
+
+        switch (r.kind) {
+            case victorygen::KeyKind::Amulet:
+                if (!playerHasAmulet()) {
+                    ok = false;
+                    if (missing) missing->push_back("FIND THE AMULET OF YENDOR");
+                }
+                break;
+
+            case victorygen::KeyKind::Gold: {
+                const int have = goldCount();
+                if (have < r.amount) {
+                    ok = false;
+                    if (missing) missing->push_back("COLLECT " + std::to_string(r.amount) + " GOLD (HAVE: " + std::to_string(have) + ")");
+                }
+            } break;
+
+            case victorygen::KeyKind::EssenceShards: {
+                const int have = countEssenceShardsMatching(inv, r.tag, r.minTier);
+                if (have < r.amount) {
+                    ok = false;
+                    if (missing) {
+                        std::string ln = "COLLECT " + std::to_string(r.amount) + " ";
+                        ln += crafttags::tagToken(r.tag);
+                        ln += " ESSENCE SHARD";
+                        if (r.amount != 1) ln += "S";
+                        if (r.minTier > 0) ln += " (TIER " + std::to_string(r.minTier) + "+)";
+                        ln += " (HAVE: " + std::to_string(have) + ")";
+                        missing->push_back(ln);
+                    }
+                }
+            } break;
+
+            case victorygen::KeyKind::ClearDebt: {
+                const int debt = shopDebtTotal();
+                if (debt > 0) {
+                    ok = false;
+                    if (missing) missing->push_back("CLEAR YOUR SHOP DEBT (OWE: " + std::to_string(debt) + ")");
+                }
+            } break;
+
+            case victorygen::KeyKind::Pacifist:
+                if (directKillCount_ > 0) {
+                    ok = false;
+                    if (missing) missing->push_back("DELIVER NO KILLING BLOWS (DIRECT KILLS: " + std::to_string(directKillCount_) + ")");
+                }
+                break;
+
+            case victorygen::KeyKind::Foodless:
+                if (conductFoodEaten_ > 0) {
+                    ok = false;
+                    if (missing) missing->push_back("EAT NOTHING (FOOD EATEN: " + std::to_string(conductFoodEaten_) + ")");
+                }
+                break;
+
+            case victorygen::KeyKind::Vegetarian:
+                if (conductCorpseEaten_ > 0) {
+                    ok = false;
+                    if (missing) missing->push_back("EAT NO CORPSES (CORPSES EATEN: " + std::to_string(conductCorpseEaten_) + ")");
+                }
+                break;
+
+            case victorygen::KeyKind::Atheist:
+                if (conductPrayers_ > 0) {
+                    ok = false;
+                    if (missing) missing->push_back("USE NO SHRINES (PRAYERS: " + std::to_string(conductPrayers_) + ")");
+                }
+                break;
+
+            case victorygen::KeyKind::Illiterate:
+                if (conductScrollsRead_ > 0 || conductSpellbooksRead_ > 0) {
+                    ok = false;
+                    if (missing) {
+                        missing->push_back(
+                            "READ NOTHING (SCROLLS: " + std::to_string(conductScrollsRead_) + ", BOOKS: " + std::to_string(conductSpellbooksRead_) + ")"
+                        );
+                    }
+                }
+                break;
+
+            case victorygen::KeyKind::HideTrophies: {
+                const int have = countButcherTrophiesMatching(inv, ItemKind::ButcheredHide, r.minTier);
+                if (have < r.amount) {
+                    ok = false;
+                    if (missing) {
+                        std::string ln = "COLLECT " + std::to_string(r.amount) + " HIDE TROPH";
+                        ln += (r.amount == 1) ? "Y" : "IES";
+                        ln += " ("; ln += victorygen::trophyTierLabel(r.minTier); ln += ")";
+                        ln += " (HAVE: " + std::to_string(have) + ")";
+                        missing->push_back(ln);
+                    }
+                }
+            } break;
+
+            case victorygen::KeyKind::BoneTrophies: {
+                const int have = countButcherTrophiesMatching(inv, ItemKind::ButcheredBones, r.minTier);
+                if (have < r.amount) {
+                    ok = false;
+                    if (missing) {
+                        std::string ln = "COLLECT " + std::to_string(r.amount) + " BONE TROPH";
+                        ln += (r.amount == 1) ? "Y" : "IES";
+                        ln += " ("; ln += victorygen::trophyTierLabel(r.minTier); ln += ")";
+                        ln += " (HAVE: " + std::to_string(have) + ")";
+                        missing->push_back(ln);
+                    }
+                }
+            } break;
+
+            case victorygen::KeyKind::FishTrophies: {
+                const int have = countFishTrophiesMatching(inv, r.tag, r.minTier);
+                if (have < r.amount) {
+                    ok = false;
+                    if (missing) {
+                        std::string ln = "CATCH " + std::to_string(r.amount) + " ";
+                        if (r.tag != crafttags::Tag::None) {
+                            ln += crafttags::tagToken(r.tag);
+                            ln += " ";
+                        }
+                        ln += "TROPHY FISH (";
+                        ln += victorygen::fishRarityLabel(r.minTier);
+                        ln += ") (HAVE: " + std::to_string(have) + ")";
+                        missing->push_back(ln);
+                    }
+                }
+            } break;
+
+            default:
+                break;
+        }
+    }
+
+    return ok;
 }

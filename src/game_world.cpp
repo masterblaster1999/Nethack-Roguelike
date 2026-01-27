@@ -359,7 +359,7 @@ void Game::recomputeLightMap() {
     // occasional dim navigation landmarks in darkness without replacing torches.
     {
         // Ensure terrain caches exist (biolum is computed in Dungeon::ensureMaterials).
-        dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+        dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
         struct GlowCand {
             Vec2i pos;
@@ -522,6 +522,12 @@ void Game::recomputeFov() {
     int radius = 9;
     if (p.effects.visionTurns > 0) radius += 3;
 
+    // Overworld weather can reduce visibility in the wilderness.
+    if (atCamp() && !atHomeCamp()) {
+        const int pen = overworldWeatherFx().fovPenalty;
+        if (pen > 0) radius = std::max(4, radius - pen);
+    }
+
     recomputeLightMap();
 
     if (!darknessActive()) {
@@ -604,7 +610,7 @@ void Game::updateScentMap() {
     if (W <= 0 || H <= 0) return;
 
     // Substrate materials influence scent: mossy/earthy areas absorb odor faster.
-    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
     // Deposit at the player's current tile.
     //

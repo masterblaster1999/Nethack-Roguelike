@@ -813,7 +813,7 @@ void Game::emitNoise(Vec2i pos, int volume) {
 
     // Ensure deterministic substrate cache so sound propagation can incorporate
     // material acoustics (moss/dirt dampen; metal/crystal carry).
-    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
     // Dungeon-aware propagation: walls/secret doors block sound; doors + materials muffle/carry.
     const std::vector<int> sound = dung.computeSoundMap(pos.x, pos.y, maxEff);

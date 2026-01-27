@@ -90,6 +90,9 @@ bool Game::autoPickupWouldPick(ItemKind k) const {
             if (k == ItemKind::Arrow) return hasRangedWeaponForAmmo(AmmoKind::Arrow);
             if (k == ItemKind::Rock)  return hasRangedWeaponForAmmo(AmmoKind::Rock);
 
+            // Procedural crafting byproduct.
+            if (k == ItemKind::EssenceShard) return true;
+
             const ItemDef& def = itemDef(k);
             if (def.consumable) return true;
             if (def.slot != EquipSlot::None) return true; // equipment

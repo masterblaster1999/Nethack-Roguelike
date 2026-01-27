@@ -2,6 +2,7 @@
 #include "artifact_gen.hpp"
 
 #include "pet_gen.hpp"
+#include "proc_names.hpp"
 
 #include "combat_rules.hpp"
 #include "physics.hpp"
@@ -44,6 +45,19 @@ const char* kindName(EntityKind k) {
         case EntityKind::Minotaur: return "MINOTAUR";
         default: return "THING";
     }
+}
+
+// Hostile procedural variants: deterministic codename for message text.
+static std::string kindNameForMsg(const Entity& e, bool hallu) {
+    std::string base = kindName(e.kind);
+    if (hallu) return base;
+    if (procname::shouldShowCodename(e)) {
+        const std::string code = procname::codename(e);
+        if (!code.empty()) {
+            return code + " " + base;
+        }
+    }
+    return base;
 }
 
 // A player-facing description for what a projectile collided with.
@@ -448,11 +462,11 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
     if (!hc.hit) {
         std::ostringstream ss;
         if (attacker.kind == EntityKind::Player) {
-            ss << "YOU MISS " << kindName(defender.kind) << ".";
+            ss << "YOU MISS " << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << ".";
         } else if (defender.kind == EntityKind::Player) {
-            ss << kindName(attacker.kind) << " MISSES YOU.";
+            ss << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " MISSES YOU.";
         } else {
-            ss << kindName(attacker.kind) << " MISSES " << kindName(defender.kind) << ".";
+            ss << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " MISSES " << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << ".";
         }
         pushMsg(ss.str(), MessageKind::Combat, msgFromPlayer);
         if (attacker.kind == EntityKind::Player) {
@@ -564,18 +578,18 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
     std::ostringstream ss;
     if (attacker.kind == EntityKind::Player) {
         if (ambush) ss << (backstab ? "SNEAK ATTACK! " : "AMBUSH! ");
-        ss << "YOU " << (hc.crit ? "CRIT " : "") << (kick ? "KICK " : "HIT ") << kindName(defender.kind);
+        ss << "YOU " << (hc.crit ? "CRIT " : "") << (kick ? "KICK " : "HIT ") << kindNameForMsg(defender, player().effects.hallucinationTurns > 0);
         if (dmg > 0) ss << " FOR " << dmg;
         else ss << " BUT DO NO DAMAGE";
         ss << ".";
     } else if (defender.kind == EntityKind::Player) {
-        if (kick) ss << kindName(attacker.kind) << " " << (hc.crit ? "CRIT KICKS" : "KICKS") << " YOU";
-        else ss << kindName(attacker.kind) << " " << (hc.crit ? "CRITS" : "HITS") << " YOU";
+        if (kick) ss << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " " << (hc.crit ? "CRIT KICKS" : "KICKS") << " YOU";
+        else ss << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " " << (hc.crit ? "CRITS" : "HITS") << " YOU";
         if (dmg > 0) ss << " FOR " << dmg;
         else ss << " BUT DOES NO DAMAGE";
         ss << ".";
     } else {
-        ss << kindName(attacker.kind) << (kick ? " KICKS " : " HITS ") << kindName(defender.kind) << ".";
+        ss << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << (kick ? " KICKS " : " HITS ") << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << ".";
     }
     pushMsg(ss.str(), MessageKind::Combat, msgFromPlayer);
 
@@ -616,7 +630,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                             pushMsg("YOU ARE SET AFLAME!", MessageKind::Warning, false);
                         } else if (canSee(defender)) {
                             std::ostringstream ss2;
-                            ss2 << kindName(defender.kind) << " CATCHES FIRE!";
+                            ss2 << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " CATCHES FIRE!";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -634,7 +648,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                             pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
                         } else if (canSee(defender)) {
                             std::ostringstream ss2;
-                            ss2 << kindName(defender.kind) << " IS POISONED!";
+                            ss2 << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " IS POISONED!";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -653,7 +667,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                             pushMsg("YOU ARE CAUGHT IN STICKY WEBBING!", MessageKind::Warning, false);
                         } else if (canSee(defender)) {
                             std::ostringstream ss2;
-                            ss2 << kindName(defender.kind) << " IS CAUGHT IN STICKY WEBBING!";
+                            ss2 << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " IS CAUGHT IN STICKY WEBBING!";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -672,7 +686,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                             pushMsg("ACID SIZZLES ON YOUR SKIN!", MessageKind::Warning, false);
                         } else if (canSee(defender)) {
                             std::ostringstream ss2;
-                            ss2 << kindName(defender.kind) << " IS SPLASHED WITH ACID!";
+                            ss2 << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " IS SPLASHED WITH ACID!";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -691,7 +705,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                             pushMsg("YOU ARE DAZED!", MessageKind::Warning, false);
                         } else if (canSee(defender)) {
                             std::ostringstream ss2;
-                            ss2 << kindName(defender.kind) << " LOOKS DAZED!";
+                            ss2 << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " LOOKS DAZED!";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -711,7 +725,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                             pushMsg("YOUR LIFE IS DRAINED!", MessageKind::Warning, false);
                         } else if (canSee(attacker)) {
                             std::ostringstream ss2;
-                            ss2 << kindName(attacker.kind) << " LOOKS REINVIGORATED.";
+                            ss2 << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " LOOKS REINVIGORATED.";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -818,7 +832,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                                 pushMsg("YOU ARE SET AFLAME!", MessageKind::Warning, false);
                             } else if (canSeeEnt(defender)) {
                                 std::ostringstream ss2;
-                                ss2 << kindName(defender.kind) << " CATCHES FIRE!";
+                                ss2 << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " CATCHES FIRE!";
                                 pushMsg(ss2.str(), MessageKind::Info, true);
                             }
                         }
@@ -836,7 +850,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                                 pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
                             } else if (canSeeEnt(defender)) {
                                 std::ostringstream ss2;
-                                ss2 << kindName(defender.kind) << " IS POISONED!";
+                                ss2 << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " IS POISONED!";
                                 pushMsg(ss2.str(), MessageKind::Info, true);
                             }
                             if (canSeeEnt(defender)) pushFxParticle(FXParticlePreset::Poison, defender.pos, 18, 0.35f);
@@ -855,7 +869,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                                 pushMsg("YOU ARE DAZED!", MessageKind::Warning, false);
                             } else if (canSeeEnt(defender)) {
                                 std::ostringstream ss2;
-                                ss2 << kindName(defender.kind) << " LOOKS DAZED!";
+                                ss2 << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " LOOKS DAZED!";
                                 pushMsg(ss2.str(), MessageKind::Info, true);
                             }
                         }
@@ -884,7 +898,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                             pushMsg("THE FOE SURGES WITH VITALITY!", MessageKind::Warning, false);
                         } else if (canSeeEnt(attacker)) {
                             std::ostringstream ss2;
-                            ss2 << kindName(attacker.kind) << " LOOKS REINVIGORATED.";
+                            ss2 << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " LOOKS REINVIGORATED.";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -909,7 +923,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                             pushMsg("THE FOE RAISES A SHIMMERING WARD!", MessageKind::Warning, false);
                         } else if (canSeeEnt(attacker)) {
                             std::ostringstream ss2;
-                            ss2 << kindName(attacker.kind) << " IS SURROUNDED BY A WARD.";
+                            ss2 << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " IS SURROUNDED BY A WARD.";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -929,7 +943,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                             pushFxParticle(FXParticlePreset::Buff, defender.pos, 18, 0.25f);
                         } else if (canSeeEnt(defender)) {
                             std::ostringstream ss2;
-                            ss2 << kindName(defender.kind) << " IS PROTECTED BY A WARD.";
+                            ss2 << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " IS PROTECTED BY A WARD.";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -952,7 +966,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                             pushFxParticle(FXParticlePreset::Heal, defender.pos, 18, 0.25f);
                         } else if (canSeeEnt(defender)) {
                             std::ostringstream ss2;
-                            ss2 << kindName(defender.kind) << " LOOKS HEALTHIER.";
+                            ss2 << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " LOOKS HEALTHIER.";
                             pushMsg(ss2.str(), MessageKind::Info, true);
                         }
                     }
@@ -1008,7 +1022,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                         pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
                     } else if (defender.friendly && canSeeProc()) {
                         std::ostringstream ps;
-                        ps << "YOUR " << kindName(defender.kind) << " IS POISONED!";
+                        ps << "YOUR " << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " IS POISONED!";
                         pushMsg(ps.str(), MessageKind::Info, true);
                     }
                     if (canSeeProc()) pushFxParticle(FXParticlePreset::Poison, defender.pos, 18, 0.35f);
@@ -1029,7 +1043,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                         pushMsg("YOU CATCH FIRE!", MessageKind::Warning, false);
                     } else if (defender.friendly && canSeeProc()) {
                         std::ostringstream bs;
-                        bs << "YOUR " << kindName(defender.kind) << " CATCHES FIRE!";
+                        bs << "YOUR " << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " CATCHES FIRE!";
                         pushMsg(bs.str(), MessageKind::Info, true);
                     }
                 }
@@ -1049,7 +1063,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                         pushMsg("YOU ARE ENSNARED!", MessageKind::Warning, false);
                     } else if (defender.friendly && canSeeProc()) {
                         std::ostringstream ws;
-                        ws << "YOUR " << kindName(defender.kind) << " IS ENSNARED!";
+                        ws << "YOUR " << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " IS ENSNARED!";
                         pushMsg(ws.str(), MessageKind::Info, true);
                     }
                 }
@@ -1069,7 +1083,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                         pushMsg("YOUR LIFE IS DRAINED!", MessageKind::Warning, false);
                     } else if (defender.friendly && canSeeProc()) {
                         std::ostringstream vs;
-                        vs << "YOUR " << kindName(defender.kind) << " IS DRAINED!";
+                        vs << "YOUR " << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " IS DRAINED!";
                         pushMsg(vs.str(), MessageKind::Info, true);
                     }
                     if (dung.inBounds(attacker.pos.x, attacker.pos.y) && dung.at(attacker.pos.x, attacker.pos.y).visible) {
@@ -1188,11 +1202,11 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
             if (kb.stepsMoved > 0) {
                 std::ostringstream ks;
                 if (attacker.kind == EntityKind::Player) {
-                    ks << "YOU KNOCK " << kindName(defender.kind) << " BACK!";
+                    ks << "YOU KNOCK " << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " BACK!";
                 } else if (defender.kind == EntityKind::Player) {
-                    ks << kindName(attacker.kind) << " KNOCKS YOU BACK!";
+                    ks << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " KNOCKS YOU BACK!";
                 } else {
-                    ks << kindName(attacker.kind) << " KNOCKS " << kindName(defender.kind) << " BACK.";
+                    ks << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " KNOCKS " << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " BACK.";
                 }
                 pushMsg(ks.str(), MessageKind::Combat, msgFromPlayer);
 
@@ -1213,7 +1227,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                 std::ostringstream cs;
                 const bool door = (kb.stop == KnockbackStop::SlammedDoor);
                 if (defender.kind == EntityKind::Player) cs << "YOU";
-                else cs << kindName(defender.kind);
+                else cs << kindNameForMsg(defender, player().effects.hallucinationTurns > 0);
                 cs << (door ? " SLAM INTO THE DOOR" : " SLAM INTO THE WALL");
                 if (kb.collisionDamageDefender > 0) cs << " FOR " << kb.collisionDamageDefender;
                 cs << "!";
@@ -1227,10 +1241,10 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                 std::ostringstream cs;
                 if (other) {
                     if (defender.kind == EntityKind::Player) cs << "YOU";
-                    else cs << kindName(defender.kind);
+                    else cs << kindNameForMsg(defender, player().effects.hallucinationTurns > 0);
                     cs << " CRASH INTO ";
                     if (other->kind == EntityKind::Player) cs << "YOU";
-                    else cs << kindName(other->kind);
+                    else cs << kindNameForMsg(*other, player().effects.hallucinationTurns > 0);
                     cs << "!";
                 } else {
                     cs << "SOMETHING GETS RAMMED!";
@@ -1244,7 +1258,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
                     pushMsg(fs.str(), MessageKind::Warning, false);
                     if (endCause_.empty()) endCause_ = "FELL INTO A CHASM";
                 } else {
-                    fs << kindName(defender.kind) << " FALLS INTO THE CHASM!";
+                    fs << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " FALLS INTO THE CHASM!";
                     pushMsg(fs.str(), MessageKind::Combat, msgFromPlayer);
                     skipDeathMsg = true;
                 }
@@ -1255,7 +1269,7 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
             } else if (kb.stop == KnockbackStop::ImmuneToChasm) {
                 if (defender.kind != EntityKind::Player) {
                     std::ostringstream fs;
-                    fs << kindName(defender.kind) << " DODGES THE CHASM.";
+                    fs << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " DODGES THE CHASM.";
                     pushMsg(fs.str(), MessageKind::Info, msgFromPlayer);
                 }
 
@@ -1272,21 +1286,24 @@ void Game::attackMelee(Entity& attacker, Entity& defender, bool kick) {
     if (defender.hp <= 0) {
         if (defender.kind == EntityKind::Player) {
             pushMsg("YOU DIE.", MessageKind::Combat, false);
-            if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindName(attacker.kind);
+            if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindNameForMsg(attacker, player().effects.hallucinationTurns > 0);
             gameOver = true;
         } else {
             if (!skipDeathMsg) {
                 std::ostringstream ds;
                 if (defender.friendly) {
-                    ds << "YOUR " << kindName(defender.kind) << " DIES.";
+                    ds << "YOUR " << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " DIES.";
                 } else {
-                    ds << kindName(defender.kind) << " DIES.";
+                    ds << kindNameForMsg(defender, player().effects.hallucinationTurns > 0) << " DIES.";
                 }
                 pushMsg(ds.str(), MessageKind::Combat, msgFromPlayer);
             }
 
             if ((attacker.kind == EntityKind::Player || attacker.friendly) && !defender.friendly) {
                 ++killCount;
+                if (attacker.kind == EntityKind::Player && directKillCount_ < 0xFFFFFFFFu) {
+                    ++directKillCount_;
+                }
 
                 const size_t kidx = static_cast<size_t>(defender.kind);
                 if (kidx < codexKills_.size()) {
@@ -1402,18 +1419,21 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
 
         if (victim.kind == EntityKind::Player) {
             pushMsg("YOU DIE.", MessageKind::Combat, false);
-            if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindName(attacker.kind);
+            if (endCause_.empty()) endCause_ = std::string("KILLED BY ") + kindNameForMsg(attacker, player().effects.hallucinationTurns > 0);
             gameOver = true;
             return;
         }
 
         std::ostringstream ds;
-        if (victim.friendly) ds << "YOUR " << kindName(victim.kind) << " DIES.";
-        else ds << kindName(victim.kind) << " DIES.";
+        if (victim.friendly) ds << "YOUR " << kindNameForMsg(victim, player().effects.hallucinationTurns > 0) << " DIES.";
+        else ds << kindNameForMsg(victim, player().effects.hallucinationTurns > 0) << " DIES.";
         pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
 
         if ((attacker.kind == EntityKind::Player || attacker.friendly) && !victim.friendly) {
             ++killCount;
+            if (attacker.kind == EntityKind::Player && directKillCount_ < 0xFFFFFFFFu) {
+                ++directKillCount_;
+            }
 
             const size_t kidx = static_cast<size_t>(victim.kind);
             if (kidx < codexKills_.size()) {
@@ -1485,11 +1505,11 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
             // Miss: projectile continues.
             if (fromPlayer) {
                 std::ostringstream ss;
-                ss << "YOU MISS " << kindName(e->kind) << ".";
+                ss << "YOU MISS " << kindNameForMsg(*e, player().effects.hallucinationTurns > 0) << ".";
                 pushMsg(ss.str(), MessageKind::Combat, true);
             } else if (e->kind == EntityKind::Player) {
                 std::ostringstream ss;
-                ss << kindName(attacker.kind) << " MISSES YOU.";
+                ss << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " MISSES YOU.";
                 pushMsg(ss.str(), MessageKind::Combat, false);
             }
             continue;
@@ -1531,17 +1551,17 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
 
         std::ostringstream ss;
         if (fromPlayer) {
-            ss << "YOU " << (hc.crit ? "CRIT " : "") << "HIT " << kindName(hit->kind);
+            ss << "YOU " << (hc.crit ? "CRIT " : "") << "HIT " << kindNameForMsg(*hit, player().effects.hallucinationTurns > 0);
             if (dmg > 0) ss << " FOR " << dmg;
             else ss << " BUT DO NO DAMAGE";
             ss << ".";
         } else if (hit->kind == EntityKind::Player) {
-            ss << kindName(attacker.kind) << " " << (hc.crit ? "CRITS" : "HITS") << " YOU";
+            ss << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " " << (hc.crit ? "CRITS" : "HITS") << " YOU";
             if (dmg > 0) ss << " FOR " << dmg;
             else ss << " BUT DOES NO DAMAGE";
             ss << ".";
         } else {
-            ss << kindName(attacker.kind) << " HITS " << kindName(hit->kind) << ".";
+            ss << kindNameForMsg(attacker, player().effects.hallucinationTurns > 0) << " HITS " << kindNameForMsg(*hit, player().effects.hallucinationTurns > 0) << ".";
         }
         pushMsg(ss.str(), MessageKind::Combat, fromPlayer);
 
@@ -1556,7 +1576,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                     pushMsg("YOU CATCH FIRE!", MessageKind::Warning, false);
                 } else if (dung.inBounds(hit->pos.x, hit->pos.y) && dung.at(hit->pos.x, hit->pos.y).visible) {
                     std::ostringstream bs;
-                    bs << kindName(hit->kind) << " CATCHES FIRE!";
+                    bs << kindNameForMsg(*hit, player().effects.hallucinationTurns > 0) << " CATCHES FIRE!";
                     pushMsg(bs.str(), MessageKind::Info, fromPlayer);
                 }
             }
@@ -1585,7 +1605,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                             pushMsg("YOU ARE POISONED!", MessageKind::Warning, false);
                         } else if (hit->friendly && canSeeProc()) {
                             std::ostringstream ps;
-                            ps << "YOUR " << kindName(hit->kind) << " IS POISONED!";
+                            ps << "YOUR " << kindNameForMsg(*hit, player().effects.hallucinationTurns > 0) << " IS POISONED!";
                             pushMsg(ps.str(), MessageKind::Info, true);
                         }
                         if (canSeeProc()) pushFxParticle(FXParticlePreset::Poison, hit->pos, 16, 0.35f);
@@ -1606,7 +1626,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                             pushMsg("YOU CATCH FIRE!", MessageKind::Warning, false);
                         } else if (hit->friendly && canSeeProc()) {
                             std::ostringstream bs;
-                            bs << "YOUR " << kindName(hit->kind) << " CATCHES FIRE!";
+                            bs << "YOUR " << kindNameForMsg(*hit, player().effects.hallucinationTurns > 0) << " CATCHES FIRE!";
                             pushMsg(bs.str(), MessageKind::Info, true);
                         }
                     }
@@ -1626,7 +1646,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                             pushMsg("YOU ARE ENSNARED!", MessageKind::Warning, false);
                         } else if (hit->friendly && canSeeProc()) {
                             std::ostringstream ws;
-                            ws << "YOUR " << kindName(hit->kind) << " IS ENSNARED!";
+                            ws << "YOUR " << kindNameForMsg(*hit, player().effects.hallucinationTurns > 0) << " IS ENSNARED!";
                             pushMsg(ws.str(), MessageKind::Info, true);
                         }
                     }
@@ -1646,7 +1666,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                             pushMsg("YOUR LIFE IS DRAINED!", MessageKind::Warning, false);
                         } else if (hit->friendly && canSeeProc()) {
                             std::ostringstream vs;
-                            vs << "YOUR " << kindName(hit->kind) << " IS DRAINED!";
+                            vs << "YOUR " << kindNameForMsg(*hit, player().effects.hallucinationTurns > 0) << " IS DRAINED!";
                             pushMsg(vs.str(), MessageKind::Info, true);
                         }
                         if (dung.inBounds(attacker.pos.x, attacker.pos.y) && dung.at(attacker.pos.x, attacker.pos.y).visible) {
@@ -1852,7 +1872,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                 pushMsg(ss.str(), MessageKind::Combat, false);
             } else if (fromPlayer || tileVisible) {
                 std::ostringstream ss;
-                ss << kindName(e->kind) << " IS HIT";
+                ss << kindNameForMsg(*e, player().effects.hallucinationTurns > 0) << " IS HIT";
                 if (dmg > 0) ss << " FOR " << dmg;
                 else ss << " BUT TAKES NO DAMAGE";
                 ss << ".";
@@ -1863,7 +1883,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                 if (e->kind == EntityKind::Player) {
                     pushMsg("YOU DIE.", MessageKind::Combat, false);
                     if (endCause_.empty()) {
-                        endCause_ = fromPlayer ? "KILLED BY YOUR OWN FIREBALL" : (std::string("KILLED BY ") + kindName(attacker.kind));
+                        endCause_ = fromPlayer ? "KILLED BY YOUR OWN FIREBALL" : (std::string("KILLED BY ") + kindNameForMsg(attacker, player().effects.hallucinationTurns > 0));
                     }
                     gameOver = true;
                     break;
@@ -1871,12 +1891,15 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                     const bool vis = dung.inBounds(e->pos.x, e->pos.y) && dung.at(e->pos.x, e->pos.y).visible;
                     if (fromPlayer || vis) {
                         std::ostringstream ds;
-                        if (e->friendly) ds << "YOUR " << kindName(e->kind) << " DIES.";
-                        else ds << kindName(e->kind) << " DIES.";
+                        if (e->friendly) ds << "YOUR " << kindNameForMsg(*e, player().effects.hallucinationTurns > 0) << " DIES.";
+                        else ds << kindNameForMsg(*e, player().effects.hallucinationTurns > 0) << " DIES.";
                         pushMsg(ds.str(), MessageKind::Combat, fromPlayer);
                     }
                     if ((attacker.kind == EntityKind::Player || attacker.friendly) && !e->friendly) {
                         ++killCount;
+						if (attacker.kind == EntityKind::Player && directKillCount_ < 0xFFFFFFFFu) {
+							++directKillCount_;
+						}
 
                         const size_t kidx = static_cast<size_t>(e->kind);
                         if (kidx < codexKills_.size()) {
@@ -1938,7 +1961,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
         const bool impacted = hitAny || hitWall;
         if (impacted) {
             // Ensure deterministic terrain materials are cached for this floor.
-            dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+            dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
             Vec2i impactTile = line[stopIdx];
             Vec2i arcOrigin = impactTile;
@@ -2096,13 +2119,13 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                     if (show) {
                         std::ostringstream ss;
                         if (fromPlayer) {
-                            ss << "LIGHTNING ARCS TO " << kindName(best->kind);
+                            ss << "LIGHTNING ARCS TO " << kindNameForMsg(*best, player().effects.hallucinationTurns > 0);
                         } else if (best->kind == EntityKind::Player) {
                             ss << "LIGHTNING ARCS TO YOU";
                         } else if (best->friendly) {
-                            ss << "LIGHTNING ARCS TO YOUR " << kindName(best->kind);
+                            ss << "LIGHTNING ARCS TO YOUR " << kindNameForMsg(*best, player().effects.hallucinationTurns > 0);
                         } else {
-                            ss << "LIGHTNING ARCS TO " << kindName(best->kind);
+                            ss << "LIGHTNING ARCS TO " << kindNameForMsg(*best, player().effects.hallucinationTurns > 0);
                         }
                         if (dmg > 0) ss << " FOR " << dmg;
                         else ss << " BUT DOES NO DAMAGE";
@@ -2132,7 +2155,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                                 pushMsg("YOU ARE STUNNED BY THE SHOCK!", MessageKind::Warning, false);
                             } else if (dung.inBounds(best->pos.x, best->pos.y) && dung.at(best->pos.x, best->pos.y).visible) {
                                 std::ostringstream cs;
-                                cs << kindName(best->kind) << " REELS FROM THE SHOCK!";
+                                cs << kindNameForMsg(*best, player().effects.hallucinationTurns > 0) << " REELS FROM THE SHOCK!";
                                 pushMsg(cs.str(), MessageKind::Info, fromPlayer);
                             }
                         }

@@ -38,6 +38,7 @@ inline constexpr ActionInfo kActionInfoTable[] = {
     {Action::Cancel,  "cancel",  "Cancel / close"},
     {Action::Wait,    "wait",    "Wait a turn"},
     {Action::Parry,   "parry",   "Parry (ready a riposte)"},
+    {Action::Butcher, "butcher", "Butcher a corpse"},
     {Action::Rest,    "rest",    "Rest until healed / interrupted"},
     {Action::ToggleSneak, "sneak", "Toggle sneak (quieter movement)"},
     {Action::Evade,   "evade",   "Smart step away from visible threats"},
@@ -73,6 +74,7 @@ inline constexpr ActionInfo kActionInfoTable[] = {
     {Action::Command,        "command",         "Open extended command prompt"},
 
     {Action::ToggleMinimap,   "toggle_minimap",   "Toggle minimap"},
+    {Action::ToggleOverworldMap, "overworld_map", "Toggle overworld map"},
     {Action::MinimapZoomIn,   "minimap_zoom_in",  "Minimap zoom in"},
     {Action::MinimapZoomOut,  "minimap_zoom_out", "Minimap zoom out"},
     {Action::ToggleStats,     "toggle_stats",     "Toggle stats panel"},

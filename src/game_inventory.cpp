@@ -1,11 +1,13 @@
 #include "game_internal.hpp"
 
 #include "fishing_gen.hpp"
+#include "butcher_gen.hpp"
 
 #include "crafting_gen.hpp"
 
 #include "bounty_gen.hpp"
 #include "proc_spells.hpp"
+#include "shop_profile_gen.hpp"
 
 
 static ChestContainer* findChestContainer(std::vector<ChestContainer>& containers, int chestId) {
@@ -157,6 +159,9 @@ Game::CraftComputed Game::computeCraftComputed(const Item& a0, const Item& b0) c
     cc.tagB = o.tagB;
     cc.tier = o.tier;
     cc.out = o.out;
+
+    cc.hasByproduct = o.hasByproduct;
+    cc.byproduct = o.byproduct;
 
     Item& out = cc.out;
 
@@ -390,6 +395,42 @@ void Game::rebuildCraftingPreview() {
     outNamed.id = 0;
     invCraftPreviewLines_.push_back("RESULT: " + displayItemName(outNamed));
 
+    if (cc.hasByproduct) {
+        Item byp = cc.byproduct;
+        byp.id = 0;
+        invCraftPreviewLines_.push_back("BYPRODUCT: " + displayItemName(byp));
+    }
+
+
+    // Extra outcome details for procedural crafting/forging.
+    if (outNamed.kind == ItemKind::RuneTablet) {
+        const ProcSpell ps = generateProcSpell(outNamed.spriteSeed);
+        std::string runeLine = "RUNE: ";
+        runeLine += ps.name;
+        if (!ps.tags.empty()) {
+            runeLine += " (";
+            runeLine += ps.tags;
+            runeLine += ")";
+        }
+        invCraftPreviewLines_.push_back(runeLine);
+    } else if (isWearableGear(outNamed.kind)) {
+        if (itemIsArtifact(outNamed)) {
+            const artifactgen::Power p = artifactgen::artifactPower(outNamed);
+            std::string artLine = "ARTIFACT: ";
+            artLine += artifactgen::powerTag(p);
+            artLine += " — ";
+            artLine += artifactgen::powerDesc(p);
+            invCraftPreviewLines_.push_back(artLine);
+        } else if (outNamed.ego != ItemEgo::None) {
+            std::string egoLine = "EGO: ";
+            egoLine += egoPrefix(outNamed.ego);
+            egoLine += " — ";
+            egoLine += egoShortDesc(outNamed.ego);
+            invCraftPreviewLines_.push_back(egoLine);
+        }
+    }
+
+
     std::ostringstream tierLine;
     tierLine << "TIER: " << cc.tier;
     invCraftPreviewLines_.push_back(tierLine.str());
@@ -516,6 +557,27 @@ bool Game::craftCombineById(int itemAId, int itemBId) {
         }
     }
 
+    // Add deterministic byproduct (if any).
+    bool bypDropped = false;
+    Item byp;
+    if (cc0.hasByproduct) {
+        byp = cc0.byproduct;
+        byp.id = nextItemId++;
+        byp.shopPrice = 0;
+        byp.shopDepth = 0;
+
+        bool stackedB = tryStackItem(inv, byp);
+        if (!stackedB) {
+            if (static_cast<int>(inv.size()) >= maxInv) {
+                dropGroundItemItem(player().pos, byp);
+                pushMsg("YOUR PACK IS FULL; YOU DROP " + displayItemName(byp) + ".", MessageKind::Loot, true);
+                bypDropped = true;
+            } else {
+                inv.push_back(byp);
+            }
+        }
+    }
+
     invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 
     // Record the recipe in the run's journal (UI-only; not serialized).
@@ -526,6 +588,10 @@ bool Game::craftCombineById(int itemAId, int itemBId) {
         std::ostringstream ss;
         ss << "YOU CRAFT " << displayItemName(out) << " FROM " << aName << " + " << bName << ".";
         pushMsg(ss.str(), MessageKind::Success, true);
+    }
+
+    if (cc0.hasByproduct && !bypDropped) {
+        pushMsg("BYPRODUCT: YOU HARVEST " + displayItemName(byp) + ".", MessageKind::Loot, true);
     }
 
     if (!cc0.tagA.empty() || !cc0.tagB.empty()) {
@@ -1584,12 +1650,17 @@ bool Game::dropSelected() {
         named.shopDepth = 0;
         msg = "YOU RETURN " + displayItemName(named) + ".";
     } else if (peacefulShop && drop.shopPrice <= 0 && itemCanBeSoldToShop(drop)) {
-        const int perUnit = shopSellPricePerUnit(drop, depth_);
+        const Room* shopRoom = shopgen::shopRoomAt(dung, player().pos);
+        const shopgen::ShopProfile prof = shopRoom ? shopgen::profileFor(seed_, depth_, *shopRoom) : shopgen::ShopProfile{};
+
+        const int basePerUnit = shopSellPricePerUnit(drop, depth_);
+        const int perUnit = shopgen::adjustedShopSellPricePerUnit(basePerUnit, prof, drop);
         const int gold = std::max(0, perUnit) * stackUnitsForPrice(drop);
         if (gold > 0) gainGoldToInv(inv, gold, nextItemId, rng);
 
         // The shop now owns the item and will resell it.
-        drop.shopPrice = shopBuyPricePerUnit(drop, depth_);
+        const int baseBuy = shopBuyPricePerUnit(drop, depth_);
+        drop.shopPrice = shopgen::adjustedShopBuyPricePerUnit(baseBuy, prof, drop);
         drop.shopDepth = depth_;
 
         Item named = drop;
@@ -1658,11 +1729,16 @@ bool Game::dropSelectedAll() {
         named.shopDepth = 0;
         msg = "YOU RETURN " + displayItemName(named) + ".";
     } else if (peacefulShop && drop.shopPrice <= 0 && itemCanBeSoldToShop(drop)) {
-        const int perUnit = shopSellPricePerUnit(drop, depth_);
+        const Room* shopRoom = shopgen::shopRoomAt(dung, player().pos);
+        const shopgen::ShopProfile prof = shopRoom ? shopgen::profileFor(seed_, depth_, *shopRoom) : shopgen::ShopProfile{};
+
+        const int basePerUnit = shopSellPricePerUnit(drop, depth_);
+        const int perUnit = shopgen::adjustedShopSellPricePerUnit(basePerUnit, prof, drop);
         const int gold = std::max(0, perUnit) * stackUnitsForPrice(drop);
         if (gold > 0) gainGoldToInv(inv, gold, nextItemId, rng);
 
-        drop.shopPrice = shopBuyPricePerUnit(drop, depth_);
+        const int baseBuy = shopBuyPricePerUnit(drop, depth_);
+        drop.shopPrice = shopgen::adjustedShopBuyPricePerUnit(baseBuy, prof, drop);
         drop.shopDepth = depth_;
 
         Item named = drop;
@@ -1832,6 +1908,283 @@ bool Game::equipSelected() {
     return false;
 }
 
+
+static bool canButcherWith(ItemKind k) {
+    return k == ItemKind::Dagger || k == ItemKind::Sword || k == ItemKind::Axe || k == ItemKind::Pickaxe;
+}
+
+bool Game::butcherSelected() {
+    if (invSel < 0 || invSel >= static_cast<int>(inv.size())) {
+        pushMsg("NOTHING TO BUTCHER.", MessageKind::Bad);
+        return false;
+    }
+
+    Item* tool = equippedMelee();
+    if (!tool || !canButcherWith(tool->kind)) {
+        pushMsg("YOU NEED A SHARP TOOL EQUIPPED TO BUTCHER.", MessageKind::Bad);
+        return false;
+    }
+
+    Item corpse = inv[invSel];
+    if (!isCorpseKind(corpse.kind)) {
+        pushMsg("THAT IS NOT A CORPSE.", MessageKind::Bad);
+        return false;
+    }
+
+    const uint32_t baseSeed = (corpse.spriteSeed != 0u)
+        ? corpse.spriteSeed
+        : hash32(static_cast<uint32_t>(corpse.id) ^ 0xB007C0DEu);
+
+    // Include tool kind so different tools carve the same corpse differently (deterministically).
+    const uint32_t seed = hash32(baseSeed
+        ^ (static_cast<uint32_t>(corpse.count) * 0x9E3779B9u)
+        ^ (static_cast<uint32_t>(tool->kind) * 0x85EBCA6Bu));
+
+    const auto y = butchergen::generate(corpse.kind, seed, corpse.charges, tool->kind);
+
+    // Consume exactly one corpse from the stack.
+    if (inv[invSel].count > 1) {
+        inv[invSel].count -= 1;
+    } else {
+        inv.erase(inv.begin() + invSel);
+        if (invSel >= static_cast<int>(inv.size())) invSel = static_cast<int>(inv.size()) - 1;
+    }
+
+    const int noise = clampi(itemDef(corpse.kind).weight / 4, 6, 16);
+    emitNoise(player().pos, noise);
+
+    {
+        std::ostringstream ss;
+        ss << "YOU BUTCHER THE " << itemDef(corpse.kind).name << ".";
+        pushMsg(ss.str(), MessageKind::Loot);
+    }
+
+    if (y.meat.empty()) {
+        pushMsg("YOU CAN'T SALVAGE ANY EDIBLE MEAT.", MessageKind::Bad);
+    }
+
+    static constexpr int maxInv = 26;
+
+    auto grantOrDrop = [&](Item out) {
+        if (out.count <= 0) return;
+        out.id = nextItemId++;
+        out.shopPrice = 0;
+        out.shopDepth = 0;
+        out.ownerId = 0;
+
+        if (!tryStackItem(inv, out)) {
+            if (static_cast<int>(inv.size()) < maxInv) {
+                inv.push_back(out);
+            } else {
+                dropGroundItemItem(player().pos, out);
+                std::ostringstream ss;
+                ss << "YOUR PACK IS FULL. YOU DROP " << itemDisplayName(out) << ".";
+                pushMsg(ss.str(), MessageKind::Bad);
+            }
+        }
+    };
+
+    auto meatSpriteSeed = [&](int cutId, int tagId) -> uint32_t {
+        const uint32_t base = hash32(seed ^ 0x4D454154u ^ (static_cast<uint32_t>(cutId) * 0x9E3779B9u) ^ (static_cast<uint32_t>(tagId) * 0x85EBCA6Bu)); // 'MEAT'
+        const uint32_t lo = static_cast<uint32_t>((cutId & 0xF) | ((tagId & 0xF) << 4));
+        return (base & ~0xFFu) | lo;
+    };
+
+    auto materialSpriteSeed = [&](uint32_t domain, int variant, int quality) -> uint32_t {
+        const int qTier = butcherQualityTierFromQuality(quality);
+        const uint32_t base = hash32(seed ^ domain ^ (static_cast<uint32_t>(variant) * 0x9E3779B9u) ^ (static_cast<uint32_t>(quality) * 0x85EBCA6Bu));
+        const uint32_t lo = static_cast<uint32_t>((variant & 0xF) | ((qTier & 0xF) << 4));
+        return (base & ~0xFFu) | lo;
+    };
+
+    // Meat stacks
+    for (const auto& ms : y.meat) {
+        if (ms.pieces <= 0) continue;
+
+        Item meat;
+        meat.kind = ItemKind::ButcheredMeat;
+        meat.count = ms.pieces;
+        meat.charges = corpse.charges;
+        meat.enchant = packButcherMeatEnchant(
+            ms.hungerPerPiece,
+            ms.healPerPiece,
+            static_cast<int>(corpse.kind),
+            butchergen::tagIndex(ms.tag),
+            butchergen::cutIndex(ms.cut));
+        meat.spriteSeed = meatSpriteSeed(butchergen::cutIndex(ms.cut), butchergen::tagIndex(ms.tag));
+        grantOrDrop(meat);
+    }
+
+    // Hide
+    if (y.hidePieces > 0) {
+        Item hide;
+        hide.kind = ItemKind::ButcheredHide;
+        hide.count = y.hidePieces;
+        hide.enchant = packButcherMaterialEnchant(static_cast<int>(corpse.kind), y.hideQuality, butchergen::hideTypeIndex(y.hideType));
+        hide.spriteSeed = materialSpriteSeed(0x48494445u, butchergen::hideTypeIndex(y.hideType), y.hideQuality); // 'HIDE'
+        grantOrDrop(hide);
+    }
+
+    // Bones
+    if (y.bonePieces > 0) {
+        Item bones;
+        bones.kind = ItemKind::ButcheredBones;
+        bones.count = y.bonePieces;
+        bones.enchant = packButcherMaterialEnchant(static_cast<int>(corpse.kind), y.boneQuality, butchergen::boneTypeIndex(y.boneType));
+        bones.spriteSeed = materialSpriteSeed(0x424F4E45u, butchergen::boneTypeIndex(y.boneType), y.boneQuality); // 'BONE'
+        grantOrDrop(bones);
+    }
+
+    return true;
+}
+
+bool Game::butcherAtFeetOrPrompt() {
+    Item* tool = equippedMelee();
+    if (!tool || !canButcherWith(tool->kind)) {
+        pushMsg("YOU NEED A SHARP TOOL EQUIPPED TO BUTCHER.", MessageKind::Bad);
+        return false;
+    }
+
+    const Vec2i ppos = player().pos;
+
+    // Prefer a corpse at your feet (freshest first).
+    int bestIdx = -1;
+    int bestFresh = -999999;
+    for (int i = 0; i < static_cast<int>(ground.size()); ++i) {
+        if (ground[i].pos == ppos && isCorpseKind(ground[i].item.kind)) {
+            if (ground[i].item.charges > bestFresh) {
+                bestFresh = ground[i].item.charges;
+                bestIdx = i;
+            }
+        }
+    }
+
+    if (bestIdx >= 0) {
+        // Butcher one corpse from the ground stack.
+        GroundItem gi = ground[bestIdx];
+        Item corpse = gi.item;
+        corpse.count = 1;
+
+        if (ground[bestIdx].item.count > 1) {
+            ground[bestIdx].item.count -= 1;
+        } else {
+            ground.erase(ground.begin() + bestIdx);
+        }
+
+        const uint32_t baseSeed = (corpse.spriteSeed != 0u)
+            ? corpse.spriteSeed
+            : hash32(static_cast<uint32_t>(corpse.id) ^ 0xB007C0DEu);
+
+        // Domain-separated, and tool-dependent.
+        const uint32_t seed = hash32(baseSeed ^ 0xC0DEC0DEu ^ (static_cast<uint32_t>(tool->kind) * 0x85EBCA6Bu));
+
+        const auto y = butchergen::generate(corpse.kind, seed, corpse.charges, tool->kind);
+
+        const int noise = clampi(itemDef(corpse.kind).weight / 4, 6, 16);
+        emitNoise(player().pos, noise);
+
+        {
+            std::ostringstream ss;
+            ss << "YOU BUTCHER THE " << itemDef(corpse.kind).name << ".";
+            pushMsg(ss.str(), MessageKind::Loot);
+        }
+
+        if (y.meat.empty()) {
+            pushMsg("YOU CAN'T SALVAGE ANY EDIBLE MEAT.", MessageKind::Bad);
+        }
+
+        static constexpr int maxInv = 26;
+        auto grantOrDrop = [&](Item out) {
+            if (out.count <= 0) return;
+            out.id = nextItemId++;
+            out.shopPrice = 0;
+            out.shopDepth = 0;
+            out.ownerId = 0;
+            if (!tryStackItem(inv, out)) {
+                if (static_cast<int>(inv.size()) < maxInv) {
+                    inv.push_back(out);
+                } else {
+                    dropGroundItemItem(ppos, out);
+                    std::ostringstream ss;
+                    ss << "YOUR PACK IS FULL. YOU DROP " << itemDisplayName(out) << ".";
+                    pushMsg(ss.str(), MessageKind::Bad);
+                }
+            }
+        };
+
+        auto meatSpriteSeed = [&](int cutId, int tagId) -> uint32_t {
+            const uint32_t base = hash32(seed ^ 0x4D454154u ^ (static_cast<uint32_t>(cutId) * 0x9E3779B9u) ^ (static_cast<uint32_t>(tagId) * 0x85EBCA6Bu));
+            const uint32_t lo = static_cast<uint32_t>((cutId & 0xF) | ((tagId & 0xF) << 4));
+            return (base & ~0xFFu) | lo;
+        };
+
+        auto materialSpriteSeed = [&](uint32_t domain, int variant, int quality) -> uint32_t {
+            const int qTier = butcherQualityTierFromQuality(quality);
+            const uint32_t base = hash32(seed ^ domain ^ (static_cast<uint32_t>(variant) * 0x9E3779B9u) ^ (static_cast<uint32_t>(quality) * 0x85EBCA6Bu));
+            const uint32_t lo = static_cast<uint32_t>((variant & 0xF) | ((qTier & 0xF) << 4));
+            return (base & ~0xFFu) | lo;
+        };
+
+        for (const auto& ms : y.meat) {
+            if (ms.pieces <= 0) continue;
+
+            Item meat;
+            meat.kind = ItemKind::ButcheredMeat;
+            meat.count = ms.pieces;
+            meat.charges = corpse.charges;
+            meat.enchant = packButcherMeatEnchant(
+                ms.hungerPerPiece,
+                ms.healPerPiece,
+                static_cast<int>(corpse.kind),
+                butchergen::tagIndex(ms.tag),
+                butchergen::cutIndex(ms.cut));
+            meat.spriteSeed = meatSpriteSeed(butchergen::cutIndex(ms.cut), butchergen::tagIndex(ms.tag));
+            grantOrDrop(meat);
+        }
+
+        if (y.hidePieces > 0) {
+            Item hide;
+            hide.kind = ItemKind::ButcheredHide;
+            hide.count = y.hidePieces;
+            hide.enchant = packButcherMaterialEnchant(static_cast<int>(corpse.kind), y.hideQuality, butchergen::hideTypeIndex(y.hideType));
+            hide.spriteSeed = materialSpriteSeed(0x48494445u, butchergen::hideTypeIndex(y.hideType), y.hideQuality);
+            grantOrDrop(hide);
+        }
+
+        if (y.bonePieces > 0) {
+            Item bones;
+            bones.kind = ItemKind::ButcheredBones;
+            bones.count = y.bonePieces;
+            bones.enchant = packButcherMaterialEnchant(static_cast<int>(corpse.kind), y.boneQuality, butchergen::boneTypeIndex(y.boneType));
+            bones.spriteSeed = materialSpriteSeed(0x424F4E45u, butchergen::boneTypeIndex(y.boneType), y.boneQuality);
+            grantOrDrop(bones);
+        }
+
+        return true;
+    }
+
+    // Otherwise butcher from inventory (prompt if multiple).
+    std::vector<int> corpseIdx;
+    for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+        if (isCorpseKind(inv[i].kind)) corpseIdx.push_back(i);
+    }
+
+    if (corpseIdx.empty()) {
+        pushMsg("NO CORPSES TO BUTCHER.", MessageKind::Bad);
+        return false;
+    }
+
+    if (corpseIdx.size() == 1) {
+        invSel = corpseIdx[0];
+        return butcherSelected();
+    }
+
+    openInventory();
+    invPrompt_ = InvPromptKind::Butcher;
+    invSel = corpseIdx[0];
+    pushMsg("SELECT A CORPSE TO BUTCHER.", MessageKind::Info);
+    return false;
+}
 bool Game::useSelected() {
     if (inv.empty()) {
         pushMsg("NOTHING TO USE.", MessageKind::Info, true);
@@ -2991,6 +3344,95 @@ bool Game::useSelected() {
         return true;
     }
 
+
+    if (it.kind == ItemKind::ButcheredMeat) {
+        Entity& p = playerMut();
+
+        if (hungerEnabled_ && hungerMax <= 0) hungerMax = 800;
+
+        const int beforeState = hungerStateFor(hunger, hungerMax);
+
+        const bool rotten = (it.charges <= 60);
+        const bool stale = (it.charges <= 160);
+
+        int restore = butcherMeatHungerFromEnchant(it.enchant);
+        int heal = butcherMeatHealFromEnchant(it.enchant);
+
+        // Spoilage reduces nutrition.
+        if (rotten) {
+            restore = restore / 2;
+            heal = std::max(0, heal - 1);
+        } else if (stale) {
+            restore = (restore * 3) / 4;
+        }
+
+        if (heal > 0 && p.hp < p.hpMax) p.hp = std::min(p.hpMax, p.hp + heal);
+        if (hungerEnabled_) hunger = std::min(hungerMax, hunger + restore);
+
+        // Scale effect duration loosely with the source creature weight.
+        int wt = 0;
+        const int srcRaw = butcherSourceKindFromEnchant(it.enchant);
+        if (srcRaw >= 0 && srcRaw < ITEM_KIND_COUNT) wt = itemDef(static_cast<ItemKind>(srcRaw)).weight;
+        const int dur = 8 + (wt / 40);
+
+        const char* tag = butchergen::tagToken(butchergen::tagFromIndex(butcherMeatTagFromEnchant(it.enchant)));
+        if (tag && tag[0]) {
+            const std::string t = tag;
+            if (t == "REGEN") {
+                p.effects.regenTurns = std::max(p.effects.regenTurns, dur);
+                pushMsg("THE MEAT MAKES YOU FEEL HEALTHIER.", MessageKind::Loot, true);
+            } else if (t == "HASTE") {
+                p.effects.hasteTurns = std::max(p.effects.hasteTurns, dur);
+                pushMsg("THE MEAT MAKES YOU FEEL QUICKER.", MessageKind::Loot, true);
+            } else if (t == "SHIELD") {
+                p.effects.shieldTurns = std::max(p.effects.shieldTurns, dur);
+                pushMsg("YOU FEEL PROTECTED.", MessageKind::Loot, true);
+            } else if (t == "AURORA") {
+                p.effects.visionTurns = std::max(p.effects.visionTurns, dur);
+                pushMsg("YOUR VISION SHARPENS.", MessageKind::Loot, true);
+                recomputeFov();
+            } else if (t == "CLARITY") {
+                if (p.effects.confuseTurns > 0 || p.effects.halluTurns > 0) {
+                    p.effects.confuseTurns = 0;
+                    p.effects.halluTurns = 0;
+                    pushMsg("YOUR MIND CLEARS.", MessageKind::Loot, true);
+                } else {
+                    pushMsg("YOU FEEL A LITTLE MORE FOCUSED.", MessageKind::Loot, true);
+                }
+            } else if (t == "VENOM") {
+                p.effects.poisonTurns = std::max(p.effects.poisonTurns, 6 + (wt / 80));
+                pushMsg("UGH... YOU FEEL SICK.", MessageKind::Warning, true);
+            } else if (t == "EMBER") {
+                p.effects.burnTurns = std::max(p.effects.burnTurns, 4 + (wt / 80));
+                pushFxParticle(FXParticlePreset::EmberBurst, player().pos);
+                pushMsg("THE MEAT BURNS YOUR THROAT!", MessageKind::Warning, true);
+            }
+        }
+
+        if (rotten) {
+            // A little extra sickness risk.
+            p.effects.poisonTurns = std::max(p.effects.poisonTurns, 3 + (wt / 100));
+            pushMsg("YOU EAT ROTTEN MEAT.", MessageKind::Warning, true);
+        } else if (stale) {
+            pushMsg("YOU EAT STALE MEAT.", MessageKind::Loot, true);
+        } else {
+            pushMsg("YOU EAT SOME MEAT.", MessageKind::Loot, true);
+        }
+
+        const int afterState = hungerStateFor(hunger, hungerMax);
+
+        if (hungerEnabled_) {
+            if (afterState < beforeState) {
+                pushMsg("YOU FEEL HUNGRIER.", MessageKind::Bad, true);
+            } else if (afterState > beforeState) {
+                pushMsg("YOU FEEL FULLER.", MessageKind::Loot, true);
+            }
+        }
+
+        hungerStatePrev = afterState;
+        consumeOneStackable();
+        return true;
+    }
     if (isCorpseKind(it.kind)) {
         Entity& p = playerMut();
         const ItemDef& d = itemDef(it.kind);

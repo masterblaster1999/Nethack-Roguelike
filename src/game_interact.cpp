@@ -1,5 +1,13 @@
 #include "game_internal.hpp"
 
+#include "trap_salvage_gen.hpp"
+
+#include "sigil_gen.hpp"
+
+#include "shop_profile_gen.hpp"
+
+#include "shrine_profile_gen.hpp"
+
 #include "wards.hpp"
 
 int Game::playerFootstepNoiseVolumeAt(Vec2i pos) const {
@@ -26,7 +34,7 @@ int Game::playerFootstepNoiseVolumeAt(Vec2i pos) const {
     // (Moss/dirt dampen; metal/crystal ring out.)
     int matDelta = 0;
     {
-        dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+        dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
         const TerrainMaterial m = dung.materialAtCached(pos.x, pos.y);
         matDelta = terrainMaterialFx(m).footstepNoiseDelta;
     }
@@ -291,7 +299,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
                     const TileType before = dung.at(nx, ny).type;
                     if (dung.dig(nx, ny)) {
                         // Digging noise depends on the local substrate material (metal rings, moss muffles, ...).
-                        dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+                        dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
                         const TerrainMaterial digMat = dung.materialAtCached(nx, ny);
                         int digNoise = 14 + terrainMaterialFx(digMat).digNoiseDelta;
                         digNoise = clampi(digNoise, 6, 20);
@@ -367,6 +375,27 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
             const int debt = shopDebtThisDepth();
             if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
                 triggerShopTheftAlarm(prevPos, e.pos);
+            }
+        }
+        if (!wasInShop && nowInShop) {
+            if (const Room* shopRoom = shopgen::shopRoomAt(dung, e.pos)) {
+                const shopgen::ShopProfile prof = shopgen::profileFor(seed_, depth_, *shopRoom);
+                pushMsg("YOU ENTER " + shopgen::shopNameFor(prof) + ".", MessageKind::Info, true);
+
+                bool keeperHere = false;
+                for (const Entity& en : ents) {
+                    if (en.kind == EntityKind::Shopkeeper && !en.alerted && shopRoom->contains(en.pos)) {
+                        keeperHere = true;
+                        break;
+                    }
+                }
+                if (keeperHere) {
+                    pushMsg("SHOPKEEPER " + shopgen::shopkeeperNameFor(prof) + " SAYS: " + shopgen::greetingFor(prof), MessageKind::Info, true);
+                } else {
+                    pushMsg("THE SHOP SEEMS UNATTENDED.", MessageKind::Info, false);
+                }
+            } else {
+                pushMsg("YOU ENTER A SHOP.", MessageKind::Info, true);
             }
         }
         // Footstep noise: small, but enough for nearby monsters to investigate.
@@ -745,6 +774,27 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
                     const int debt = shopDebtThisDepth();
                     if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
                         triggerShopTheftAlarm(prevPos, victim.pos);
+                    }
+                }
+                if (!wasInShop && nowInShop) {
+                    if (const Room* shopRoom = shopgen::shopRoomAt(dung, victim.pos)) {
+                        const shopgen::ShopProfile prof = shopgen::profileFor(seed_, depth_, *shopRoom);
+                        pushMsg("YOU ENTER " + shopgen::shopNameFor(prof) + ".", MessageKind::Info, true);
+
+                        bool keeperHere = false;
+                        for (const Entity& en : ents) {
+                            if (en.kind == EntityKind::Shopkeeper && !en.alerted && shopRoom->contains(en.pos)) {
+                                keeperHere = true;
+                                break;
+                            }
+                        }
+                        if (keeperHere) {
+                            pushMsg("SHOPKEEPER " + shopgen::shopkeeperNameFor(prof) + " SAYS: " + shopgen::greetingFor(prof), MessageKind::Info, true);
+                        } else {
+                            pushMsg("THE SHOP SEEMS UNATTENDED.", MessageKind::Info, false);
+                        }
+                    } else {
+                        pushMsg("YOU ENTER A SHOP.", MessageKind::Info, true);
                     }
                 }
             }
@@ -1248,188 +1298,272 @@ void Game::triggerSigilAt(Vec2i pos, Entity& victim) {
         // ------------------------------------------------------------------
         // SIGIL EFFECTS
         // ------------------------------------------------------------------
-        // NOTE: Keep effects deterministic and local. We use existing systems
-        // (traps/doors, gas, fire) rather than inventing new persistent formats.
+        // NOTE: Keep effects local and rely on existing systems (fields/traps/effects).
+        // Sigil parameters are procedurally derived from seed/depth/pos so they are
+        // stable per-run without needing extra serialization.
 
-        if (key == "SEER") {
-            // A mild "detect secrets" burst around the sigil's location.
-            // Player-only: monsters don't meaningfully use this information.
-            if (!isPlayer) return;
+        const sigilgen::SigilSpec spec = sigilgen::makeSigil(seed_, depth_, pos, key);
+        if (spec.kind == sigilgen::SigilKind::Unknown) return;
 
-            constexpr int radius = 5;
-            int revealedTraps = 0;
-            int revealedDoors = 0;
-            int revealedChests = 0;
-
-            for (auto& t : trapsCur) {
-                if (t.discovered) continue;
-                if (chebyshev(t.pos, pos) <= radius) {
-                    t.discovered = true;
-                    revealedTraps += 1;
-                }
-            }
-
-            for (int dy = -radius; dy <= radius; ++dy) {
-                for (int dx = -radius; dx <= radius; ++dx) {
-                    if (std::max(std::abs(dx), std::abs(dy)) > radius) continue;
-                    const int x = pos.x + dx;
-                    const int y = pos.y + dy;
-                    if (!dung.inBounds(x, y)) continue;
-                    Tile& tt = dung.at(x, y);
-                    if (tt.type == TileType::DoorSecret) {
-                        tt.type = TileType::DoorClosed;
-                        tt.explored = true;
-                        revealedDoors += 1;
-                    }
-                }
-            }
-
-            for (auto& gi : ground) {
-                if (!isChestKind(gi.item.kind)) continue;
-                if (!chestTrapped(gi.item)) continue;
-                if (chestTrapKnown(gi.item)) continue;
-                if (chebyshev(gi.pos, pos) > radius) continue;
-                setChestTrapKnown(gi.item, true);
-                revealedChests += 1;
-            }
-
-            say("THE SIGIL'S LINES REARRANGE IN YOUR MIND.", MessageKind::System, false);
-
-            if (revealedTraps + revealedDoors + revealedChests > 0) {
-                std::ostringstream ss;
-                ss << "YOU GLIMPSE ";
-                bool first = true;
-                if (revealedDoors > 0) {
-                    ss << revealedDoors << " HIDDEN PASSAGE" << (revealedDoors == 1 ? "" : "S");
-                    first = false;
-                }
-                if (revealedTraps > 0) {
-                    if (!first) ss << ", ";
-                    ss << revealedTraps << " TRAP" << (revealedTraps == 1 ? "" : "S");
-                    first = false;
-                }
-                if (revealedChests > 0) {
-                    if (!first) ss << ", ";
-                    ss << revealedChests << " TRAPPED CHEST" << (revealedChests == 1 ? "" : "S");
-                }
-                ss << ".";
-                say(ss.str(), MessageKind::Info, false);
-            } else {
-                say("...BUT NOTHING STIRS.", MessageKind::Info, false);
-            }
-
-            consumeUse(true);
-            return;
-        }
-
-        if (key == "NEXUS") {
-            // Teleport (neutral-chaotic). Works on monsters too.
-            if (isPlayer) {
-                say("SPACE TWISTS AROUND YOU!", MessageKind::Warning, true);
-            } else {
-                std::ostringstream ss;
-                ss << kindName(victim.kind) << " VANISHES!";
-                say(ss.str(), MessageKind::Warning, false);
-            }
-
-            Vec2i dst = dung.randomFloor(rng, true);
-            // Avoid teleporting into stairs or onto another entity.
-            for (int tries = 0; tries < 200; ++tries) {
-                Vec2i cand = dung.randomFloor(rng, true);
-                if (!dung.inBounds(cand.x, cand.y)) continue;
-                TileType tt = dung.at(cand.x, cand.y).type;
-                if (tt == TileType::StairsUp || tt == TileType::StairsDown) continue;
-                if (entityAt(cand.x, cand.y) != nullptr) continue;
-                dst = cand;
-                break;
-            }
-
-            const Vec2i from = victim.pos;
-            victim.pos = dst;
-
-            // Mirrors trap teleport's shop-debt safety (so you can't escape a shop by luck).
-            if (isPlayer) {
-                const bool wasInShop = (roomTypeAt(dung, from) == RoomType::Shop);
-                const bool nowInShop = (roomTypeAt(dung, dst) == RoomType::Shop);
-                if (wasInShop && !nowInShop) {
-                    const int debt = shopDebtThisDepth();
-                    if (debt > 0) {
-                        victim.pos = from;
-                        say("A FORCE YANKS YOU BACK!", MessageKind::Warning, true);
-                    }
-                }
-            }
-
-            // A teleport should wake up the floor a bit.
-            emitNoise(pos, 10);
-
-            consumeUse(true);
-            return;
-        }
-
-        if (key == "MIASMA") {
-            // Spawn a small confusion gas bloom.
-            say("THE SIGIL EXHALES A NOXIOUS MIASMA!", MessageKind::Warning, true);
-
+        auto ensureField = [&](std::vector<uint8_t>& field) {
             const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
-            auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * dung.width + x); };
+            if (field.size() != expect) field.assign(expect, 0u);
+        };
 
-            constexpr int radius = 2;
+        auto idx = [&](int x, int y) -> size_t {
+            return static_cast<size_t>(y * dung.width + x);
+        };
+
+        auto bloomField = [&](std::vector<uint8_t>& field, int radius, int center, bool requireWalkable) {
+            radius = std::clamp(radius, 0, 6);
+            center = std::clamp(center, 1, 32);
+            if (radius <= 0) radius = 1;
+            const int fall = std::max(2, center / (radius + 2));
+
+            ensureField(field);
+
             for (int dy = -radius; dy <= radius; ++dy) {
                 for (int dx = -radius; dx <= radius; ++dx) {
                     const int x = pos.x + dx;
                     const int y = pos.y + dy;
                     if (!dung.inBounds(x, y)) continue;
-                    if (!dung.isWalkable(x, y)) continue;
+                    if (requireWalkable && !dung.isWalkable(x, y)) continue;
                     const int dist = std::max(std::abs(dx), std::abs(dy));
-                    const int inten = 10 - 3 * dist;
+                    if (dist > radius) continue;
+                    const int inten = center - fall * dist;
                     if (inten <= 0) continue;
                     const size_t ii = idx(x, y);
-                    if (ii >= confusionGas_.size()) continue;
-                    confusionGas_[ii] = std::max(confusionGas_[ii], static_cast<uint8_t>(inten));
+                    if (ii >= field.size()) continue;
+                    field[ii] = std::max(field[ii], static_cast<uint8_t>(inten));
                 }
             }
+        };
 
-            victim.effects.confusionTurns = std::max(victim.effects.confusionTurns, 6);
-            emitNoise(pos, 8);
+        switch (spec.kind) {
+            case sigilgen::SigilKind::Seer: {
+                // Player-only: monsters don't meaningfully use this information.
+                if (!isPlayer) return;
 
-            consumeUse(true);
-            return;
-        }
+                const int radius = std::clamp(spec.radius, 2, 8);
+                int revealedTraps = 0;
+                int revealedDoors = 0;
+                int revealedChests = 0;
 
-        if (key == "EMBER") {
-            // Spawn a small fire flare.
-            say("THE SIGIL FLARES WITH EMBERS!", MessageKind::Warning, true);
-
-            const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (fireField_.size() != expect) fireField_.assign(expect, 0u);
-            auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * dung.width + x); };
-
-            constexpr int radius = 1;
-            for (int dy = -radius; dy <= radius; ++dy) {
-                for (int dx = -radius; dx <= radius; ++dx) {
-                    const int x = pos.x + dx;
-                    const int y = pos.y + dy;
-                    if (!dung.inBounds(x, y)) continue;
-                    if (!dung.isWalkable(x, y)) continue;
-                    const int dist = std::max(std::abs(dx), std::abs(dy));
-                    const int inten = (dist == 0) ? 12 : 6;
-                    const size_t ii = idx(x, y);
-                    if (ii >= fireField_.size()) continue;
-                    fireField_[ii] = std::max(fireField_[ii], static_cast<uint8_t>(inten));
+                for (auto& t : trapsCur) {
+                    if (t.discovered) continue;
+                    if (chebyshev(t.pos, pos) <= radius) {
+                        t.discovered = true;
+                        revealedTraps += 1;
+                    }
                 }
+
+                for (int dy = -radius; dy <= radius; ++dy) {
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        if (std::max(std::abs(dx), std::abs(dy)) > radius) continue;
+                        const int x = pos.x + dx;
+                        const int y = pos.y + dy;
+                        if (!dung.inBounds(x, y)) continue;
+                        Tile& tt = dung.at(x, y);
+                        if (tt.type == TileType::DoorSecret) {
+                            tt.type = TileType::DoorClosed;
+                            tt.explored = true;
+                            revealedDoors += 1;
+                        }
+                    }
+                }
+
+                for (auto& gi : ground) {
+                    if (!isChestKind(gi.item.kind)) continue;
+                    if (!chestTrapped(gi.item)) continue;
+                    if (chestTrapKnown(gi.item)) continue;
+                    if (chebyshev(gi.pos, pos) > radius) continue;
+                    setChestTrapKnown(gi.item, true);
+                    revealedChests += 1;
+                }
+
+                pushFxParticle(FXParticlePreset::Detect, pos, 30 + radius * 5, 0.25f);
+                say("THE SIGIL'S LINES REARRANGE IN YOUR MIND.", MessageKind::System, false);
+
+                if (revealedTraps + revealedDoors + revealedChests > 0) {
+                    std::ostringstream ss;
+                    ss << "YOU GLIMPSE ";
+                    bool first = true;
+                    if (revealedDoors > 0) {
+                        ss << revealedDoors << " HIDDEN PASSAGE" << (revealedDoors == 1 ? "" : "S");
+                        first = false;
+                    }
+                    if (revealedTraps > 0) {
+                        if (!first) ss << ", ";
+                        ss << revealedTraps << " TRAP" << (revealedTraps == 1 ? "" : "S");
+                        first = false;
+                    }
+                    if (revealedChests > 0) {
+                        if (!first) ss << ", ";
+                        ss << revealedChests << " TRAPPED CHEST" << (revealedChests == 1 ? "" : "S");
+                    }
+                    ss << ".";
+                    say(ss.str(), MessageKind::Info, false);
+                } else {
+                    say("...BUT NOTHING STIRS.", MessageKind::Info, false);
+                }
+
+                consumeUse(true);
+                return;
             }
+            case sigilgen::SigilKind::Nexus: {
+                // Teleport (neutral-chaotic). Works on monsters too.
+                if (isPlayer) {
+                    say("SPACE TWISTS AROUND YOU!", MessageKind::Warning, true);
+                } else {
+                    std::ostringstream ss;
+                    ss << kindName(victim.kind) << " VANISHES!";
+                    say(ss.str(), MessageKind::Warning, false);
+                }
 
-            victim.effects.burnTurns = std::max(victim.effects.burnTurns, 6);
-            emitNoise(pos, 10);
+                pushFxParticle(FXParticlePreset::Blink, pos, 25 + spec.intensity * 2, 0.22f);
 
-            consumeUse(true);
-            return;
+                Vec2i dst = dung.randomFloor(rng, true);
+                // Avoid teleporting into stairs or onto another entity.
+                for (int tries = 0; tries < 200; ++tries) {
+                    Vec2i cand = dung.randomFloor(rng, true);
+                    if (!dung.inBounds(cand.x, cand.y)) continue;
+                    TileType tt = dung.at(cand.x, cand.y).type;
+                    if (tt == TileType::StairsUp || tt == TileType::StairsDown) continue;
+                    if (entityAt(cand.x, cand.y) != nullptr) continue;
+                    dst = cand;
+                    break;
+                }
+
+                const Vec2i from = victim.pos;
+                victim.pos = dst;
+
+                // Mirrors trap teleport's shop-debt safety (so you can't escape a shop by luck).
+                if (isPlayer) {
+                    const bool wasInShop = (roomTypeAt(dung, from) == RoomType::Shop);
+                    const bool nowInShop = (roomTypeAt(dung, dst) == RoomType::Shop);
+                    if (wasInShop && !nowInShop) {
+                        const int debt = shopDebtThisDepth();
+                        if (debt > 0) {
+                            victim.pos = from;
+                            say("A FORCE YANKS YOU BACK!", MessageKind::Warning, true);
+                        }
+                    }
+
+                    // If the teleport brought you into a shop, announce the shop
+                    // (procedural identity + greeting).
+                    const bool finalNowInShop = (roomTypeAt(dung, victim.pos) == RoomType::Shop);
+                    if (!wasInShop && finalNowInShop) {
+                        if (const Room* shopRoom = shopgen::shopRoomAt(dung, victim.pos)) {
+                            const shopgen::ShopProfile prof = shopgen::profileFor(seed_, depth_, *shopRoom);
+                            say("YOU ENTER " + shopgen::shopNameFor(prof) + ".", MessageKind::Info, true);
+
+                            bool keeperHere = false;
+                            for (const Entity& en : ents) {
+                                if (en.kind == EntityKind::Shopkeeper && !en.alerted && shopRoom->contains(en.pos)) {
+                                    keeperHere = true;
+                                    break;
+                                }
+                            }
+                            if (keeperHere) {
+                                say("SHOPKEEPER " + shopgen::shopkeeperNameFor(prof) + " SAYS: " + shopgen::greetingFor(prof), MessageKind::Info, true);
+                            } else {
+                                say("THE SHOP SEEMS UNATTENDED.", MessageKind::Info, false);
+                            }
+                        } else {
+                            say("YOU ENTER A SHOP.", MessageKind::Info, true);
+                        }
+                    }
+                }
+
+                // A teleport should wake up the floor a bit.
+                emitNoise(pos, 8 + spec.intensity / 2);
+                consumeUse(true);
+                return;
+            }
+            case sigilgen::SigilKind::Miasma: {
+                say("THE SIGIL EXHALES A NOXIOUS MIASMA!", MessageKind::Warning, true);
+                bloomField(confusionGas_, spec.radius, spec.intensity, /*requireWalkable=*/true);
+                victim.effects.confusionTurns = std::max(victim.effects.confusionTurns, spec.durationTurns);
+                pushFxParticle(FXParticlePreset::Poison, pos, 20 + spec.intensity * 2, 0.25f);
+                emitNoise(pos, 6 + spec.radius * 2);
+                consumeUse(true);
+                return;
+            }
+            case sigilgen::SigilKind::Ember: {
+                say("THE SIGIL FLARES WITH EMBERS!", MessageKind::Warning, true);
+                bloomField(fireField_, spec.radius, spec.intensity, /*requireWalkable=*/true);
+                victim.effects.burnTurns = std::max(victim.effects.burnTurns, spec.durationTurns);
+                emitNoise(pos, 8 + spec.radius * 2);
+                consumeUse(true);
+                return;
+            }
+            case sigilgen::SigilKind::Venom: {
+                say("THE SIGIL SWEATS VENOMOUS FUMES!", MessageKind::Warning, true);
+                bloomField(poisonGas_, spec.radius, spec.intensity, /*requireWalkable=*/true);
+                victim.effects.poisonTurns = std::max(victim.effects.poisonTurns, spec.durationTurns);
+                pushFxParticle(FXParticlePreset::Poison, pos, 22 + spec.intensity * 2, 0.25f);
+                emitNoise(pos, 6 + spec.radius * 2);
+                consumeUse(true);
+                return;
+            }
+            case sigilgen::SigilKind::Rust: {
+                say("THE SIGIL BREATHES A CORROSIVE HISS!", MessageKind::Warning, true);
+                bloomField(corrosiveGas_, spec.radius, spec.intensity, /*requireWalkable=*/true);
+                victim.effects.corrosionTurns = std::max(victim.effects.corrosionTurns, spec.durationTurns);
+                pushFxParticle(FXParticlePreset::Poison, pos, 22 + spec.intensity * 2, 0.25f);
+                emitNoise(pos, 6 + spec.radius * 2);
+                consumeUse(true);
+                return;
+            }
+            case sigilgen::SigilKind::Aegis: {
+                // Beneficial: only helps the player + allies (don't buff hostiles).
+                if (!(isPlayer || victim.friendly)) return;
+                say("THE SIGIL SHELLS YOU IN LIGHT.", MessageKind::System, true);
+                victim.effects.shieldTurns = std::max(victim.effects.shieldTurns, spec.durationTurns);
+                victim.effects.parryTurns = std::max(victim.effects.parryTurns, spec.param);
+                pushFxParticle(FXParticlePreset::Buff, pos, 35, 0.25f);
+                emitNoise(pos, 5);
+                consumeUse(true);
+                return;
+            }
+            case sigilgen::SigilKind::Regen: {
+                if (!(isPlayer || victim.friendly)) return;
+                say("THE SIGIL WARMS YOUR BLOOD.", MessageKind::System, true);
+                const int heal = std::clamp(spec.param, 1, 3);
+                victim.hp = std::min(victim.hpMax, victim.hp + heal);
+                victim.effects.regenTurns = std::max(victim.effects.regenTurns, spec.durationTurns);
+                pushFxParticle(FXParticlePreset::Heal, pos, 35, 0.28f);
+                emitNoise(pos, 4);
+                consumeUse(true);
+                return;
+            }
+            case sigilgen::SigilKind::Lethe: {
+                // Amnesia shock for player; memory-scramble for monsters.
+                if (isPlayer) {
+                    say("THE SIGIL DRINKS YOUR MEMORIES!", MessageKind::Warning, true);
+                    applyAmnesiaShock(std::clamp(spec.param, 1, 12));
+                    pushFxParticle(FXParticlePreset::Detect, pos, 40, 0.30f);
+                } else {
+                    // Monsters: lose last known player info + become briefly confused.
+                    victim.alerted = false;
+                    victim.lastKnownPlayerPos = {-1, -1};
+                    victim.lastKnownPlayerAge = 9999;
+                    victim.lastKnownPlayerUncertainty = 0;
+                    victim.effects.confusionTurns = std::max(victim.effects.confusionTurns, 3);
+                    if (vis) {
+                        std::ostringstream ss;
+                        ss << kindName(victim.kind) << " STAGGERS, FORGETFUL.";
+                        say(ss.str(), MessageKind::Info, false);
+                    }
+                }
+                emitNoise(pos, 7);
+                consumeUse(true);
+                return;
+            }
+            case sigilgen::SigilKind::Unknown:
+            default:
+                return;
         }
-
-        // Unknown sigil keyword: treat as inert graffiti.
-        return;
     }
 }
 
@@ -1692,6 +1826,28 @@ bool Game::disarmTrap() {
         return "TRAP";
     };
 
+    auto salvageShardNameAndStore = [&](const trapsalvage::SalvageSpec& spec) -> std::string {
+        if (spec.count <= 0) return std::string();
+        if (spec.tag == crafttags::Tag::None) return std::string();
+
+        Item shard;
+        shard.id = nextItemId++;
+        shard.kind = ItemKind::EssenceShard;
+        shard.count = spec.count;
+        shard.charges = 0;
+        shard.enchant = packEssenceShardEnchant(crafttags::tagIndex(spec.tag), spec.tier, spec.shiny);
+        shard.buc = 0;
+        shard.spriteSeed = spec.spriteSeed;
+        shard.ego = ItemEgo::None;
+        shard.flags = 0;
+        shard.shopPrice = 0;
+        shard.shopDepth = 0;
+
+        const std::string name = itemDisplayName(shard);
+        if (!tryStackItem(inv, shard)) inv.push_back(shard);
+        return name;
+    };
+
     // --- Chest trap disarm ---
     if (targetIsChest) {
         Item& chest = bestChest->item;
@@ -1720,8 +1876,17 @@ bool Game::disarmTrap() {
         if (rng.chance(chance)) {
             setChestTrapped(chest, false);
             setChestTrapKnown(chest, true);
+
+            const uint32_t chestSeed = (chest.spriteSeed != 0u) ? chest.spriteSeed : hash32(static_cast<uint32_t>(chest.id) ^ 0xC1E57EEDu);
+            const uint32_t sSalv = trapsalvage::seedForChestTrap(seed_, depth_, chestSeed, tk, tier);
+            const int depthHint = depth_ + 2 * tier;
+            const auto spec = trapsalvage::rollSalvage(sSalv, tk, depthHint, /*chest=*/true);
+            const std::string salvageName = salvageShardNameAndStore(spec);
+
             std::ostringstream ss;
-            ss << "YOU DISARM THE CHEST'S " << trapName(tk) << " TRAP.";
+            ss << "YOU DISARM THE CHEST'S " << trapName(tk) << " TRAP";
+            if (!salvageName.empty()) ss << " AND SALVAGE " << salvageName;
+            ss << ".";
             pushMsg(ss.str(), MessageKind::Success, true);
             return true;
         }
@@ -1800,6 +1965,25 @@ bool Game::disarmTrap() {
                             triggerShopTheftAlarm(prevPos, p.pos);
                         }
                     }
+
+                    if (!wasInShop && nowInShop) {
+                        if (const Room* shopRoom = shopgen::shopRoomAt(dung, p.pos)) {
+                            const shopgen::ShopProfile prof = shopgen::profileFor(seed_, depth_, *shopRoom);
+                            pushMsg("YOU ENTER " + shopgen::shopNameFor(prof) + ".", MessageKind::Info, true);
+
+                            bool keeperHere = false;
+                            for (const Entity& en : ents) {
+                                if (en.kind == EntityKind::Shopkeeper && !en.alerted && shopRoom->contains(en.pos)) {
+                                    keeperHere = true;
+                                    break;
+                                }
+                            }
+                            if (keeperHere) {
+                                pushMsg("SHOPKEEPER " + shopgen::shopkeeperNameFor(prof) + " SAYS: " + shopgen::greetingFor(prof),
+                                    MessageKind::Info, true);
+                            }
+                        }
+                    }
                     break;
                 }
                 case TrapKind::Alarm: {
@@ -1867,9 +2051,19 @@ bool Game::disarmTrap() {
     chance = std::max(0.05f, chance);
 
     if (rng.chance(chance)) {
+        const TrapKind k = tr.kind;
+        const Vec2i tpos = tr.pos;
+
+        const uint32_t base = trapsalvage::seedForFloorTrap(seed_, depth_, tpos, k);
+        const auto spec = trapsalvage::rollSalvage(base, k, depth_, /*chest=*/false);
+        const std::string salvageName = salvageShardNameAndStore(spec);
+
         std::ostringstream ss;
-        ss << "YOU DISARM THE " << trapName(tr.kind) << " TRAP.";
+        ss << "YOU DISARM THE " << trapName(k) << " TRAP";
+        if (!salvageName.empty()) ss << " AND SALVAGE " << salvageName;
+        ss << ".";
         pushMsg(ss.str(), MessageKind::Success, true);
+
         trapsCur.erase(trapsCur.begin() + bestIndex);
         return true;
     }
@@ -2515,14 +2709,14 @@ bool Game::prayAtShrine(const std::string& modeIn) {
         return idxs;
     };
 
-    bool inShrine = false;
-    for (const auto& r : dung.rooms) {
-        if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
-    }
-    if (!inShrine) {
+    const Room* shrineRoom = shrinegen::shrineRoomAt(dung, p.pos);
+    if (!shrineRoom) {
         pushMsg("YOU ARE NOT IN A SHRINE.", MessageKind::Info, true);
         return false;
     }
+
+    const shrinegen::ShrineProfile shrineProf = shrinegen::profileFor(seed_, depth_, *shrineRoom);
+    const std::string deityShort = shrinegen::deityNameFor(shrineProf);
 
     std::string mode = toLower(trim(modeIn));
     if (mode == "charge") mode = "recharge";
@@ -2564,7 +2758,7 @@ bool Game::prayAtShrine(const std::string& modeIn) {
     // Prayer timeout: shrine services cannot be spammed back-to-back.
     if (turnCount < prayerCooldownUntilTurn_) {
         const int cd = static_cast<int>(prayerCooldownUntilTurn_ - turnCount);
-        pushMsg("THE GODS ARE SILENT. (COOLDOWN: " + std::to_string(cd) + ")", MessageKind::Info, true);
+        pushMsg(deityShort + " IS SILENT. (COOLDOWN: " + std::to_string(cd) + ")", MessageKind::Info, true);
         return false;
     }
 
@@ -2581,6 +2775,17 @@ bool Game::prayAtShrine(const std::string& modeIn) {
     else if (mode == "uncurse") costGold = baseGold + 14;
     else if (mode == "recharge") costGold = baseGold + 16;
 
+    shrinegen::ShrineService svc = shrinegen::ShrineService::Heal;
+    if (mode == "heal") svc = shrinegen::ShrineService::Heal;
+    else if (mode == "cure") svc = shrinegen::ShrineService::Cure;
+    else if (mode == "identify") svc = shrinegen::ShrineService::Identify;
+    else if (mode == "bless") svc = shrinegen::ShrineService::Bless;
+    else if (mode == "uncurse") svc = shrinegen::ShrineService::Uncurse;
+    else if (mode == "recharge") svc = shrinegen::ShrineService::Recharge;
+
+    const int pct = shrinegen::serviceCostPct(shrineProf.domain, svc);
+    costGold = std::max(1, (costGold * pct + 50) / 100);
+
     const int costPiety = std::max(1, (costGold + GOLD_PER_PIETY - 1) / GOLD_PER_PIETY);
 
     if (piety_ < costPiety) {
@@ -2595,7 +2800,7 @@ bool Game::prayAtShrine(const std::string& modeIn) {
         // Convert just enough gold into piety.
         (void)spendGoldFromInv(inv, goldNeeded);
         piety_ = std::min(999, piety_ + missing);
-        pushMsg("YOU DONATE " + std::to_string(goldNeeded) + " GOLD. (+" + std::to_string(missing) + " PIETY)", MessageKind::Info, true);
+        pushMsg("YOU DONATE " + std::to_string(goldNeeded) + " GOLD TO " + deityShort + ". (+" + std::to_string(missing) + " PIETY)", MessageKind::Info, true);
     }
 
     // Spend piety now; selection prompts (if any) are UI-only and do not consume extra turns.
@@ -2603,7 +2808,7 @@ bool Game::prayAtShrine(const std::string& modeIn) {
 
     // Conduct tracking: using shrine services breaks ATHEIST.
     ++conductPrayers_;
-    pushMsg("YOU OFFER " + std::to_string(costPiety) + " PIETY.", MessageKind::Info, true);
+    pushMsg("YOU OFFER " + std::to_string(costPiety) + " PIETY TO " + deityShort + ".", MessageKind::Info, true);
 
     // Set a simple prayer timeout scaled by how "expensive" the service is.
     const uint32_t cooldown = 40u + static_cast<uint32_t>(costPiety) * 10u;
@@ -2706,6 +2911,148 @@ bool Game::prayAtShrine(const std::string& modeIn) {
         }
     }
 
+
+    // Patron resonance: a small domain-flavored bonus on any shrine prayer.
+    {
+        switch (shrineProf.domain) {
+            case shrinegen::ShrineDomain::Mercy: {
+                const int before = p.hp;
+                if (p.hp < p.hpMax) {
+                    const int extra = std::max(2, p.hpMax / 10);
+                    p.hp = std::min(p.hp + extra, p.hpMax);
+                }
+                p.effects.regenTurns = std::max(p.effects.regenTurns, 40);
+                if (p.hp > before) pushMsg("MERCY LINGERS IN YOUR VEINS.", MessageKind::Info, true);
+                else pushMsg("A SOFT RADIANCE LINGERS.", MessageKind::Info, true);
+                break;
+            }
+            case shrinegen::ShrineDomain::Cleansing: {
+                bool changed = false;
+                if (p.effects.corrosionTurns > 0) { p.effects.corrosionTurns = 0; changed = true; }
+                if (p.effects.hallucinationTurns > 0) { p.effects.hallucinationTurns = 0; changed = true; }
+                if (changed) pushMsg("A CLEAR WIND PASSES OVER YOU.", MessageKind::Info, true);
+                break;
+            }
+            case shrinegen::ShrineDomain::Insight: {
+                const int radius = 4;
+                int foundTraps = 0;
+                int foundSecrets = 0;
+
+                for (auto& t : trapsCur) {
+                    if (t.discovered) continue;
+                    const int dx = std::abs(t.pos.x - p.pos.x);
+                    const int dy = std::abs(t.pos.y - p.pos.y);
+                    const int cheb = std::max(dx, dy);
+                    if (cheb > radius) continue;
+                    t.discovered = true;
+                    foundTraps += 1;
+                }
+
+                // Trapped chests behave like traps for revelation purposes.
+                for (auto& gi : ground) {
+                    if (gi.item.kind != ItemKind::Chest) continue;
+                    if (!chestTrapped(gi.item)) continue;
+                    if (chestTrapKnown(gi.item)) continue;
+
+                    const int dx = std::abs(gi.pos.x - p.pos.x);
+                    const int dy = std::abs(gi.pos.y - p.pos.y);
+                    const int cheb = std::max(dx, dy);
+                    if (cheb > radius) continue;
+
+                    setChestTrapKnown(gi.item, true);
+                    foundTraps += 1;
+                }
+
+                for (int y = p.pos.y - radius; y <= p.pos.y + radius; ++y) {
+                    for (int x = p.pos.x - radius; x <= p.pos.x + radius; ++x) {
+                        if (!dung.inBounds(x, y)) continue;
+                        Tile& tt = dung.at(x, y);
+                        if (tt.type != TileType::DoorSecret) continue;
+
+                        const int dx = std::abs(x - p.pos.x);
+                        const int dy = std::abs(y - p.pos.y);
+                        const int cheb = std::max(dx, dy);
+                        if (cheb > radius) continue;
+
+                        tt.type = TileType::DoorClosed;
+                        tt.explored = true;
+                        foundSecrets += 1;
+                    }
+                }
+
+                p.effects.visionTurns = std::max(p.effects.visionTurns, 90);
+
+                if (foundTraps > 0 || foundSecrets > 0) {
+                    pushMsg(formatSearchDiscoveryMessage(foundTraps, foundSecrets), MessageKind::Info, true);
+                } else {
+                    pushMsg("YOUR EYES TINGLE WITH INSIGHT.", MessageKind::Info, true);
+                }
+                break;
+            }
+            case shrinegen::ShrineDomain::Benediction: {
+                p.effects.parryTurns = std::max(p.effects.parryTurns, 60);
+                p.effects.shieldTurns = std::max(p.effects.shieldTurns, 40);
+                pushMsg("A GUARDING PRESENCE SETTLES ON YOUR SHOULDERS.", MessageKind::Info, true);
+                break;
+            }
+            case shrinegen::ShrineDomain::Purging: {
+                auto isEquippedId = [&](int id) {
+                    return id == equipMeleeId || id == equipRangedId || id == equipArmorId || id == equipRing1Id || id == equipRing2Id;
+                };
+
+                int targetIdx = -1;
+                for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+                    if (inv[static_cast<size_t>(i)].buc < 0 && !isEquippedId(inv[static_cast<size_t>(i)].id)) { targetIdx = i; break; }
+                }
+                if (targetIdx < 0) {
+                    for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+                        if (inv[static_cast<size_t>(i)].buc < 0) { targetIdx = i; break; }
+                    }
+                }
+
+                if (targetIdx >= 0) {
+                    Item& it = inv[static_cast<size_t>(targetIdx)];
+                    Item named = it;
+                    named.buc = 0;
+                    it.buc = 0;
+                    pushMsg("A BANISHING CHANT ECHOES OVER YOUR " + displayItemName(named) + ".", MessageKind::Info, true);
+                }
+                break;
+            }
+            case shrinegen::ShrineDomain::Artifice: {
+                int wandIdx = -1;
+
+                if (equipRangedId >= 0) {
+                    for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+                        if (inv[static_cast<size_t>(i)].id != equipRangedId) continue;
+                        if (isWandKind(inv[static_cast<size_t>(i)].kind)) { wandIdx = i; break; }
+                    }
+                }
+                if (wandIdx < 0) {
+                    for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+                        if (isWandKind(inv[static_cast<size_t>(i)].kind)) { wandIdx = i; break; }
+                    }
+                }
+
+                if (wandIdx >= 0) {
+                    Item& w = inv[static_cast<size_t>(wandIdx)];
+                    const ItemDef& d = itemDef(w.kind);
+                    if (d.maxCharges > 0) {
+                        const int cap = d.maxCharges + 1;
+                        if (w.charges < cap) {
+                            w.charges += 1;
+                            Item named = w;
+                            named.buc = 0;
+                            pushMsg("ARCANE SPARKS DANCE INTO YOUR " + displayItemName(named) + ".", MessageKind::Info, true);
+                        }
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
     advanceAfterPlayerAction();
     return true;
 }
@@ -2715,13 +3062,16 @@ bool Game::donateAtShrine(int goldAmount) {
 
     Entity& p = playerMut();
 
-    bool inShrine = false;
-    for (const auto& r : dung.rooms) {
-        if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
-    }
+    const Room* shrineRoom = shrinegen::shrineRoomAt(dung, p.pos);
     const bool atCamp = (branch_ == DungeonBranch::Camp);
 
-    if (!inShrine && !atCamp) {
+    std::string deityShort;
+    if (shrineRoom) {
+        const shrinegen::ShrineProfile prof = shrinegen::profileFor(seed_, depth_, *shrineRoom);
+        deityShort = shrinegen::deityNameFor(prof);
+    }
+
+    if (!shrineRoom && !atCamp) {
         pushMsg("YOU NEED A SHRINE OR YOUR CAMP TO DONATE.", MessageKind::Info, true);
         return false;
     }
@@ -2754,7 +3104,12 @@ bool Game::donateAtShrine(int goldAmount) {
     (void)spendGoldFromInv(inv, donateGold);
     piety_ = std::min(999, piety_ + gain);
 
-    pushMsg("YOU DONATE " + std::to_string(donateGold) + " GOLD. (+" + std::to_string(gain) + " PIETY)", MessageKind::Success, true);
+    if (shrineRoom) {
+        pushMsg("YOU DONATE " + std::to_string(donateGold) + " GOLD TO " + deityShort + ". (+" + std::to_string(gain) + " PIETY)", MessageKind::Success, true);
+    } else {
+        pushMsg("YOU DONATE " + std::to_string(donateGold) + " GOLD AT YOUR CAMP ALTAR. (+" + std::to_string(gain) + " PIETY)", MessageKind::Success, true);
+    }
+
 
     advanceAfterPlayerAction();
     return true;
@@ -2765,13 +3120,16 @@ bool Game::sacrificeAtShrine() {
 
     Entity& p = playerMut();
 
-    bool inShrine = false;
-    for (const auto& r : dung.rooms) {
-        if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
-    }
+    const Room* shrineRoom = shrinegen::shrineRoomAt(dung, p.pos);
     const bool atCamp = (branch_ == DungeonBranch::Camp);
 
-    if (!inShrine && !atCamp) {
+    std::string deityShort;
+    if (shrineRoom) {
+        const shrinegen::ShrineProfile prof = shrinegen::profileFor(seed_, depth_, *shrineRoom);
+        deityShort = shrinegen::deityNameFor(prof);
+    }
+
+    if (!shrineRoom && !atCamp) {
         pushMsg("YOU NEED A SHRINE OR YOUR CAMP TO SACRIFICE.", MessageKind::Info, true);
         return false;
     }
@@ -2825,7 +3183,11 @@ bool Game::sacrificeAtShrine() {
         }
 
         piety_ = std::min(999, piety_ + gain);
-        pushMsg("YOU OFFER A SACRIFICE. (+" + std::to_string(gain) + " PIETY)", MessageKind::Success, true);
+        if (shrineRoom) {
+            pushMsg("YOU OFFER A SACRIFICE TO " + deityShort + ". (+" + std::to_string(gain) + " PIETY)", MessageKind::Success, true);
+        } else {
+            pushMsg("YOU OFFER A SACRIFICE AT YOUR CAMP ALTAR. (+" + std::to_string(gain) + " PIETY)", MessageKind::Success, true);
+        }
     };
 
     if (corpses.size() == 1) {
@@ -2836,6 +3198,7 @@ bool Game::sacrificeAtShrine() {
         invSel = corpses[0];
         pushMsg("SELECT A CORPSE TO SACRIFICE (ENTER=OFFER, ESC=BEST).", MessageKind::System, true);
     }
+
 
     advanceAfterPlayerAction();
     return true;
@@ -2852,20 +3215,28 @@ bool Game::augury() {
 
     Entity& p = playerMut();
 
-    bool inShrine = false;
-    for (const auto& r : dung.rooms) {
-        if (r.type == RoomType::Shrine && r.contains(p.pos.x, p.pos.y)) { inShrine = true; break; }
+    const Room* shrineRoom = shrinegen::shrineRoomAt(dung, p.pos);
+
+    std::string deityShort;
+    shrinegen::ShrineProfile shrineProf{};
+    if (shrineRoom) {
+        shrineProf = shrinegen::profileFor(seed_, depth_, *shrineRoom);
+        deityShort = shrinegen::deityNameFor(shrineProf);
     }
 
     const bool atCamp = (branch_ == DungeonBranch::Camp);
-    if (!inShrine && !atCamp) {
+    if (!shrineRoom && !atCamp) {
         pushMsg("YOU NEED A SHRINE OR YOUR CAMP TO ATTEMPT AUGURY.", MessageKind::Info, true);
         return false;
     }
 
     // Slightly cheaper in shrines (where you're still in danger) than in the safe-ish camp.
     const int base = 8 + std::max(0, depth_) * 2;
-    const int cost = inShrine ? base : (base + 4);
+    int cost = shrineRoom ? base : (base + 4);
+    if (shrineRoom) {
+        const int pct = shrinegen::serviceCostPct(shrineProf.domain, shrinegen::ShrineService::Augury);
+        cost = std::max(1, (cost * pct + 50) / 100);
+    }
 
     if (goldCount() < cost) {
         pushMsg("YOU LACK THE GOLD FOR AUGURY.", MessageKind::Info, true);
@@ -2873,7 +3244,11 @@ bool Game::augury() {
     }
 
     (void)spendGoldFromInv(inv, cost);
-    pushMsg("YOU PAY " + std::to_string(cost) + " GOLD AND CAST THE BONES...", MessageKind::Info, true);
+    if (shrineRoom) {
+        pushMsg("YOU PAY " + std::to_string(cost) + " GOLD TO " + deityShort + " AND CAST THE BONES...", MessageKind::Info, true);
+    } else {
+        pushMsg("YOU PAY " + std::to_string(cost) + " GOLD AT YOUR CAMP ALTAR AND CAST THE BONES...", MessageKind::Info, true);
+    }
 
     // Preview the next floor using its deterministic per-level seed.
     // (Worldgen is decoupled from the gameplay RNG stream, so this vision stays accurate.)
@@ -3031,6 +3406,7 @@ bool Game::augury() {
         pushMsg(s, MessageKind::System, true);
     }
     pushMsg("THE VISION FLICKERS. FATE IS NOT FIXED.", MessageKind::Info, true);
+
 
     advanceAfterPlayerAction();
     return true;
@@ -3208,6 +3584,7 @@ bool Game::payAtShop() {
     }
 
     // Paying takes a turn.
+
     advanceAfterPlayerAction();
     return true;
 }
@@ -3358,6 +3735,7 @@ bool Game::payAtCamp() {
     }
 
     // Paying takes a turn.
+
     advanceAfterPlayerAction();
     return true;
 }
@@ -3451,7 +3829,7 @@ bool Game::digInDirection(int dx, int dy) {
 
     // Attempting to dig always costs a turn (like lockpicking), even if nothing happens.
     // Substrate materials modulate how loud the digging is.
-    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
     const TerrainMaterial digMat = dung.materialAtCached(p.x, p.y);
     int digNoise = 14 + terrainMaterialFx(digMat).digNoiseDelta;
     digNoise = clampi(digNoise, 6, 20);
@@ -3482,6 +3860,7 @@ bool Game::digInDirection(int dx, int dy) {
     }
 
     recomputeFov();
+
     advanceAfterPlayerAction();
     return true;
 }
@@ -3525,6 +3904,7 @@ bool Game::throwTorchInDirection(int dx, int dy) {
     const int dmgBonus = 0;
 
     attackRanged(playerMut(), dst, range, atkBonus, dmgBonus, ProjectileKind::Torch, /*fromPlayer=*/true, &thrown);
+
     advanceAfterPlayerAction();
     return true;
 }
@@ -3612,6 +3992,7 @@ bool Game::engraveHere(const std::string& rawText) {
     } else {
         pushMsg("YOU ENGRAVE A MESSAGE INTO THE FLOOR.", MessageKind::Info, true);
     }
+
     advanceAfterPlayerAction();
     return true;
 }

@@ -2,6 +2,7 @@
 #include "content.hpp"
 #include "proc_rd.hpp"
 #include "proc_spells.hpp"
+#include "shop_profile_gen.hpp"
 
 namespace {
 
@@ -667,6 +668,11 @@ Vec2i Game::randomFreeTileInRoom(const Room& r, int tries) {
         if (!dung.inBounds(x, y)) return false;
         const TileType t = dung.at(x, y).type;
         if (!(t == TileType::Floor || t == TileType::StairsUp || t == TileType::StairsDown || t == TileType::DoorOpen)) return false;
+        // In normal dungeon generation rooms do not overlap, but overworld chunks
+        // intentionally include a large catch-all room for spawn logic.
+        // If we introduce special sub-rooms inside that space (shops, shrines, etc.),
+        // spawns for the large room should not bleed into those safe zones.
+        if (roomTypeAt(dung, Vec2i{x, y}) != r.type) return false;
         if (entityAt(x, y)) return false;
         return true;
     };
@@ -1159,7 +1165,10 @@ void Game::spawnMonsters() {
     int nextGroup = 1000;
 
     // Spawn ecology consults the deterministic terrain-material field.
-    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+
+    // Use a depth-like scalar for the overworld (Camp/0 wilderness chunks).
+    const int spawnDepth = materialDepth();
 
     // Find a nearby free tile inside the room interior (keeps clusters feeling like nests).
     auto freeTileNearInRoom = [&](Vec2i center, const Room& room, int radius) -> Vec2i {
@@ -1200,7 +1209,7 @@ void Game::spawnMonsters() {
                 if (isMat(TerrainMaterial::Dirt, TerrainMaterial::Moss)) {
                     chance = 0.38f;
                     extra = rng.chance(chance) ? 1 : 0;
-                    if (depth_ >= 6 && rng.chance(0.12f)) extra += 1;
+                    if (spawnDepth >= 6 && rng.chance(0.12f)) extra += 1;
                 }
             } break;
             case EntityKind::Snake: {
@@ -1216,7 +1225,7 @@ void Game::spawnMonsters() {
                 }
             } break;
             case EntityKind::Bat: {
-                if (isMat(TerrainMaterial::Moss, TerrainMaterial::Stone) && depth_ >= 2) {
+                if (isMat(TerrainMaterial::Moss, TerrainMaterial::Stone) && spawnDepth >= 2) {
                     chance = 0.18f;
                     extra = rng.chance(chance) ? 1 : 0;
                 }
@@ -1257,6 +1266,14 @@ void Game::spawnMonsters() {
             }
 
             Entity& sk = spawnMonster(EntityKind::Shopkeeper, sp, 0, /*allowGear=*/false);
+
+            // Procedural shop identity: tie the shopkeeper's spriteSeed to the room
+            // so their look stays stable even if other RNG consumers shift.
+            {
+                const shopgen::ShopProfile prof = shopgen::profileFor(seed_, spawnDepth, r);
+                sk.spriteSeed = hashCombine(prof.seed, "SK"_tag);
+            }
+
             sk.alerted = false;
             sk.energy = 0;
             continue;
@@ -1265,9 +1282,9 @@ void Game::spawnMonsters() {
         const bool isStart = r.contains(dung.stairsUp.x, dung.stairsUp.y);
         int base = isStart ? 0 : 1;
 
-        int depthTerm = (depth_ >= 3 ? 2 : 1);
-        if (depth_ >= 7) depthTerm += 1;
-        if (depth_ >= 9) depthTerm += 1;
+        int depthTerm = (spawnDepth >= 3 ? 2 : 1);
+        if (spawnDepth >= 7) depthTerm += 1;
+        if (spawnDepth >= 9) depthTerm += 1;
 
         int n = rng.range(0, base + depthTerm);
         if (r.type == RoomType::Vault) n = rng.range(0, 1);
@@ -1276,7 +1293,7 @@ void Game::spawnMonsters() {
             Vec2i p = randomFreeTileInRoom(r);
 
             const TerrainMaterial mat = dung.materialAtCached(p.x, p.y);
-            EntityKind k = pickSpawnMonsterEcology(SpawnCategory::Room, rng, depth_, r.type, mat);
+            EntityKind k = pickSpawnMonsterEcology(SpawnCategory::Room, rng, spawnDepth, r.type, mat);
 
             if (k == EntityKind::Wolf) {
                 spawnMonster(k, p, nextGroup++);
@@ -1296,13 +1313,13 @@ void Game::spawnMonsters() {
             for (int i = 0; i < guardians; ++i) {
                 Vec2i p = randomFreeTileInRoom(r);
                 const TerrainMaterial mat = dung.materialAtCached(p.x, p.y);
-                EntityKind k = pickSpawnMonsterEcology(SpawnCategory::Guardian, rng, depth_, r.type, mat);
+                EntityKind k = pickSpawnMonsterEcology(SpawnCategory::Guardian, rng, spawnDepth, r.type, mat);
 
                 spawnMonster(k, p, 0);
             }
 
             // Thieves love rooms with loot. (Themed rooms are a bit less enticing.)
-            if (depth_ >= 2) {
+            if (spawnDepth >= 2) {
                 float chance = 0.20f;
                 if (r.type == RoomType::Vault) chance = 0.35f;
                 else if (themedRoom) chance = 0.12f;
@@ -1394,6 +1411,12 @@ void Game::spawnItems() {
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;
 
+    // Use a depth-like scalar for the overworld (Camp/0 wilderness chunks).
+    const int spawnDepth = materialDepth();
+
+// Spawn item ecology consults the deterministic terrain-material field (ego rolls, etc).
+dung.ensureMaterials(materialWorldSeed(), branch_, spawnDepth, dungeonMaxDepth());
+
     auto dropItemAt = [&](ItemKind k, Vec2i pos, int count = 1) {
         Item it;
         it.id = nextItemId++;
@@ -1409,12 +1432,12 @@ void Game::spawnItems() {
             const RoomType rt = roomTypeAt(dung, pos);
 
             // Tier loosely tracks depth with small room-based adjustments.
-            int tier = 1 + depth_ / 2;
+            int tier = 1 + spawnDepth / 2;
             if (rt == RoomType::Treasure || rt == RoomType::Vault || rt == RoomType::Shrine) tier += 1;
             if (rt == RoomType::Shop) tier = std::max(1, tier - 1);
 
             // A small depth-based chance to bump tier upward so deep tablets feel spicy.
-            if (depth_ >= 6 && rng.chance(0.18f)) tier += 1;
+            if (spawnDepth >= 6 && rng.chance(0.18f)) tier += 1;
 
             tier = clampi(tier, 1, 15);
             const uint32_t seed28 = rng.nextU32() & PROC_SPELL_SEED_MASK;
@@ -1424,9 +1447,9 @@ void Game::spawnItems() {
         // Roll BUC (blessed/uncursed/cursed) for gear; and light enchant chance on deeper floors.
         if (isWearableGear(k)) {
             const RoomType rt = roomTypeAt(dung, pos);
-            it.buc = rollBucForGear(rng, depth_, rt);
+            it.buc = rollBucForGear(rng, spawnDepth, rt);
 
-            if (it.enchant == 0 && depth_ >= 3) {
+            if (it.enchant == 0 && spawnDepth >= 3) {
                 float enchChance = 0.15f;
                 if (rt == RoomType::Treasure || rt == RoomType::Vault || rt == RoomType::Secret) enchChance += 0.10f;
                 if (rt == RoomType::Lair) enchChance -= 0.05f;
@@ -1434,24 +1457,24 @@ void Game::spawnItems() {
 
                 if (rng.chance(enchChance)) {
                     it.enchant = 1;
-                    if (depth_ >= 6 && rng.chance(0.08f)) {
+                    if (spawnDepth >= 6 && rng.chance(0.08f)) {
                         it.enchant = 2;
                     }
                 }
             }
 
             // Rare ego weapons (brands).
-            it.ego = rollWeaponEgo(rng, seed_, k, depth_, rt, dung.materialAtCached(pos.x, pos.y), /*fromShop=*/false, /*forMonster=*/false);
+            it.ego = rollWeaponEgo(rng, seed_, k, spawnDepth, rt, dung.materialAtCached(pos.x, pos.y), /*fromShop=*/false, /*forMonster=*/false);
 
 
             // Rare artifacts.
-            if (rollArtifact(rng, k, depth_, rt, /*fromShop=*/false, /*forMonster=*/false)) {
+            if (rollArtifact(rng, k, spawnDepth, rt, /*fromShop=*/false, /*forMonster=*/false)) {
                 setItemArtifact(it, true);
                 // Keep artifacts visually distinct from ego gear.
                 it.ego = ItemEgo::None;
                 // Artifacts tend to be at least +1.
                 it.enchant = std::max(it.enchant, 1);
-                if (depth_ >= 7 && rng.chance(0.30f)) it.enchant = std::max(it.enchant, 2);
+                if (spawnDepth >= 7 && rng.chance(0.30f)) it.enchant = std::max(it.enchant, 2);
             }
         }
 
@@ -1461,7 +1484,7 @@ void Game::spawnItems() {
         ground.push_back(gi);
     };
 
-    auto dropShopItemAt = [&](ItemKind k, Vec2i pos, int count = 1) {
+    auto dropShopItemAt = [&](const shopgen::ShopProfile& prof, ItemKind k, Vec2i pos, int count = 1) {
         Item it;
         it.id = nextItemId++;
         it.kind = k;
@@ -1478,10 +1501,16 @@ void Game::spawnItems() {
 
         // Procedural rune tablets: shops can stock tablets too.
         if (k == ItemKind::RuneTablet) {
-            int tier = 1 + depth_ / 2;
+            int tier = 1 + spawnDepth / 2;
+
             // Magic shops tend to have slightly better rune stock deeper down.
-            if (depth_ >= 4 && rng.chance(0.20f)) tier += 1;
-            if (depth_ >= 7 && rng.chance(0.10f)) tier += 1;
+            if (prof.theme == shopgen::ShopTheme::Magic) {
+                if (spawnDepth >= 4 && rng.chance(0.25f)) tier += 1;
+                if (spawnDepth >= 7 && rng.chance(0.12f)) tier += 1;
+            } else {
+                // Off-theme shops still get the occasional spicy tablet, but less often.
+                if (spawnDepth >= 6 && rng.chance(0.12f)) tier += 1;
+            }
 
             tier = clampi(tier, 1, 15);
             const uint32_t seed28 = rng.nextU32() & PROC_SPELL_SEED_MASK;
@@ -1491,32 +1520,33 @@ void Game::spawnItems() {
         // Shops sell mostly "clean" gear.
         RoomType rt = RoomType::Shop;
         if (isWearableGear(k)) {
-            it.buc = rollBucForGear(rng, depth_, rt);
+            it.buc = rollBucForGear(rng, spawnDepth, rt);
             // A slightly higher chance of +1 items compared to the floor.
-            float enchChance = (depth_ >= 2) ? 0.22f : 0.12f;
-            enchChance += std::min(0.18f, depth_ * 0.02f);
+            float enchChance = (spawnDepth >= 2) ? 0.22f : 0.12f;
+            enchChance += std::min(0.18f, spawnDepth * 0.02f);
             if (rng.chance(enchChance)) {
                 it.enchant = 1;
-                if (depth_ >= 6 && rng.chance(0.08f)) it.enchant = 2;
+                if (spawnDepth >= 6 && rng.chance(0.08f)) it.enchant = 2;
             }
 
             // Rare premium ego weapons.
-            it.ego = rollWeaponEgo(rng, seed_, k, depth_, rt, dung.materialAtCached(pos.x, pos.y), /*fromShop=*/true, /*forMonster=*/false);
+            it.ego = rollWeaponEgo(rng, seed_, k, spawnDepth, rt, dung.materialAtCached(pos.x, pos.y), /*fromShop=*/true, /*forMonster=*/false);
 
 
             // Extremely rare artifacts in shops.
-            if (rollArtifact(rng, k, depth_, rt, /*fromShop=*/true, /*forMonster=*/false)) {
+            if (rollArtifact(rng, k, spawnDepth, rt, /*fromShop=*/true, /*forMonster=*/false)) {
                 setItemArtifact(it, true);
                 // Keep artifacts visually distinct from ego gear.
                 it.ego = ItemEgo::None;
                 // Artifacts tend to be at least +1.
                 it.enchant = std::max(it.enchant, 1);
-                if (depth_ >= 7 && rng.chance(0.25f)) it.enchant = std::max(it.enchant, 2);
+                if (spawnDepth >= 7 && rng.chance(0.25f)) it.enchant = std::max(it.enchant, 2);
             }
         }
 
-        it.shopPrice = shopBuyPricePerUnit(it, depth_);
-        it.shopDepth = depth_;
+        const int basePrice = shopBuyPricePerUnit(it, spawnDepth);
+        it.shopPrice = shopgen::adjustedShopBuyPricePerUnit(basePrice, prof, it);
+        it.shopDepth = spawnDepth;
 
         GroundItem gi;
         gi.item = it;
@@ -1538,7 +1568,7 @@ void Game::spawnItems() {
         else if (roll < 78) dropItemAt(ItemKind::WandDigging, randomFreeTileInRoom(r));
         else if (roll < 82) {
             // Fireball wand is a mid/deep treasure find.
-            ItemKind wk = (depth_ >= 5) ? ItemKind::WandFireball : ItemKind::WandSparks;
+            ItemKind wk = (spawnDepth >= 5) ? ItemKind::WandFireball : ItemKind::WandSparks;
             dropItemAt(wk, randomFreeTileInRoom(r));
         }
         else if (roll < 92) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r));
@@ -1579,7 +1609,7 @@ void Game::spawnItems() {
             // Kept relatively uncommon here; magic shops are the primary source.
             if (rng.chance(0.60f)) {
                 ItemKind sp = ItemKind::CaptureSphere;
-                if (depth_ >= 6 && rng.chance(0.40f)) sp = ItemKind::MegaSphere;
+                if (spawnDepth >= 6 && rng.chance(0.40f)) sp = ItemKind::MegaSphere;
                 dropItemAt(sp, randomFreeTileInRoom(r), rng.range(1, 2));
             } else {
                 dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
@@ -1587,7 +1617,7 @@ void Game::spawnItems() {
         }
         else if (roll < 172) {
             // Rare traversal utility in treasure rooms.
-            if (depth_ >= 3 && rng.chance(0.33f)) {
+            if (spawnDepth >= 3 && rng.chance(0.33f)) {
                 dropItemAt(ItemKind::PotionLevitation, randomFreeTileInRoom(r), 1);
             } else {
                 dropItemAt(ItemKind::RingProtection, randomFreeTileInRoom(r), 1);
@@ -1608,7 +1638,7 @@ void Game::spawnItems() {
             } else if (rng.chance(0.22f)) {
                 dropItemAt(ItemKind::VtuberHoloCard, randomFreeTileInRoom(r), 1);
             } else {
-                ItemKind bk = (depth_ >= 2) ? pickSpellbookKind(rng, depth_) : ItemKind::ScrollIdentify;
+                ItemKind bk = (spawnDepth >= 2) ? pickSpellbookKind(rng, spawnDepth) : ItemKind::ScrollIdentify;
                 dropItemAt(bk, randomFreeTileInRoom(r), 1);
             }
         }
@@ -1632,10 +1662,10 @@ void Game::spawnItems() {
         if (r < 28) return TrapKind::PoisonDart;
         if (r < 52) return TrapKind::Alarm;
         if (r < 72) return TrapKind::Web;
-        if (depth_ >= 4) {
+        if (spawnDepth >= 4) {
             if (r < 84) return TrapKind::ConfusionGas;
             if (r < 91) return TrapKind::PoisonGas;
-            if (depth_ >= 6 && r < 95) return TrapKind::CorrosiveGas;
+            if (spawnDepth >= 6 && r < 95) return TrapKind::CorrosiveGas;
             return TrapKind::Teleport;
         }
         if (r < 90) return TrapKind::ConfusionGas;
@@ -1677,8 +1707,8 @@ void Game::spawnItems() {
 
         // Mimic chance (NetHack flavor): some chests are actually monsters.
         // Starts appearing a bit deeper; higher-tier chests are more likely.
-        if (depth_ >= 2) {
-            float mimicChance = 0.04f + 0.01f * static_cast<float>(std::min(6, depth_ - 2));
+        if (spawnDepth >= 2) {
+            float mimicChance = 0.04f + 0.01f * static_cast<float>(std::min(6, spawnDepth - 2));
             mimicChance += 0.03f * static_cast<float>(tier);
             mimicChance = std::min(0.20f, mimicChance);
 
@@ -1709,9 +1739,9 @@ void Game::spawnItems() {
 
         if (r.type == RoomType::Vault) {
             // Vaults are locked bonus rooms: high reward, higher risk.
-            dropItemAt(ItemKind::Gold, p, rng.range(25, 55) + depth_ * 4);
+            dropItemAt(ItemKind::Gold, p, rng.range(25, 55) + spawnDepth * 4);
             dropChestInRoom(r, 2, 0.75f, 0.55f);
-            if (depth_ >= 4 && rng.chance(0.25f)) {
+            if (spawnDepth >= 4 && rng.chance(0.25f)) {
                 dropChestInRoom(r, 2, 0.85f, 0.65f);
             }
             dropGoodItem(r);
@@ -1725,16 +1755,16 @@ void Game::spawnItems() {
             // Shops: a stocked room + a shopkeeper (spawned in spawnMonsters).
             // Items are tagged with shopPrice/shopDepth and must be paid for.
 
-            // Pick a simple theme.
-            const int themeRoll = rng.range(0, 99);
+            // Procedurally generated shop profile (stable per room/run).
+            const shopgen::ShopProfile prof = shopgen::profileFor(seed_, spawnDepth, r);
             // 0=General, 1=Armory, 2=Magic, 3=Supplies
-            const int theme = (themeRoll < 30) ? 0 : (themeRoll < 55) ? 1 : (themeRoll < 80) ? 2 : 3;
+            const int theme = static_cast<int>(prof.theme);
 
             // Anchor item so every shop feels useful.
             if (theme == 2) {
-                dropShopItemAt(ItemKind::ScrollIdentify, randomEmptyTileInRoom(r), 1);
+                dropShopItemAt(prof, ItemKind::ScrollIdentify, randomEmptyTileInRoom(r), 1);
             } else {
-                dropShopItemAt(ItemKind::PotionHealing, randomEmptyTileInRoom(r), 1);
+                dropShopItemAt(prof, ItemKind::PotionHealing, randomEmptyTileInRoom(r), 1);
             }
 
             const int n = rng.range(7, 11);
@@ -1769,15 +1799,15 @@ void Game::spawnItems() {
                     else if (roll < 84) { k = ItemKind::Arrow; count = rng.range(10, 24); }
                     else if (roll < 92) { k = ItemKind::LeatherArmor; }
                     else if (roll < 98) { k = ItemKind::ChainArmor; }
-                    else { k = (depth_ >= 6 ? ItemKind::PlateArmor : ItemKind::ChainArmor); }
+                    else { k = (spawnDepth >= 6 ? ItemKind::PlateArmor : ItemKind::ChainArmor); }
                 } else if (theme == 2) {
                     // Magic shop (wands/scrolls/potions + spellbooks + rune tablets)
                     // NOTE: Keep this table self-contained (0..99) so every outcome is reachable.
                     if (roll < 6) { k = ItemKind::RuneTablet; }
-                    else if (roll < 14) { k = pickSpellbookKind(rng, depth_); }
+                    else if (roll < 14) { k = pickSpellbookKind(rng, spawnDepth); }
                     else if (roll < 26) { k = ItemKind::WandSparks; }
                     else if (roll < 36) { k = ItemKind::WandDigging; }
-                    else if (roll < 40) { k = (depth_ >= 6 ? ItemKind::WandFireball : ItemKind::WandDigging); }
+                    else if (roll < 40) { k = (spawnDepth >= 6 ? ItemKind::WandFireball : ItemKind::WandDigging); }
                     else if (roll < 48) { k = ItemKind::ScrollTeleport; }
                     else if (roll < 58) { k = ItemKind::ScrollMapping; }
                     else if (roll < 70) { k = ItemKind::ScrollIdentify; }
@@ -1787,7 +1817,7 @@ void Game::spawnItems() {
                     else if (roll < 88) { k = ItemKind::ScrollTaming; }
                     else if (roll < 92) {
                         // Capture spheres: staple item for monster collecting.
-                        k = (depth_ >= 6 && rng.chance(0.25f)) ? ItemKind::MegaSphere : ItemKind::CaptureSphere;
+                        k = (spawnDepth >= 6 && rng.chance(0.25f)) ? ItemKind::MegaSphere : ItemKind::CaptureSphere;
                         count = rng.range(1, 3);
                     }
                     else if (roll < 94) { k = ItemKind::PotionStrength; }
@@ -1807,10 +1837,10 @@ void Game::spawnItems() {
                         // Rare traversal utility.
                         if (rng.chance(0.18f)) {
                             k = ItemKind::PotionHallucination;
-                        } else if (depth_ >= 3 && rng.chance(0.25f)) {
+                        } else if (spawnDepth >= 3 && rng.chance(0.25f)) {
                             k = ItemKind::PotionLevitation;
                         } else {
-                            k = (depth_ >= 5 ? ItemKind::PotionInvisibility : ItemKind::PotionVision);
+                            k = (spawnDepth >= 5 ? ItemKind::PotionInvisibility : ItemKind::PotionVision);
                         }
                     }
                 } else {
@@ -1824,10 +1854,10 @@ void Game::spawnItems() {
                 }
 
                 // Depth-based small upgrades.
-                if (k == ItemKind::LeatherArmor && depth_ >= 4 && rng.chance(0.12f)) k = ItemKind::ChainArmor;
-                if (k == ItemKind::ChainArmor && depth_ >= 7 && rng.chance(0.06f)) k = ItemKind::PlateArmor;
+                if (k == ItemKind::LeatherArmor && spawnDepth >= 4 && rng.chance(0.12f)) k = ItemKind::ChainArmor;
+                if (k == ItemKind::ChainArmor && spawnDepth >= 7 && rng.chance(0.06f)) k = ItemKind::PlateArmor;
 
-                dropShopItemAt(k, randomEmptyTileInRoom(r), count);
+                dropShopItemAt(prof, k, randomEmptyTileInRoom(r), count);
             }
             continue;
         }
@@ -1835,7 +1865,7 @@ void Game::spawnItems() {
         if (r.type == RoomType::Secret) {
             // Secret rooms are optional bonus finds; keep them rewarding but not as
             // rich as full treasure rooms.
-            dropItemAt(ItemKind::Gold, p, rng.range(8, 22) + depth_);
+            dropItemAt(ItemKind::Gold, p, rng.range(8, 22) + spawnDepth);
             if (rng.chance(0.55f)) {
                 dropChestInRoom(r, 1, 0.45f, 0.35f);
             }
@@ -1848,7 +1878,7 @@ void Game::spawnItems() {
         }
 
         if (r.type == RoomType::Treasure) {
-            dropItemAt(ItemKind::Gold, p, rng.range(15, 40) + depth_ * 3);
+            dropItemAt(ItemKind::Gold, p, rng.range(15, 40) + spawnDepth * 3);
             dropGoodItem(r);
             if (rng.chance(0.40f)) {
                 dropChestInRoom(r, 1, 0.50f, 0.25f);
@@ -1887,7 +1917,7 @@ void Game::spawnItems() {
             }
             if (rng.chance(0.45f)) dropItemAt(ItemKind::ScrollTeleport, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.35f)) dropItemAt(ItemKind::ScrollMapping, randomFreeTileInRoom(r), 1);
-            if (depth_ >= 2 && rng.chance(0.10f)) dropItemAt(ItemKind::RuneTablet, randomFreeTileInRoom(r), 1);
+            if (spawnDepth >= 2 && rng.chance(0.10f)) dropItemAt(ItemKind::RuneTablet, randomFreeTileInRoom(r), 1);
             if (rng.chance(0.50f)) dropItemAt(ItemKind::Gold, randomFreeTileInRoom(r), rng.range(6, 18));
             continue;
         }
@@ -1897,13 +1927,13 @@ void Game::spawnItems() {
             if (rng.chance(0.10f)) dropKeyAt(randomFreeTileInRoom(r), 1);
             if (rng.chance(0.12f)) dropLockpickAt(randomFreeTileInRoom(r), 1);
             if (rng.chance(hungerEnabled_ ? 0.25f : 0.10f)) dropItemAt(ItemKind::FoodRation, randomFreeTileInRoom(r), 1);
-            if (depth_ >= 2 && rng.chance(0.20f)) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r), 1);
+            if (spawnDepth >= 2 && rng.chance(0.20f)) dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r), 1);
             continue;
         }
 
         if (r.type == RoomType::Armory) {
             // A moderate gear cache: some weapons/armor/ammo. Less "spicy" than Treasure.
-            dropItemAt(ItemKind::Gold, p, rng.range(6, 16) + depth_);
+            dropItemAt(ItemKind::Gold, p, rng.range(6, 16) + spawnDepth);
 
             const int drops = rng.range(2, 3);
             for (int i = 0; i < drops; ++i) {
@@ -1920,8 +1950,8 @@ void Game::spawnItems() {
                     dropItemAt(ItemKind::Sling, randomFreeTileInRoom(r), 1);
                 } else if (roll < 82) {
                     ItemKind ak = ItemKind::LeatherArmor;
-                    if (depth_ >= 4 && rng.chance(0.40f)) ak = ItemKind::ChainArmor;
-                    if (depth_ >= 7 && rng.chance(0.18f)) ak = ItemKind::PlateArmor;
+                    if (spawnDepth >= 4 && rng.chance(0.40f)) ak = ItemKind::ChainArmor;
+                    if (spawnDepth >= 7 && rng.chance(0.18f)) ak = ItemKind::PlateArmor;
                     dropItemAt(ak, randomFreeTileInRoom(r), 1);
                 } else if (roll < 92) {
                     dropItemAt(ItemKind::Arrow, randomFreeTileInRoom(r), rng.range(6, 14));
@@ -1939,14 +1969,14 @@ void Game::spawnItems() {
 
         if (r.type == RoomType::Library) {
             // Utility room: scrolls + the occasional wand.
-            dropItemAt(ItemKind::Gold, p, rng.range(4, 14) + depth_);
+            dropItemAt(ItemKind::Gold, p, rng.range(4, 14) + spawnDepth);
 
             const int drops = rng.range(2, 4);
             for (int i = 0; i < drops; ++i) {
                 // Occasionally a spellbook shows up (more likely on deeper floors).
-                const float bookChance = std::min(0.24f, 0.06f + 0.02f * static_cast<float>(std::max(0, depth_ - 2)));
-                if (depth_ >= 2 && rng.chance(bookChance)) {
-                    dropItemAt(pickSpellbookKind(rng, depth_), randomFreeTileInRoom(r), 1);
+                const float bookChance = std::min(0.24f, 0.06f + 0.02f * static_cast<float>(std::max(0, spawnDepth - 2)));
+                if (spawnDepth >= 2 && rng.chance(bookChance)) {
+                    dropItemAt(pickSpellbookKind(rng, spawnDepth), randomFreeTileInRoom(r), 1);
                     continue;
                 }
 
@@ -1967,8 +1997,8 @@ void Game::spawnItems() {
                 else if (roll < 98) dropItemAt(ItemKind::ScrollTaming, randomFreeTileInRoom(r), 1);
                 else {
                     ItemKind wk = ItemKind::WandSparks;
-                    if (depth_ >= 4 && rng.chance(0.35f)) wk = ItemKind::WandDigging;
-                    if (depth_ >= 7 && rng.chance(0.10f)) wk = ItemKind::WandFireball;
+                    if (spawnDepth >= 4 && rng.chance(0.35f)) wk = ItemKind::WandDigging;
+                    if (spawnDepth >= 7 && rng.chance(0.10f)) wk = ItemKind::WandFireball;
                     dropItemAt(wk, randomFreeTileInRoom(r), 1);
                 }
             }
@@ -1981,7 +2011,7 @@ void Game::spawnItems() {
 
         if (r.type == RoomType::Laboratory) {
             // Potion-heavy room. Safer than Vault, but with a little "weird" edge.
-            dropItemAt(ItemKind::Gold, p, rng.range(4, 14) + depth_);
+            dropItemAt(ItemKind::Gold, p, rng.range(4, 14) + spawnDepth);
 
             const int drops = rng.range(2, 4);
             for (int i = 0; i < drops; ++i) {
@@ -2006,8 +2036,8 @@ void Game::spawnItems() {
                 } else {
                     // Rare: a wand (labs have tools).
                     ItemKind wk = ItemKind::WandSparks;
-                    if (depth_ >= 4 && rng.chance(0.30f)) wk = ItemKind::WandDigging;
-                    if (depth_ >= 8 && rng.chance(0.10f)) wk = ItemKind::WandFireball;
+                    if (spawnDepth >= 4 && rng.chance(0.30f)) wk = ItemKind::WandDigging;
+                    if (spawnDepth >= 8 && rng.chance(0.10f)) wk = ItemKind::WandFireball;
                     dropItemAt(wk, randomFreeTileInRoom(r), 1);
                 }
             }
@@ -2133,7 +2163,7 @@ void Game::spawnItems() {
 
 
     // Quest objective: place the Amulet of Yendor on the final depth.
-    if (depth_ == QUEST_DEPTH && !playerHasAmulet()) {
+    if (branch_ == DungeonBranch::Main && spawnDepth == QUEST_DEPTH && !playerHasAmulet()) {
         bool alreadyHere = false;
         for (const auto& gi : ground) {
             if (gi.item.kind == ItemKind::AmuletYendor) {
@@ -2168,8 +2198,8 @@ void Game::spawnItems() {
         chest.spriteSeed = rng.nextU32();
 
         // Scale the cache a bit with depth.
-        int tier = (depth_ <= 2) ? 1 : ((depth_ <= 5) ? 2 : 3);
-        if (depth_ >= 6 && rng.chance(0.35f)) tier = 4;
+        int tier = (spawnDepth <= 2) ? 1 : ((spawnDepth <= 5) ? 2 : 3);
+        if (spawnDepth >= 6 && rng.chance(0.35f)) tier = 4;
         chest.enchant = std::clamp(tier, 1, 4);
 
         // Some caches are a bit spicy.
@@ -2196,7 +2226,7 @@ void Game::spawnItems() {
 
     // Item mimics: rare ground loot that turns into a Mimic when picked up.
     // This complements chest mimics and gives Mimics a more NetHack-flavored role.
-    if (depth_ >= 2) {
+    if (spawnDepth >= 2) {
         struct Cand { size_t idx; int w; };
         std::vector<Cand> cands;
         cands.reserve(ground.size());
@@ -2237,7 +2267,7 @@ void Game::spawnItems() {
             // Weight toward tempting, high-value single items.
             int w = roomW;
             w += std::min(120, def.value / 2);
-            w += std::min(30, depth_ * 2);
+            w += std::min(30, spawnDepth * 2);
             if (w <= 0) continue;
 
             cands.push_back(Cand{i, w});
@@ -2271,13 +2301,13 @@ void Game::spawnItems() {
         };
 
         // Chance to place 0..2 item mimics on a floor (rare, scaled gently with depth).
-        float p1 = 0.10f + 0.02f * static_cast<float>(std::min(8, std::max(0, depth_ - 2)));
+        float p1 = 0.10f + 0.02f * static_cast<float>(std::min(8, std::max(0, spawnDepth - 2)));
         p1 = std::min(0.35f, p1);
         if (rng.chance(p1)) {
             (void)markOne();
 
             float p2 = std::min(0.18f, p1 * 0.6f);
-            if (depth_ >= 7 && rng.chance(p2)) {
+            if (spawnDepth >= 7 && rng.chance(p2)) {
                 (void)markOne();
             }
         }
@@ -2289,15 +2319,18 @@ void Game::spawnTraps() {
 
     trapsCur.clear();
 
+    // Use a depth-like scalar for the overworld (Camp/0 wilderness chunks).
+    const int spawnDepth = materialDepth();
+
     // A small number of traps per floor, scaling gently with depth.
     // (Setpieces below may "spend" some of this budget by placing traps in patterns,
     // so the total density stays roughly stable.)
     const int base = 2;
-    const int depthBonus = std::min(6, depth_ / 2);
+    const int depthBonus = std::min(6, spawnDepth / 2);
     int targetCount = base + depthBonus + rng.range(0, 2);
 
     // Penultimate floor (the labyrinth) is intentionally trap-heavy.
-    if (depth_ == QUEST_DEPTH - 1) {
+    if (spawnDepth == QUEST_DEPTH - 1) {
         targetCount += 4;
     }
 
@@ -2363,12 +2396,12 @@ void Game::spawnTraps() {
         // Bias toward "security" traps rather than raw damage.
         // (The chest itself may also be trapped.)
         int r = rng.range(0, 99);
-        if (depth_ <= 2) {
+        if (spawnDepth <= 2) {
             if (r < 55) return TrapKind::Alarm;
             if (r < 88) return TrapKind::PoisonDart;
             return TrapKind::Web;
         }
-        if (depth_ <= 5) {
+        if (spawnDepth <= 5) {
             if (r < 40) return TrapKind::Alarm;
             if (r < 68) return TrapKind::PoisonDart;
             if (r < 88) return TrapKind::Web;
@@ -2380,7 +2413,7 @@ void Game::spawnTraps() {
         if (r < 74) return TrapKind::Web;
         if (r < 86) return TrapKind::ConfusionGas;
         if (r < 91) return TrapKind::PoisonGas;
-        if (depth_ >= 8 && r < 94) return TrapKind::CorrosiveGas;
+        if (spawnDepth >= 8 && r < 94) return TrapKind::CorrosiveGas;
         if (r < 96) return TrapKind::LetheMist;
         return TrapKind::Teleport;
     };
@@ -2394,8 +2427,8 @@ void Game::spawnTraps() {
 
         // Try to place 1-2 guard traps around the cache.
         int want = 1;
-        if (depth_ >= 6 && rng.chance(0.35f)) want = 2;
-        if (depth_ == QUEST_DEPTH - 1 && rng.chance(0.40f)) want += 1;
+        if (spawnDepth >= 6 && rng.chance(0.35f)) want = 2;
+        if (spawnDepth == QUEST_DEPTH - 1 && rng.chance(0.40f)) want += 1;
 
         std::vector<Vec2i> adj;
         adj.reserve(8);
@@ -2462,10 +2495,10 @@ void Game::spawnTraps() {
     auto pickStripTrap = [&]() -> TrapKind {
         // Strips lean toward classic damage/control traps.
         int r = rng.range(0, 99);
-        if (depth_ <= 2) {
+        if (spawnDepth <= 2) {
             return (r < 70) ? TrapKind::Spike : TrapKind::PoisonDart;
         }
-        if (depth_ <= 5) {
+        if (spawnDepth <= 5) {
             if (r < 45) return TrapKind::Spike;
             if (r < 78) return TrapKind::PoisonDart;
             if (r < 90) return TrapKind::Web;
@@ -2536,8 +2569,8 @@ void Game::spawnTraps() {
     }
 
     int gauntletsWanted = 0;
-    if (depth_ >= 3 && rng.chance(0.22f)) gauntletsWanted = 1;
-    if (depth_ == QUEST_DEPTH - 1) gauntletsWanted = 1;
+    if (spawnDepth >= 3 && rng.chance(0.22f)) gauntletsWanted = 1;
+    if (spawnDepth == QUEST_DEPTH - 1) gauntletsWanted = 1;
 
     for (int gk = 0; gk < gauntletsWanted; ++gk) {
         if (straight.empty()) break;
@@ -2580,8 +2613,8 @@ void Game::spawnTraps() {
 
             // Decide how many traps to place along the run.
             int want = 3;
-            if (depth_ >= 4) want += 1;
-            if (depth_ >= 7 && rng.chance(0.35f)) want += 1;
+            if (spawnDepth >= 4) want += 1;
+            if (spawnDepth >= 7 && rng.chance(0.35f)) want += 1;
             want = std::min(want, 6);
 
             // Place every other tile to keep it readable (and reduce chain triggers).
@@ -2622,10 +2655,10 @@ void Game::spawnTraps() {
     // ------------------------------------------------------------
     auto pickTrafficTrap = [&]() -> TrapKind {
         int r = rng.range(0, 99);
-        if (depth_ <= 2) {
+        if (spawnDepth <= 2) {
             return (r < 65) ? TrapKind::Alarm : TrapKind::PoisonDart;
         }
-        if (depth_ <= 5) {
+        if (spawnDepth <= 5) {
             if (r < 32) return TrapKind::Alarm;
             if (r < 56) return TrapKind::Web;
             if (r < 76) return TrapKind::PoisonDart;
@@ -2637,15 +2670,15 @@ void Game::spawnTraps() {
         if (r < 60) return TrapKind::ConfusionGas;
         if (r < 72) return TrapKind::PoisonDart;
         if (r < 78) return TrapKind::PoisonGas;
-        if (depth_ >= 8 && r < 82) return TrapKind::CorrosiveGas;
+        if (spawnDepth >= 8 && r < 82) return TrapKind::CorrosiveGas;
         if (r < 88) return TrapKind::LetheMist;
         if (r < 92) return TrapKind::Teleport;
         return TrapKind::RollingBoulder;
     };
 
     int trafficTrapsWanted = 0;
-    if (depth_ >= 3 && rng.chance(0.28f)) trafficTrapsWanted = 1;
-    if (depth_ >= 7 && rng.chance(0.18f)) trafficTrapsWanted += 1;
+    if (spawnDepth >= 3 && rng.chance(0.28f)) trafficTrapsWanted = 1;
+    if (spawnDepth >= 7 && rng.chance(0.18f)) trafficTrapsWanted += 1;
 
     if (trafficTrapsWanted > 0 && (!junctions.empty() || !chokepoints.empty()) && !candidatesAll.empty()) {
         auto pickFrom = [&](const std::vector<Vec2i>& v) -> Vec2i {
@@ -2819,7 +2852,7 @@ void Game::spawnTraps() {
         // Choose trap type (deeper floors skew deadlier).
         int roll = rng.range(0, 99);
         TrapKind tk = TrapKind::Spike;
-        if (depth_ == QUEST_DEPTH - 1) {
+        if (spawnDepth == QUEST_DEPTH - 1) {
             // Labyrinth: more "tactical" traps than raw damage.
             if (roll < 22) tk = TrapKind::Spike;
             else if (roll < 44) tk = TrapKind::PoisonDart;
@@ -2830,11 +2863,11 @@ void Game::spawnTraps() {
             else if (roll < 91) tk = TrapKind::CorrosiveGas;
             else if (roll < 93) tk = TrapKind::LetheMist;
             else if (roll < 96) tk = TrapKind::RollingBoulder;
-            else if (depth_ != DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
+            else if (spawnDepth != DUNGEON_MAX_DEPTH && roll < 98) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
-        } else if (depth_ <= 1) {
+        } else if (spawnDepth <= 1) {
             tk = (roll < 70) ? TrapKind::Spike : TrapKind::PoisonDart;
-        } else if (depth_ <= 3) {
+        } else if (spawnDepth <= 3) {
             if (roll < 43) tk = TrapKind::Spike;
             else if (roll < 73) tk = TrapKind::PoisonDart;
             else if (roll < 85) tk = TrapKind::Alarm;
@@ -2849,10 +2882,10 @@ void Game::spawnTraps() {
             else if (roll < 86) tk = TrapKind::Web;
             else if (roll < 90) tk = TrapKind::ConfusionGas;
             else if (roll < 92) tk = TrapKind::PoisonGas;
-            else if (depth_ >= 8 && roll < 94) tk = TrapKind::CorrosiveGas;
+            else if (spawnDepth >= 8 && roll < 94) tk = TrapKind::CorrosiveGas;
             else if (roll < 96) tk = TrapKind::LetheMist;
             else if (roll < 97) tk = TrapKind::RollingBoulder;
-            else if (depth_ != DUNGEON_MAX_DEPTH && roll < 99) tk = TrapKind::TrapDoor;
+            else if (spawnDepth != DUNGEON_MAX_DEPTH && roll < 99) tk = TrapKind::TrapDoor;
             else tk = TrapKind::Teleport;
         }
         return tk;
@@ -2888,7 +2921,7 @@ void Game::spawnTraps() {
     // Vault security: some locked doors are trapped.
     // Traps are attached to the door tile and will trigger when you step through.
     const float doorTrapBase = 0.18f;
-    const float doorTrapDepth = 0.02f * static_cast<float>(std::min(8, depth_));
+    const float doorTrapDepth = 0.02f * static_cast<float>(std::min(8, spawnDepth));
     const float doorTrapChance = std::min(0.40f, doorTrapBase + doorTrapDepth);
 
     for (int y = 0; y < dung.height; ++y) {
@@ -2905,8 +2938,8 @@ void Game::spawnTraps() {
             t.pos = p;
             t.discovered = false;
             // Bias toward alarm/poison on doors (fits the theme), with occasional gas traps.
-            if (depth_ >= 8 && rng.chance(0.05f)) t.kind = TrapKind::CorrosiveGas;
-            else if (depth_ >= 4 && rng.chance(0.10f)) t.kind = TrapKind::PoisonGas;
+            if (spawnDepth >= 8 && rng.chance(0.05f)) t.kind = TrapKind::CorrosiveGas;
+            else if (spawnDepth >= 4 && rng.chance(0.10f)) t.kind = TrapKind::PoisonGas;
             else if (rng.chance(0.10f)) t.kind = TrapKind::ConfusionGas;
             else t.kind = rng.chance(0.55f) ? TrapKind::Alarm : TrapKind::PoisonDart;
             trapsCur.push_back(t);
@@ -2920,7 +2953,7 @@ void Game::spawnTraps() {
         if (r.type != RoomType::Laboratory) continue;
 
         int extra = rng.chance(0.60f) ? 1 : 0;
-        if (depth_ >= 6 && rng.chance(0.25f)) extra += 1;
+        if (spawnDepth >= 6 && rng.chance(0.25f)) extra += 1;
 
         for (int i = 0; i < extra; ++i) {
             Vec2i p = randomFreeTileInRoom(r);
@@ -2933,7 +2966,7 @@ void Game::spawnTraps() {
             const int roll = rng.range(0, 99);
             if (roll < 42) t.kind = TrapKind::ConfusionGas;
             else if (roll < 56) t.kind = TrapKind::PoisonGas;
-            else if (depth_ >= 8 && roll < 70) t.kind = TrapKind::CorrosiveGas;
+            else if (spawnDepth >= 8 && roll < 70) t.kind = TrapKind::CorrosiveGas;
             else if (roll < 88) t.kind = TrapKind::PoisonDart;
             else if (roll < 95) t.kind = TrapKind::Alarm;
             else t.kind = TrapKind::Teleport;
@@ -3524,14 +3557,21 @@ void Game::applyEndOfTurnEffects() {
 
     Entity& p = playerMut();
 
+    const OverworldWeatherFx wx = overworldWeatherFx();
+
     // Per-level wind: biases drifting hazards (gas, fire). Deterministic from run seed + level id.
-    const Vec2i wind = windDir();
-    const int windStr = windStrength();
+    // Overworld wilderness chunks override this with their weather wind.
+    const Vec2i wind = wx.active ? wx.wind : windDir();
+    const int windStr = wx.active ? wx.windStrength : windStrength();
     const Vec2i upWind = {-wind.x, -wind.y};
+
+    // Overworld weather modifiers.
+    const int wxFireQuench = wx.active ? wx.fireQuench : 0;
+    const int wxBurnQuench = wx.active ? wx.burnQuench : 0;
 
     // Ensure the terrain material cache is populated for this floor so the
     // hazard simulation can query materialAtCached() cheaply and deterministically.
-    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
     // Substrate chemistry helpers: porous materials absorb fumes; smooth sealed
     // surfaces let vapors drift a little farther.
@@ -4004,7 +4044,8 @@ void Game::applyEndOfTurnEffects() {
 
     // Burning: hurts once per full turn.
     if (p.effects.burnTurns > 0) {
-        p.effects.burnTurns = std::max(0, p.effects.burnTurns - 1);
+        const int burnDecay = 1 + wxBurnQuench;
+        p.effects.burnTurns = std::max(0, p.effects.burnTurns - burnDecay);
         p.hp -= 1;
         if (p.hp <= 0) {
             pushMsg("YOU BURN TO DEATH.", MessageKind::Combat, false);
@@ -4393,154 +4434,130 @@ void Game::applyEndOfTurnEffects() {
         }
     }
 
-
-    // Corpses rot away (carried and dropped).
-    // We reuse the Item::charges field as a simple "freshness" timer in turns.
+    // Corpses (and butchered meat) rot away
     {
-        int rottedInv = 0;
+        int rottedInvCorpses = 0;
+        int rottedInvMeat = 0;
+
+        // Corpses/meat in inventory
         for (size_t i = 0; i < inv.size();) {
             Item& it = inv[i];
-            if (isCorpseKind(it.kind)) {
-                if (it.charges > 0) it.charges -= 1;
+            if (isCorpseKind(it.kind) || it.kind == ItemKind::ButcheredMeat) {
+                if (it.charges > 0) it.charges--;
                 if (it.charges <= 0) {
-                    ++rottedInv;
+                    if (isCorpseKind(it.kind)) ++rottedInvCorpses;
+                    else ++rottedInvMeat;
                     inv.erase(inv.begin() + static_cast<std::vector<Item>::difference_type>(i));
-                    continue;
+                } else {
+                    ++i;
                 }
+            } else {
+                ++i;
             }
-            ++i;
         }
-        if (rottedInv > 0) {
-            pushMsg(rottedInv == 1 ? "A CORPSE ROTS AWAY IN YOUR PACK." : "CORPSES ROT AWAY IN YOUR PACK.", MessageKind::System, true);
+
+        if (rottedInvCorpses > 0) {
+            pushMsg(rottedInvCorpses == 1 ? "A CORPSE ROTS AWAY IN YOUR PACK." : "SOME CORPSES ROT AWAY IN YOUR PACK.",
+                MessageKind::Bad, true);
+        }
+        if (rottedInvMeat > 0) {
+            pushMsg(rottedInvMeat == 1 ? "MEAT ROTS AWAY IN YOUR PACK." : "SOME MEAT ROTS AWAY IN YOUR PACK.",
+                MessageKind::Bad, true);
         }
 
         int rottedGroundVis = 0;
+        int rottedMeatVis = 0;
+        int revivedVis = 0;
+
+        auto inView = [&](Vec2i pos) -> bool {
+            return dung.inBounds(pos.x, pos.y) && dung.at(pos.x, pos.y).visible;
+        };
+
+        // Deterministic per-corpse, per-turn "one in N" without consuming gameplay RNG.
+        auto oneInThisTurn = [&](const Item& corpse, int n) -> bool {
+            if (n <= 1) return true;
+            const uint32_t h = hashCombine(hash32(static_cast<uint32_t>(corpse.id)), static_cast<uint32_t>(turnCount) ^ 0xC0FFEE5Eu);
+            return (h % static_cast<uint32_t>(n)) == 0u;
+        };
+
+        auto findReviveSpot = [&](Vec2i origin) -> Vec2i {
+            if (dung.inBounds(origin.x, origin.y) && dung.isWalkable(origin.x, origin.y) && !entityAt(origin.x, origin.y)) {
+                return origin;
+            }
+            constexpr Vec2i dirs[8] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
+            for (int r = 1; r <= 2; ++r) {
+                for (const Vec2i& d : dirs) {
+                    Vec2i p{ origin.x + d.x * r, origin.y + d.y * r };
+                    if (!dung.inBounds(p.x, p.y)) continue;
+                    if (!dung.isWalkable(p.x, p.y)) continue;
+                    if (entityAt(p.x, p.y)) continue;
+                    return p;
+                }
+            }
+            return { -1, -1 };
+        };
+
         for (size_t i = 0; i < ground.size();) {
             auto& gi = ground[i];
-            if (isCorpseKind(gi.item.kind)) {
-                if (gi.item.charges > 0) gi.item.charges -= 1;
 
-                // Corpse revival: when a corpse becomes stale it may rise once.
-                // NOTE: We use Item::enchant as a tiny per-stack flag for corpses:
-                //   0 = not checked for rising yet
-                //   1 = rising check has been performed (success or failure)
-                //
-                // This avoids growing the save format and is safe because corpses do not
-                // use enchantment gameplay in the inventory UI.
-                if (gi.item.charges > 60 && gi.item.charges <= 160 && gi.item.enchant == 0) {
-                    // Only attempt to spawn something if the corpse is on a valid walkable tile.
-                    if (dung.inBounds(gi.pos.x, gi.pos.y) && dung.isWalkable(gi.pos.x, gi.pos.y)) {
-                        // Only if the tile is empty. (If someone is standing on the corpse,
-                        // it can't get up; we'll try again later.)
-                        if (entityAt(gi.pos.x, gi.pos.y) == nullptr) {
-                            gi.item.enchant = 1;
-
-                            EntityKind riseKind = EntityKind::Zombie;
-                            int bonusHp = 0;
-                            int bonusAtk = 0;
-                            int bonusDef = 0;
-
-                            float chance = 0.06f + 0.01f * std::min(depth_, 20);
-
-                            // A few special cases for "NetHack-ish" flavor.
-                            switch (gi.item.kind) {
-                                case ItemKind::CorpseTroll:
-                                    // Trolls are infamous for regenerating.
-                                    riseKind = EntityKind::Troll;
-                                    chance = 0.20f + 0.02f * std::min(depth_, 15);
-                                    break;
-
-                                case ItemKind::CorpseSlime:
-                                    // Slimes can reconstitute.
-                                    riseKind = EntityKind::Slime;
-                                    chance = 0.18f + 0.02f * std::min(depth_, 12);
-                                    break;
-
-                                case ItemKind::CorpseMimic:
-                                    // Mimics are weird.
-                                    riseKind = EntityKind::Mimic;
-                                    chance = 0.14f + 0.015f * std::min(depth_, 12);
-                                    break;
-
-                                case ItemKind::CorpseWizard:
-                                    // A wizard's spirit may linger.
-                                    riseKind = EntityKind::Ghost;
-                                    chance = 0.12f + 0.015f * std::min(depth_, 12);
-                                    break;
-
-                                case ItemKind::CorpseMinotaur:
-                                    // Big corpse -> beefier zombie.
-                                    riseKind = EntityKind::Zombie;
-                                    chance = 0.10f + 0.015f * std::min(depth_, 12);
-                                    bonusHp = 8;
-                                    bonusAtk = 2;
-                                    bonusDef = 1;
-                                    break;
-
-                                default:
-                                    break;
-                            }
-
-                            chance = std::clamp(chance, 0.02f, 0.40f);
-
-                            if (rng.chance(chance)) {
-                                const bool vis = dung.at(gi.pos.x, gi.pos.y).visible;
-
-                                if (vis) {
-                                    std::ostringstream ss;
-                                    if (riseKind == EntityKind::Zombie) {
-                                        ss << "A CORPSE RISES AS A ZOMBIE!";
-                                    } else {
-                                        ss << "THE " << itemDef(gi.item.kind).name << " RISES!";
-                                    }
-                                    pushMsg(ss.str(), MessageKind::System, true);
-                                }
-
-                                // Loud enough to wake nearby monsters even if the player doesn't see it.
-                                emitNoise(gi.pos, 14);
-
-                                Entity risen = makeMonster(riseKind, gi.pos, 0, false);
-
-                                // If this happened in view, the risen creature is immediately "alerted".
-                                if (vis) {
-                                    risen.alerted = true;
-                                    risen.lastKnownPlayerPos = player().pos;
-                                }
-
-                                // Corpse-specific stat bumps (used for big bodies like Minotaurs).
-                                if (bonusHp > 0) {
-                                    risen.hpMax += bonusHp;
-                                    risen.hp = risen.hpMax;
-                                }
-                                risen.baseAtk += bonusAtk;
-                                risen.baseDef += bonusDef;
-
-                                ents.push_back(risen);
-
-                                // Consume one corpse from the stack (if stacked).
-                                if (gi.item.count > 1) {
-                                    gi.item.count -= 1;
-                                } else {
-                                    ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(i));
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
-
+            if (gi.item.kind == ItemKind::ButcheredMeat) {
+                if (gi.item.charges > 0) gi.item.charges--;
                 if (gi.item.charges <= 0) {
-                    if (dung.inBounds(gi.pos.x, gi.pos.y) && dung.at(gi.pos.x, gi.pos.y).visible) {
-                        ++rottedGroundVis;
-                    }
+                    if (inView(gi.pos)) ++rottedMeatVis;
                     ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(i));
                     continue;
                 }
             }
+
+            if (isCorpseKind(gi.item.kind)) {
+                // Corpses rot away over time.
+                if (gi.item.charges > 0) gi.item.charges--;
+                if (gi.item.charges <= 0) {
+                    if (inView(gi.pos)) ++rottedGroundVis;
+                    ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(i));
+                    continue;
+                }
+
+                // A few corpses can revive while fresh.
+                if (gi.item.charges > 160) {
+                    EntityKind revivedKind = EntityKind::Goblin;
+                    int n = 0;
+                    bool trollMsg = false;
+
+                    switch (gi.item.kind) {
+                        case ItemKind::CorpseTroll: revivedKind = EntityKind::Troll; n = 70; trollMsg = true; break;
+                        case ItemKind::CorpseBat: revivedKind = EntityKind::Bat; n = 90; break;
+                        case ItemKind::CorpseSnake: revivedKind = EntityKind::Snake; n = 130; break;
+                        case ItemKind::CorpseSpider: revivedKind = EntityKind::Spider; n = 200; break;
+                        default: break;
+                    }
+
+                    if (n > 0 && oneInThisTurn(gi.item, n)) {
+                        const Vec2i spot = findReviveSpot(gi.pos);
+                        if (spot.x != -1) {
+                            if (trollMsg && inView(spot)) {
+                                pushMsg("THE TROLL CORPSE REGENERATES!", MessageKind::Warning, true);
+                            }
+                            spawnMonster(revivedKind, spot, /*groupId=*/0, /*allowGear=*/false);
+                            revivedVis += inView(spot) ? 1 : 0;
+                            ground.erase(ground.begin() + static_cast<std::vector<GroundItem>::difference_type>(i));
+                            continue;
+                        }
+                    }
+                }
+            }
+
             ++i;
         }
+
         if (rottedGroundVis > 0) {
-            pushMsg(rottedGroundVis == 1 ? "A CORPSE ROTS AWAY." : "SOME CORPSES ROT AWAY.", MessageKind::System, true);
+            pushMsg(rottedGroundVis == 1 ? "A CORPSE ROTS AWAY." : "SOME CORPSES ROT AWAY.", MessageKind::Bad, true);
+        }
+        if (rottedMeatVis > 0) {
+            pushMsg(rottedMeatVis == 1 ? "MEAT ROTS AWAY." : "SOME MEAT ROTS AWAY.", MessageKind::Bad, true);
+        }
+        if (revivedVis > 0) {
+            pushMsg(revivedVis == 1 ? "A CORPSE TWITCHES AND STANDS UP!" : "SOME CORPSES TWITCH AND STAND UP!", MessageKind::Warning, true);
         }
     }
 
@@ -4585,7 +4602,8 @@ void Game::applyEndOfTurnEffects() {
 
         // Burning: damage over time.
         if (m.effects.burnTurns > 0) {
-            m.effects.burnTurns = std::max(0, m.effects.burnTurns - 1);
+            const int burnDecay = 1 + wxBurnQuench;
+            m.effects.burnTurns = std::max(0, m.effects.burnTurns - burnDecay);
             m.hp -= 1;
 
             if (m.hp <= 0) {
@@ -5324,8 +5342,9 @@ void Game::applyEndOfTurnEffects() {
                     if (s == 0u) continue;
                     if (!passable(x, y)) continue;
 
-                    // Always decay in place.
-                    const uint8_t self = (s > 0u) ? static_cast<uint8_t>(s - 1u) : 0u;
+                    // Always decay in place. Rain/snow/storms can quench it faster on the overworld.
+                    const int decay = 1 + wxFireQuench;
+                    const uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
                     if (next[i] < self) next[i] = self;
 
                     // Strong fires can spread a bit, but we keep this rare to avoid runaway map-wide burns.
@@ -5347,6 +5366,9 @@ void Game::applyEndOfTurnEffects() {
                                 } else if (d.x == upWind.x && d.y == upWind.y) {
                                     chance *= std::max(0.20f, (1.0f - 0.25f * static_cast<float>(windStr)));
                                 }
+                            }
+                            if (wxFireQuench > 0) {
+                                chance *= std::max(0.10f, 1.0f - 0.25f * static_cast<float>(wxFireQuench));
                             }
                             chance = std::min(0.35f, std::max(0.0f, chance));
 
@@ -5653,17 +5675,21 @@ void Game::spawnFountains() {
     const auto& rooms = dung.rooms;
     if (rooms.empty()) return;
 
+    // Use a depth-like scalar for the overworld (Camp/0 wilderness chunks).
+    const int spawnDepth = materialDepth();
+
+
     // Decide how many fountains to place.
     // Kept deliberately sparse: fountains are flavorful but can be risky.
     int want = 0;
     float p1 = 0.35f;
-    if (depth_ >= 4) p1 = 0.45f;
-    if (depth_ >= 8) p1 = 0.55f;
-    if (depth_ >= 12) p1 = 0.60f;
+    if (spawnDepth >= 4) p1 = 0.45f;
+    if (spawnDepth >= 8) p1 = 0.55f;
+    if (spawnDepth >= 12) p1 = 0.60f;
 
     if (rng.chance(p1)) want = 1;
-    if (depth_ >= 8 && rng.chance(0.20f)) want += 1;
-    if (depth_ >= 14 && rng.chance(0.10f)) want += 1;
+    if (spawnDepth >= 8 && rng.chance(0.20f)) want += 1;
+    if (spawnDepth >= 14 && rng.chance(0.10f)) want += 1;
 
     want = clampi(want, 0, 3);
     if (want <= 0) return;

@@ -2,6 +2,7 @@
 #include "spritegen3d.hpp"
 #include "game.hpp"      // EntityKind
 #include "items.hpp"     // ItemKind, ProjectileKind
+#include "craft_tags.hpp"
 #include "proc_spells.hpp"
 #include "vtuber_gen.hpp"
 #include <algorithm>
@@ -3451,6 +3452,275 @@ case ItemKind::Arrow: {
                 break;
             }
 
+
+            if (kind == ItemKind::ButcheredMeat) {
+                // Low byte of sprite seed encodes [cutId:4][tagId:4].
+                const int cutId = static_cast<int>(seed & 0xFu);
+                const int tagId = static_cast<int>((seed >> 4) & 0xFu);
+
+                Color meat = add({180, 70, 70, 255}, rng.range(-18, 18), rng.range(-12, 12), rng.range(-12, 12));
+                Color fat  = add({220, 190, 170, 255}, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
+                if (tagId != 0) {
+                    // Prime cuts: slightly brighter and shinier.
+                    meat = mul(meat, 1.07f);
+                    fat = mul(fat, 1.08f);
+                }
+                Color dark = mul(meat, 0.60f);
+
+                // Cut-driven silhouettes (values match butchergen::Cut enum).
+                if (cutId == 1) {
+                    // RIB: slab + bone hints
+                    rect(s, 6, 10, 9, 4, meat);
+                    outlineRect(s, 6, 10, 9, 4, dark);
+                    line(s, 7, 11, 13, 11, fat);
+                    line(s, 7, 12, 13, 12, mul(fat, 0.85f));
+                    // Bone nubs
+                    setPx(s, 7, 11, {245,245,245,255});
+                    setPx(s, 13, 12, {235,235,225,255});
+                } else if (cutId == 3 || cutId == 13) {
+                    // STRIP / TONGUE: long strips
+                    line(s, 6, 13, 14, 10, meat);
+                    line(s, 6, 14, 14, 11, meat);
+                    line(s, 6, 12, 14, 9, mul(meat, 0.85f));
+                    setPx(s, 10, 11, fat);
+                    setPx(s, 11, 10, fat);
+                } else if (cutId == 8 || cutId == 14) {
+                    // ORGAN / HEART: lumpy
+                    circle(s, 10, 11, 3, meat);
+                    circle(s, 12, 10, 2, meat);
+                    circle(s, 7, 10, 2, meat);
+                    circle(s, 10, 13, 2, meat);
+                    setPx(s, 10, 10, fat);
+                    setPx(s, 9, 11, fat);
+                    setPx(s, 11, 12, fat);
+                } else {
+                    // STEAK / SLAB / ROAST / etc: simple slab
+                    rect(s, 6, 10, 9, 4, meat);
+                    outlineRect(s, 6, 10, 9, 4, dark);
+                    // Marbling
+                    for (int i = 0; i < 4; ++i) {
+                        setPx(s, 7 + rng.range(0, 6), 11 + rng.range(0, 2), mul(fat, 0.92f));
+                    }
+                }
+
+                // Shadow
+                line(s, 6, 14, 14, 14, dark);
+
+                // Prime sparkle
+                if (tagId != 0) {
+                    const Color shine = {255, 255, 255, 140};
+                    if (frame % 2 == 0) {
+                        setPx(s, 13, 9, shine);
+                        setPx(s, 14, 10, shine);
+                    } else {
+                        setPx(s, 12, 9, shine);
+                        setPx(s, 13, 8, shine);
+                    }
+                }
+
+                break;
+            }
+            if (kind == ItemKind::ButcheredHide) {
+                // Low byte of sprite seed encodes [variant:4][qualityTier:4].
+                const int var = static_cast<int>(seed & 0xFu);
+                const int qTier = static_cast<int>((seed >> 4) & 0xFu);
+
+                Color base = add({175, 120, 65, 255}, rng.range(-20, 20), rng.range(-15, 15), rng.range(-10, 10));
+                const float qMul = 0.90f + 0.07f * static_cast<float>(clampi(qTier, 0, 3));
+                Color hide = mul(base, qMul);
+                Color edge = mul(hide, 0.55f);
+
+                if (var == 1) {
+                    // PELT: shaggy rectangle with fur fringe
+                    rect(s, 6, 8, 9, 6, hide);
+                    outlineRect(s, 6, 8, 9, 6, edge);
+                    for (int x = 6; x <= 14; ++x) {
+                        if ((rng.range(1, 2) == 1)) setPx(s, x, 7, edge);
+                        if ((rng.range(1, 2) == 1)) setPx(s, x, 14, edge);
+                    }
+                    for (int y = 8; y <= 13; ++y) {
+                        if ((rng.range(1, 3) == 1)) setPx(s, 5, y, edge);
+                        if ((rng.range(1, 3) == 1)) setPx(s, 15, y, edge);
+                    }
+                } else if (var == 2) {
+                    // SCALES: patterned plate
+                    rect(s, 6, 8, 9, 6, hide);
+                    outlineRect(s, 6, 8, 9, 6, edge);
+                    Color scaleHi = mul(hide, 1.10f);
+                    for (int y = 9; y <= 12; ++y) {
+                        for (int x = 7; x <= 13; ++x) {
+                            if (((x + y) % 3) == 0) setPx(s, x, y, scaleHi);
+                        }
+                    }
+                } else if (var == 3) {
+                    // CHITIN: segmented plates
+                    rect(s, 6, 8, 9, 6, hide);
+                    outlineRect(s, 6, 8, 9, 6, edge);
+                    line(s, 9, 8, 9, 13, edge);
+                    line(s, 12, 8, 12, 13, edge);
+                    setPx(s, 7, 9, mul(hide, 1.12f));
+                    setPx(s, 13, 12, mul(hide, 1.12f));
+                } else if (var == 4) {
+                    // MIMIC SKIN: blobby + glossy
+                    Color goo = add({160, 110, 90, 255}, rng.range(-15, 15), rng.range(-15, 15), rng.range(-15, 15));
+                    goo = mul(goo, qMul);
+                    Color gooDark = mul(goo, 0.60f);
+                    circle(s, 10, 11, 4, goo);
+                    circle(s, 12, 10, 2, goo);
+                    circle(s, 7, 12, 2, goo);
+                    line(s, 7, 14, 13, 14, gooDark);
+                    setPx(s, 12, 9, {255,255,255,120});
+                    setPx(s, 13, 10, {255,255,255,90});
+                } else if (var == 5) {
+                    // ROBE SCRAPS: cloth patch with stitches
+                    Color cloth = add({190, 190, 175, 255}, rng.range(-10, 10), rng.range(-10, 10), rng.range(-10, 10));
+                    cloth = mul(cloth, qMul);
+                    Color stitch = mul(cloth, 0.55f);
+                    rect(s, 6, 8, 9, 6, cloth);
+                    outlineRect(s, 6, 8, 9, 6, stitch);
+                    for (int x = 7; x <= 13; x += 2) setPx(s, x, 11, stitch);
+                    for (int y = 9; y <= 12; y += 2) setPx(s, 10, y, stitch);
+                } else {
+                    // Default hide
+                    rect(s, 6, 8, 9, 6, hide);
+                    outlineRect(s, 6, 8, 9, 6, edge);
+                    // Ragged corners
+                    if ((rng.range(1, 2) == 1)) setPx(s, 6, 8, Color{});
+                    if ((rng.range(1, 2) == 1)) setPx(s, 14, 8, Color{});
+                    if ((rng.range(1, 2) == 1)) setPx(s, 6, 13, Color{});
+                    if ((rng.range(1, 2) == 1)) setPx(s, 14, 13, Color{});
+                }
+
+                // High-quality sheen
+                if (qTier >= 3) {
+                    setPx(s, 13, 9, {255,255,255,90});
+                    setPx(s, 14, 10, {255,255,255,70});
+                }
+
+                break;
+            }
+            if (kind == ItemKind::ButcheredBones) {
+                // Low byte of sprite seed encodes [variant:4][qualityTier:4].
+                const int var = static_cast<int>(seed & 0xFu);
+                const int qTier = static_cast<int>((seed >> 4) & 0xFu);
+
+                Color bone = add({235, 235, 225, 255}, rng.range(-12, 12), rng.range(-12, 12), rng.range(-12, 12));
+                const float qMul = 0.88f + 0.06f * static_cast<float>(clampi(qTier, 0, 3));
+                bone = mul(bone, qMul);
+                Color dark = mul(bone, 0.65f);
+
+                if (var == 1) {
+                    // HORN: two curved horns
+                    line(s, 8, 13, 6, 9, bone);
+                    line(s, 8, 13, 10, 9, bone);
+                    line(s, 6, 9, 7, 8, dark);
+                    line(s, 10, 9, 9, 8, dark);
+                    setPx(s, 7, 8, {255,255,255,80});
+                    setPx(s, 9, 8, {255,255,255,80});
+                } else if (var == 2) {
+                    // FANG: paired fangs
+                    line(s, 8, 9, 7, 14, bone);
+                    line(s, 10, 9, 11, 14, bone);
+                    setPx(s, 7, 14, dark);
+                    setPx(s, 11, 14, dark);
+                } else if (var == 3) {
+                    // CHITIN SHARDS: jagged shards
+                    line(s, 6, 13, 10, 9, bone);
+                    line(s, 10, 9, 14, 12, bone);
+                    line(s, 7, 12, 12, 14, dark);
+                    setPx(s, 12, 10, dark);
+                } else if (var == 4) {
+                    // TOOTH: single tooth
+                    rect(s, 8, 9, 3, 5, bone);
+                    outlineRect(s, 8, 9, 3, 5, dark);
+                    setPx(s, 9, 14, dark);
+                    setPx(s, 10, 14, dark);
+                    setPx(s, 9, 10, {255,255,255,90});
+                } else {
+                    // BONES: classic crossbones
+                    line(s, 6, 13, 14, 9, bone);
+                    line(s, 6, 9, 14, 13, bone);
+                    circle(s, 6, 9, 1, dark);
+                    circle(s, 6, 13, 1, dark);
+                    circle(s, 14, 9, 1, dark);
+                    circle(s, 14, 13, 1, dark);
+                }
+
+                // Polished highlight on high quality
+                if (qTier >= 3) setPx(s, 11, 9, {255,255,255,90});
+
+                break;
+            }
+	            if (kind == ItemKind::EssenceShard) {
+	                const int tagId = essenceShardTagFromEnchant(it.enchant);
+	                const int tier = essenceShardTierFromEnchant(it.enchant);
+	                const bool shiny = essenceShardIsShinyFromEnchant(it.enchant);
+
+	                const crafttags::Tag tg = crafttags::tagFromIndex(tagId);
+	                Color base = {200, 200, 200, 255};
+	                switch (tg) {
+	                    case crafttags::Tag::Regen:   base = {70, 205, 110, 255}; break;
+	                    case crafttags::Tag::Haste:   base = {240, 215, 80, 255}; break;
+	                    case crafttags::Tag::Shield:  base = {90, 165, 240, 255}; break;
+	                    case crafttags::Tag::Aurora:  base = {185, 125, 255, 255}; break;
+	                    case crafttags::Tag::Clarity: base = {120, 230, 235, 255}; break;
+	                    case crafttags::Tag::Venom:   base = {115, 210, 95, 255}; break;
+	                    case crafttags::Tag::Ember:   base = {245, 120, 85, 255}; break;
+	                    case crafttags::Tag::Stone:   base = {195, 195, 210, 255}; break;
+	                    case crafttags::Tag::Rune:    base = {230, 230, 255, 255}; break;
+	                    case crafttags::Tag::Arc:     base = {105, 225, 255, 255}; break;
+	                    case crafttags::Tag::Alch:    base = {225, 110, 225, 255}; break;
+	                    case crafttags::Tag::Luck:    base = {250, 215, 135, 255}; break;
+	                    case crafttags::Tag::Daze:    base = {195, 155, 240, 255}; break;
+	                    default: break;
+	                }
+
+	                const float tMul = 0.78f + 0.03f * static_cast<float>(clampi(tier, 0, 15));
+	                Color gem = mul(base, tMul);
+	                Color edge = mul(gem, 0.55f);
+
+	                const int cx = 10;
+	                const int cy = 11;
+
+	                // Fill a diamond.
+	                for (int dy = -3; dy <= 3; ++dy) {
+	                    const int w = 4 - std::abs(dy); // 1..4
+	                    for (int dx = -(w - 1); dx <= (w - 1); ++dx) {
+	                        setPx(s, cx + dx, cy + dy, gem);
+	                    }
+	                }
+
+	                // Outline.
+	                line(s, cx, cy - 4, cx - 4, cy, edge);
+	                line(s, cx, cy - 4, cx + 4, cy, edge);
+	                line(s, cx - 4, cy, cx, cy + 4, edge);
+	                line(s, cx + 4, cy, cx, cy + 4, edge);
+
+	                // Facets.
+	                setPx(s, cx, cy - 2, mul(gem, 1.05f));
+	                setPx(s, cx - 1, cy + 1, mul(gem, 0.95f));
+	                setPx(s, cx + 1, cy + 1, mul(gem, 0.90f));
+
+	                // Subtle highlight scales with tier.
+	                const int hiA = 70 + clampi(tier, 0, 12) * 6;
+	                setPx(s, cx + 1, cy - 2, {255, 255, 255, static_cast<uint8_t>(clampi(hiA, 40, 180))});
+	                setPx(s, cx + 2, cy - 1, {255, 255, 255, static_cast<uint8_t>(clampi(hiA - 20, 20, 160))});
+
+	                if (shiny) {
+	                    // Animated glint.
+	                    const uint8_t a = static_cast<uint8_t>((frame % 2 == 0) ? 200 : 130);
+	                    Color g = {255, 255, 255, a};
+	                    setPx(s, cx + 2, cy - 3, g);
+	                    setPx(s, cx + 3, cy - 2, g);
+	                    if (frame % 2 == 0) {
+	                        setPx(s, cx - 3, cy + 2, {255, 255, 255, 120});
+	                    } else {
+	                        setPx(s, cx - 2, cy + 3, {255, 255, 255, 120});
+	                    }
+	                }
+
+	                break;
+	            }
             if (isCaptureSphereKind(kind)) {
                 const bool full = isCaptureSphereFullKind(kind);
                 const bool mega = (kind == ItemKind::MegaSphere || kind == ItemKind::MegaSphereFull);

@@ -4,7 +4,9 @@
 #include "pet_gen.hpp"
 #include "fishing_gen.hpp"
 #include "farm_gen.hpp"
+#include "butcher_gen.hpp"
 #include "bounty_gen.hpp"
+#include "craft_tags.hpp"
 #include "proc_spells.hpp"
 #include "game.hpp"
 #include "rng.hpp"
@@ -206,6 +208,14 @@ const ItemDef& itemDef(ItemKind k) {
         // Rune Tablets are consumables (read/use) even before the full procedural spell casting
         // vertical slice lands.
         { ItemKind::RuneTablet, "RUNE TABLET", false, true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 6, 200 },
+
+        // Butchering outputs (append-only)
+        { ItemKind::ButcheredMeat,  "MEAT",  true,  true,  false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 300, 0, 25, 4, 4 },
+        { ItemKind::ButcheredHide,  "HIDE",  true,  false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0,   0, 0,  6, 10 },
+        { ItemKind::ButcheredBones, "BONES", true,  false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0,   0, 0,  3, 6 },
+
+        // Procedural crafting byproducts (append-only)
+        { ItemKind::EssenceShard, "ESSENCE SHARD", true, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 1, 45 },
 };
 
     static std::vector<ItemDef> defs;
@@ -452,6 +462,23 @@ std::string itemDisplayName(const Item& it) {
 
     
 
+    } else if (it.kind == ItemKind::EssenceShard) {
+        if (it.count > 1) ss << it.count << " ";
+
+        const int tagId = essenceShardTagFromEnchant(it.enchant);
+        const int tier = essenceShardTierFromEnchant(it.enchant);
+        const bool shiny = essenceShardIsShinyFromEnchant(it.enchant);
+
+        const crafttags::Tag tg = crafttags::tagFromIndex(tagId);
+        const char* tok = crafttags::tagToken(tg);
+        if (tok && tok[0]) ss << tok << " ";
+        else ss << "MUNDANE ";
+
+        ss << "ESSENCE SHARD";
+        if (it.count > 1) ss << "S";
+        ss << " {T" << clampi(tier, 0, 15) << "}";
+        if (shiny) ss << " {SHINY}";
+
 } else if (it.kind == ItemKind::RuneTablet) {
         // Procedural rune magic tablet: spell id is encoded in spriteSeed.
         // This is UI/name/sprite support only for now; learning/casting wiring will come later.
@@ -575,6 +602,73 @@ std::string itemDisplayName(const Item& it) {
         else if (ch <= 60) ss << " (ROTTEN)";
         else if (ch <= 160) ss << " (STALE)";
         else ss << " (FRESH)";
+    } else if (it.kind == ItemKind::ButcheredMeat) {
+        // Butchered product display is fully custom; clear the default name output.
+        ss.str("");
+        ss.clear();
+
+        const bool plural = (it.count > 1);
+        if (plural) ss << it.count << " ";
+
+        const int srcRaw = butcherSourceKindFromEnchant(it.enchant);
+        ItemKind srcKind = ItemKind::CorpseGoblin;
+        if (srcRaw >= 0 && srcRaw < ITEM_KIND_COUNT) srcKind = static_cast<ItemKind>(srcRaw);
+
+        const int tagId = butcherMeatTagFromEnchant(it.enchant);
+        const char* tag = butchergen::tagToken(butchergen::tagFromIndex(tagId));
+        if (tag && tag[0]) ss << "PRIME ";
+
+        const auto cut = butchergen::cutFromIndex(butcherMeatCutFromEnchant(it.enchant));
+        ss << butchergen::corpseLabel(srcKind) << " ";
+        if (plural) {
+            const char* cp = butchergen::cutTokenPlural(cut);
+            if (cp) ss << cp;
+            else ss << butchergen::cutToken(cut) << "S";
+        } else {
+            ss << butchergen::cutToken(cut);
+        }
+
+        if (it.charges <= 60) ss << " (ROTTEN)";
+        else if (it.charges <= 160) ss << " (STALE)";
+        else ss << " (FRESH)";
+
+        if (tag && tag[0]) ss << " {" << tag << "}";
+
+    } else if (it.kind == ItemKind::ButcheredHide) {
+        ss.str("");
+        ss.clear();
+
+        const bool plural = (it.count > 1);
+        if (plural) ss << it.count << " ";
+
+        const int srcRaw = butcherSourceKindFromEnchant(it.enchant);
+        ItemKind srcKind = ItemKind::CorpseGoblin;
+        if (srcRaw >= 0 && srcRaw < ITEM_KIND_COUNT) srcKind = static_cast<ItemKind>(srcRaw);
+
+        const int q = butcherMaterialQualityFromEnchant(it.enchant);
+        const int v = butcherMaterialVariantFromEnchant(it.enchant);
+        const auto ht = butchergen::hideTypeFromIndex(v);
+
+        ss << butcherQualityAdj(q) << " " << butchergen::corpseLabel(srcKind) << " ";
+        ss << (plural ? butchergen::hideTokenPlural(ht) : butchergen::hideTokenSingular(ht));
+
+    } else if (it.kind == ItemKind::ButcheredBones) {
+        ss.str("");
+        ss.clear();
+
+        const bool plural = (it.count > 1);
+        if (plural) ss << it.count << " ";
+
+        const int srcRaw = butcherSourceKindFromEnchant(it.enchant);
+        ItemKind srcKind = ItemKind::CorpseGoblin;
+        if (srcRaw >= 0 && srcRaw < ITEM_KIND_COUNT) srcKind = static_cast<ItemKind>(srcRaw);
+
+        const int q = butcherMaterialQualityFromEnchant(it.enchant);
+        const int v = butcherMaterialVariantFromEnchant(it.enchant);
+        const auto bt = butchergen::boneTypeFromIndex(v);
+
+        ss << butcherQualityAdj(q) << " " << butchergen::corpseLabel(srcKind) << " ";
+        ss << (plural ? butchergen::boneTokenPlural(bt) : butchergen::boneTokenSingular(bt));
     } else if (d.maxCharges > 0) {
         ss << " (" << it.charges << "/" << d.maxCharges << ")";
     }

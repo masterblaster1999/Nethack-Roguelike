@@ -2,11 +2,14 @@
 #include "ui_font.hpp"
 #include "hallucination.hpp"
 #include "rng.hpp"
+#include "overworld.hpp"
 #include "version.hpp"
 #include "action_info.hpp"
 #include "spritegen3d.hpp"
 #include "proc_spells.hpp"
 #include "artifact_gen.hpp"
+#include "shop_profile_gen.hpp"
+#include "shrine_profile_gen.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -2929,7 +2932,7 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
                                          static_cast<uint32_t>(game.depth()));
 
     // Ensure deterministic terrain caches are available (biolum/material queries).
-    d.ensureMaterials(runSeed, game.branch(), game.depth(), game.dungeonMaxDepth());
+    d.ensureMaterials(game.materialWorldSeed(), game.branch(), game.materialDepth(), game.dungeonMaxDepth());
 
     for (int y = 0; y < d.height; ++y) {
         for (int x = 0; x < d.width; ++x) {
@@ -4263,7 +4266,7 @@ void Renderer::render(const Game& game) {
     const int levelKey = static_cast<int>(lvlSeed);
 
 // Precompute deterministic terrain materials for this dungeon (used for tinting + LOOK adjectives).
-d.ensureMaterials(runSeed, game.branch(), game.depth(), game.dungeonMaxDepth());
+d.ensureMaterials(game.materialWorldSeed(), game.branch(), game.materialDepth(), game.dungeonMaxDepth());
 
 
     // Build isometric-diamond terrain textures lazily so top-down mode doesn't pay
@@ -7290,6 +7293,10 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
         drawMinimapOverlay(game);
     }
 
+    if (game.isOverworldMapOpen()) {
+        drawOverworldMapOverlay(game);
+    }
+
     if (game.isStatsOpen()) {
         drawStatsOverlay(game);
     }
@@ -7554,20 +7561,60 @@ void Renderer::drawHud(const Game& game) {
 
     ss << " | KEYS: " << game.keyCount() << " | PICKS: " << game.lockpickCount();
 
+    // Procedural shop identity HUD tag
+    if (game.playerInShop()) {
+        if (const Room* shopRoom = shopgen::shopRoomAt(game.dungeon(), p.pos)) {
+            const shopgen::ShopProfile prof = shopgen::profileFor(game.seed(), game.depth(), *shopRoom);
+            ss << " | SHOP: " << shopgen::shopNameFor(prof);
+        } else {
+            ss << " | SHOP";
+        }
+    }
+
+    // Procedural shrine patron HUD tag
+    if (const Room* shrineRoom = shrinegen::shrineRoomAt(game.dungeon(), p.pos)) {
+        const shrinegen::ShrineProfile prof = shrinegen::profileFor(game.seed(), game.depth(), *shrineRoom);
+        ss << " | SHRINE: " << shrinegen::hudLabelFor(prof);
+    }
+
     const int arrows = ammoCount(game.inventory(), AmmoKind::Arrow);
     const int rocks  = ammoCount(game.inventory(), AmmoKind::Rock);
     if (arrows > 0) ss << " | ARROWS: " << arrows;
     if (rocks > 0)  ss << " | ROCKS: " << rocks;
-    if (game.atCamp()) {
+    if (game.atHomeCamp()) {
         ss << " | DEPTH: CAMP";
+    } else if (game.atCamp()) {
+        const overworld::ChunkProfile prof = overworld::profileFor(game.seed(), game.overworldX(), game.overworldY(), game.dungeonMaxDepth());
+        ss << " | SURFACE: " << overworld::chunkNameFor(prof)
+           << " (" << game.overworldX() << "," << game.overworldY() << ")"
+           << " [" << overworld::biomeName(prof.biome) << " D" << prof.dangerDepth << "]";
+
+        const overworld::WeatherProfile wx = overworld::weatherFor(game.seed(), game.overworldX(), game.overworldY(), prof.biome);
+        ss << " WX:" << overworld::weatherName(wx.kind);
+        if (wx.windStrength > 0) {
+            char c = '-';
+            if (wx.windDir.x == 1) c = 'E';
+            else if (wx.windDir.x == -1) c = 'W';
+            else if (wx.windDir.y == 1) c = 'S';
+            else if (wx.windDir.y == -1) c = 'N';
+            ss << " WIND:" << c << wx.windStrength;
+        }
     } else if (game.infiniteWorldEnabled() && game.depth() > game.dungeonMaxDepth()) {
         ss << " | DEPTH: " << game.depth() << " (ENDLESS)";
     } else {
         ss << " | DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth();
+        if (dung.campaignStratumIndex >= 0 && dung.campaignStratumLen > 0) {
+            ss << " (" << endlessStratumThemeName(dung.campaignStratumTheme) << ")";
+        }
     }
     ss << " | DEEPEST: " << game.maxDepthReached();
     ss << " | TURNS: " << game.turns();
     ss << " | KILLS: " << game.kills();
+
+    {
+        const std::string winTag = game.winConditionHudTag();
+        if (!winTag.empty()) ss << " | " << winTag;
+    }
 
     // Companions
     {
@@ -7747,6 +7794,7 @@ void Renderer::drawHud(const Game& game) {
             case MessageKind::Info:         c = white; break;
             case MessageKind::Combat:       c = red; break;
             case MessageKind::Loot:         c = yellow; break;
+            case MessageKind::Bad:          c = yellow; break;
             case MessageKind::Warning:      c = yellow; break;
             case MessageKind::ImportantMsg: c = important; break;
             case MessageKind::Success:      c = green; break;
@@ -9864,6 +9912,224 @@ void Renderer::drawMinimapOverlay(const Game& game) {
     }
 }
 
+
+void Renderer::drawOverworldMapOverlay(const Game& game) {
+    const Color white{240,240,240,255};
+    const Color gray{160,160,160,255};
+    const Color yellow{255,230,120,255};
+    const Color cyan{140,220,255,255};
+    const Color green{140,240,160,255};
+
+    // Center panel
+    const int panelW = winW * 4 / 5;
+    const int panelH = (winH - hudH) * 4 / 5;
+    const int x0 = (winW - panelW) / 2;
+    const int y0 = (winH - hudH - panelH) / 2;
+
+    SDL_Rect panel { x0, y0, panelW, panelH };
+    drawPanel(game, panel, 235, lastFrame);
+
+    const int pad = 14;
+    int y = y0 + pad;
+
+    drawText5x7(renderer, x0 + pad, y, 2, white, "OVERWORLD ATLAS (SHIFT+M)");
+    y += 22;
+
+    // Cursor chunk coordinate (in chunk-space, not tile-space).
+    const Vec2i curChunk{game.overworldX(), game.overworldY()};
+    Vec2i cursorChunk = curChunk;
+    if (game.overworldMapCursorActive()) {
+        cursorChunk = game.overworldMapCursorPos();
+    }
+
+    // View radius (chunks); zoom steps add/subtract 2 chunks of radius.
+    const int baseRadius = 8; // 17x17
+    int radius = baseRadius + game.overworldMapZoom() * 2;
+    radius = std::clamp(radius, 4, 16);
+    const int dim = radius * 2 + 1;
+
+    // Layout: left grid, right details.
+    const int scale = 1;
+    const int charW = (5 + 1) * scale;
+    const int charH = 7 * scale;
+
+    const int cellW = charW * 3;      // 2 chars + space
+    const int cellH = charH + 2;      // a little breathing room
+
+    const int gridX0 = x0 + pad;
+    const int gridY0 = y;
+
+    const int gridWpx = dim * cellW;
+    const int detailsX0 = gridX0 + gridWpx + 18;
+    const int detailsW = (x0 + panelW - pad) - detailsX0;
+
+    auto biomeLetter = [](overworld::Biome b) -> char {
+        switch (b) {
+            case overworld::Biome::Plains:  return 'P';
+            case overworld::Biome::Forest:  return 'F';
+            case overworld::Biome::Swamp:   return 'S';
+            case overworld::Biome::Desert:  return 'D';
+            case overworld::Biome::Tundra:  return 'T';
+            case overworld::Biome::Hills:   return 'H';
+            case overworld::Biome::Badlands:return 'B';
+            case overworld::Biome::Crystal: return 'C';
+        }
+        return '?';
+    };
+
+    auto biomeColor = [&](overworld::Biome b) -> Color {
+        switch (b) {
+            case overworld::Biome::Plains:   return {210, 235, 150, 255};
+            case overworld::Biome::Forest:   return {150, 235, 150, 255};
+            case overworld::Biome::Swamp:    return {120, 220, 190, 255};
+            case overworld::Biome::Desert:   return {245, 220, 140, 255};
+            case overworld::Biome::Tundra:   return {215, 235, 255, 255};
+            case overworld::Biome::Hills:    return {220, 190, 140, 255};
+            case overworld::Biome::Badlands: return {240, 165, 140, 255};
+            case overworld::Biome::Crystal:  return {225, 170, 255, 255};
+        }
+        return gray;
+    };
+
+    auto chunkHasShopRoom = [&](int cx, int cy) -> bool {
+        const Dungeon* d = game.overworldChunkDungeon(cx, cy);
+        if (!d) return false;
+        for (const auto& r : d->rooms) {
+            if (r.type == RoomType::Shop) return true;
+        }
+        return false;
+    };
+
+    // Draw grid cells
+    for (int row = 0; row < dim; ++row) {
+        const int cy = cursorChunk.y - radius + row;
+        for (int col = 0; col < dim; ++col) {
+            const int cx = cursorChunk.x - radius + col;
+
+            const bool discovered = game.overworldChunkDiscovered(cx, cy);
+            const bool isCurrent = (cx == curChunk.x && cy == curChunk.y);
+            const bool isCursor  = (cx == cursorChunk.x && cy == cursorChunk.y);
+
+            Color colr = gray;
+            std::string cell = "??";
+
+            if (discovered) {
+                const overworld::ChunkProfile prof = overworld::profileFor(game.seed(), cx, cy, game.dungeonMaxDepth());
+                const char b = biomeLetter(prof.biome);
+
+                char mark = '.';
+                if (isCurrent) mark = '@';
+                else if (cx == 0 && cy == 0) mark = '*';
+                else if (chunkHasShopRoom(cx, cy)) mark = '$';
+
+                cell[0] = b;
+                cell[1] = mark;
+
+                colr = biomeColor(prof.biome);
+            }
+
+            // Cursor highlight overrides palette.
+            if (isCursor) colr = yellow;
+            else if (isCurrent) colr = white;
+
+            const int px = gridX0 + col * cellW;
+            const int py = gridY0 + row * cellH;
+
+            // Subtle selection bg for the cursor.
+            if (isCursor) {
+                SDL_Rect bg{ px - 2, py - 2, charW * 2 + 4, charH + 4 };
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 160);
+                SDL_RenderFillRect(renderer, &bg);
+            }
+
+            drawText5x7(renderer, px, py, scale, colr, cell);
+        }
+    }
+
+    // Details
+    int dy = gridY0;
+
+    auto drawLine = [&](const Color& c, const std::string& s) {
+        if (detailsW <= 0) return;
+        drawText5x7(renderer, detailsX0, dy, 2, c, s);
+        dy += 18;
+    };
+
+    {
+        std::stringstream ss;
+        ss << "CURSOR: (" << cursorChunk.x << "," << cursorChunk.y << ")";
+        drawLine(white, ss.str());
+    }
+
+    if (!game.overworldChunkDiscovered(cursorChunk.x, cursorChunk.y)) {
+        drawLine(gray, "UNKNOWN REGION");
+        drawLine(gray, "Explore to reveal.");
+    } else {
+        if (cursorChunk.x == 0 && cursorChunk.y == 0) {
+            drawLine(green, "HOME CAMP");
+        } else {
+            const overworld::ChunkProfile prof = overworld::profileFor(game.seed(), cursorChunk.x, cursorChunk.y, game.dungeonMaxDepth());
+            const overworld::WeatherProfile wx = overworld::weatherFor(game.seed(), cursorChunk.x, cursorChunk.y, prof.biome);
+
+            drawLine(cyan, std::string("REGION: ") + overworld::chunkNameFor(prof));
+            drawLine(white, std::string("BIOME: ") + overworld::biomeName(prof.biome));
+
+            {
+                std::stringstream ss;
+                ss << "DANGER: D" << prof.dangerDepth;
+                drawLine(white, ss.str());
+            }
+
+            {
+                std::stringstream ss;
+                ss << "WX: " << overworld::weatherName(wx.kind);
+                drawLine(white, ss.str());
+            }
+
+            if (wx.windStrength > 0) {
+                char c = '-';
+                if (wx.windDir.x == 1) c = 'E';
+                else if (wx.windDir.x == -1) c = 'W';
+                else if (wx.windDir.y == 1) c = 'S';
+                else if (wx.windDir.y == -1) c = 'N';
+
+                std::stringstream ss;
+                ss << "WIND: " << c << " " << wx.windStrength;
+                drawLine(white, ss.str());
+            }
+
+            const Dungeon* d = game.overworldChunkDungeon(cursorChunk.x, cursorChunk.y);
+            if (!d) {
+                drawLine(gray, "STATE: NOT IN MEMORY");
+            } else {
+                drawLine(green, "STATE: LOADED");
+
+                const bool shop = chunkHasShopRoom(cursorChunk.x, cursorChunk.y);
+                if (shop && !(cursorChunk.x == 0 && cursorChunk.y == 0)) {
+                    drawLine(yellow, "FEATURE: WAYSTATION ($)");
+                }
+
+                // Lightweight terrain stats (helps players reason about travel).
+                {
+                    std::stringstream ss;
+                    ss << "WATER: " << d->fluvialChasmCount
+                       << "  BOULDERS: " << d->heightfieldScreeBoulderCount
+                       << "  PILLARS: " << d->heightfieldRidgePillarCount;
+                    drawLine(gray, ss.str());
+                }
+            }
+        }
+    }
+
+    // Controls (bottom)
+    {
+        const int by = y0 + panelH - pad - 16;
+        drawText5x7(renderer, x0 + pad, by, 2, gray, "MOVE: PAN   +/-: ZOOM   ENTER: RECENTER   ESC: CLOSE");
+    }
+}
+
+
 void Renderer::drawStatsOverlay(const Game& game) {
     const Color white{240,240,240,255};
     const Color gray{160,160,160,255};
@@ -9907,8 +10173,30 @@ void Renderer::drawStatsOverlay(const Game& game) {
     }
     {
         std::stringstream ss;
-        if (game.atCamp()) ss << "DEPTH: CAMP  (DEEPEST: " << game.maxDepthReached() << ")";
-        else ss << "DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth() << "  (DEEPEST: " << game.maxDepthReached() << ")";
+        if (game.atHomeCamp()) {
+            ss << "DEPTH: CAMP  (DEEPEST: " << game.maxDepthReached() << ")";
+        } else if (game.atCamp()) {
+            const overworld::ChunkProfile prof = overworld::profileFor(game.seed(), game.overworldX(), game.overworldY(), game.dungeonMaxDepth());
+            ss << "SURFACE: " << overworld::chunkNameFor(prof)
+               << " (" << game.overworldX() << "," << game.overworldY() << ")"
+               << " [" << overworld::biomeName(prof.biome) << " D" << prof.dangerDepth << "]";
+
+            const overworld::WeatherProfile wx = overworld::weatherFor(game.seed(), game.overworldX(), game.overworldY(), prof.biome);
+            ss << " WX:" << overworld::weatherName(wx.kind);
+            if (wx.windStrength > 0) {
+                char c = '-';
+                if (wx.windDir.x == 1) c = 'E';
+                else if (wx.windDir.x == -1) c = 'W';
+                else if (wx.windDir.y == 1) c = 'S';
+                else if (wx.windDir.y == -1) c = 'N';
+                ss << " WIND:" << c << wx.windStrength;
+            }
+
+            ss << "  (DEEPEST: " << game.maxDepthReached() << ")";
+        } else {
+            ss << "DEPTH: " << game.depth() << "/" << game.dungeonMaxDepth()
+               << "  (DEEPEST: " << game.maxDepthReached() << ")";
+        }
         drawText5x7(renderer, x0 + pad, y, 2, white, ss.str());
         y += 18;
     }
@@ -9943,6 +10231,18 @@ void Renderer::drawStatsOverlay(const Game& game) {
         // Use a smaller scale so the full tag list fits comfortably.
         drawText5x7(renderer, x0 + pad, y, 1, white, ss.str());
         y += 12;
+    }
+
+    // Procedural victory plan (run-seeded).
+    {
+        drawText5x7(renderer, x0 + pad, y, 1, white, "WIN CONDITIONS:");
+        y += 12;
+
+        const auto goals = game.winConditionLines(true);
+        for (const auto& ln : goals) {
+            drawText5x7(renderer, x0 + pad, y, 1, white, std::string("  ") + ln);
+            y += 12;
+        }
     }
 
     {
@@ -11035,6 +11335,7 @@ void Renderer::drawMessageHistoryOverlay(const Game& game) {
             case MessageKind::Combat:       return Color{255,230,120,255};
             case MessageKind::Loot:         return Color{120,255,120,255};
             case MessageKind::System:       return Color{160,200,255,255};
+            case MessageKind::Bad:          return Color{255,120,120,255};
             case MessageKind::Warning:      return Color{255,120,120,255};
             case MessageKind::ImportantMsg: return Color{255,170,80,255};
             case MessageKind::Success:      return Color{120,255,255,255};

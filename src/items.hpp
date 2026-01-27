@@ -209,6 +209,14 @@ enum class ItemKind : uint8_t {
 
     // --- Procedural rune magic (append-only) ---
     RuneTablet,
+
+    // Butchering outputs (append-only)
+    ButcheredMeat,
+    ButcheredHide,
+    ButcheredBones,
+
+    // Procedural crafting byproducts (append-only)
+    EssenceShard,
 };
 
 // Item "egos" (NetHack-style brands / special properties) applied to some gear.
@@ -285,7 +293,7 @@ inline int egoValueMultiplierPct(ItemEgo e) {
 }
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::RuneTablet) + 1;
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::EssenceShard) + 1; // keep in sync with last enum value
 
 inline bool isVtuberCollectible(ItemKind k) {
     return k == ItemKind::VtuberFigurine || k == ItemKind::VtuberHoloCard;
@@ -311,6 +319,7 @@ inline bool isFishKind(ItemKind k) { return k == ItemKind::Fish; }
 // --- Crafting helpers (append-only) ---
 
 inline bool isCraftingKitKind(ItemKind k) { return k == ItemKind::CraftingKit; }
+inline bool isEssenceShardKind(ItemKind k) { return k == ItemKind::EssenceShard; }
 
 // --- Bounty helpers (append-only) ---
 
@@ -432,6 +441,90 @@ inline int packFishEnchant(int sizeClass, int rarity, bool shiny) {
 
 // Fish seeds are stored in Item::charges (int32 bits preserved).
 inline uint32_t fishSeedFromCharges(int charges) { return static_cast<uint32_t>(charges); }
+
+// --- Butchered corpse products metadata (append-only) ---
+//
+// We store per-piece nutrition and provenance in Item::enchant so saves remain compatible.
+// This is used by ItemKind::ButcheredMeat / ButcheredHide / ButcheredBones.
+//
+// For MEAT (ItemKind::ButcheredMeat):
+//   bits 0..7   : hunger restore per piece (0..255)
+//   bits 8..15  : heal amount per piece   (0..255)
+//   bits 16..23 : source ItemKind (corpse kind id, 0..255)
+//   bits 24..27 : tag id (0..15)  (shared tokens with fish/crops: REGEN/HASTE/SHIELD/AURORA/CLARITY/VENOM/EMBER)
+//   bits 28..31 : cut id (0..15)  (display-only)
+//
+// For HIDE/BONES (ItemKind::ButcheredHide / ButcheredBones):
+//   bits 0..7   : quality (0..255)
+//   bits 8..15  : variant id (0..255) (HideType/BoneType, future-proof)
+//   bits 16..23 : source ItemKind (corpse kind id, 0..255)
+
+inline int butcherMeatHungerFromEnchant(int enchant) { return enchant & 0xFF; }
+inline int butcherMeatHealFromEnchant(int enchant) { return (enchant >> 8) & 0xFF; }
+inline int butcherSourceKindFromEnchant(int enchant) { return (enchant >> 16) & 0xFF; }
+inline int butcherMeatTagFromEnchant(int enchant) { return (enchant >> 24) & 0xF; }
+inline int butcherMeatCutFromEnchant(int enchant) { return (enchant >> 28) & 0xF; }
+
+inline int packButcherMeatEnchant(int hungerPerPiece, int healPerPiece, int sourceKind, int tagId, int cutId) {
+    const int h = clampi(hungerPerPiece, 0, 255);
+    const int hp = clampi(healPerPiece, 0, 255);
+    const int src = clampi(sourceKind, 0, 255);
+    const int tg = clampi(tagId, 0, 15);
+    const int ct = clampi(cutId, 0, 15);
+    return (h & 0xFF) | ((hp & 0xFF) << 8) | ((src & 0xFF) << 16) | ((tg & 0xF) << 24) | ((ct & 0xF) << 28);
+}
+
+inline int butcherMaterialQualityFromEnchant(int enchant) { return enchant & 0xFF; }
+inline int butcherMaterialVariantFromEnchant(int enchant) { return (enchant >> 8) & 0xFF; }
+
+inline int packButcherMaterialEnchant(int sourceKind, int quality, int variant) {
+    const int src = clampi(sourceKind, 0, 255);
+    const int q = clampi(quality, 0, 255);
+    const int v = clampi(variant, 0, 255);
+    return (q & 0xFF) | ((v & 0xFF) << 8) | ((src & 0xFF) << 16);
+}
+
+// Back-compat convenience overload (old callers had no variant).
+inline int packButcherMaterialEnchant(int sourceKind, int quality) {
+    return packButcherMaterialEnchant(sourceKind, quality, 0);
+}
+
+inline int butcherQualityTierFromQuality(int quality) {
+    const int q = clampi(quality, 0, 255);
+    return q / 64; // 0..3
+}
+
+// Cosmetic helper for UI naming (quality adjective).
+inline const char* butcherQualityAdj(int quality) {
+    const int q = clampi(quality, 0, 255);
+    if (q >= 240) return "MASTERWORK";
+    if (q >= 192) return "PRIME";
+    if (q >= 128) return "FINE";
+    if (q >= 64)  return "TOUGH";
+    return "RAGGED";
+}
+
+// --- Procedural crafting: Essence Shards metadata (append-only) ---
+//
+// ItemKind::EssenceShard is a stackable crafting ingredient produced as a
+// deterministic byproduct of some crafts. Metadata is stored in Item::enchant.
+//
+// Item::enchant bits:
+//   bits 0..4 : craft tag id (0..31) (see craft_tags.hpp)
+//   bits 5..8 : tier (0..15)
+//   bit 9     : shiny flag
+//   bit 15    : signature (always 1)
+
+inline int essenceShardTagFromEnchant(int enchant) { return enchant & 0x1F; }
+inline int essenceShardTierFromEnchant(int enchant) { return (enchant >> 5) & 0xF; }
+inline bool essenceShardIsShinyFromEnchant(int enchant) { return ((enchant >> 9) & 0x1) != 0; }
+
+inline int packEssenceShardEnchant(int tagId, int tier, bool shiny) {
+    const int tg = clampi(tagId, 0, 31);
+    const int t = clampi(tier, 0, 15);
+    const int sh = shiny ? 1 : 0;
+    return 0x8000 | (tg & 0x1F) | ((t & 0xF) << 5) | ((sh & 0x1) << 9);
+}
 
 // --- Bounty contract metadata (append-only) ---
 //
@@ -607,6 +700,13 @@ inline bool isCorpseKind(ItemKind k) {
         default:
             return false;
     }
+}
+
+inline bool isButcheredMeatKind(ItemKind k) { return k == ItemKind::ButcheredMeat; }
+inline bool isButcheredHideKind(ItemKind k) { return k == ItemKind::ButcheredHide; }
+inline bool isButcheredBonesKind(ItemKind k) { return k == ItemKind::ButcheredBones; }
+inline bool isButcheredProductKind(ItemKind k) {
+    return isButcheredMeatKind(k) || isButcheredHideKind(k) || isButcheredBonesKind(k);
 }
 
 inline bool isPotionKind(ItemKind k) {

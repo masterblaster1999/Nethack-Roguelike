@@ -12,6 +12,7 @@
 #include <cctype>
 #include <array>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -571,6 +572,10 @@ enum class Action : uint8_t {
 
     // Combat stance (append-only)
     Parry,
+    Butcher,
+
+    // UI / meta (append-only)
+    ToggleOverworldMap, // Toggle overworld atlas/map overlay
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -657,6 +662,7 @@ enum class MessageKind : uint8_t {
     Combat,
     Loot,
     System,
+    Bad,
     ImportantMsg,
     Warning,
     Success,
@@ -1304,6 +1310,20 @@ public:
     // 0 = calm, 1..3 = increasing strength.
     int windStrength() const;
 
+// Deterministic overworld weather (only meaningful at Camp depth 0, outside the home camp).
+// This is derived from (runSeed, overworldX, overworldY) and does not consume gameplay RNG.
+struct OverworldWeatherFx {
+    bool active = false; // true when on a wilderness chunk (atCamp() && !atHomeCamp())
+    Vec2i wind{0, 0};
+    int windStrength = 0;
+    int fovPenalty = 0;
+    int fireQuench = 0;
+    int burnQuench = 0;
+    const char* name = "CLEAR";
+};
+
+OverworldWeatherFx overworldWeatherFx() const;
+
 struct WindShotAdjust {
     Vec2i adjustedTarget{0, 0};
     Vec2i drift{0, 0};         // drift applied to the aim point (tile delta)
@@ -1332,7 +1352,21 @@ WindShotAdjust windAdjustShot(Vec2i src, Vec2i aim, int range, ProjectileKind pr
     int overworldX() const { return overworldX_; }
     int overworldY() const { return overworldY_; }
 
+    // Overworld atlas helpers (UI-only).
+    bool overworldChunkDiscovered(int x, int y) const;
+    // Returns a pointer to a loaded snapshot of a chunk's Dungeon when available;
+    // nullptr if the chunk was never visited (or has been evicted from memory).
+    const Dungeon* overworldChunkDungeon(int x, int y) const;
+
     int dungeonMaxDepth() const { return DUNGEON_MAX_DEPTH; }
+
+// Deterministic parameters for the per-floor "substrate material" cache.
+//
+// In the overworld (Camp/0), these are derived from run seed + overworld chunk
+// coords so each wilderness chunk can have its own material palette while still
+// keeping the core branch/depth semantics unchanged.
+uint32_t materialWorldSeed() const;
+int materialDepth() const;
     int questDepth() const { return QUEST_DEPTH; }
 
     bool isGameOver() const { return gameOver; }
@@ -1356,6 +1390,22 @@ WindShotAdjust windAdjustShot(Vec2i src, Vec2i aim, int range, ProjectileKind pr
     // Returns a '|' separated list of currently-kept conducts (e.g., "FOODLESS | PACIFIST"),
     // or an empty string if none are currently kept.
     std::string runConductsTag() const;
+
+    // ---------------------------------------------------------------------
+    // Procedural win conditions (run-seeded)
+    // ---------------------------------------------------------------------
+    //
+    // The run seed deterministically chooses a "victory plan".
+    // These helpers expose it to the UI and game loop without altering the save format.
+    //
+    // - winConditionLines(): human-readable goal lines (optionally with live progress)
+    // - winConditionHudTag(): compact one-line HUD tag
+    // - winConditionTargetDepth(): minimum depth required by the plan
+    // - winConditionRequiresAmulet(): true for the classic NetHack win path
+    std::vector<std::string> winConditionLines(bool includeProgress = true) const;
+    std::string winConditionHudTag() const;
+    int winConditionTargetDepth() const;
+    bool winConditionRequiresAmulet() const;
 
     // Player identity (used for HUD + scoreboard)
     const std::string& playerName() const { return playerName_; }
@@ -1744,6 +1794,13 @@ bool clearItemCallLabel(ItemKind k);
     bool isMinimapOpen() const { return minimapOpen; }
     bool isStatsOpen() const { return statsOpen; }
 
+    bool isOverworldMapOpen() const { return overworldMapOpen; }
+    Vec2i overworldMapCursorPos() const { return overworldMapCursorPos_; }
+    bool overworldMapCursorActive() const { return overworldMapCursorActive_; }
+    void clearOverworldMapCursor() { overworldMapCursorActive_ = false; }
+    int overworldMapZoom() const { return overworldMapZoom_; }
+    void setOverworldMapZoom(int z) { overworldMapZoom_ = std::clamp(z, -3, 3); }
+
     // Minimap cursor (UI-only): used for minimap keyboard/mouse navigation.
     bool minimapCursorActive() const { return minimapCursorActive_; }
     Vec2i minimapCursor() const { return minimapCursorPos_; }
@@ -1919,7 +1976,7 @@ bool clearItemCallLabel(ItemKind k);
     bool discoveriesIsIdentified(ItemKind k) const { return isIdentified(k); }
 
     // Returns the "appearance label" used when the item is not identified.
-    // Examples: "RUBY POTION", "SCROLL 'ZELGO'", "OPAL RING", "OAK WAND".
+    // Examples: "BUBBLING RUBY POTION", "SCROLL 'ZELGO VORPAL'", "ENGRAVED OPAL RING", "CARVED OAK WAND".
     std::string discoveryAppearanceLabel(ItemKind k) const;
 
     void buildDiscoveryList(std::vector<ItemKind>& out) const;
@@ -2032,6 +2089,15 @@ bool clearItemCallLabel(ItemKind k);
     friend struct GameTestAccess;
 
 private:
+    // Internal: evaluate the run's procedurally generated win conditions.
+    // If 'missing' is provided and the conditions are not met, it is filled with
+    // one or more short requirement lines suitable for the message log.
+    bool winConditionsSatisfied(std::vector<std::string>* missing = nullptr) const;
+
+    // Internal: remember that the player has discovered/visited an overworld chunk.
+    // Used by the overworld atlas overlay (UI-only; not serialized).
+    void markOverworldDiscovered(int x, int y);
+
     // Drop an item on the ground, merging into an existing stack when possible.
     // This reduces clutter for stackable items (ammo, gold, potions, scrolls, etc.).
     void dropGroundItem(Vec2i pos, ItemKind k, int count = 1, int enchant = 0);
@@ -2135,6 +2201,8 @@ private:
     int overworldX_ = 0;
     int overworldY_ = 0;
     std::map<OverworldKey, LevelState> overworldChunks_;
+    // Lightweight visitation record for the overworld atlas (UI-only; not serialized).
+    std::set<OverworldKey> overworldVisited_;
 
     // Monsters/companions that fell through trap doors into a deeper level.
     // These are queued by destination depth and spawned when that level is entered.
@@ -2227,6 +2295,7 @@ private:
         ShrineBless,
         ShrineRecharge,
         ShrineSacrifice,
+        Butcher,
     };
     InvPromptKind invPrompt_ = InvPromptKind::None;
 
@@ -2352,6 +2421,12 @@ private:
     // Minimap / stats overlays
     bool minimapOpen = false;
     bool statsOpen = false;
+
+    // Overworld atlas/map overlay (UI-only; not serialized).
+    bool overworldMapOpen = false;
+    Vec2i overworldMapCursorPos_{0, 0};
+    bool overworldMapCursorActive_ = false;
+    int overworldMapZoom_ = 0; // -3..3 (affects chunk view radius)
 
     // Minimap cursor (UI-only). Allows clicking/keyboard navigation in the minimap.
     Vec2i minimapCursorPos_{0,0};
@@ -2678,6 +2753,9 @@ private:
     bool dropSelectedAll();
     bool equipSelected();
     bool useSelected();
+    bool butcherSelected();
+    bool butcherAtFeetOrPrompt();
+
 
 
 
@@ -2688,6 +2766,9 @@ private:
         std::string tagB;
         int tier = 0;
         RoomType workstation = RoomType::Normal;
+
+        bool hasByproduct = false;
+        Item byproduct;
     };
     CraftComputed computeCraftComputed(const Item& a0, const Item& b0) const;
     void rebuildCraftingPreview();

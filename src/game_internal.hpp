@@ -1428,7 +1428,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.pushSystemMessage("SOUND: shout | whistle | listen | throwvoice [x y] (TIP: LOOK cursor works)");
         game.pushSystemMessage("TACTICS: evade (smart step away from visible threats; respects sneak/audibility)");
         game.pushSystemMessage("COMPANIONS: pet [follow|stay|fetch|guard] | tame (needs a FOOD RATION)");
-        game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse|recharge] (costs PIETY + cooldown)");
+        game.pushSystemMessage("SHRINES: pray [heal|cure|identify|bless|uncurse|recharge] (costs PIETY + cooldown; costs vary by patron domain)");
         game.pushSystemMessage("         donate [amount] (convert gold->piety) | sacrifice (offer a corpse for piety)");
         game.pushSystemMessage("AUGURY: augury (costs gold; shrine/camp only; hints can shift)");
         game.pushSystemMessage("BOUNTIES: bounty (list contracts) | use a completed contract to redeem");
@@ -2599,7 +2599,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
         {
             // Procedural biolum terrain stats (lichen/crystal glow): counts of tiles that can emit light.
-            d.ensureMaterials(static_cast<uint32_t>(game.seed()), game.branch(), game.depth(), game.dungeonMaxDepth());
+            d.ensureMaterials(game.materialWorldSeed(), game.branch(), game.materialDepth(), game.dungeonMaxDepth());
 
             int bioTiles = 0;
             int bioStrong = 0;
@@ -2650,7 +2650,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
 
 {
     // Deterministic "substrate materials" (STONE/BRICK/BASALT/...) used for tinting and LOOK adjectives.
-    d.ensureMaterials(static_cast<uint32_t>(game.seed()), game.branch(), game.depth(), game.dungeonMaxDepth());
+    d.ensureMaterials(game.materialWorldSeed(), game.branch(), game.materialDepth(), game.dungeonMaxDepth());
 
     std::vector<int> counts(static_cast<size_t>(TerrainMaterial::COUNT), 0);
     int materialTotal = 0;

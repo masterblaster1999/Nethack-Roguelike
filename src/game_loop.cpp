@@ -1,5 +1,11 @@
 #include "game_internal.hpp"
 
+#include "shrine_profile_gen.hpp"
+
+#include "victory_gen.hpp"
+
+#include "shrine_profile_gen.hpp"
+
 void Game::update(float dt) {
     // Animate FX projectiles.
     if (!fx.empty()) {
@@ -249,6 +255,8 @@ void Game::handleAction(Action a) {
         looking = false;
         minimapOpen = false;
         statsOpen = false;
+        overworldMapOpen = false;
+        overworldMapCursorActive_ = false;
         optionsOpen = false;
         keybindsOpen = false;
         keybindsCapture = false;
@@ -580,9 +588,21 @@ void Game::handleAction(Action a) {
 
             piety_ = std::min(999, piety_ + gain);
 
-            pushMsg("YOU OFFER A SACRIFICE. (+"
-                    + std::to_string(gain)
-                    + " PIETY)", MessageKind::Success, true);
+            std::string deityShort;
+            if (const Room* sr = shrinegen::shrineRoomAt(dung, player().pos)) {
+                const shrinegen::ShrineProfile prof = shrinegen::profileFor(seed_, depth_, *sr);
+                deityShort = shrinegen::deityNameFor(prof);
+            }
+
+            if (!deityShort.empty()) {
+                pushMsg("YOU OFFER A SACRIFICE TO " + deityShort + ". (+"
+                        + std::to_string(gain)
+                        + " PIETY)", MessageKind::Success, true);
+            } else {
+                pushMsg("YOU OFFER A SACRIFICE. (+"
+                        + std::to_string(gain)
+                        + " PIETY)", MessageKind::Success, true);
+            }
         };
 
         auto identifyRandom = [&]() {
@@ -729,6 +749,13 @@ void Game::handleAction(Action a) {
                         }
                         sacrificeOne(invSel);
                         closeInventory();
+                        break;
+
+                    case InvPromptKind::Butcher:
+                        if (butcherSelected()) {
+                            closeInventory();
+                            advanceAfterPlayerAction();
+                        }
                         break;
 
                     default:
@@ -1038,6 +1065,18 @@ void Game::handleAction(Action a) {
                 minimapOpen = true;
                 minimapCursorPos_ = player().pos;
                 minimapCursorActive_ = true;
+            }
+            return;
+
+        case Action::ToggleOverworldMap:
+            if (overworldMapOpen) {
+                overworldMapOpen = false;
+                overworldMapCursorActive_ = false;
+            } else {
+                closeOverlays();
+                overworldMapOpen = true;
+                overworldMapCursorPos_ = Vec2i{overworldX_, overworldY_};
+                overworldMapCursorActive_ = true;
             }
             return;
 
@@ -1622,6 +1661,65 @@ if (optionsSel == 19) {
         return;
     }
 
+
+    // Overlay: overworld map (atlas)
+    if (overworldMapOpen) {
+        if (!overworldMapCursorActive_) {
+            overworldMapCursorPos_ = Vec2i{overworldX_, overworldY_};
+            overworldMapCursorActive_ = true;
+        }
+
+        // Close
+        if (a == Action::Cancel || a == Action::ToggleOverworldMap) {
+            overworldMapOpen = false;
+            overworldMapCursorActive_ = false;
+            return;
+        }
+
+        // Zoom (UI-only; reuse minimap zoom keys)
+        if (a == Action::MinimapZoomIn || a == Action::MinimapZoomOut) {
+            const int cur = overworldMapZoom();
+            int next = cur + (a == Action::MinimapZoomIn ? 1 : -1);
+            setOverworldMapZoom(next);
+            return;
+        }
+
+        // Navigation (supports diagonals)
+        int dx = 0;
+        int dy = 0;
+        switch (a) {
+            case Action::Up:       dy = -1; break;
+            case Action::Down:     dy =  1; break;
+            case Action::Left:     dx = -1; break;
+            case Action::Right:    dx =  1; break;
+            case Action::UpLeft:   dx = -1; dy = -1; break;
+            case Action::UpRight:  dx =  1; dy = -1; break;
+            case Action::DownLeft: dx = -1; dy =  1; break;
+            case Action::DownRight:dx =  1; dy =  1; break;
+
+            // Quick scroll (LOG keys) move by 5 chunks.
+            case Action::LogUp:    dy = -5; break;
+            case Action::LogDown:  dy =  5; break;
+            default: break;
+        }
+
+        if (dx != 0 || dy != 0) {
+            overworldMapCursorPos_.x = clampi(overworldMapCursorPos_.x + dx, -9999, 9999);
+            overworldMapCursorPos_.y = clampi(overworldMapCursorPos_.y + dy, -9999, 9999);
+            return;
+        }
+
+        // Confirm snaps the cursor back to the current chunk.
+        if (a == Action::Confirm) {
+            overworldMapCursorPos_ = Vec2i{overworldX_, overworldY_};
+            overworldMapCursorActive_ = true;
+            return;
+        }
+
+        // Swallow all other actions while the atlas is open (UI-only; does not take a turn).
+        return;
+    }
+
     // Overlay: stats
     if (statsOpen) {
         if (a == Action::Cancel) statsOpen = false;
@@ -2188,6 +2286,9 @@ if (optionsSel == 19) {
             case Action::Use:
                 acted = useSelected();
                 break;
+            case Action::Butcher:
+                acted = butcherSelected();
+                break;
             case Action::Drop:
                 acted = dropSelected();
                 break;
@@ -2451,6 +2552,9 @@ if (optionsSel == 19) {
         case Action::Pickup:
             acted = pickupAtPlayer();
             break;
+        case Action::Butcher:
+            acted = butcherAtFeetOrPrompt();
+            break;
         case Action::Inventory:
             openInventory();
             break;
@@ -2506,14 +2610,25 @@ if (optionsSel == 19) {
                 if (atCamp()) {
                     if (encumbranceEnabled_ && burdenState() == BurdenState::Overloaded) {
                         pushMsg("YOU ARE OVERLOADED!", MessageKind::Warning, true);
-                    } else if (playerHasAmulet()) {
-                        gameWon = true;
-                        if (endCause_.empty()) endCause_ = "ESCAPED WITH THE AMULET";
-                        pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!", MessageKind::Success);
-                        pushMsg("VICTORY!", MessageKind::Success);
-                        maybeRecordRun();
                     } else {
-                        pushMsg("THE EXIT IS HERE... BUT YOU STILL NEED THE AMULET.");
+                        std::vector<std::string> missing;
+                        if (winConditionsSatisfied(&missing)) {
+                            const victorygen::VictoryPlan plan = victorygen::planFor(seed_, dungeonMaxDepth(), infiniteWorldEnabled_);
+                            gameWon = true;
+                            if (endCause_.empty()) endCause_ = victorygen::endCauseTag(plan);
+                            if (victorygen::requiresAmulet(plan)) {
+                                pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!", MessageKind::Success);
+                            } else {
+                                pushMsg("YOU ESCAPE THE DUNGEON!", MessageKind::Success);
+                            }
+                            pushMsg("VICTORY!", MessageKind::Success);
+                            maybeRecordRun();
+                        } else {
+                            pushMsg("THE EXIT IS HERE... BUT YOUR VICTORY CONDITIONS ARE NOT YET MET.", MessageKind::Warning, false);
+                            for (const auto& ln : missing) {
+                                pushMsg(std::string("NEED: ") + ln, MessageKind::System, false);
+                            }
+                        }
                     }
                 } else {
                     if (encumbranceEnabled_ && burdenState() == BurdenState::Overloaded) {
@@ -2588,14 +2703,23 @@ if (optionsSel == 19) {
                     break;
                 }
                 if (atCamp()) {
-                    if (playerHasAmulet()) {
+                    std::vector<std::string> missing;
+                    if (winConditionsSatisfied(&missing)) {
+                        const victorygen::VictoryPlan plan = victorygen::planFor(seed_, dungeonMaxDepth(), infiniteWorldEnabled_);
                         gameWon = true;
-                        if (endCause_.empty()) endCause_ = "ESCAPED WITH THE AMULET";
-                        pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!", MessageKind::Success);
+                        if (endCause_.empty()) endCause_ = victorygen::endCauseTag(plan);
+                        if (victorygen::requiresAmulet(plan)) {
+                            pushMsg("YOU ESCAPE WITH THE AMULET OF YENDOR!", MessageKind::Success);
+                        } else {
+                            pushMsg("YOU ESCAPE THE DUNGEON!", MessageKind::Success);
+                        }
                         pushMsg("VICTORY!", MessageKind::Success);
                         maybeRecordRun();
                     } else {
-                        pushMsg("THE EXIT IS HERE... BUT YOU STILL NEED THE AMULET.");
+                        pushMsg("THE EXIT IS HERE... BUT YOUR VICTORY CONDITIONS ARE NOT YET MET.", MessageKind::Warning, false);
+                        for (const auto& ln : missing) {
+                            pushMsg(std::string("NEED: ") + ln, MessageKind::System, false);
+                        }
                     }
                 } else {
                     // Branch-aware: ascending from Main depth 1 returns to the Camp hub.
@@ -2737,7 +2861,7 @@ void Game::listen() {
 
     // Ensure deterministic substrate cache so sound propagation can incorporate
     // material acoustics (moss/dirt dampen; metal/crystal carry).
-    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
     const std::vector<int> sound = dung.computeSoundMap(p.pos.x, p.pos.y, range);
 
@@ -2854,7 +2978,7 @@ bool Game::throwVoiceAt(Vec2i target) {
     // you can only throw a voice where sound could plausibly travel.
     // Ensure deterministic substrate cache so sound propagation can incorporate
     // material acoustics (moss/dirt dampen; metal/crystal carry).
-    dung.ensureMaterials(seed_, branch_, depth_, dungeonMaxDepth());
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
     const std::vector<int> sound = dung.computeSoundMap(p.pos.x, p.pos.y, range);
     const int dist = sound[static_cast<size_t>(idx(target.x, target.y))];

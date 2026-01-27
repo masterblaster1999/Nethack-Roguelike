@@ -438,6 +438,20 @@ mutable std::vector<uint8_t> biolumCache;
     int crawlspaceCacheCount = 0;    // Bonus cache spots requested (bonusLootSpots).
 
 
+    
+    // Not serialized: finite-run macro theming ("strata") for the fixed-length campaign.
+    //
+    // Like Infinite World's endless strata, the main 1..maxDepth campaign is grouped into
+    // run-seeded themed bands. This gives the finite run a sense of large-scale progression
+    // and allows procgen decoration (biome zones, terrain materials, macro terrain) to stay
+    // coherent across a handful of consecutive floors.
+    int campaignStratumIndex = -1;       // 0-based within depth 1..maxDepth (Main branch)
+    int campaignStratumStartDepth = -1;  // absolute depth where this stratum begins
+    int campaignStratumLen = 0;          // number of floors in this stratum band
+    int campaignStratumLocal = 0;        // 0..len-1 position within the stratum
+    EndlessStratumTheme campaignStratumTheme = EndlessStratumTheme::Ruins;
+    uint32_t campaignStratumSeed = 0u;
+
     // Not serialized: endless-depth macro theming ("strata") for Infinite World.
     // Derived from the run's worldSeed and the depth; used to create coherent regions of
     // generator bias across infinite descent (so deep floors feel like they belong to
@@ -495,6 +509,12 @@ mutable std::vector<uint8_t> biolumCache;
     // Not serialized: surface camp stash anchor (depth 0).
     Vec2i campStashSpot{ -1, -1 };
 
+    // Not serialized: overworld chunk border gates (edge exits).
+    // gateMask: bit 0 = north, 1 = south, 2 = west, 3 = east.
+    // gatePositions: list of border tile positions that represent exits.
+    uint8_t gateMask = 0u;
+    std::vector<Vec2i> gatePositions;
+
     // Not serialized: surface camp landmarks (depth 0).
     // These are generation hints consumed by Game::setupSurfaceCampInstallations()
     // to add helpful map markers without expensive scanning.
@@ -547,6 +567,7 @@ mutable std::vector<uint8_t> biolumCache;
     // `depth` is a branch-local depth used for pacing and special floors.
     void generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, uint32_t worldSeed = 0u);
     void computeEndlessStratumInfo(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth);
+    void computeCampaignStratumInfo(uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth);
 
 // Procedural terrain materials (cosmetic): computed deterministically from the run seed + depth.
 // Call ensureMaterials() once (per floor/per frame) before querying materialAtCached() in tight loops.

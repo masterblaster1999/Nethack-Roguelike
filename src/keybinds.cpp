@@ -1,5 +1,8 @@
 #include "keybinds.hpp"
 #include "action_info.hpp"
+#include "settings.hpp"
+
+#include <array>
 
 #include <algorithm>
 #include <cctype>
@@ -7,7 +10,25 @@
 #include <sstream>
 
 Uint16 KeyBinds::normalizeMods(Uint16 mods) {
-    return mods & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT | KMOD_GUI);
+    // SDL reports modifiers with left/right variants (e.g. KMOD_LSHIFT vs KMOD_RSHIFT).
+    // For gameplay/keybind purposes we treat each modifier *group* as a single bit, so
+    // either side matches the same binding.
+    //
+    // AltGr / MODE note:
+    //   SDL exposes AltGr as KMOD_MODE (see SDL_Keymod). On some platforms/layouts,
+    //   pressing AltGr also sets CTRL+ALT. For binding purposes we treat MODE as ALT
+    //   and drop CTRL when MODE is present so AltGr doesn't accidentally behave like CTRL.
+    Uint16 out = 0;
+    if (mods & KMOD_SHIFT) out |= KMOD_SHIFT;
+
+    const bool hasMode = (mods & KMOD_MODE) != 0;
+    if (!hasMode) {
+        if (mods & KMOD_CTRL) out |= KMOD_CTRL;
+    }
+
+    if (mods & (KMOD_ALT | KMOD_MODE)) out |= KMOD_ALT;
+    if (mods & KMOD_GUI) out |= KMOD_GUI;
+    return out;
 }
 
 bool KeyBinds::chordMatches(const KeyChord& chord, SDL_Keycode key, Uint16 mods) {
@@ -89,6 +110,72 @@ static SDL_Keycode baseKeycodeForLayout(SDL_Keycode key, Uint16* impliedMods) {
                     *impliedMods |= KMOD_SHIFT;
                     return SDLK_PERIOD;
                 }
+                case '+': {
+                    // Best-effort: '+' is often SHIFT+'='.
+                    const SDL_Scancode scEq = SDL_GetScancodeFromKey(SDLK_EQUALS);
+                    if (scEq != SDL_SCANCODE_UNKNOWN) {
+                        *impliedMods |= KMOD_SHIFT;
+                        return SDL_GetKeyFromScancode(scEq);
+                    }
+
+                    *impliedMods |= KMOD_SHIFT;
+                    return SDLK_EQUALS;
+                }
+                case '_': {
+                    // Best-effort: '_' is often SHIFT+'-'.
+                    const SDL_Scancode scMinus = SDL_GetScancodeFromKey(SDLK_MINUS);
+                    if (scMinus != SDL_SCANCODE_UNKNOWN) {
+                        *impliedMods |= KMOD_SHIFT;
+                        return SDL_GetKeyFromScancode(scMinus);
+                    }
+
+                    *impliedMods |= KMOD_SHIFT;
+                    return SDLK_MINUS;
+                }
+                case ':': {
+                    // Best-effort: ':' is often SHIFT+';'.
+                    const SDL_Scancode scSemi = SDL_GetScancodeFromKey(SDLK_SEMICOLON);
+                    if (scSemi != SDL_SCANCODE_UNKNOWN) {
+                        *impliedMods |= KMOD_SHIFT;
+                        return SDL_GetKeyFromScancode(scSemi);
+                    }
+
+                    *impliedMods |= KMOD_SHIFT;
+                    return SDLK_SEMICOLON;
+                }
+                case '"': {
+                    // Best-effort: '"' is often SHIFT+QUOTE.
+                    const SDL_Scancode scQuote = SDL_GetScancodeFromKey(SDLK_QUOTE);
+                    if (scQuote != SDL_SCANCODE_UNKNOWN) {
+                        *impliedMods |= KMOD_SHIFT;
+                        return SDL_GetKeyFromScancode(scQuote);
+                    }
+
+                    *impliedMods |= KMOD_SHIFT;
+                    return SDLK_QUOTE;
+                }
+                case '|': {
+                    // Best-effort: '|' is often SHIFT+BACKSLASH.
+                    const SDL_Scancode scBs = SDL_GetScancodeFromKey(SDLK_BACKSLASH);
+                    if (scBs != SDL_SCANCODE_UNKNOWN) {
+                        *impliedMods |= KMOD_SHIFT;
+                        return SDL_GetKeyFromScancode(scBs);
+                    }
+
+                    *impliedMods |= KMOD_SHIFT;
+                    return SDLK_BACKSLASH;
+                }
+                case '~': {
+                    // Best-effort: '~' is often SHIFT+BACKQUOTE.
+                    const SDL_Scancode scGrave = SDL_GetScancodeFromKey(SDLK_BACKQUOTE);
+                    if (scGrave != SDL_SCANCODE_UNKNOWN) {
+                        *impliedMods |= KMOD_SHIFT;
+                        return SDL_GetKeyFromScancode(scGrave);
+                    }
+
+                    *impliedMods |= KMOD_SHIFT;
+                    return SDLK_BACKQUOTE;
+                }
                 default: break;
             }
         }
@@ -148,6 +235,10 @@ SDL_Keycode KeyBinds::parseKeycode(const std::string& keyNameIn, Uint16* implied
     if (keyName == "backslash") return SDLK_BACKSLASH;
     if (keyName == "minus" || keyName == "dash") return SDLK_MINUS;
     if (keyName == "equals" || keyName == "equal") return SDLK_EQUALS;
+    // Convenience aliases for shifted symbols in config files (#bind / INI).
+    // These map to the base physical key + implied Shift.
+    if (keyName == "plus") return baseKeycodeForLayout(static_cast<SDL_Keycode>('+'), impliedMods);
+
     if (keyName == "semicolon") return SDLK_SEMICOLON;
     if (keyName == "apostrophe" || keyName == "quote") return SDLK_QUOTE;
     if (keyName == "grave" || keyName == "backquote") return SDLK_BACKQUOTE;
@@ -179,6 +270,24 @@ SDL_Keycode KeyBinds::parseKeycode(const std::string& keyNameIn, Uint16* implied
     if (keyName == "kp_7") return SDLK_KP_7;
     if (keyName == "kp_8") return SDLK_KP_8;
     if (keyName == "kp_9") return SDLK_KP_9;
+    // Handy shorthands (common in other games/tools): kp+, kp-, kp*, kp/, kp., kp,, kp=
+    // Note: because '+' is our chord delimiter, users can also write `kp+` and we’ll
+    // interpret it as `kp_plus` in the chord parser.
+    if (keyName == "kp+" || keyName == "kp_add") return SDLK_KP_PLUS;
+    if (keyName == "kp-" || keyName == "kp_sub") return SDLK_KP_MINUS;
+    if (keyName == "kp*" || keyName == "kp_mult") return SDLK_KP_MULTIPLY;
+    if (keyName == "kp/" ) return SDLK_KP_DIVIDE;
+    if (keyName == "kp." ) return SDLK_KP_PERIOD;
+    if (keyName == "kp," ) return SDLK_KP_COMMA;
+    if (keyName == "kp=" ) return SDLK_KP_EQUALS;
+
+    if (keyName == "kp_plus") return SDLK_KP_PLUS;
+    if (keyName == "kp_minus") return SDLK_KP_MINUS;
+    if (keyName == "kp_multiply" || keyName == "kp_mul") return SDLK_KP_MULTIPLY;
+    if (keyName == "kp_divide" || keyName == "kp_div") return SDLK_KP_DIVIDE;
+    if (keyName == "kp_period" || keyName == "kp_decimal" || keyName == "kp_dot") return SDLK_KP_PERIOD;
+    if (keyName == "kp_comma") return SDLK_KP_COMMA;
+    if (keyName == "kp_equals" || keyName == "kp_equal") return SDLK_KP_EQUALS;
 
     // Fallback: SDL's own key name parsing.
     // This lets users use names like "Left Shift", "Keypad 8", etc.
@@ -190,23 +299,80 @@ SDL_Keycode KeyBinds::parseKeycode(const std::string& keyNameIn, Uint16* implied
     return SDLK_UNKNOWN;
 }
 
+
+namespace {
+static std::vector<std::string> splitChordTokenPlusEscaped(const std::string& token) {
+    // Split a chord string on '+' while allowing "++" to mean a literal '+' key.
+    // Example:
+    //   "ctrl++"       -> ["ctrl", "+"]
+    //   "shift+cmd++"  -> ["shift", "cmd", "+"]
+    std::vector<std::string> out;
+    std::string cur;
+    out.reserve(4);
+
+    for (size_t i = 0; i < token.size(); ++i) {
+        const char ch = token[i];
+        if (ch == '+') {
+            if (i + 1 < token.size() && token[i + 1] == '+') {
+                cur.push_back('+');
+                ++i;
+            } else {
+                out.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    out.push_back(cur);
+    return out;
+}
+} // namespace
+
 std::optional<KeyChord> KeyBinds::parseChord(const std::string& tokenIn) {
     std::string token = trim(tokenIn);
     if (token.empty()) return std::nullopt;
 
-    std::vector<std::string> parts = split(token, '+');
+    std::vector<std::string> parts = splitChordTokenPlusEscaped(token);
     if (parts.empty()) return std::nullopt;
+
+
+    // Support literal '+' as a key in chord strings.
+    //
+    // Because '+' is also our modifier delimiter, users can express the plus key as "++"
+    // (e.g. "ctrl++" for Ctrl + '+', which corresponds to Shift+'=' on US layouts).
+    //
+    // Additionally, allow the common shorthand `kp+` / `keypad+` for keypad plus.
+    if (!parts.empty() && trim(parts.back()).empty()) {
+        if (parts.size() >= 2) {
+            const std::string pen = trim(toLower(parts[parts.size() - 2]));
+            if (pen == "kp" || pen == "keypad") {
+                parts[parts.size() - 2] = "kp_plus";
+                parts.pop_back();
+            } else {
+                parts.back() = "+";
+            }
+        } else {
+            parts.back() = "+";
+        }
+    }
 
     Uint16 mods = KMOD_NONE;
 
     // All parts except the last are modifiers.
     for (size_t i = 0; i + 1 < parts.size(); ++i) {
         std::string m = trim(toLower(parts[i]));
-        if (m == "shift") mods |= KMOD_SHIFT;
-        else if (m == "ctrl" || m == "control") mods |= KMOD_CTRL;
-        else if (m == "alt") mods |= KMOD_ALT;
-        else if (m == "cmd" || m == "gui" || m == "meta" || m == "super") mods |= KMOD_GUI;
-        else return std::nullopt;
+        if (m == "shift") {
+            mods |= KMOD_SHIFT;
+        } else if (m == "ctrl" || m == "control" || m == "ctl") {
+            mods |= KMOD_CTRL;
+        } else if (m == "alt" || m == "option" || m == "opt" || m == "altgr" || m == "mode") {
+            mods |= KMOD_ALT;
+        } else if (m == "cmd" || m == "gui" || m == "meta" || m == "super" || m == "win" || m == "windows") {
+            mods |= KMOD_GUI;
+        } else {
+            return std::nullopt;
+        }
     }
 
     Uint16 impliedMods = KMOD_NONE;
@@ -350,16 +516,21 @@ KeyBinds KeyBinds::defaults() {
     add(Action::Help, SDLK_SLASH, KMOD_GUI | KMOD_SHIFT);
 
     add(Action::Options, SDLK_F2);
+    // Common desktop UX: Ctrl+, / Cmd+, opens options/preferences.
+    add(Action::Options, SDLK_COMMA, KMOD_CTRL);
+    add(Action::Options, SDLK_COMMA, KMOD_GUI);
     add(Action::Command, SDLK_3, KMOD_SHIFT);
     // Convenience: open the extended command prompt on keyboards/layouts where '#' is awkward.
     add(Action::Command, SDLK_p, KMOD_CTRL);
+    // Modern editor-style command palette defaults (esp. macOS / power users).
+    add(Action::Command, SDLK_p, KMOD_CTRL | KMOD_SHIFT);
+    add(Action::Command, SDLK_p, KMOD_GUI | KMOD_SHIFT);
 
     add(Action::ToggleMinimap, SDLK_m);
     add(Action::ToggleOverworldMap, SDLK_m, KMOD_SHIFT);
     add(Action::MinimapZoomOut, SDLK_LEFTBRACKET);
     add(Action::MinimapZoomIn, SDLK_RIGHTBRACKET);
     add(Action::MessageHistory, SDLK_F3);
-    add(Action::MessageHistory, SDLK_m, KMOD_SHIFT);
     add(Action::Codex, SDLK_F4);
     add(Action::Discoveries, SDLK_BACKSLASH);
     add(Action::ToggleStats, SDLK_TAB, KMOD_SHIFT);
@@ -378,6 +549,15 @@ KeyBinds KeyBinds::defaults() {
     add(Action::ToggleScentPreview, SDLK_s, KMOD_CTRL);
 
     add(Action::ToggleViewMode, SDLK_F7);
+
+    // Raycast 3D (view-only): free-look turning.
+    // These bindings do not affect game simulation; they only rotate the 3D camera.
+    add(Action::ViewTurnLeft, SDLK_q, KMOD_ALT);
+    add(Action::ViewTurnRight, SDLK_e, KMOD_ALT);
+    // Alternate: Alt+Arrow keys (useful on some keyboard layouts).
+    add(Action::ViewTurnLeft, SDLK_LEFT, KMOD_ALT);
+    add(Action::ViewTurnRight, SDLK_RIGHT, KMOD_ALT);
+
     add(Action::ToggleVoxelSprites, SDLK_F8);
 
     add(Action::ToggleFullscreen, SDLK_F11);
@@ -447,19 +627,54 @@ void KeyBinds::loadOverridesFromIni(const std::string& settingsPath) {
         binds[*act] = std::move(chords);
     }
 
+    auto hasChord = [](const std::vector<KeyChord>& v, const KeyChord& c) {
+        for (const auto& it : v) {
+            if (it.key == c.key && it.mods == c.mods) return true;
+        }
+        return false;
+    };
+
+    auto removeChord = [&](std::vector<KeyChord>& v, const KeyChord& c) {
+        v.erase(std::remove_if(v.begin(), v.end(), [&](const KeyChord& it) {
+            return it.key == c.key && it.mods == c.mods;
+        }), v.end());
+    };
+
+    auto addChord = [&](std::vector<KeyChord>& v, const KeyChord& c) {
+        if (!hasChord(v, c)) v.push_back(c);
+    };
+
+    auto onlyChord = [&](const std::vector<KeyChord>& v, const KeyChord& c) {
+        return v.size() == 1 && hasChord(v, c);
+    };
+
+    auto chordUsedElsewhere = [&](Action target, const KeyChord& c) {
+        for (const auto& kv : binds) {
+            if (kv.first == target) continue;
+            if (hasChord(kv.second, c)) return true;
+        }
+        return false;
+    };
+
+    auto iniKeyFor = [&](Action a) -> std::string {
+        const char* tok = actioninfo::token(a);
+        if (!tok || !*tok) return std::string();
+        return std::string("bind_") + tok;
+    };
+
+    auto persist = [&](Action a) {
+        const std::string k = iniKeyFor(a);
+        if (k.empty()) return;
+        updateIniKey(settingsPath, k, describeAction(a));
+    };
+
     // Back-compat: older default settings files wrote `bind_search = c`, which
     // conflicts with the modern diagonal move `bind_down_right = c`.
-    // If we detect that specific conflict, automatically shift Search to `C`.
+    // If we detect that specific conflict, automatically shift Search to `C`
+    // and persist the fix back to the INI.
     {
         const KeyChord legacy{SDLK_c, 0};
         const KeyChord fixed{SDLK_c, KMOD_SHIFT};
-
-        auto hasChord = [](const std::vector<KeyChord>& v, const KeyChord& c) {
-            for (const auto& it : v) {
-                if (it.key == c.key && it.mods == c.mods) return true;
-            }
-            return false;
-        };
 
         auto itSearch = binds.find(Action::Search);
         auto itDR = binds.find(Action::DownRight);
@@ -468,21 +683,107 @@ void KeyBinds::loadOverridesFromIni(const std::string& settingsPath) {
             const bool downRightHasLegacy = hasChord(itDR->second, legacy);
             if (searchHasLegacy && downRightHasLegacy) {
                 auto& chords = itSearch->second;
-                chords.erase(
-                    std::remove_if(chords.begin(), chords.end(), [&](const KeyChord& c) {
-                        return c.key == legacy.key && c.mods == legacy.mods;
-                    }),
-                    chords.end());
-                if (!hasChord(chords, fixed)) {
-                    chords.push_back(fixed);
-                }
+                removeChord(chords, legacy);
+                addChord(chords, fixed);
+                persist(Action::Search);
             }
+        }
+    }
+
+    // Back-compat: older default settings files bound Message History to SHIFT+M.
+    // SHIFT+M is now reserved for the Overworld Map. If we detect the legacy overlap,
+    // remove SHIFT+M from Message History (keeping F3) and persist.
+    {
+        const KeyChord legacy{SDLK_m, KMOD_SHIFT};
+        const KeyChord f3{SDLK_F3, KMOD_NONE};
+        auto itMH = binds.find(Action::MessageHistory);
+        auto itOW = binds.find(Action::ToggleOverworldMap);
+        if (itMH != binds.end() && itOW != binds.end()) {
+            if (hasChord(itMH->second, legacy) && hasChord(itOW->second, legacy)) {
+                removeChord(itMH->second, legacy);
+                addChord(itMH->second, f3);
+                persist(Action::MessageHistory);
+            }
+        }
+    }
+
+    // Back-compat: older default settings files used F6 for Restart. F6 is now
+    // the default High Scores key (Restart moved to SHIFT+F6). If we detect a conflict,
+    // move Restart off F6 and persist.
+    {
+        const KeyChord f6{SDLK_F6, KMOD_NONE};
+        const KeyChord shiftF6{SDLK_F6, KMOD_SHIFT};
+        auto itRestart = binds.find(Action::Restart);
+        auto itScores = binds.find(Action::Scores);
+        if (itRestart != binds.end() && itScores != binds.end()) {
+            if (hasChord(itRestart->second, f6) && hasChord(itScores->second, f6)) {
+                removeChord(itRestart->second, f6);
+                addChord(itRestart->second, shiftF6);
+                persist(Action::Restart);
+            }
+        }
+    }
+
+    // Back-compat: older default settings files pinned Options to F2 only.
+    // If it looks like an untouched legacy binding, add the conventional Ctrl/Cmd+Comma
+    // shortcut (where it doesn't create an obvious conflict) and persist.
+    {
+        const KeyChord legacy{SDLK_F2, KMOD_NONE};
+        auto it = binds.find(Action::Options);
+        if (it != binds.end() && onlyChord(it->second, legacy)) {
+            bool changed = false;
+            const KeyChord ctrlComma{SDLK_COMMA, KMOD_CTRL};
+            const KeyChord cmdComma{SDLK_COMMA, KMOD_GUI};
+            if (!chordUsedElsewhere(Action::Options, ctrlComma)) {
+                const bool had = hasChord(it->second, ctrlComma);
+                addChord(it->second, ctrlComma);
+                changed |= !had;
+            }
+            if (!chordUsedElsewhere(Action::Options, cmdComma)) {
+                const bool had = hasChord(it->second, cmdComma);
+                addChord(it->second, cmdComma);
+                changed |= !had;
+            }
+            if (changed) persist(Action::Options);
+        }
+    }
+
+    // Back-compat: older default settings files pinned the extended command prompt
+    // to `#` (SHIFT+3) only. If it looks like an untouched legacy binding, add
+    // editor-style shortcuts (Ctrl+P and Shift+Ctrl/Cmd+P) where they don't create
+    // an obvious conflict, then persist.
+    {
+        const KeyChord legacy{SDLK_3, KMOD_SHIFT};
+        auto it = binds.find(Action::Command);
+        if (it != binds.end() && onlyChord(it->second, legacy)) {
+            bool changed = false;
+            const KeyChord ctrlP{SDLK_p, KMOD_CTRL};
+            const KeyChord shiftCtrlP{SDLK_p, KMOD_CTRL | KMOD_SHIFT};
+            const KeyChord shiftCmdP{SDLK_p, KMOD_GUI | KMOD_SHIFT};
+
+            if (!chordUsedElsewhere(Action::Command, ctrlP)) {
+                const bool had = hasChord(it->second, ctrlP);
+                addChord(it->second, ctrlP);
+                changed |= !had;
+            }
+            if (!chordUsedElsewhere(Action::Command, shiftCtrlP)) {
+                const bool had = hasChord(it->second, shiftCtrlP);
+                addChord(it->second, shiftCtrlP);
+                changed |= !had;
+            }
+            if (!chordUsedElsewhere(Action::Command, shiftCmdP)) {
+                const bool had = hasChord(it->second, shiftCmdP);
+                addChord(it->second, shiftCmdP);
+                changed |= !had;
+            }
+
+            if (changed) persist(Action::Command);
         }
     }
 }
 
 Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
-    Uint16 nm = normalizeMods(mods);
+    const Uint16 nm = normalizeMods(mods);
 
     auto match = [&](Action a) -> bool {
         auto it = binds.find(a);
@@ -493,23 +794,46 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         return false;
     };
 
-    auto matchIn = [&](std::initializer_list<Action> order) -> Action {
-        for (auto a : order) {
+    auto evalOrder = [&](const std::vector<Action>& order) -> Action {
+        for (Action a : order) {
             if (match(a)) return a;
         }
         return Action::None;
     };
 
-    // Inventory gets priority for inventory-specific actions (users may rebind keys to overlap movement).
+    // Build a deterministic action-evaluation order:
+    //   1) a small hand-tuned priority list (UI/meta + context actions)
+    //   2) the canonical action registry order (action_info.hpp)
     //
-    // IMPORTANT: global UI/meta hotkeys should still work while the inventory overlay is open
-    // (help/options/message history/etc). This avoids "dead" bindings when a menu is up.
+    // This prevents "bindable-but-never-mapped" regressions when new Actions are
+    // added but someone forgets to extend the priority lists.
+    auto buildOrder = [&](std::initializer_list<Action> pri) -> std::vector<Action> {
+        std::array<bool, 256> seen{};
+        std::vector<Action> out;
+        out.reserve(pri.size() + (sizeof(actioninfo::kActionInfoTable) / sizeof(actioninfo::kActionInfoTable[0])));
+
+        auto addUnique = [&](Action a) {
+            const uint8_t id = static_cast<uint8_t>(a);
+            if (!seen[id]) {
+                seen[id] = true;
+                out.push_back(a);
+            }
+        };
+
+        for (Action a : pri) addUnique(a);
+        for (const auto& info : actioninfo::kActionInfoTable) addUnique(info.action);
+        return out;
+    };
+
+    // Inventory gets priority for inventory-specific actions (users may rebind keys to overlap movement).
+    // IMPORTANT: global UI/meta hotkeys should still work while the inventory overlay is open.
     if (game.isInventoryOpen()) {
-        Action a = matchIn({
+        static const std::vector<Action> invOrder = buildOrder({
             Action::DropAll,
             Action::SortInventory,
             Action::Equip,
             Action::Use,
+            Action::Butcher,
             Action::Drop,
             Action::Confirm,
             Action::Cancel,
@@ -519,6 +843,8 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::Right,
             Action::LogUp,
             Action::LogDown,
+
+            // Global/meta
             Action::Help,
             Action::Options,
             Action::Command,
@@ -532,6 +858,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::LoadAuto,
             Action::Restart,
             Action::ToggleMinimap,
+            Action::ToggleOverworldMap,
             Action::MinimapZoomIn,
             Action::MinimapZoomOut,
             Action::ToggleStats,
@@ -545,14 +872,18 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
             Action::ToggleFullscreen,
             Action::Screenshot,
         });
+
+        const Action a = evalOrder(invOrder);
         if (a != Action::None) return a;
+        return Action::None;
     }
 
-    // Default priority order.
-    Action a = matchIn({
+    static const std::vector<Action> defaultOrder = buildOrder({
+        // Message log / paging first.
         Action::LogUp,
         Action::LogDown,
 
+        // UI/meta.
         Action::Help,
         Action::MessageHistory,
         Action::Codex,
@@ -560,6 +891,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::Options,
         Action::Command,
 
+        // Save/load.
         Action::Save,
         Action::Load,
         Action::LoadAuto,
@@ -567,7 +899,9 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
 
         Action::Scores,
 
+        // Toggles.
         Action::ToggleMinimap,
+        Action::ToggleOverworldMap,
         Action::MinimapZoomIn,
         Action::MinimapZoomOut,
         Action::ToggleStats,
@@ -581,6 +915,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::ToggleFullscreen,
         Action::Screenshot,
 
+        // Gameplay actions.
         Action::Inventory,
         Action::Spells,
         Action::Fire,
@@ -594,6 +929,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::AutoExplore,
         Action::ToggleAutoPickup,
         Action::Pickup,
+        Action::Butcher,
         Action::Rest,
         Action::ToggleSneak,
         Action::Evade,
@@ -606,6 +942,7 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::StairsUp,
         Action::StairsDown,
 
+        // Movement.
         Action::Up,
         Action::Down,
         Action::Left,
@@ -616,10 +953,8 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         Action::DownRight,
     });
 
-    return a;
+    return evalOrder(defaultOrder);
 }
-
-
 
 static std::string keycodeToToken(SDL_Keycode key) {
     // Printable ASCII range: keep letters/digits as-is for copy/paste convenience.
@@ -690,6 +1025,13 @@ static std::string keycodeToToken(SDL_Keycode key) {
         case SDLK_KP_7: return "kp_7";
         case SDLK_KP_8: return "kp_8";
         case SDLK_KP_9: return "kp_9";
+        case SDLK_KP_PLUS: return "kp_plus";
+        case SDLK_KP_MINUS: return "kp_minus";
+        case SDLK_KP_MULTIPLY: return "kp_multiply";
+        case SDLK_KP_DIVIDE: return "kp_divide";
+        case SDLK_KP_PERIOD: return "kp_period";
+        case SDLK_KP_COMMA: return "kp_comma";
+        case SDLK_KP_EQUALS: return "kp_equals";
 
         default: break;
     }

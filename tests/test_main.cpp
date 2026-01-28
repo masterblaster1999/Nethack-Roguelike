@@ -1,4 +1,5 @@
 #include "game.hpp"
+#include "action_info.hpp"
 #include "overworld.hpp"
 #include "settings.hpp"
 #include "scent_field.hpp"
@@ -337,6 +338,47 @@ bool test_settings_minimap_zoom_clamp() {
     fs::remove(p, ec);
     return true;
 }
+
+
+bool test_action_palette_executes_actions() {
+    Game g;
+    g.newGame(424242u);
+
+    // Open the extended command prompt and use the action-palette shorthand.
+    CHECK(!g.isInventoryOpen());
+
+    g.handleAction(Action::Command);
+    CHECK(g.isCommandOpen());
+
+    // Autocomplete should expand action tokens after '@'.
+    g.commandTextInput("@inv");
+    g.commandAutocomplete();
+    CHECK(g.commandBuffer() == "@inventory");
+
+    // Confirm should dispatch the action and open inventory.
+    g.handleAction(Action::Confirm);
+    CHECK(!g.isCommandOpen());
+    CHECK(g.isInventoryOpen());
+
+    // And cancel should close inventory normally.
+    g.handleAction(Action::Cancel);
+    CHECK(!g.isInventoryOpen());
+
+    return true;
+}
+
+bool test_action_info_view_turn_tokens() {
+    const actioninfo::ActionInfo* left = actioninfo::findByToken("view_turn_left");
+    CHECK(left != nullptr);
+    CHECK(left->action == Action::ViewTurnLeft);
+
+    const actioninfo::ActionInfo* right = actioninfo::findByToken("view_turn_right");
+    CHECK(right != nullptr);
+    CHECK(right->action == Action::ViewTurnRight);
+
+    return true;
+}
+
 
 
 bool test_noise_localization_determinism() {
@@ -984,8 +1026,9 @@ bool test_overworld_weather_determinism() {
     const int cy = -3;
 
     const auto prof = overworld::profileFor(seed, cx, cy, /*maxDepth=*/25);
-    const auto w0 = overworld::weatherFor(seed, cx, cy, prof.biome);
-    const auto w1 = overworld::weatherFor(seed, cx, cy, prof.biome);
+    const uint32_t t = 7777u;
+    const auto w0 = overworld::weatherFor(seed, cx, cy, prof.biome, t);
+    const auto w1 = overworld::weatherFor(seed, cx, cy, prof.biome, t);
 
     CHECK(w0.kind == w1.kind);
     CHECK(w0.windDir.x == w1.windDir.x && w0.windDir.y == w1.windDir.y);
@@ -1005,6 +1048,51 @@ bool test_overworld_weather_determinism() {
     if (w0.windStrength == 0) {
         CHECK(w0.windDir.x == 0 && w0.windDir.y == 0);
     }
+
+    return true;
+}
+
+
+bool test_overworld_weather_time_varying_fronts() {
+    const uint32_t seed = 424242u;
+
+    // We expect at least one nearby chunk's weather to differ between two
+    // distant times if time-varying fronts are active.
+    const uint32_t t0 = 0u;
+    const uint32_t t1 = 5000u;
+
+    bool changed = false;
+    for (int cy = -4; cy <= 4 && !changed; ++cy) {
+        for (int cx = -4; cx <= 4 && !changed; ++cx) {
+            const auto prof = overworld::profileFor(seed, cx, cy, /*maxDepth=*/25);
+            const auto w0 = overworld::weatherFor(seed, cx, cy, prof.biome, t0);
+            const auto w1 = overworld::weatherFor(seed, cx, cy, prof.biome, t1);
+
+            if (w0.kind != w1.kind ||
+                w0.windDir.x != w1.windDir.x || w0.windDir.y != w1.windDir.y ||
+                w0.windStrength != w1.windStrength ||
+                w0.fovPenalty != w1.fovPenalty ||
+                w0.fireQuench != w1.fireQuench ||
+                w0.burnQuench != w1.burnQuench) {
+                changed = true;
+            }
+        }
+    }
+    CHECK(changed);
+
+    // But each time slice must remain deterministic.
+    const int cx = 7;
+    const int cy = -3;
+    const auto prof = overworld::profileFor(seed, cx, cy, /*maxDepth=*/25);
+    const auto a = overworld::weatherFor(seed, cx, cy, prof.biome, t1);
+    const auto b = overworld::weatherFor(seed, cx, cy, prof.biome, t1);
+
+    CHECK(a.kind == b.kind);
+    CHECK(a.windDir.x == b.windDir.x && a.windDir.y == b.windDir.y);
+    CHECK(a.windStrength == b.windStrength);
+    CHECK(a.fovPenalty == b.fovPenalty);
+    CHECK(a.fireQuench == b.fireQuench);
+    CHECK(a.burnQuench == b.burnQuench);
 
     return true;
 }
@@ -1097,6 +1185,8 @@ int main(int argc, char** argv) {
         {"save_load_roundtrip",  test_save_load_roundtrip},
         {"save_load_sneak",      test_save_load_preserves_sneak},
         {"settings_minimap_zoom", test_settings_minimap_zoom_clamp},
+        {"action_palette",  test_action_palette_executes_actions},
+        {"action_info_view_turn", test_action_info_view_turn_tokens},
         {"noise_localization",  test_noise_localization_determinism},
         {"proc_spells",         test_proc_spell_generation_determinism},
         {"proc_monster_codename", test_proc_monster_codename_determinism},
@@ -1107,6 +1197,7 @@ int main(int argc, char** argv) {
         {"overworld_profiles", test_overworld_profiles},
         {"overworld_chunk",    test_overworld_chunk_determinism},
         {"overworld_weather",  test_overworld_weather_determinism},
+        {"overworld_weather_time", test_overworld_weather_time_varying_fronts},
         {"overworld_atlas_discovery", test_overworld_atlas_discovery_tracking},
         {"overworld_gate_alignment", test_overworld_gate_alignment},
         {"ident_appearances", test_ident_appearance_procgen_determinism},

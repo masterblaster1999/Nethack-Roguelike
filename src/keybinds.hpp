@@ -17,7 +17,7 @@
 //
 // Each key can be:
 //   - a single character: w, ., ?
-//   - a named key: up, down, left, right, tab, enter, escape, pageup, f1, kp_8, ...
+//   - a named key: up, down, left, right, tab, enter, escape, pageup, f1, kp_8, kp_plus, ...
 // Modifiers can be prefixed with: shift+, ctrl+, alt+, cmd+  (example: shift+comma)
 
 // On macOS, cmd+ corresponds to the Command key. On Windows/Linux, it maps to the GUI/Windows/Super key.

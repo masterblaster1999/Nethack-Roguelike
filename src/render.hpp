@@ -7,6 +7,7 @@
 #include "spritegen.hpp"
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <list>
@@ -188,6 +189,34 @@ public:
     void setViewMode(ViewMode mode) { viewMode_ = mode; }
     ViewMode viewMode() const { return viewMode_; }
 
+    // Raycast 3D view (visual-only) tuning knobs.
+    // These affect only the experimental 3D presentation mode (F7 cycles view modes).
+    void setRaycast3DScale(int scale);               // internal render resolution divisor (1..4)
+    void setRaycast3DFovDegrees(float degrees);      // horizontal FOV in degrees (~40..100)
+    void setRaycast3DCeilingEnabled(bool enabled) { raycast3DEnableCeiling_ = enabled; }
+    void setRaycast3DBumpEnabled(bool enabled) { raycast3DEnableBump_ = enabled; }
+    void setRaycast3DParallaxEnabled(bool enabled) { raycast3DEnableParallax_ = enabled; }
+    void setRaycast3DParallaxStrengthPct(int pct) { raycast3DParallaxStrengthPct_ = std::clamp(pct, 0, 100); }
+    void setRaycast3DSpecularEnabled(bool enabled) { raycast3DEnableSpecular_ = enabled; }
+    void setRaycast3DSpecularStrengthPct(int pct) { raycast3DSpecularStrengthPct_ = std::clamp(pct, 0, 100); }
+
+    // When enabled (default), the 3D camera direction will follow the player's most recent
+    // movement tween. When disabled, the camera direction persists and can be rotated via
+    // the view-turn actions.
+    void setRaycast3DFollowMoveEnabled(bool enabled) { raycast3DFollowMove_ = enabled; }
+
+    // Degrees rotated per "view turn" action (clamped in implementation).
+    void setRaycast3DTurnDegrees(float degrees);
+
+    // Rotate the raycast 3D camera (visual-only). These are safe to call regardless of
+    // current view mode; they will simply update the stored camera direction.
+    void raycast3DTurnLeft();
+    void raycast3DTurnRight();
+
+    // Raycast 3D billboard knobs (visual-only)
+    void setRaycast3DSpritesEnabled(bool enabled) { raycast3DEnableSprites_ = enabled; }
+    void setRaycast3DItemsEnabled(bool enabled) { raycast3DEnableItems_ = enabled; }
+
     // Input helpers
     // Converts a window pixel coordinate to a map tile coordinate.
     // Returns false if the coordinate is outside the map region.
@@ -238,6 +267,63 @@ private:
     // Isometric camera center (in map tiles). Used only when viewMode_ == Isometric.
     int isoCamX = 0;
     int isoCamY = 0;
+
+    // Raycast 3D view (first-person / pseudo-3D) is a renderer-only presentation mode.
+    // It renders the dungeon as a textured raycast scene (walls + floor/ceiling) using
+    // the same deterministic procedural terrain generators for texture content.
+    bool raycast3DAssetsValid_ = false;
+    uint32_t raycast3DStyleSeedCached_ = 0u;
+    uint32_t raycast3DLvlSeedCached_ = 0u;
+    int raycast3DTexPxCached_ = 0;
+    static constexpr int RAYCAST3D_VARIANTS = 4;
+    // CPU-side textures (SpritePixels) used by the raycaster.
+    // Indexed by [style][material][variant] for floors/ceilings, and [material][variant] for walls.
+    std::vector<SpritePixels> raycast3DFloorTex_;
+    std::vector<SpritePixels> raycast3DCeilingTex_;
+    std::vector<SpritePixels> raycast3DWallTex_;
+    std::vector<SpritePixels> raycast3DDoorClosedTex_;
+    std::vector<SpritePixels> raycast3DDoorLockedTex_;
+    std::vector<SpritePixels> raycast3DChasmTex_;
+
+    // Streaming render target for the raycast view. We render at a reduced internal
+    // resolution (raycast3DScale_) and then scale up to the map clip for a crisp
+    // retro look and better performance.
+    SDL_Texture* raycast3DFrameTex_ = nullptr;
+    int raycast3DFrameW_ = 0;
+    int raycast3DFrameH_ = 0;
+    int raycast3DScale_ = 2;
+    // Visual-only options for the raycaster.
+    bool raycast3DEnableCeiling_ = true;
+    bool raycast3DEnableBump_ = true;
+    bool raycast3DEnableParallax_ = true;
+    int raycast3DParallaxStrengthPct_ = 60;
+    bool raycast3DEnableSpecular_ = true;
+    int raycast3DSpecularStrengthPct_ = 70;
+    bool raycast3DEnableSprites_ = true;
+    bool raycast3DEnableItems_ = true;
+
+    // Raycast3D camera behaviour (visual-only).
+    bool raycast3DFollowMove_ = true;       // If true, dir follows player movement tween
+    float raycast3DTurnDegrees_ = 15.0f;    // Degrees per turn action
+    // If the user turns manually, suppress "follow move" camera snapping briefly so the
+    // turn is visible even while a move tween is still animating.
+    float raycast3DManualHoldSec_ = 0.0f;
+
+    struct Raycast3DSpriteEntry {
+        std::array<SpritePixels, FRAMES> frames{};
+        std::list<uint64_t>::iterator lruIt{};
+    };
+
+    std::unordered_map<uint64_t, Raycast3DSpriteEntry> raycast3DSpriteCache_;
+    std::list<uint64_t> raycast3DSpriteLRU_;
+    size_t raycast3DSpriteCacheMax_ = 128;
+    // Field-of-view control: plane vector length = tan(FOV/2). Classic Wolf3D used ~0.66.
+    float raycast3DFovPlane_ = 0.66f;
+    std::vector<uint32_t> raycast3DFramePixels_;
+
+    // Facing direction for the 3D view. Updated opportunistically from the player
+    // movement tween (renderer-only state; does not affect gameplay).
+    Vec2f raycast3DCamDir_{1.0f, 0.0f};
 
     bool initialized = false;
 	// Cached animation frame index for overlay/UI draws.
@@ -351,6 +437,17 @@ private:
     // Isometric variants for floor decals (diamond-projected transparent overlays).
     // Generated lazily with the other isometric terrain assets.
     std::vector<AnimTex> floorDecalVarIso;
+
+    // Terrain material overlays (transparent; procedural patterns that get tinted in the renderer).
+    // These add high-frequency material cues (grain/seams/veins/pits) on top of the base themed
+    // floor/wall tiles, making biomes and substrate materials more visually distinct.
+    static constexpr int MATERIAL_OVERLAY_VARS = 3;
+    int materialOverlayVarsUsed = MATERIAL_OVERLAY_VARS;
+    static constexpr size_t TERRAIN_MATERIAL_COUNT = static_cast<size_t>(TerrainMaterial::COUNT);
+    std::array<std::array<AnimTex, MATERIAL_OVERLAY_VARS>, TERRAIN_MATERIAL_COUNT> floorMaterialOverlayVar{};
+    std::array<std::array<AnimTex, MATERIAL_OVERLAY_VARS>, TERRAIN_MATERIAL_COUNT> wallMaterialOverlayVar{};
+    // Isometric (diamond) variants for floor material overlays. Generated lazily with other iso terrain assets.
+    std::array<std::array<AnimTex, MATERIAL_OVERLAY_VARS>, TERRAIN_MATERIAL_COUNT> floorMaterialOverlayVarIso{};
 
     // Autotile overlays (transparent, layered on top of base tiles)
     // openMask bits: 1=N, 2=E, 4=S, 8=W (bit set means "edge exposed")
@@ -484,6 +581,10 @@ private:
     void ensureUIAssets(const Game& game);
     // Terrain helpers
     void ensureIsoTerrainAssets(uint32_t styleSeed, bool voxelBlocks, bool isoRaytrace);
+    // Raycast 3D view helpers
+    void ensureRaycast3DAssets(uint32_t styleSeed, uint32_t lvlSeed);
+    void ensureRaycast3DRenderTarget(int w, int h);
+    void drawRaycast3DView(const Game& game, uint32_t styleSeed, uint32_t lvlSeed, int frame, const SDL_Rect& mapClip);
     void drawPanel(const Game& game, const SDL_Rect& rect, uint8_t alpha, int frame);
 
     void drawHud(const Game& game);

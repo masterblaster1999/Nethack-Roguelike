@@ -214,6 +214,14 @@ inline std::string keyTokenToDisplay(const std::string& keyTokIn, bool shift, bo
     // Keypad tokens.
     if (k.rfind("kp_", 0) == 0) {
         if (k == "kp_enter") return "KP ENTER";
+        if (k == "kp_plus") return "KP+";
+        if (k == "kp_minus") return "KP-";
+        if (k == "kp_multiply") return "KP*";
+        if (k == "kp_divide") return "KP/";
+        if (k == "kp_period" || k == "kp_decimal" || k == "kp_dot") return "KP.";
+        if (k == "kp_comma") return "KP,";
+        if (k == "kp_equals" || k == "kp_equal") return "KP=";
+
         if (k.size() == 4 && std::isdigit(static_cast<unsigned char>(k[3]))) {
             return std::string("KP") + static_cast<char>(k[3]);
         }
@@ -301,6 +309,38 @@ inline std::string keyTokenToDisplay(const std::string& keyTokIn, bool shift, bo
     return toUpperCopy(raw);
 }
 
+
+inline bool isMacPlatform() {
+    static bool cached = []() {
+        const char* plat = SDL_GetPlatform();
+        if (!plat) return false;
+        std::string p(plat);
+        for (char& c : p) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return (p.find("mac") != std::string::npos) || (p.find("ios") != std::string::npos);
+    }();
+    return cached;
+}
+
+inline const std::string& guiModifierDisplayLabel() {
+    static std::string cached = []() {
+        const char* plat = SDL_GetPlatform();
+        if (!plat) return std::string("CMD");
+        std::string p(plat);
+        for (char& c : p) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (p.find("mac") != std::string::npos || p.find("ios") != std::string::npos) return std::string("CMD");
+        if (p.find("windows") != std::string::npos) return std::string("WIN");
+        return std::string("SUPER");
+    }();
+    return cached;
+}
+
+inline const std::string& altModifierDisplayLabel() {
+    static std::string cached = []() {
+        return isMacPlatform() ? std::string("OPT") : std::string("ALT");
+    }();
+    return cached;
+}
+
 inline std::string chordTokenToDisplay(const std::string& chordTokIn) {
     std::string chordTok = trimCopy(chordTokIn);
     if (chordTok.empty()) return "";
@@ -321,9 +361,9 @@ inline std::string chordTokenToDisplay(const std::string& chordTokIn) {
         const std::string p = toLowerCopy(pRaw);
 
         // All but the last part are usually modifiers, but be defensive.
-        if (p == "cmd" || p == "gui" || p == "meta" || p == "super") cmd = true;
+        if (p == "cmd" || p == "gui" || p == "meta" || p == "super" || p == "win" || p == "windows") cmd = true;
         else if (p == "ctrl" || p == "control") ctrl = true;
-        else if (p == "alt" || p == "option") alt = true;
+        else if (p == "alt" || p == "option" || p == "opt") alt = true;
         else if (p == "shift") shift = true;
         else keyTok = pRaw; // treat as key
     }
@@ -332,9 +372,9 @@ inline std::string chordTokenToDisplay(const std::string& chordTokIn) {
     const std::string keyDisp = keyTokenToDisplay(keyTok, shift, consumedShift);
 
     std::string out;
-    if (cmd) out += "CMD+";
+    if (cmd) out += guiModifierDisplayLabel() + "+";
     if (ctrl) out += "CTRL+";
-    if (alt) out += "ALT+";
+    if (alt) out += altModifierDisplayLabel() + "+";
     if (shift && !consumedShift) out += "SHIFT+";
     out += keyDisp;
     return out;
@@ -1450,6 +1490,9 @@ bool Renderer::init() {
     borderVarsUsed = (spritePx <= 96) ? 2 : 1;
     borderVarsUsed = std::clamp(borderVarsUsed, 1, BORDER_VARS);
 
+    materialOverlayVarsUsed = (spritePx <= 96) ? 3 : (spritePx <= 160 ? 2 : 1);
+    materialOverlayVarsUsed = std::clamp(materialOverlayVarsUsed, 1, MATERIAL_OVERLAY_VARS);
+
 
     // Configure the sprite texture cache budget.
     // 0 => unlimited (no eviction).
@@ -1558,7 +1601,33 @@ for (int st = 0; st < DECAL_STYLES; ++st) {
 }
 
 
-    // Pre-generate room-style floor border overlays (thin "trim" lines keyed by room style + 4-neighbor mask).
+    
+
+// Pre-generate terrain material overlays (transparent patterns layered on top of the base tiles).
+// These provide per-material texture cues (wood grain, metal seams, marble veins, etc.) while
+// still allowing the renderer's palette/tint system to control hue and lighting.
+for (size_t mi = 0; mi < TERRAIN_MATERIAL_COUNT; ++mi) {
+    const TerrainMaterial mat = static_cast<TerrainMaterial>(mi);
+    for (int v = 0; v < materialOverlayVarsUsed; ++v) {
+        const uint32_t fSeed = hashCombine(0x1A7E11u + static_cast<uint32_t>(mi) * 131u, static_cast<uint32_t>(v));
+        const uint32_t wSeed = hashCombine(0x4411E1u + static_cast<uint32_t>(mi) * 191u, static_cast<uint32_t>(v));
+        for (int f = 0; f < FRAMES; ++f) {
+            floorMaterialOverlayVar[mi][static_cast<size_t>(v)][static_cast<size_t>(f)] =
+                textureFromSprite(generateFloorMaterialOverlay(fSeed, mat, f, spritePx));
+            wallMaterialOverlayVar[mi][static_cast<size_t>(v)][static_cast<size_t>(f)] =
+                textureFromSprite(generateWallMaterialOverlay(wSeed, mat, f, spritePx));
+        }
+    }
+    // Ensure unused variants are nullptr (materialOverlayVarsUsed may be < MATERIAL_OVERLAY_VARS at large tile sizes).
+    for (int v = materialOverlayVarsUsed; v < MATERIAL_OVERLAY_VARS; ++v) {
+        for (int f = 0; f < FRAMES; ++f) {
+            floorMaterialOverlayVar[mi][static_cast<size_t>(v)][static_cast<size_t>(f)] = nullptr;
+            wallMaterialOverlayVar[mi][static_cast<size_t>(v)][static_cast<size_t>(f)] = nullptr;
+        }
+    }
+}
+
+// Pre-generate room-style floor border overlays (thin "trim" lines keyed by room style + 4-neighbor mask).
     // These are transparent overlays layered on top of base floor tiles.
     for (int st = 0; st < ROOM_STYLES; ++st) {
         for (int mask = 0; mask < AUTO_MASKS; ++mask) {
@@ -1757,6 +1826,19 @@ isoEntityShadowTex.fill(nullptr);
 
 isoTerrainAssetsValid = false;
 
+// Raycast 3D view resources
+if (raycast3DFrameTex_) { SDL_DestroyTexture(raycast3DFrameTex_); raycast3DFrameTex_ = nullptr; }
+raycast3DFrameW_ = 0;
+raycast3DFrameH_ = 0;
+raycast3DFramePixels_.clear();
+raycast3DAssetsValid_ = false;
+raycast3DFloorTex_.clear();
+raycast3DCeilingTex_.clear();
+raycast3DWallTex_.clear();
+raycast3DDoorClosedTex_.clear();
+raycast3DDoorLockedTex_.clear();
+raycast3DChasmTex_.clear();
+
 // Decal overlay textures
 for (auto& arr : floorDecalVar) {
     for (SDL_Texture*& t : arr) {
@@ -1773,6 +1855,20 @@ for (auto& arr : wallDecalVar) {
 floorDecalVar.clear();
 wallDecalVar.clear();
 
+// Terrain material overlay textures (top-down)
+for (size_t mi = 0; mi < TERRAIN_MATERIAL_COUNT; ++mi) {
+    for (int v = 0; v < MATERIAL_OVERLAY_VARS; ++v) {
+        for (SDL_Texture*& t : floorMaterialOverlayVar[mi][static_cast<size_t>(v)]) {
+            if (t) SDL_DestroyTexture(t);
+            t = nullptr;
+        }
+        for (SDL_Texture*& t : wallMaterialOverlayVar[mi][static_cast<size_t>(v)]) {
+            if (t) SDL_DestroyTexture(t);
+            t = nullptr;
+        }
+    }
+}
+
 
 // Isometric floor decal overlay textures (generated lazily with isometric terrain assets)
 for (auto& arr : floorDecalVarIso) {
@@ -1782,6 +1878,17 @@ for (auto& arr : floorDecalVarIso) {
     }
 }
 floorDecalVarIso.clear();
+
+// Isometric terrain material overlay textures (diamond-projected)
+for (size_t mi = 0; mi < TERRAIN_MATERIAL_COUNT; ++mi) {
+    for (int v = 0; v < MATERIAL_OVERLAY_VARS; ++v) {
+        for (int f = 0; f < FRAMES; ++f) {
+            SDL_Texture*& t = floorMaterialOverlayVarIso[mi][static_cast<size_t>(v)][static_cast<size_t>(f)];
+            if (t) SDL_DestroyTexture(t);
+            t = nullptr;
+        }
+    }
+}
 
 // Room-style floor border overlays
 for (auto& styleArr : floorBorderVar) {
@@ -1934,6 +2041,10 @@ uiAssetsValid = false;
     // Entity/item/projectile textures are budget-cached in spriteTex.
     spriteTex.clear();
 
+    // CPU-side billboard sprite cache (raycast 3D view).
+    raycast3DSpriteCache_.clear();
+    raycast3DSpriteLRU_.clear();
+
     // UI preview textures (Codex/etc.).
     uiPreviewTex.clear();
 
@@ -1957,6 +2068,80 @@ void Renderer::toggleFullscreen() {
     const Uint32 flags = SDL_GetWindowFlags(window);
     const bool isFs = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
     SDL_SetWindowFullscreen(window, isFs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+}
+
+
+void Renderer::setRaycast3DScale(int scale) {
+    scale = std::clamp(scale, 1, 4);
+    if (scale == raycast3DScale_) return;
+    raycast3DScale_ = scale;
+
+    // Force the streaming render target to be recreated at the new resolution.
+    if (raycast3DFrameTex_) {
+        SDL_DestroyTexture(raycast3DFrameTex_);
+        raycast3DFrameTex_ = nullptr;
+    }
+    raycast3DFrameW_ = 0;
+    raycast3DFrameH_ = 0;
+    raycast3DFramePixels_.clear();
+}
+
+void Renderer::setRaycast3DFovDegrees(float degrees) {
+    degrees = std::clamp(degrees, 40.0f, 100.0f);
+    const float rad = degrees * 3.1415926535f / 180.0f;
+    // In a classic raycaster, the camera plane length is tan(FOV/2).
+    const float plane = std::tan(rad * 0.5f);
+    raycast3DFovPlane_ = std::clamp(plane, 0.2f, 2.0f);
+}
+
+void Renderer::setRaycast3DTurnDegrees(float degrees) {
+    // Keep this modest: huge turn steps are disorienting, tiny ones make key-tapping tedious.
+    degrees = std::clamp(degrees, 1.0f, 90.0f);
+    raycast3DTurnDegrees_ = degrees;
+}
+
+static Vec2f rotateDirYDown(const Vec2f& v, float degrees) {
+    // Our map coordinate system is X+ = east, Y+ = south (Y grows downward).
+    // This rotation is CCW for positive degrees in that coordinate system.
+    const float rad = degrees * 3.1415926535f / 180.0f;
+    const float cs = std::cos(rad);
+    const float sn = std::sin(rad);
+    Vec2f o;
+    o.x = v.x * cs + v.y * sn;
+    o.y = -v.x * sn + v.y * cs;
+    return o;
+}
+
+void Renderer::raycast3DTurnLeft() {
+    // Turning is a purely visual affordance. To make the turn immediately visible even if a
+    // move tween is still animating, we briefly suppress "follow move" camera snapping.
+    raycast3DManualHoldSec_ = std::max(raycast3DManualHoldSec_, 0.15f);
+
+    Vec2f d = raycast3DCamDir_;
+    if (std::abs(d.x) < 0.001f && std::abs(d.y) < 0.001f) d = {1.0f, 0.0f};
+    d = rotateDirYDown(d, +raycast3DTurnDegrees_);
+
+    const float len = std::sqrt(d.x * d.x + d.y * d.y);
+    if (len > 0.001f) {
+        d.x /= len;
+        d.y /= len;
+        raycast3DCamDir_ = d;
+    }
+}
+
+void Renderer::raycast3DTurnRight() {
+    raycast3DManualHoldSec_ = std::max(raycast3DManualHoldSec_, 0.15f);
+
+    Vec2f d = raycast3DCamDir_;
+    if (std::abs(d.x) < 0.001f && std::abs(d.y) < 0.001f) d = {1.0f, 0.0f};
+    d = rotateDirYDown(d, -raycast3DTurnDegrees_);
+
+    const float len = std::sqrt(d.x * d.x + d.y * d.y);
+    if (len > 0.001f) {
+        d.x /= len;
+        d.y /= len;
+        raycast3DCamDir_ = d;
+    }
 }
 
 SDL_Rect Renderer::mapTileDst(int mapX, int mapY) const {
@@ -2144,6 +2329,9 @@ bool Renderer::windowToMapTile(const Game& game, int winX, int winY, int& tileX,
 
     // Reject clicks outside the map viewport (e.g., HUD area).
     if (my >= mapH) return false;
+
+    // The 3D raycast view does not use the 2D tile projection; disable tile picking.
+    if (viewMode_ == ViewMode::Raycast3D) return false;
 
     if (viewMode_ == ViewMode::Isometric) {
         // Invert the isometric projection used by mapTileDst(), then refine by
@@ -3746,6 +3934,18 @@ void Renderer::ensureIsoTerrainAssets(uint32_t styleSeed, bool voxelBlocks, bool
     }
     floorDecalVarIso.clear();
 
+    // Isometric terrain material overlays (diamond-projected).
+    // Stored in a fixed array (materials x vars x frames), so we reset pointers manually.
+    for (size_t mi = 0; mi < TERRAIN_MATERIAL_COUNT; ++mi) {
+        for (int v = 0; v < MATERIAL_OVERLAY_VARS; ++v) {
+            for (int f = 0; f < FRAMES; ++f) {
+                SDL_Texture*& t = floorMaterialOverlayVarIso[mi][static_cast<size_t>(v)][static_cast<size_t>(f)];
+                if (t) SDL_DestroyTexture(t);
+                t = nullptr;
+            }
+        }
+    }
+
 
     // Isometric room-style floor border overlays (diamond-projected overlays)
     for (auto& styleArr : floorBorderVarIso) {
@@ -3937,6 +4137,26 @@ void Renderer::ensureIsoTerrainAssets(uint32_t styleSeed, bool voxelBlocks, bool
         }
     }
 
+
+    // Isometric terrain material overlays (diamond): thin procedural patterns keyed by substrate material.
+    // These sit between the base themed floor and room-style decals/borders.
+    for (size_t mi = 0; mi < TERRAIN_MATERIAL_COUNT; ++mi) {
+        const TerrainMaterial mat = static_cast<TerrainMaterial>(mi);
+        for (int v = 0; v < materialOverlayVarsUsed; ++v) {
+            const uint32_t mSeed = hashCombine(mixSeed(0x1A7E1100u + static_cast<uint32_t>(mi) * 131u), static_cast<uint32_t>(v));
+            for (int f = 0; f < FRAMES; ++f) {
+                const SpritePixels iso = generateIsometricFloorMaterialOverlay(mSeed, mat, f, spritePx);
+                floorMaterialOverlayVarIso[mi][static_cast<size_t>(v)][static_cast<size_t>(f)] = textureFromSprite(iso);
+            }
+        }
+        // Ensure unused variants stay nulled.
+        for (int v = materialOverlayVarsUsed; v < MATERIAL_OVERLAY_VARS; ++v) {
+            for (int f = 0; f < FRAMES; ++f) {
+                floorMaterialOverlayVarIso[mi][static_cast<size_t>(v)][static_cast<size_t>(f)] = nullptr;
+            }
+        }
+    }
+
     // Isometric room-style floor border overlays: diamond variants of the same style+mask trim used in top-down view.
     for (int st = 0; st < ROOM_STYLES; ++st) {
         for (int mask = 0; mask < AUTO_MASKS; ++mask) {
@@ -4105,6 +4325,1411 @@ static void drawSpriteWithShadowOutline(SDL_Renderer* r,
     SDL_SetTextureAlphaMod(tex, 255);
 }
 
+
+//------------------------------------------------------------------------------
+// Raycast 3D view (first-person / pseudo-3D)
+//------------------------------------------------------------------------------
+
+static inline Color alphaBlendOver(const Color& base, const Color& overlay) {
+    if (overlay.a == 0) return base;
+    if (overlay.a == 255) return overlay;
+
+    const uint32_t a = static_cast<uint32_t>(overlay.a);
+    const uint32_t inv = 255u - a;
+
+    Color out;
+    out.r = static_cast<uint8_t>((static_cast<uint32_t>(overlay.r) * a + static_cast<uint32_t>(base.r) * inv + 127u) / 255u);
+    out.g = static_cast<uint8_t>((static_cast<uint32_t>(overlay.g) * a + static_cast<uint32_t>(base.g) * inv + 127u) / 255u);
+    out.b = static_cast<uint8_t>((static_cast<uint32_t>(overlay.b) * a + static_cast<uint32_t>(base.b) * inv + 127u) / 255u);
+    out.a = 255;
+    return out;
+}
+
+void Renderer::ensureRaycast3DAssets(uint32_t styleSeed, uint32_t lvlSeed) {
+    // Fixed texture resolution for the 3D view. This keeps generation cost bounded
+    // and avoids ballooning memory when the user increases tile size.
+    const int texPx = 64;
+
+    if (raycast3DAssetsValid_
+        && raycast3DStyleSeedCached_ == styleSeed
+        && raycast3DLvlSeedCached_ == lvlSeed
+        && raycast3DTexPxCached_ == texPx) {
+        return;
+    }
+
+    raycast3DStyleSeedCached_ = styleSeed;
+    raycast3DLvlSeedCached_ = lvlSeed;
+    raycast3DTexPxCached_ = texPx;
+
+    const int matCount = static_cast<int>(TERRAIN_MATERIAL_COUNT);
+
+    auto floorIdx = [&](int style, int mat, int v) -> size_t {
+        return static_cast<size_t>(((style * matCount) + mat) * RAYCAST3D_VARIANTS + v);
+    };
+    auto wallIdx = [&](int mat, int v) -> size_t {
+        return static_cast<size_t>((mat * RAYCAST3D_VARIANTS) + v);
+    };
+
+    raycast3DFloorTex_.clear();
+    raycast3DCeilingTex_.clear();
+    raycast3DWallTex_.clear();
+    raycast3DDoorClosedTex_.clear();
+    raycast3DDoorLockedTex_.clear();
+    raycast3DChasmTex_.clear();
+
+    raycast3DFloorTex_.resize(static_cast<size_t>(ROOM_STYLES * matCount * RAYCAST3D_VARIANTS));
+    raycast3DCeilingTex_.resize(static_cast<size_t>(ROOM_STYLES * matCount * RAYCAST3D_VARIANTS));
+    raycast3DWallTex_.resize(static_cast<size_t>(matCount * RAYCAST3D_VARIANTS));
+    raycast3DDoorClosedTex_.resize(static_cast<size_t>(RAYCAST3D_VARIANTS));
+    raycast3DDoorLockedTex_.resize(static_cast<size_t>(RAYCAST3D_VARIANTS));
+    raycast3DChasmTex_.resize(static_cast<size_t>(RAYCAST3D_VARIANTS));
+
+    // Floors: themed base + material overlay
+    const uint32_t baseFloorTag = tag32("RC3D_FLOOR");
+    const uint32_t overFloorTag = tag32("RC3D_FLOOR_OV");
+
+    for (int style = 0; style < ROOM_STYLES; ++style) {
+        for (int mi = 0; mi < matCount; ++mi) {
+            const TerrainMaterial mat = static_cast<TerrainMaterial>(mi);
+            for (int v = 0; v < RAYCAST3D_VARIANTS; ++v) {
+                const uint32_t bSeed = hashCombine(styleSeed, hashCombine(baseFloorTag,
+                    hashCombine(static_cast<uint32_t>(style), hashCombine(static_cast<uint32_t>(mi), static_cast<uint32_t>(v)))));
+
+                const uint32_t oSeed = hashCombine(lvlSeed, hashCombine(overFloorTag,
+                    hashCombine(static_cast<uint32_t>(style), hashCombine(static_cast<uint32_t>(mi), static_cast<uint32_t>(v)))));
+
+                SpritePixels base = generateThemedFloorTile(bSeed, 0, style, texPx);
+                SpritePixels over = generateFloorMaterialOverlay(oSeed, 0, mat, texPx);
+
+                // Blend material detail over the base.
+                const size_t n = std::min(base.px.size(), over.px.size());
+                for (size_t i = 0; i < n; ++i) {
+                    base.px[i] = alphaBlendOver(base.px[i], over.px[i]);
+                }
+
+                raycast3DFloorTex_[floorIdx(style, mi, v)] = std::move(base);
+            }
+        }
+    }
+
+
+    // Ceilings: derived from themed floor + material overlay, then tinted/darkened with extra
+    // deterministic shadow/stalactite noise so ceilings read differently than floors.
+    const uint32_t baseCeilTag = tag32("RC3D_CEIL");
+    const uint32_t overCeilTag = tag32("RC3D_CEIL_OV");
+    const uint32_t ceilShadeTag = tag32("RC3D_CEIL_SHADE");
+
+    auto tintCeiling = [&](SpritePixels& sp, uint32_t seed) {
+        if (sp.w <= 0 || sp.h <= 0 || sp.px.empty()) return;
+
+        // Mottled shadow field + cool tint.
+        for (int y = 0; y < sp.h; ++y) {
+            for (int x = 0; x < sp.w; ++x) {
+                Color c = sp.px[static_cast<size_t>(y * sp.w + x)];
+                const float n = fractalNoise2D01(x, y, seed);
+                const float shadow = 0.90f - 0.35f * std::clamp((n - 0.55f) / 0.45f, 0.0f, 1.0f);
+                const float t = 0.52f * shadow;
+
+                int r = static_cast<int>(std::round(static_cast<float>(c.r) * t));
+                int g = static_cast<int>(std::round(static_cast<float>(c.g) * t));
+                int b = static_cast<int>(std::round(static_cast<float>(c.b) * (t * 1.05f)));
+                b = std::min(255, b + 8); // subtle blue bias
+
+                c.r = static_cast<uint8_t>(std::clamp(r, 0, 255));
+                c.g = static_cast<uint8_t>(std::clamp(g, 0, 255));
+                c.b = static_cast<uint8_t>(std::clamp(b, 0, 255));
+                c.a = 255;
+
+                sp.px[static_cast<size_t>(y * sp.w + x)] = c;
+            }
+        }
+
+        // Stalactite-ish drips: deterministic column mask that darkens the upper region.
+        for (int x = 0; x < sp.w; ++x) {
+            const float v = fractalNoise2D01(x * 13, 7, seed ^ 0xC311u);
+            const float b = v * v; // bias toward small
+            int h = static_cast<int>(std::round(b * static_cast<float>(sp.h) * 0.35f));
+            h = std::clamp(h, 0, sp.h / 2);
+            for (int y = 0; y < h; ++y) {
+                Color c = sp.px[static_cast<size_t>(y * sp.w + x)];
+                c.r = static_cast<uint8_t>((static_cast<int>(c.r) * 70) / 100);
+                c.g = static_cast<uint8_t>((static_cast<int>(c.g) * 70) / 100);
+                c.b = static_cast<uint8_t>((static_cast<int>(c.b) * 75) / 100);
+                sp.px[static_cast<size_t>(y * sp.w + x)] = c;
+            }
+        }
+    };
+
+    for (int style = 0; style < ROOM_STYLES; ++style) {
+        for (int mi = 0; mi < matCount; ++mi) {
+            const TerrainMaterial mat = static_cast<TerrainMaterial>(mi);
+            for (int v = 0; v < RAYCAST3D_VARIANTS; ++v) {
+                const uint32_t bSeed = hashCombine(styleSeed, hashCombine(baseCeilTag,
+                    hashCombine(static_cast<uint32_t>(style), hashCombine(static_cast<uint32_t>(mi), static_cast<uint32_t>(v)))));
+
+                const uint32_t oSeed = hashCombine(lvlSeed, hashCombine(overCeilTag,
+                    hashCombine(static_cast<uint32_t>(style), hashCombine(static_cast<uint32_t>(mi), static_cast<uint32_t>(v)))));
+
+                SpritePixels base = generateThemedFloorTile(bSeed, 0, style, texPx);
+                SpritePixels over = generateFloorMaterialOverlay(oSeed, 0, mat, texPx);
+
+                const size_t n = std::min(base.px.size(), over.px.size());
+                for (size_t i = 0; i < n; ++i) {
+                    base.px[i] = alphaBlendOver(base.px[i], over.px[i]);
+                }
+
+                tintCeiling(base, hashCombine(lvlSeed, hashCombine(ceilShadeTag,
+                    hashCombine(static_cast<uint32_t>(style), hashCombine(static_cast<uint32_t>(mi), static_cast<uint32_t>(v))))));
+
+                raycast3DCeilingTex_[floorIdx(style, mi, v)] = std::move(base);
+            }
+        }
+    }
+
+    // Walls: base wall + material overlay.
+    const uint32_t baseWallTag = tag32("RC3D_WALL");
+    const uint32_t overWallTag = tag32("RC3D_WALL_OV");
+
+    for (int mi = 0; mi < matCount; ++mi) {
+        const TerrainMaterial mat = static_cast<TerrainMaterial>(mi);
+        for (int v = 0; v < RAYCAST3D_VARIANTS; ++v) {
+            const uint32_t bSeed = hashCombine(styleSeed, hashCombine(baseWallTag, hashCombine(static_cast<uint32_t>(mi), static_cast<uint32_t>(v))));
+            const uint32_t oSeed = hashCombine(lvlSeed,  hashCombine(overWallTag, hashCombine(static_cast<uint32_t>(mi), static_cast<uint32_t>(v))));
+
+            SpritePixels base = generateWallTile(bSeed, 0, texPx);
+            SpritePixels over = generateWallMaterialOverlay(oSeed, 0, mat, texPx);
+
+            const size_t n = std::min(base.px.size(), over.px.size());
+            for (size_t i = 0; i < n; ++i) {
+                base.px[i] = alphaBlendOver(base.px[i], over.px[i]);
+            }
+
+            raycast3DWallTex_[wallIdx(mi, v)] = std::move(base);
+        }
+    }
+
+    // Doors / chasm
+    const uint32_t doorTag = tag32("RC3D_DOOR");
+    const uint32_t lockTag = tag32("RC3D_LOCK");
+    const uint32_t chasmTag = tag32("RC3D_CHASM");
+
+    for (int v = 0; v < RAYCAST3D_VARIANTS; ++v) {
+        raycast3DDoorClosedTex_[static_cast<size_t>(v)] = generateDoorTile(hashCombine(styleSeed, hashCombine(doorTag, static_cast<uint32_t>(v))), 0, texPx);
+        raycast3DDoorLockedTex_[static_cast<size_t>(v)] = generateLockedDoorTile(hashCombine(styleSeed, hashCombine(lockTag, static_cast<uint32_t>(v))), 0, texPx);
+        raycast3DChasmTex_[static_cast<size_t>(v)] = generateChasmTile(hashCombine(lvlSeed, hashCombine(chasmTag, static_cast<uint32_t>(v))), 0, texPx);
+    }
+
+    raycast3DAssetsValid_ = true;
+}
+
+void Renderer::ensureRaycast3DRenderTarget(int w, int h) {
+    if (!renderer) return;
+
+    w = std::max(64, w);
+    h = std::max(64, h);
+
+    if (raycast3DFrameTex_ && raycast3DFrameW_ == w && raycast3DFrameH_ == h) {
+        const size_t want = static_cast<size_t>(w) * static_cast<size_t>(h);
+        if (raycast3DFramePixels_.size() != want) raycast3DFramePixels_.assign(want, 0u);
+        return;
+    }
+
+    if (raycast3DFrameTex_) {
+        SDL_DestroyTexture(raycast3DFrameTex_);
+        raycast3DFrameTex_ = nullptr;
+    }
+
+    raycast3DFrameTex_ = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, w, h);
+    if (raycast3DFrameTex_) {
+        SDL_SetTextureBlendMode(raycast3DFrameTex_, SDL_BLENDMODE_NONE);
+    }
+
+    raycast3DFrameW_ = w;
+    raycast3DFrameH_ = h;
+    raycast3DFramePixels_.assign(static_cast<size_t>(w) * static_cast<size_t>(h), 0u);
+}
+
+void Renderer::drawRaycast3DView(const Game& game, uint32_t styleSeed, uint32_t lvlSeed, int frame, const SDL_Rect& mapClip) {
+    (void)frame;
+    if (!renderer || !pixfmt) return;
+
+    ensureRaycast3DAssets(styleSeed, lvlSeed);
+
+    const int scale = std::max(1, raycast3DScale_);
+    const int w = std::max(64, mapClip.w / scale);
+    const int h = std::max(64, mapClip.h / scale);
+    ensureRaycast3DRenderTarget(w, h);
+    if (!raycast3DFrameTex_) return;
+
+    const Dungeon& d = game.dungeon();
+    if (d.width <= 0 || d.height <= 0) return;
+
+    // Update the facing direction from the player's move tween (renderer-only).
+    // When the user manually turns, we temporarily suppress this snapping so the turn is visible.
+    const Entity& pl = game.player();
+    if (raycast3DFollowMove_ && raycast3DManualHoldSec_ <= 0.0f) {
+        auto itAnim = procAnimById_.find(pl.id);
+        if (itAnim != procAnimById_.end()) {
+            const Vec2i df{ itAnim->second.moveTo.x - itAnim->second.moveFrom.x,
+                            itAnim->second.moveTo.y - itAnim->second.moveFrom.y };
+            if (df.x != 0 || df.y != 0) {
+                const float len = std::sqrt(static_cast<float>(df.x * df.x + df.y * df.y));
+                if (len > 0.001f) {
+                    raycast3DCamDir_.x = static_cast<float>(df.x) / len;
+                    raycast3DCamDir_.y = static_cast<float>(df.y) / len;
+                }
+            }
+        }
+    }
+
+    // Ensure non-zero direction.
+    if (std::abs(raycast3DCamDir_.x) < 0.001f && std::abs(raycast3DCamDir_.y) < 0.001f) {
+        raycast3DCamDir_ = {1.0f, 0.0f};
+    }
+
+    // Camera vectors.
+    // Plane magnitude ~0.66 gives ~66° FOV (classic Wolfenstein-like).
+    const Vec2f dir = raycast3DCamDir_;
+    const Vec2f plane{ -dir.y * raycast3DFovPlane_, dir.x * raycast3DFovPlane_ };
+
+    const float posX = static_cast<float>(pl.pos.x) + 0.5f;
+    const float posY = static_cast<float>(pl.pos.y) + 0.5f;
+
+    // Build a cheap room-type cache so themed floors still work in 3D.
+    std::vector<uint8_t> roomTypeCache;
+    roomTypeCache.assign(static_cast<size_t>(d.width) * static_cast<size_t>(d.height), static_cast<uint8_t>(RoomType::Normal));
+    for (const Room& room : d.rooms) {
+        const int x1 = std::max(0, room.x);
+        const int y1 = std::max(0, room.y);
+        const int x2 = std::min(d.width, room.x2());
+        const int y2 = std::min(d.height, room.y2());
+        for (int yy = y1; yy < y2; ++yy) {
+            for (int xx = x1; xx < x2; ++xx) {
+                roomTypeCache[static_cast<size_t>(yy * d.width + xx)] = static_cast<uint8_t>(room.type);
+            }
+        }
+    }
+
+    auto styleForRoomType = [&](uint8_t rt) -> int {
+        switch (static_cast<RoomType>(rt)) {
+            case RoomType::Treasure: return 1;
+            case RoomType::Lair:     return 2;
+            case RoomType::Shrine:   return 3;
+            case RoomType::Secret:   return 4;
+            case RoomType::Vault:    return 5;
+            case RoomType::Shop:     return 6;
+            case RoomType::Armory:   return 5;
+            case RoomType::Library:  return 3;
+            case RoomType::Laboratory: return 4;
+            case RoomType::Normal:
+            default: return 0;
+        }
+    };
+
+    auto floorStyleAt = [&](int tx, int ty) -> int {
+        if (!d.inBounds(tx, ty)) return 0;
+        const size_t ii = static_cast<size_t>(ty * d.width + tx);
+        if (ii < roomTypeCache.size()) {
+            const int s = styleForRoomType(roomTypeCache[ii]);
+            if (s != 0) return s;
+        }
+
+        // Inherit from adjacent tiles so doors/stairs feel embedded in the room.
+        static const int dx[4] = { 1, -1, 0, 0 };
+        static const int dy[4] = { 0, 0, 1, -1 };
+        for (int k = 0; k < 4; ++k) {
+            const int nx = tx + dx[k];
+            const int ny = ty + dy[k];
+            if (!d.inBounds(nx, ny)) continue;
+            const size_t jj = static_cast<size_t>(ny * d.width + nx);
+            if (jj < roomTypeCache.size()) {
+                const int s2 = styleForRoomType(roomTypeCache[jj]);
+                if (s2 != 0) return s2;
+            }
+        }
+        return 0;
+    };
+
+    const int matCount = static_cast<int>(TERRAIN_MATERIAL_COUNT);
+
+    auto floorIdx = [&](int style, int mat, int v) -> size_t {
+        return static_cast<size_t>(((style * matCount) + mat) * RAYCAST3D_VARIANTS + v);
+    };
+    auto wallIdx = [&](int mat, int v) -> size_t {
+        return static_cast<size_t>((mat * RAYCAST3D_VARIANTS) + v);
+    };
+
+    auto pack = [&](uint8_t r, uint8_t g, uint8_t b, uint8_t a) -> uint32_t {
+        return (static_cast<uint32_t>(r) << pixfmt->Rshift)
+             | (static_cast<uint32_t>(g) << pixfmt->Gshift)
+             | (static_cast<uint32_t>(b) << pixfmt->Bshift)
+             | (static_cast<uint32_t>(a) << pixfmt->Ashift);
+    };
+
+    auto unpack = [&](uint32_t p) -> Color {
+        Color c;
+        c.r = static_cast<uint8_t>((p & pixfmt->Rmask) >> pixfmt->Rshift);
+        c.g = static_cast<uint8_t>((p & pixfmt->Gmask) >> pixfmt->Gshift);
+        c.b = static_cast<uint8_t>((p & pixfmt->Bmask) >> pixfmt->Bshift);
+        c.a = static_cast<uint8_t>((p & pixfmt->Amask) >> pixfmt->Ashift);
+        return c;
+    };
+
+    auto shadeColor = [&](const Color& c, float s) -> Color {
+        s = std::clamp(s, 0.0f, 1.25f);
+        Color out;
+        out.r = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(c.r) * s)), 0, 255));
+        out.g = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(c.g) * s)), 0, 255));
+        out.b = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(static_cast<float>(c.b) * s)), 0, 255));
+        out.a = c.a;
+        return out;
+    };
+
+    // Per-channel modulation (used to apply the game's tile lightmaps to textured raycast surfaces).
+    auto mulColorMod = [&](const Color& c, const Color& mod) -> Color {
+        Color out;
+        out.r = static_cast<uint8_t>((static_cast<int>(c.r) * static_cast<int>(mod.r)) / 255);
+        out.g = static_cast<uint8_t>((static_cast<int>(c.g) * static_cast<int>(mod.g)) / 255);
+        out.b = static_cast<uint8_t>((static_cast<int>(c.b) * static_cast<int>(mod.b)) / 255);
+        out.a = c.a;
+        return out;
+    };
+
+    auto isSolidWall = [&](TileType tt) -> bool {
+        switch (tt) {
+            case TileType::Wall:
+            case TileType::DoorClosed:
+            case TileType::DoorLocked:
+            case TileType::DoorSecret:
+            case TileType::Pillar:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    auto texel = [&](const SpritePixels& tex, int x, int y) -> Color {
+        if (tex.w <= 0 || tex.h <= 0 || tex.px.empty()) return Color{0,0,0,255};
+        x = std::clamp(x, 0, tex.w - 1);
+        y = std::clamp(y, 0, tex.h - 1);
+        return tex.px[static_cast<size_t>(y * tex.w + x)];
+    };
+
+    auto luminance01 = [&](const Color& c) -> float {
+        // Perceptual luma approximation (sRGB weights).
+        return (0.2126f * static_cast<float>(c.r)
+              + 0.7152f * static_cast<float>(c.g)
+              + 0.0722f * static_cast<float>(c.b)) / 255.0f;
+    };
+
+    struct Vec3fLocal {
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 1.0f;
+    };
+
+    auto norm3 = [&](Vec3fLocal v) -> Vec3fLocal {
+        const float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+        if (len <= 1e-6f) return Vec3fLocal{0.0f, 0.0f, 1.0f};
+        return Vec3fLocal{ v.x / len, v.y / len, v.z / len };
+    };
+    auto dot3 = [&](const Vec3fLocal& a, const Vec3fLocal& b) -> float {
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    };
+
+    // Tangent-space-ish torch light direction. Z>0 means the light points "out of" the surface.
+    const Vec3fLocal lightDir = norm3(Vec3fLocal{ -0.35f, -0.25f, 0.90f });
+
+    const bool enableParallax = raycast3DEnableParallax_ && raycast3DParallaxStrengthPct_ > 0;
+    const bool enableSpecular = raycast3DEnableSpecular_ && raycast3DSpecularStrengthPct_ > 0;
+    const float parallaxGlobal = static_cast<float>(raycast3DParallaxStrengthPct_) / 100.0f;
+    const float specularGlobal = static_cast<float>(raycast3DSpecularStrengthPct_) / 100.0f;
+
+    struct MatProps {
+        float spec = 0.05f;      // base specular reflectance (F0-ish, 0..1)
+        float shininess = 16.0f; // Blinn-Phong exponent
+        float relief = 1.0f;     // relative parallax depth scalar
+    };
+
+    auto matProps = [&](TerrainMaterial m) -> MatProps {
+        switch (m) {
+            case TerrainMaterial::Stone:    return MatProps{0.05f, 10.0f, 0.85f};
+            case TerrainMaterial::Brick:    return MatProps{0.06f, 12.0f, 1.00f};
+            case TerrainMaterial::Marble:   return MatProps{0.16f, 42.0f, 0.55f};
+            case TerrainMaterial::Basalt:   return MatProps{0.08f, 18.0f, 0.70f};
+            case TerrainMaterial::Obsidian: return MatProps{0.26f, 72.0f, 0.45f};
+            case TerrainMaterial::Moss:     return MatProps{0.03f,  8.0f, 1.25f};
+            case TerrainMaterial::Dirt:     return MatProps{0.02f,  7.0f, 1.15f};
+            case TerrainMaterial::Wood:     return MatProps{0.12f, 26.0f, 0.90f};
+            case TerrainMaterial::Metal:    return MatProps{0.44f, 120.0f, 0.35f};
+            case TerrainMaterial::Crystal:  return MatProps{0.58f, 140.0f, 0.45f};
+            case TerrainMaterial::Bone:     return MatProps{0.12f, 30.0f, 0.80f};
+            default:                        return MatProps{0.05f, 16.0f, 0.80f};
+        }
+    };
+
+    // Height/normal helpers derived from texture luminance (no extra assets).
+    auto height01 = [&](const SpritePixels& tex, int u, int v) -> float {
+        return std::clamp(luminance01(texel(tex, u, v)), 0.0f, 1.0f);
+    };
+
+    auto bumpNormal = [&](const SpritePixels& tex, int u, int v, float strength) -> Vec3fLocal {
+        const float lL = luminance01(texel(tex, u - 1, v));
+        const float lR = luminance01(texel(tex, u + 1, v));
+        const float lU = luminance01(texel(tex, u, v - 1));
+        const float lD = luminance01(texel(tex, u, v + 1));
+
+        const float dx = (lR - lL);
+        const float dy = (lD - lU);
+
+        return norm3(Vec3fLocal{ -dx * strength, -dy * strength, 1.0f });
+    };
+
+    auto diffuseFromNormal = [&](const Vec3fLocal& n) -> float {
+        const float d = dot3(n, lightDir);
+        return std::clamp(d, 0.0f, 1.0f);
+    };
+
+    auto specularFromNormal = [&](const Vec3fLocal& n, const Vec3fLocal& vDir, const MatProps& mp) -> float {
+        if (!enableSpecular) return 0.0f;
+        const Vec3fLocal h = norm3(Vec3fLocal{ lightDir.x + vDir.x, lightDir.y + vDir.y, lightDir.z + vDir.z });
+        const float ndoth = std::max(0.0f, dot3(n, h));
+        const float ndotv = std::clamp(dot3(n, vDir), 0.0f, 1.0f);
+        const float f = mp.spec + (1.0f - mp.spec) * std::pow(1.0f - ndotv, 5.0f);
+        const float s = f * std::pow(ndoth, mp.shininess);
+        return std::clamp(s, 0.0f, 1.0f);
+    };
+    auto wallTexture = [&](TileType tt, int tx, int ty) -> const SpritePixels& {
+        // Doors use dedicated textures; everything else uses the material wall atlas.
+        const size_t v = pickCoherentVariantIndex(tx, ty, hashCombine(styleSeed, tag32("RC3D_WVAR")), RAYCAST3D_VARIANTS);
+        if (tt == TileType::DoorClosed) {
+            return raycast3DDoorClosedTex_[v];
+        }
+        if (tt == TileType::DoorLocked) {
+            return raycast3DDoorLockedTex_[v];
+        }
+
+        const TerrainMaterial mat = d.materialAtCached(tx, ty);
+        const int mi = std::clamp(static_cast<int>(mat), 0, matCount - 1);
+        return raycast3DWallTex_[wallIdx(mi, static_cast<int>(v))];
+    };
+
+    auto floorTexture = [&](TileType tt, int tx, int ty) -> const SpritePixels& {
+        const size_t v = pickCoherentVariantIndex(tx, ty, hashCombine(styleSeed, tag32("RC3D_FVAR")), RAYCAST3D_VARIANTS);
+        if (tt == TileType::Chasm) {
+            return raycast3DChasmTex_[v];
+        }
+        const TerrainMaterial mat = d.materialAtCached(tx, ty);
+        const int mi = std::clamp(static_cast<int>(mat), 0, matCount - 1);
+        const int style = std::clamp(floorStyleAt(tx, ty), 0, ROOM_STYLES - 1);
+        return raycast3DFloorTex_[floorIdx(style, mi, static_cast<int>(v))];
+    };
+
+    auto ceilingTexture = [&](int tx, int ty) -> const SpritePixels& {
+        const size_t v = pickCoherentVariantIndex(tx, ty, hashCombine(styleSeed, tag32("RC3D_CVAR")), RAYCAST3D_VARIANTS);
+        const TerrainMaterial mat = d.materialAtCached(tx, ty);
+        const int mi = std::clamp(static_cast<int>(mat), 0, matCount - 1);
+        const int style = std::clamp(floorStyleAt(tx, ty), 0, ROOM_STYLES - 1);
+        return raycast3DCeilingTex_[floorIdx(style, mi, static_cast<int>(v))];
+    };
+
+    // ---------------------------------------------------------------------
+    // Lighting integration (darkness + colored light maps)
+    // ---------------------------------------------------------------------
+    const bool dark = game.darknessActive();
+
+    auto lightMod = [&](int x, int y) -> uint8_t {
+        // Keep visible-but-unlit tiles from going fully black (darkvision / “memory” readability).
+        if (!dark) return 255;
+        const uint8_t L = game.tileLightLevel(x, y);
+        constexpr int kMin = 40;
+        const int mod = kMin + (static_cast<int>(L) * (255 - kMin)) / 255;
+        return static_cast<uint8_t>(std::clamp(mod, 0, 255));
+    };
+
+    // Match the 2D renderer's subtle per-depth color grading.
+    auto depthTint = [&]() -> Color {
+        // Subtle per-depth color grading (keeps deeper levels feeling “colder”/”older” without
+        // turning everything monochrome). Deterministic per run/level, but not “chunky”.
+        const int depth = game.depth();
+        const uint32_t base = hashCombine(styleSeed, static_cast<uint32_t>(depth * 1315423911u));
+        const float t = std::clamp(static_cast<float>(depth) / 22.0f, 0.0f, 1.0f);
+
+        auto lerp = [](float a, float b, float t_) { return a + (b - a) * t_; };
+        auto jitter = [&](int channelTag) {
+            const uint32_t h = hashCombine(base, static_cast<uint32_t>(channelTag));
+            // [-1, +1]
+            const float r = (static_cast<float>(h & 0xffffu) / 32767.5f) - 1.0f;
+            return r;
+        };
+
+        // Depth curve: near levels keep close to white; deeper gradually shift.
+        // Palette differs by UI theme.
+        Color warmA{255, 248, 235, 255};
+        Color warmB{232, 215, 190, 255};
+        Color coolA{235, 244, 255, 255};
+        Color coolB{195, 214, 232, 255};
+        Color neutralA{245, 245, 245, 255};
+        Color neutralB{210, 210, 210, 255};
+
+        Color a = neutralA;
+        Color b = neutralB;
+        switch (game.uiTheme) {
+            case UITheme::Classic:
+                a = warmA;
+                b = warmB;
+                break;
+            case UITheme::Dim:
+                a = coolA;
+                b = coolB;
+                break;
+            case UITheme::Hicon:
+                a = neutralA;
+                b = neutralB;
+                break;
+        }
+
+        // Optional gentle wobble so consecutive depths don't look identical.
+        const float wobble = 0.04f;
+        const float jr = jitter(1) * wobble;
+        const float jg = jitter(2) * wobble;
+        const float jb = jitter(3) * wobble;
+
+        const float rr = std::clamp(lerp(static_cast<float>(a.r), static_cast<float>(b.r), t) * (1.0f + jr), 0.0f, 255.0f);
+        const float gg = std::clamp(lerp(static_cast<float>(a.g), static_cast<float>(b.g), t) * (1.0f + jg), 0.0f, 255.0f);
+        const float bb = std::clamp(lerp(static_cast<float>(a.b), static_cast<float>(b.b), t) * (1.0f + jb), 0.0f, 255.0f);
+        return Color{static_cast<uint8_t>(rr), static_cast<uint8_t>(gg), static_cast<uint8_t>(bb), 255};
+    };
+
+    const Color tint = depthTint();
+
+    // Gather torch sources for subtle per-frame flame flicker. (The lightmap already handles
+    // intensity; this is just a tiny animated multiplier to make the first-person view feel alive.)
+    struct TorchSrc {
+        Vec2i pos;
+        int radius = 7;
+        float strength = 1.0f;
+    };
+    std::vector<TorchSrc> torches;
+    if (dark) {
+        // Player-held torch.
+        for (const auto& it : game.inventory()) {
+            if (it.kind == ItemKind::TorchLit && it.charges > 0) {
+                torches.push_back(TorchSrc{game.player().pos, 7, 1.0f});
+                break;
+            }
+        }
+        // Ground torches.
+        for (const auto& gi : game.groundItems()) {
+            if (gi.item.kind == ItemKind::TorchLit && gi.item.charges > 0) {
+                torches.push_back(TorchSrc{gi.pos, 7, 0.9f});
+            }
+        }
+        // Monster torches.
+        for (const auto& e : game.entities()) {
+            if (e.id == game.player().id) continue;
+            for (const auto& it : e.pocket.consumables) {
+                if (it.kind == ItemKind::TorchLit && it.charges > 0) {
+                    torches.push_back(TorchSrc{e.pos, 7, 0.85f});
+                    break;
+                }
+            }
+        }
+    }
+
+    auto idxTile = [&](int x, int y) -> size_t {
+        return static_cast<size_t>(y * d.width + x);
+    };
+
+    std::vector<float> torchFlickerCache;
+    torchFlickerCache.assign(static_cast<size_t>(d.width * d.height), 1.0f);
+    if (!torches.empty()) {
+        const uint32_t ticks = SDL_GetTicks();
+        const float time = static_cast<float>(ticks) * 0.014f;
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                float best = 0.0f;
+                Vec2i bestPos{x, y};
+                for (const auto& t : torches) {
+                    const float dx = static_cast<float>(x - t.pos.x);
+                    const float dy = static_cast<float>(y - t.pos.y);
+                    const float d2 = dx * dx + dy * dy;
+                    const float r2 = static_cast<float>(t.radius * t.radius);
+                    if (d2 >= r2) continue;
+                    const float att = (1.0f - std::sqrt(d2 / r2)) * t.strength;
+                    if (att > best) {
+                        best = att;
+                        bestPos = t.pos;
+                    }
+                }
+
+                if (best > 0.0f) {
+                    const float seed = static_cast<float>(bestPos.x * 17 + bestPos.y * 31);
+                    const float w1 = std::sin(time + seed);
+                    const float w2 = std::sin(time * 2.13f + seed * 0.7f);
+                    const float w = (w1 * 0.6f + w2 * 0.4f);
+                    const float f = std::clamp(1.0f + best * 0.05f * w, 0.90f, 1.10f);
+                    torchFlickerCache[idxTile(x, y)] = f;
+                }
+            }
+        }
+    }
+
+    // Per-tile RGB modulation cache (depth tint + lightmap + visibility/explored).
+    std::vector<Color> tileModCache;
+    tileModCache.assign(static_cast<size_t>(d.width * d.height), Color{0, 0, 0, 255});
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const Tile& t = d.at(x, y);
+            const size_t i = idxTile(x, y);
+
+            if (!t.explored) {
+                tileModCache[i] = Color{0, 0, 0, 255};
+                continue;
+            }
+
+            if (!t.visible) {
+                const uint8_t base = dark ? 30u : 80u;
+                tileModCache[i] = Color{
+                    static_cast<uint8_t>((static_cast<int>(base) * static_cast<int>(tint.r)) / 255),
+                    static_cast<uint8_t>((static_cast<int>(base) * static_cast<int>(tint.g)) / 255),
+                    static_cast<uint8_t>((static_cast<int>(base) * static_cast<int>(tint.b)) / 255),
+                    255
+                };
+                continue;
+            }
+
+            Color out = tint;
+            if (dark) {
+                const uint8_t m = lightMod(x, y);
+                Color lc = game.tileLightColor(x, y);
+
+                // If we're in darkness but the tile is visible (short-radius vision), keep it readable.
+                if (lc.r == 0 && lc.g == 0 && lc.b == 0) {
+                    lc = Color{m, m, m, 255};
+                } else {
+                    const int minChan = std::max(0, static_cast<int>(m) / 4);
+                    lc.r = static_cast<uint8_t>(std::max(static_cast<int>(lc.r), minChan));
+                    lc.g = static_cast<uint8_t>(std::max(static_cast<int>(lc.g), minChan));
+                    lc.b = static_cast<uint8_t>(std::max(static_cast<int>(lc.b), minChan));
+                }
+
+                out = Color{
+                    static_cast<uint8_t>((static_cast<int>(lc.r) * static_cast<int>(tint.r)) / 255),
+                    static_cast<uint8_t>((static_cast<int>(lc.g) * static_cast<int>(tint.g)) / 255),
+                    static_cast<uint8_t>((static_cast<int>(lc.b) * static_cast<int>(tint.b)) / 255),
+                    255
+                };
+
+                const float f = torchFlickerCache[i];
+                if (f != 1.0f) {
+                    out = shadeColor(out, f);
+                }
+            }
+
+            tileModCache[i] = out;
+        }
+    }
+
+    // Clear frame (baseline) as we draw columns.
+    raycast3DFramePixels_.assign(static_cast<size_t>(w) * static_cast<size_t>(h), pack(0, 0, 0, 255));
+
+    // Per-column depth buffer (used for billboard sprite occlusion).
+    std::vector<float> zBuffer(static_cast<size_t>(w), 1e9f);
+
+    // Draw each vertical column.
+    for (int x = 0; x < w; ++x) {
+        const float cameraX = 2.0f * static_cast<float>(x) / static_cast<float>(w) - 1.0f;
+        const float rayDirX = dir.x + plane.x * cameraX;
+        const float rayDirY = dir.y + plane.y * cameraX;
+
+        int mapX = static_cast<int>(posX);
+        int mapY = static_cast<int>(posY);
+
+        const float deltaDistX = (rayDirX == 0.0f) ? 1e30f : std::abs(1.0f / rayDirX);
+        const float deltaDistY = (rayDirY == 0.0f) ? 1e30f : std::abs(1.0f / rayDirY);
+
+        float sideDistX = 0.0f;
+        float sideDistY = 0.0f;
+        int stepX = 0;
+        int stepY = 0;
+
+        if (rayDirX < 0.0f) {
+            stepX = -1;
+            sideDistX = (posX - static_cast<float>(mapX)) * deltaDistX;
+        } else {
+            stepX = 1;
+            sideDistX = (static_cast<float>(mapX) + 1.0f - posX) * deltaDistX;
+        }
+        if (rayDirY < 0.0f) {
+            stepY = -1;
+            sideDistY = (posY - static_cast<float>(mapY)) * deltaDistY;
+        } else {
+            stepY = 1;
+            sideDistY = (static_cast<float>(mapY) + 1.0f - posY) * deltaDistY;
+        }
+
+        bool hit = false;
+        int side = 0; // 0 = x-side, 1 = y-side
+        TileType hitType = TileType::Wall;
+        bool hitExplored = false;
+        bool hitVisible = false;
+
+        // DDA traversal
+        for (int iter = 0; iter < 128; ++iter) {
+            if (sideDistX < sideDistY) {
+                sideDistX += deltaDistX;
+                mapX += stepX;
+                side = 0;
+            } else {
+                sideDistY += deltaDistY;
+                mapY += stepY;
+                side = 1;
+            }
+
+            if (!d.inBounds(mapX, mapY)) {
+                hit = true;
+                hitType = TileType::Wall;
+                hitExplored = false;
+                hitVisible = false;
+                break;
+            }
+
+            const Tile& t = d.at(mapX, mapY);
+            hitExplored = t.explored;
+            hitVisible = t.visible;
+            hitType = t.type;
+
+            // Do not reveal unknown tiles: treat unexplored as an opaque black wall.
+            if (!t.explored) {
+                hit = true;
+                break;
+            }
+
+            if (isSolidWall(t.type)) {
+                hit = true;
+                break;
+            }
+        }
+
+        // Distance to wall
+        float perpDist = 1e30f;
+        if (hit) {
+            if (side == 0) {
+                perpDist = (sideDistX - deltaDistX);
+            } else {
+                perpDist = (sideDistY - deltaDistY);
+            }
+        }
+        perpDist = std::clamp(perpDist, 0.05f, 64.0f);
+        zBuffer[static_cast<size_t>(x)] = perpDist;
+
+        const int lineHeight = static_cast<int>(static_cast<float>(h) / perpDist);
+        int drawStart = -lineHeight / 2 + h / 2;
+        int drawEnd = lineHeight / 2 + h / 2;
+        drawStart = std::max(0, drawStart);
+        drawEnd = std::min(h - 1, drawEnd);
+
+        // Compute texture coordinate on wall.
+        float wallX = 0.0f;
+        if (side == 0) wallX = posY + perpDist * rayDirY;
+        else          wallX = posX + perpDist * rayDirX;
+        wallX -= std::floor(wallX);
+
+        // Wall tex selection.
+        const SpritePixels& wtex = wallTexture(hitType, mapX, mapY);
+        const int texW = (wtex.w > 0) ? wtex.w : 64;
+        const int texH = (wtex.h > 0) ? wtex.h : 64;
+
+        int texX = static_cast<int>(wallX * static_cast<float>(texW));
+        if (side == 0 && rayDirX > 0) texX = texW - texX - 1;
+        if (side == 1 && rayDirY < 0) texX = texW - texX - 1;
+        texX = std::clamp(texX, 0, texW - 1);
+
+        // Basic shading: distance fog + side darkening.
+        // Visibility/explored tinting is handled by the per-tile modulation cache so we
+        // don't double-dim non-visible (memory) surfaces.
+        float shade = 1.0f / (1.0f + perpDist * perpDist * 0.08f);
+        if (side == 1) shade *= 0.85f;
+        if (!hitExplored) shade = 0.0f;
+
+        const Color wallMod = d.inBounds(mapX, mapY) ? tileModCache[idxTile(mapX, mapY)] : Color{0, 0, 0, 255};
+
+        if (!raycast3DEnableCeiling_) {
+            // Ceiling (simple gradient) fallback when ceiling textures are disabled.
+            for (int y = 0; y < drawStart; ++y) {
+                const float t = static_cast<float>(y) / static_cast<float>(std::max(1, h / 2));
+                const float cs = 0.15f + 0.25f * (1.0f - t);
+                const uint8_t c = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(255.0f * cs)), 0, 255));
+                raycast3DFramePixels_[static_cast<size_t>(y * w + x)] = pack(c, c, c, 255);
+            }
+        }
+
+        const TerrainMaterial wmat = d.materialAtCached(mapX, mapY);
+        const MatProps wmp = matProps(wmat);
+
+        // View direction in "texture/tangent space" for shading (x = along U, y = along V, z = out of surface).
+        Vec3fLocal vWall{0.0f, 0.0f, 1.0f};
+        float viewTan = 0.0f;
+        if (side == 0) {
+            const float n = std::max(0.001f, std::abs(rayDirX));
+            vWall = norm3(Vec3fLocal{ -rayDirY, 0.0f, n });
+            viewTan = (-rayDirY) / n;
+        } else {
+            const float n = std::max(0.001f, std::abs(rayDirY));
+            vWall = norm3(Vec3fLocal{ -rayDirX, 0.0f, n });
+            viewTan = (-rayDirX) / n;
+        }
+        viewTan = std::clamp(viewTan, -2.5f, 2.5f);
+
+        // Parallax depth in texture pixels (fades with distance).
+        const float parallaxPx = (enableParallax ? (2.8f * parallaxGlobal * wmp.relief / (1.0f + perpDist * 0.45f)) : 0.0f);
+
+        // Wall slice.
+        for (int y = drawStart; y <= drawEnd; ++y) {
+            // texY in [0,texH)
+            const int dY = (y * 256) - (h * 128) + (lineHeight * 128);
+            int texY = ((dY * texH) / std::max(1, lineHeight)) / 256;
+            texY = std::clamp(texY, 0, texH - 1);
+
+            int u = texX;
+            if (parallaxPx > 0.001f) {
+                int uIt = u;
+                for (int it = 0; it < 2; ++it) {
+                    const float h01 = height01(wtex, uIt, texY);
+                    const float off = (h01 - 0.5f) * viewTan * parallaxPx;
+                    uIt = std::clamp(texX + static_cast<int>(std::lround(off)), 0, texW - 1);
+                }
+                u = uIt;
+            }
+
+            Color c = texel(wtex, u, texY);
+            c = mulColorMod(c, wallMod);
+
+            float s = shade;
+
+            Vec3fLocal nrm{0.0f, 0.0f, 1.0f};
+            if (raycast3DEnableBump_) {
+                nrm = bumpNormal(wtex, u, texY, 2.2f);
+                const float diff = diffuseFromNormal(nrm);
+                s *= (0.72f + 0.28f * diff);
+            }
+
+            c = shadeColor(c, s);
+
+            if (enableSpecular && hitVisible) {
+                const float sp = specularFromNormal(nrm, vWall, wmp) * specularGlobal * shade * 0.90f;
+                const float lr = static_cast<float>(wallMod.r) / 255.0f;
+                const float lg = static_cast<float>(wallMod.g) / 255.0f;
+                const float lb = static_cast<float>(wallMod.b) / 255.0f;
+                const int addR = static_cast<int>(std::lround(255.0f * sp * lr));
+                const int addG = static_cast<int>(std::lround(255.0f * sp * lg));
+                const int addB = static_cast<int>(std::lround(255.0f * sp * lb));
+                c.r = static_cast<uint8_t>(std::clamp(static_cast<int>(c.r) + addR, 0, 255));
+                c.g = static_cast<uint8_t>(std::clamp(static_cast<int>(c.g) + addG, 0, 255));
+                c.b = static_cast<uint8_t>(std::clamp(static_cast<int>(c.b) + addB, 0, 255));
+            }
+
+            raycast3DFramePixels_[static_cast<size_t>(y * w + x)] = pack(c.r, c.g, c.b, 255);
+        }
+
+        // Floor casting (textured).
+        // Determine the exact position where the wall was hit.
+        float floorXWall = 0.0f;
+        float floorYWall = 0.0f;
+
+        if (side == 0 && rayDirX > 0) {
+            floorXWall = static_cast<float>(mapX);
+            floorYWall = static_cast<float>(mapY) + wallX;
+        } else if (side == 0 && rayDirX < 0) {
+            floorXWall = static_cast<float>(mapX) + 1.0f;
+            floorYWall = static_cast<float>(mapY) + wallX;
+        } else if (side == 1 && rayDirY > 0) {
+            floorXWall = static_cast<float>(mapX) + wallX;
+            floorYWall = static_cast<float>(mapY);
+        } else {
+            floorXWall = static_cast<float>(mapX) + wallX;
+            floorYWall = static_cast<float>(mapY) + 1.0f;
+        }
+
+        const float distWall = perpDist;
+        const float distPlayer = 0.0f;
+
+        if (raycast3DEnableCeiling_) {
+            for (int y = 0; y < drawStart; ++y) {
+                // Ceiling row distance (mirrors floor casting).
+                const float currentDist = static_cast<float>(h) / (static_cast<float>(h) - 2.0f * static_cast<float>(y));
+                const float weight = (distWall == 0.0f) ? 1.0f : (currentDist - distPlayer) / (distWall - distPlayer);
+
+                const float curX = weight * floorXWall + (1.0f - weight) * posX;
+                const float curY = weight * floorYWall + (1.0f - weight) * posY;
+
+                const int tx = static_cast<int>(std::floor(curX));
+                const int ty = static_cast<int>(std::floor(curY));
+                const float fx = curX - static_cast<float>(tx);
+                const float fy = curY - static_cast<float>(ty);
+
+                if (!d.inBounds(tx, ty)) {
+                    raycast3DFramePixels_[static_cast<size_t>(y * w + x)] = pack(0, 0, 0, 255);
+                    continue;
+                }
+
+                const Tile& ct = d.at(tx, ty);
+                if (!ct.explored) {
+                    raycast3DFramePixels_[static_cast<size_t>(y * w + x)] = pack(0, 0, 0, 255);
+                    continue;
+                }
+
+                const SpritePixels& ctex = ceilingTexture(tx, ty);
+                const int cW = (ctex.w > 0) ? ctex.w : 64;
+                const int cH = (ctex.h > 0) ? ctex.h : 64;
+
+                const TerrainMaterial cmat = d.materialAtCached(tx, ty);
+                const MatProps cmp = matProps(cmat);
+
+                // View dir from surface point toward the camera, in texture-space-ish coordinates.
+                const Vec3fLocal vDir = norm3(Vec3fLocal{ posX - curX, posY - curY, 0.85f });
+
+                float fxP = fx;
+                float fyP = fy;
+                int u = static_cast<int>(fxP * static_cast<float>(cW));
+                int v = static_cast<int>(fyP * static_cast<float>(cH));
+                u = std::clamp(u, 0, cW - 1);
+                v = std::clamp(v, 0, cH - 1);
+
+                if (enableParallax) {
+                    const float ang = std::clamp(1.0f - vDir.z, 0.0f, 1.0f);
+                    const float h01 = height01(ctex, u, v);
+                    const float par = (h01 - 0.5f) * (0.10f * parallaxGlobal * cmp.relief) * (0.35f + 0.65f * ang) / (1.0f + currentDist * 0.35f);
+                    fxP = std::clamp(fx + vDir.x * par, 0.0f, 0.999f);
+                    fyP = std::clamp(fy + vDir.y * par, 0.0f, 0.999f);
+                    u = std::clamp(static_cast<int>(fxP * static_cast<float>(cW)), 0, cW - 1);
+                    v = std::clamp(static_cast<int>(fyP * static_cast<float>(cH)), 0, cH - 1);
+                }
+
+                Color c = texel(ctex, u, v);
+                const Color cMod = tileModCache[idxTile(tx, ty)];
+                c = mulColorMod(c, cMod);
+
+                float cShade = 1.0f / (1.0f + currentDist * currentDist * 0.05f);
+                cShade *= 0.85f; // ceilings are naturally darker
+
+                // Contact shadow near the wall/ceiling seam.
+                const float cContact = std::clamp(1.0f - (std::abs(currentDist - distWall) / 0.75f), 0.0f, 1.0f);
+                cShade *= (1.0f - 0.14f * cContact);
+
+                Vec3fLocal nrm{0.0f, 0.0f, 1.0f};
+                if (raycast3DEnableBump_) {
+                    nrm = bumpNormal(ctex, u, v, 1.6f);
+                    const float diff = diffuseFromNormal(nrm);
+                    cShade *= (0.74f + 0.26f * diff);
+                }
+
+                cShade = std::clamp(cShade, 0.0f, 1.15f);
+
+                c = shadeColor(c, cShade);
+
+                if (enableSpecular && ct.visible) {
+                    const float sp = specularFromNormal(nrm, vDir, cmp) * specularGlobal * cShade * 0.75f;
+                    const float lr = static_cast<float>(cMod.r) / 255.0f;
+                    const float lg = static_cast<float>(cMod.g) / 255.0f;
+                    const float lb = static_cast<float>(cMod.b) / 255.0f;
+                    const int addR = static_cast<int>(std::lround(255.0f * sp * lr));
+                    const int addG = static_cast<int>(std::lround(255.0f * sp * lg));
+                    const int addB = static_cast<int>(std::lround(255.0f * sp * lb));
+                    c.r = static_cast<uint8_t>(std::clamp(static_cast<int>(c.r) + addR, 0, 255));
+                    c.g = static_cast<uint8_t>(std::clamp(static_cast<int>(c.g) + addG, 0, 255));
+                    c.b = static_cast<uint8_t>(std::clamp(static_cast<int>(c.b) + addB, 0, 255));
+                }
+
+                raycast3DFramePixels_[static_cast<size_t>(y * w + x)] = pack(c.r, c.g, c.b, 255);
+            }
+        }
+
+        for (int y = drawEnd + 1; y < h; ++y) {
+            // row distance
+            const float currentDist = static_cast<float>(h) / (2.0f * static_cast<float>(y) - static_cast<float>(h));
+            const float weight = (distWall == 0.0f) ? 1.0f : (currentDist - distPlayer) / (distWall - distPlayer);
+
+            const float curX = weight * floorXWall + (1.0f - weight) * posX;
+            const float curY = weight * floorYWall + (1.0f - weight) * posY;
+
+            const int tx = static_cast<int>(std::floor(curX));
+            const int ty = static_cast<int>(std::floor(curY));
+            const float fx = curX - static_cast<float>(tx);
+            const float fy = curY - static_cast<float>(ty);
+
+            if (!d.inBounds(tx, ty)) {
+                raycast3DFramePixels_[static_cast<size_t>(y * w + x)] = pack(0, 0, 0, 255);
+                continue;
+            }
+
+            const Tile& ft = d.at(tx, ty);
+            if (!ft.explored) {
+                raycast3DFramePixels_[static_cast<size_t>(y * w + x)] = pack(0, 0, 0, 255);
+                continue;
+            }
+
+            const SpritePixels& ftex = floorTexture(ft.type, tx, ty);
+            const int fW = (ftex.w > 0) ? ftex.w : 64;
+            const int fH = (ftex.h > 0) ? ftex.h : 64;
+
+            const TerrainMaterial fmat = d.materialAtCached(tx, ty);
+            MatProps fmp = matProps(fmat);
+
+            // Chasms are meant to read as deep/absorbing rather than shiny.
+            if (ft.type == TileType::Chasm) {
+                fmp.spec *= 0.25f;
+                fmp.relief *= 0.55f;
+            }
+
+            // View dir from surface point toward the camera, in texture-space-ish coordinates.
+            const Vec3fLocal vDir = norm3(Vec3fLocal{ posX - curX, posY - curY, 0.85f });
+
+            float fxP = fx;
+            float fyP = fy;
+            int u = static_cast<int>(fxP * static_cast<float>(fW));
+            int v = static_cast<int>(fyP * static_cast<float>(fH));
+            u = std::clamp(u, 0, fW - 1);
+            v = std::clamp(v, 0, fH - 1);
+
+            if (enableParallax) {
+                const float ang = std::clamp(1.0f - vDir.z, 0.0f, 1.0f);
+                const float h01 = height01(ftex, u, v);
+                const float par = (h01 - 0.5f) * (0.12f * parallaxGlobal * fmp.relief) * (0.35f + 0.65f * ang) / (1.0f + currentDist * 0.25f);
+                fxP = std::clamp(fx + vDir.x * par, 0.0f, 0.999f);
+                fyP = std::clamp(fy + vDir.y * par, 0.0f, 0.999f);
+                u = std::clamp(static_cast<int>(fxP * static_cast<float>(fW)), 0, fW - 1);
+                v = std::clamp(static_cast<int>(fyP * static_cast<float>(fH)), 0, fH - 1);
+            }
+
+            Color c = texel(ftex, u, v);
+            const Color fMod = tileModCache[idxTile(tx, ty)];
+            c = mulColorMod(c, fMod);
+
+            float fShade = 1.0f / (1.0f + currentDist * currentDist * 0.04f);
+
+            // Contact shadow near the wall/floor seam.
+            const float fContact = std::clamp(1.0f - (std::abs(currentDist - distWall) / 0.75f), 0.0f, 1.0f);
+            fShade *= (1.0f - 0.18f * fContact);
+
+            Vec3fLocal nrm{0.0f, 0.0f, 1.0f};
+            if (raycast3DEnableBump_) {
+                nrm = bumpNormal(ftex, u, v, 1.9f);
+                const float diff = diffuseFromNormal(nrm);
+                fShade *= (0.74f + 0.26f * diff);
+            }
+
+            // Optional micro-variation bump to break up large flat spans.
+            const uint32_t bumpSeed = hashCombine(lvlSeed, tag32("RC3D_BUMP"));
+            const int bx = tx * 17 + static_cast<int>(std::floor(fxP * 64.0f));
+            const int by = ty * 17 + static_cast<int>(std::floor(fyP * 64.0f));
+            const float bump = fractalNoise2D01(bx, by, bumpSeed) * 0.06f; // 0..~0.06
+
+            fShade = std::clamp(fShade + bump, 0.0f, 1.15f);
+
+            c = shadeColor(c, fShade);
+
+            if (enableSpecular && ft.visible) {
+                float sp = specularFromNormal(nrm, vDir, fmp) * specularGlobal * fShade;
+                if (ft.type == TileType::Chasm) sp *= 0.45f;
+                const float lr = static_cast<float>(fMod.r) / 255.0f;
+                const float lg = static_cast<float>(fMod.g) / 255.0f;
+                const float lb = static_cast<float>(fMod.b) / 255.0f;
+                const int addR = static_cast<int>(std::lround(255.0f * sp * lr));
+                const int addG = static_cast<int>(std::lround(255.0f * sp * lg));
+                const int addB = static_cast<int>(std::lround(255.0f * sp * lb));
+                c.r = static_cast<uint8_t>(std::clamp(static_cast<int>(c.r) + addR, 0, 255));
+                c.g = static_cast<uint8_t>(std::clamp(static_cast<int>(c.g) + addG, 0, 255));
+                c.b = static_cast<uint8_t>(std::clamp(static_cast<int>(c.b) + addB, 0, 255));
+            }
+
+            raycast3DFramePixels_[static_cast<size_t>(y * w + x)] = pack(c.r, c.g, c.b, 255);
+        }
+    }
+
+
+
+    // ---------------------------------------------------------------------
+    // Billboard sprites (entities + ground items)
+    //
+    // Rendered after walls/floor/ceiling into the software frame buffer, using
+    // the per-column z-buffer (zBuffer) for correct wall occlusion.
+    // ---------------------------------------------------------------------
+    if ((raycast3DEnableSprites_ || raycast3DEnableItems_) && !zBuffer.empty()) {
+        // Keep keys distinct from the SDL texture cache (spriteTex) even though we use
+        // the same packing helper (makeSpriteKey).
+        constexpr uint8_t CAT_RC3D_ENTITY = 4;
+        constexpr uint8_t CAT_RC3D_ITEM = 5;
+
+        // Sprite sheet resolution for billboard drawing (procedural pixel-art).
+        // 64 is a good quality/perf sweet spot for low-res raycast targets.
+        const int spritePx = 64;
+        const bool use3dSprite = voxelSpritesCached;
+        const uint16_t flagsCommon = static_cast<uint16_t>((use3dSprite ? 1u : 0u) | ((static_cast<uint16_t>(spritePx) & 0xFFu) << 8));
+
+        auto getSpriteFrames = [&](uint64_t key, auto&& genFrame) -> std::array<SpritePixels, FRAMES>& {
+            auto it = raycast3DSpriteCache_.find(key);
+            if (it != raycast3DSpriteCache_.end()) {
+                // Touch LRU.
+                raycast3DSpriteLRU_.erase(it->second.lruIt);
+                raycast3DSpriteLRU_.push_front(key);
+                it->second.lruIt = raycast3DSpriteLRU_.begin();
+                return it->second.frames;
+            }
+
+            Raycast3DSpriteEntry ent;
+            for (int f = 0; f < FRAMES; ++f) {
+                ent.frames[static_cast<size_t>(f)] = genFrame(f);
+            }
+
+            raycast3DSpriteLRU_.push_front(key);
+            ent.lruIt = raycast3DSpriteLRU_.begin();
+
+            auto res = raycast3DSpriteCache_.emplace(key, std::move(ent));
+            it = res.first;
+
+            // Evict old entries if we exceed the budget.
+            while (raycast3DSpriteCache_.size() > raycast3DSpriteCacheMax_ && !raycast3DSpriteLRU_.empty()) {
+                const uint64_t oldKey = raycast3DSpriteLRU_.back();
+                raycast3DSpriteLRU_.pop_back();
+                raycast3DSpriteCache_.erase(oldKey);
+            }
+
+            return it->second.frames;
+        };
+
+        struct Billboard {
+            float wx = 0.0f;
+            float wy = 0.0f;
+            float dist2 = 0.0f;
+            uint8_t cat = 0;
+            uint8_t kind = 0;
+            uint32_t seed = 0u;
+            Color mod{255, 255, 255, 255};
+            int phase = 0;
+            float scale = 1.0f;
+            float vOffset = 0.0f; // fraction of sprite height (positive moves down)
+        };
+
+        std::vector<Billboard> sprites;
+        sprites.reserve(game.entities().size() + game.groundItems().size());
+
+        const bool hallucinating = isHallucinating(game);
+
+        if (raycast3DEnableSprites_) {
+            for (const Entity& e0 : game.entities()) {
+                if (e0.id == pl.id) continue;
+                if (e0.hp <= 0) continue;
+                if (!d.inBounds(e0.pos.x, e0.pos.y)) continue;
+
+                const Tile& t = d.at(e0.pos.x, e0.pos.y);
+                if (!t.visible) continue;
+
+                EntityKind visKind = e0.kind;
+                if (hallucinating) {
+                    visKind = hallucinatedEntityKind(game, e0);
+                }
+
+                // Start at tile center.
+                float ex = static_cast<float>(e0.pos.x) + 0.5f;
+                float ey = static_cast<float>(e0.pos.y) + 0.5f;
+
+                // If the renderer already has a move tween for this entity, use it so
+                // 3D billboards animate smoothly between tiles.
+                auto itE = procAnimById_.find(e0.id);
+                if (itE != procAnimById_.end()) {
+                    const auto& st = itE->second;
+                    if (st.moveDuration > 0.0f && st.moveTime < st.moveDuration) {
+                        float t01 = st.moveTime / st.moveDuration;
+                        t01 = std::clamp(t01, 0.0f, 1.0f);
+                        t01 = t01 * t01 * (3.0f - 2.0f * t01); // smoothstep
+                        ex = (static_cast<float>(st.moveFrom.x) + (static_cast<float>(st.moveTo.x) - static_cast<float>(st.moveFrom.x)) * t01) + 0.5f;
+                        ey = (static_cast<float>(st.moveFrom.y) + (static_cast<float>(st.moveTo.y) - static_cast<float>(st.moveFrom.y)) * t01) + 0.5f;
+                    }
+                }
+
+                const float dx = ex - posX;
+                const float dy = ey - posY;
+                const float dist2 = dx * dx + dy * dy;
+                if (dist2 < 0.0001f) continue;
+                if (dist2 > 400.0f) continue; // too far for a readable billboard
+
+                const int tx = std::clamp(static_cast<int>(ex), 0, d.width - 1);
+                const int ty = std::clamp(static_cast<int>(ey), 0, d.height - 1);
+                const size_t ti = static_cast<size_t>(ty * d.width + tx);
+                const Color mod = (ti < tileModCache.size()) ? tileModCache[ti] : Color{255, 255, 255, 255};
+
+                Billboard bb;
+                bb.wx = ex;
+                bb.wy = ey;
+                bb.dist2 = dist2;
+                bb.cat = CAT_RC3D_ENTITY;
+                bb.kind = static_cast<uint8_t>(visKind);
+                bb.seed = e0.spriteSeed;
+                bb.mod = mod;
+                bb.phase = e0.id;
+                bb.scale = 1.0f;
+                bb.vOffset = 0.0f;
+                sprites.push_back(bb);
+            }
+        }
+
+        if (raycast3DEnableItems_) {
+            for (const GroundItem& gi0 : game.groundItems()) {
+                if (!d.inBounds(gi0.pos.x, gi0.pos.y)) continue;
+                const Tile& t = d.at(gi0.pos.x, gi0.pos.y);
+                if (!t.visible) continue;
+
+                Item visItem = gi0.item;
+                if (hallucinating) {
+                    visItem.kind = hallucinatedItemKind(game, gi0.item);
+                }
+                applyIdentificationVisuals(game, visItem);
+                const uint32_t seed = itemVisualSpriteSeed(visItem);
+
+                float ix = static_cast<float>(gi0.pos.x) + 0.5f;
+                float iy = static_cast<float>(gi0.pos.y) + 0.5f;
+
+                // Small deterministic sub-tile scatter to reduce stacking artifacts.
+                const uint32_t h32 = hash32(hashCombine(static_cast<uint32_t>(gi0.item.id), lvlSeed ^ 0xC011EC7u));
+                const float ox = (static_cast<float>(h32 & 0xFFu) / 255.0f - 0.5f) * 0.25f;
+                const float oy = (static_cast<float>((h32 >> 8) & 0xFFu) / 255.0f - 0.5f) * 0.25f;
+                ix += ox;
+                iy += oy;
+
+                const float dx = ix - posX;
+                const float dy = iy - posY;
+                const float dist2 = dx * dx + dy * dy;
+                if (dist2 < 0.0001f) continue;
+                if (dist2 > 64.0f) continue; // items get visually noisy at long range
+
+                const size_t ti = static_cast<size_t>(gi0.pos.y * d.width + gi0.pos.x);
+                const Color mod = (ti < tileModCache.size()) ? tileModCache[ti] : Color{255, 255, 255, 255};
+
+                Billboard bb;
+                bb.wx = ix;
+                bb.wy = iy;
+                bb.dist2 = dist2;
+                bb.cat = CAT_RC3D_ITEM;
+                bb.kind = static_cast<uint8_t>(visItem.kind);
+                bb.seed = seed;
+                bb.mod = mod;
+                bb.phase = gi0.item.id;
+                bb.scale = 0.55f;
+                bb.vOffset = 0.35f; // sit closer to the floor
+                sprites.push_back(bb);
+            }
+        }
+
+        if (!sprites.empty()) {
+            std::sort(sprites.begin(), sprites.end(), [](const Billboard& a, const Billboard& b) {
+                return a.dist2 > b.dist2;
+            });
+
+            const float det = (plane.x * dir.y - dir.x * plane.y);
+            if (std::abs(det) > 1e-6f) {
+                const float invDet = 1.0f / det;
+
+                for (const Billboard& sp : sprites) {
+                    const float sprX = sp.wx - posX;
+                    const float sprY = sp.wy - posY;
+
+                    // Transform sprite into camera space.
+                    const float transformX = invDet * (dir.y * sprX - dir.x * sprY);
+                    const float transformY = invDet * (-plane.y * sprX + plane.x * sprY);
+
+                    // Behind camera.
+                    if (transformY <= 0.05f) continue;
+
+                    const int spriteScreenX = static_cast<int>((static_cast<float>(w) / 2.0f) * (1.0f + transformX / transformY));
+
+                    int spriteH = static_cast<int>(std::abs(static_cast<float>(h) / transformY) * sp.scale);
+                    spriteH = std::clamp(spriteH, 2, h * 3);
+                    const int spriteW = spriteH;
+
+                    const int vMove = static_cast<int>(std::lround(static_cast<float>(spriteH) * sp.vOffset));
+
+                    const int spriteLeft = -spriteW / 2 + spriteScreenX;
+                    const int spriteTop = -spriteH / 2 + h / 2 + vMove;
+
+                    int drawStartY = std::max(0, spriteTop);
+                    int drawEndY = std::min(h - 1, spriteTop + spriteH - 1);
+
+                    int drawStartX = std::max(0, spriteLeft);
+                    int drawEndX = std::min(w - 1, spriteLeft + spriteW - 1);
+
+                    if (drawStartX >= drawEndX || drawStartY >= drawEndY) continue;
+
+                    const int animFrame = (frame + sp.phase) % FRAMES;
+                    const uint64_t key = makeSpriteKey(sp.cat, sp.kind, sp.seed, flagsCommon);
+
+                    const SpritePixels* texS = nullptr;
+
+                    if (sp.cat == CAT_RC3D_ENTITY) {
+                        auto& frames = getSpriteFrames(key, [&](int f) {
+                            return generateEntitySprite(static_cast<EntityKind>(sp.kind), sp.seed, f, use3dSprite, spritePx);
+                        });
+                        texS = &frames[static_cast<size_t>(animFrame)];
+                    } else if (sp.cat == CAT_RC3D_ITEM) {
+                        auto& frames = getSpriteFrames(key, [&](int f) {
+                            return generateItemSprite(static_cast<ItemKind>(sp.kind), sp.seed, f, use3dSprite, spritePx);
+                        });
+                        texS = &frames[static_cast<size_t>(animFrame)];
+                    } else {
+                        continue;
+                    }
+
+                    if (!texS || texS->w <= 0 || texS->h <= 0 || texS->px.empty()) continue;
+
+                    const int texW = texS->w;
+                    const int texH = texS->h;
+
+                    // Distance shade so sprites blend with the raycasted world.
+                    const float distShade = 1.0f / (1.0f + transformY * transformY * 0.08f);
+
+                    // Draw vertical stripes, clipped by z-buffer for wall occlusion.
+                    for (int stripe = drawStartX; stripe <= drawEndX; ++stripe) {
+                        // Wall occlusion: if this stripe is behind the wall slice, skip.
+                        if (transformY > zBuffer[static_cast<size_t>(stripe)]) continue;
+
+                        int texX = (stripe - spriteLeft) * texW / std::max(1, spriteW);
+                        texX = std::clamp(texX, 0, texW - 1);
+
+                        for (int y = drawStartY; y <= drawEndY; ++y) {
+                            int texY = (y - spriteTop) * texH / std::max(1, spriteH);
+                            texY = std::clamp(texY, 0, texH - 1);
+
+                            Color src = texS->px[static_cast<size_t>(texY * texW + texX)];
+                            if (src.a == 0) continue;
+
+                            // Apply tile lighting + distance shade.
+                            src = mulColorMod(src, sp.mod);
+                            src = shadeColor(src, distShade);
+
+                            const size_t p = static_cast<size_t>(y * w + stripe);
+                            Color dst = unpack(raycast3DFramePixels_[p]);
+                            Color out = alphaBlendOver(dst, src);
+                            raycast3DFramePixels_[p] = pack(out.r, out.g, out.b, 255);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    SDL_UpdateTexture(raycast3DFrameTex_, nullptr, raycast3DFramePixels_.data(), w * static_cast<int>(sizeof(uint32_t)));
+    SDL_RenderCopy(renderer, raycast3DFrameTex_, nullptr, &mapClip);
+
+    // A tiny crosshair helps with orientation (purely cosmetic).
+    const int cx = mapClip.x + mapClip.w / 2;
+    const int cy = mapClip.y + mapClip.h / 2;
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 90);
+    SDL_RenderDrawLine(renderer, cx - 6, cy, cx + 6, cy);
+    SDL_RenderDrawLine(renderer, cx, cy - 6, cx, cy + 6);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+}
+
 // Simple post-process: a gentle vignette that improves focus and mood while
 // keeping the HUD crisp (it's applied only to the map region).
 static void drawVignette(SDL_Renderer* r, const SDL_Rect& area, int thickness, int maxAlpha) {
@@ -4144,6 +5769,12 @@ void Renderer::render(const Game& game) {
         frameDt = static_cast<float>(std::clamp(dt, 0.0, 0.5));
     }
     perfPrevCounter_ = nowCounter;
+
+    // Raycast3D: decay the temporary manual-look hold timer. This is used to prevent
+    // follow-move camera snapping from immediately overwriting a deliberate turn.
+    if (raycast3DManualHoldSec_ > 0.0f && frameDt > 0.0f) {
+        raycast3DManualHoldSec_ = std::max(0.0f, raycast3DManualHoldSec_ - frameDt);
+    }
 
     if (frameDt > 0.0f) {
         const float instFps = 1.0f / frameDt;
@@ -4230,6 +5861,11 @@ void Renderer::render(const Game& game) {
     if (wantVoxelSprites != voxelSpritesCached) {
         // Entity/item/projectile textures are budget-cached in spriteTex.
         spriteTex.clear();
+
+        // CPU-side billboard sprites (raycast 3D view) are generated from spritegen, so invalidate too.
+        raycast3DSpriteCache_.clear();
+        raycast3DSpriteLRU_.clear();
+
         spriteTex.resetStats();
         uiPreviewTex.clear();
         uiPreviewTex.resetStats();
@@ -4351,6 +5987,14 @@ d.ensureMaterials(game.materialWorldSeed(), game.branch(), game.materialDepth(),
 
     // Visual-only procedural animation state (smooth movement / bobbing / recoil).
     updateProceduralAnimations(game, static_cast<float>(frameDt), ticks);
+
+    const bool ray3DView = (viewMode_ == ViewMode::Raycast3D);
+    if (ray3DView) {
+        drawRaycast3DView(game, styleSeed, lvlSeed, lastFrame, mapClip);
+        goto RAYCAST3D_POST_MAP;
+    }
+
+    {
 
     ParticleView particleView;
     if (particles_) {
@@ -5155,6 +6799,24 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
                 SDL_SetTextureAlphaMod(btex, 255);
             }
 
+            // Material texture overlay (isometric floor): procedurally generated high-frequency pattern
+            // specific to the tile's substrate material, projected onto the diamond grid.
+            if (base == TileType::Floor && materialOverlayVarsUsed > 0 && static_cast<size_t>(mat) < TERRAIN_MATERIAL_COUNT) {
+                const size_t mi = static_cast<size_t>(mat);
+                const uint32_t mSeed = hashCombine(lvlSeed ^ 0x1A7E11u, static_cast<uint32_t>(mi) * 0x9E3779B9u);
+                const size_t mv = pickCoherentVariantIndex(x, y, mSeed, materialOverlayVarsUsed);
+                const size_t fi = static_cast<size_t>(frame % FRAMES);
+                SDL_Texture* mtex = floorMaterialOverlayVarIso[mi][mv][fi];
+                if (mtex) {
+                    SDL_SetTextureColorMod(mtex, mod.r, mod.g, mod.b);
+                    SDL_SetTextureAlphaMod(mtex, a);
+                    SDL_RenderCopy(renderer, mtex, nullptr, &dst);
+                    SDL_SetTextureColorMod(mtex, 255, 255, 255);
+                    SDL_SetTextureAlphaMod(mtex, 255);
+                }
+            }
+
+
             // Themed floor decals (isometric): project decal overlays onto the diamond grid so room
             // themes keep their subtle surface detail in 2.5D view.
             //
@@ -5670,6 +7332,34 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
         SDL_SetTextureAlphaMod(tex, 255);
 
         SDL_RenderCopy(renderer, tex, nullptr, &dst);
+
+        // Material texture overlay: procedurally generated high-frequency pattern specific to the
+        // tile's substrate material (grain / seams / veins / pits). This is intentionally a
+        // transparent, grayscale overlay so the existing palette + lighting system still controls
+        // hue and brightness.
+        if (materialOverlayVarsUsed > 0 && static_cast<size_t>(mat) < TERRAIN_MATERIAL_COUNT) {
+            const bool wallish = (baseType == TileType::Wall || baseType == TileType::DoorSecret);
+            const bool floorish = (baseType == TileType::Floor);
+            if (wallish || floorish) {
+                const size_t mi = static_cast<size_t>(mat);
+                const uint32_t mSeed = hashCombine(lvlSeed ^ (wallish ? 0x4411E1u : 0x1A7E11u),
+                                                  static_cast<uint32_t>(mi) * 0x9E3779B9u);
+                const size_t mv = pickCoherentVariantIndex(x, y, mSeed, materialOverlayVarsUsed);
+                const size_t fi = static_cast<size_t>(frame % FRAMES);
+                SDL_Texture* mtex = wallish
+                    ? wallMaterialOverlayVar[mi][mv][fi]
+                    : floorMaterialOverlayVar[mi][mv][fi];
+
+                if (mtex) {
+                    SDL_SetTextureColorMod(mtex, mod.r, mod.g, mod.b);
+                    const Uint8 a = t.visible ? (wallish ? 200 : 170) : (wallish ? 130 : 120);
+                    SDL_SetTextureAlphaMod(mtex, a);
+                    SDL_RenderCopy(renderer, mtex, nullptr, &dst);
+                    SDL_SetTextureAlphaMod(mtex, 255);
+                    SDL_SetTextureColorMod(mtex, 255, 255, 255);
+                }
+            }
+        }
 
         SDL_SetTextureColorMod(tex, 255, 255, 255);
         SDL_SetTextureAlphaMod(tex, 255);
@@ -7329,6 +9019,9 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
         drawTargetingOverlay(game);
     }
 
+    }
+
+RAYCAST3D_POST_MAP:
     // Post FX: subtle vignette over map region only.
     drawVignette(renderer, mapClip, /*thickness*/tile / 2, /*maxAlpha*/70);
 
@@ -7644,7 +9337,7 @@ void Renderer::drawHud(const Game& game) {
            << " (" << game.overworldX() << "," << game.overworldY() << ")"
            << " [" << overworld::biomeName(prof.biome) << " D" << prof.dangerDepth << "]";
 
-        const overworld::WeatherProfile wx = overworld::weatherFor(game.seed(), game.overworldX(), game.overworldY(), prof.biome);
+        const overworld::WeatherProfile wx = overworld::weatherFor(game.seed(), game.overworldX(), game.overworldY(), prof.biome, game.turns());
         ss << " WX:" << overworld::weatherName(wx.kind);
         if (wx.windStrength > 0) {
             char c = '-';
@@ -9142,7 +10835,7 @@ void Renderer::drawKeybindsOverlay(const Game& game) {
     if (total <= 0) {
         drawText5x7(renderer, x0 + 16, yy, scale, warn, "NO KEYBINDS DATA (TRY REOPENING OPTIONS).");
     } else if (n <= 0) {
-        drawText5x7(renderer, x0 + 16, yy, scale, warn, "NO MATCHING ACTIONS (CTRL+L TO CLEAR FILTER).");
+        drawText5x7(renderer, x0 + 16, yy, scale, warn, "NO MATCHING ACTIONS (CTRL/CMD+L TO CLEAR FILTER).");
     } else {
         // Column sizing (monospace-ish 5x7): ~6px per char at scale1.
         const int maxCharsTotal = std::max(0, (panelW - 32) / (6 * scale));
@@ -9176,7 +10869,7 @@ void Renderer::drawKeybindsOverlay(const Game& game) {
     // Footer / instructions
     int fy = y0 + panelH - footerH + 10;
     drawText5x7(renderer, x0 + 16, fy, 1, gray,
-        fit("UP/DOWN SELECT  ENTER REBIND  RIGHT ADD  LEFT RESET  DEL UNBIND  / FILTER  ESC BACK", maxCharsScale1));
+        fit("UP/DOWN SELECT  ENTER REBIND  RIGHT ADD  LEFT RESET  DEL UNBIND  / OR CTRL/CMD+F FILTER  ESC BACK", maxCharsScale1));
 
     fy += 16;
 
@@ -9189,10 +10882,10 @@ void Renderer::drawKeybindsOverlay(const Game& game) {
         drawText5x7(renderer, x0 + 16, fy, 2, warn, "PRESS KEY: " + target + " (" + mode + ")");
     } else if (game.isKeybindsSearchMode()) {
         drawText5x7(renderer, x0 + 16, fy, 1, gray,
-            fit("TYPE TO FILTER. ENTER/ESC DONE. CTRL+L CLEAR.", maxCharsScale1));
+            fit("TYPE TO FILTER. ENTER/ESC DONE. CTRL/CMD+L CLEAR. CTRL/CMD+V PASTE.", maxCharsScale1));
     } else if (!game.keybindsSearchQuery().empty()) {
         drawText5x7(renderer, x0 + 16, fy, 1, gray,
-            fit("FILTER ACTIVE. PRESS / TO EDIT. CTRL+L CLEAR. CONFLICTS HIGHLIGHTED.", maxCharsScale1));
+            fit("FILTER ACTIVE. PRESS / OR CTRL/CMD+F TO EDIT. CTRL/CMD+L CLEAR. CTRL/CMD+V PASTE. CONFLICTS HIGHLIGHTED.", maxCharsScale1));
     } else {
         // Context line: show a short description of the currently selected action.
         std::string infoLine;
@@ -9309,9 +11002,28 @@ void Renderer::drawCommandOverlay(const Game& game) {
 
     y += 24;
     {
-        std::string hint = "ENTER RUN  ESC CANCEL  TAB COMPLETE (CMD/ARGS)";
+        const bool mac = isMacPlatform();
+        const std::string gui = guiModifierDisplayLabel();
+        const std::string alt = altModifierDisplayLabel();
+
+        std::string hint = "ENTER RUN  ESC CANCEL  TAB COMPLETE (CMD/ARGS or @ACTION)";
         if (game.commandAutocompleteFuzzy()) hint += " (FUZZY)";
-        hint += "  CTRL+B/F MOVE  CTRL+P/N HISTORY  LEFT/RIGHT EDIT  HOME/END  DEL/CTRL+D FWD  CTRL+W WORD  CTRL+U START  CTRL+K END  CTRL+L CLEAR";
+
+        hint += "  PASTE ";
+        hint += mac ? "CMD/CTRL+V" : "CTRL+V";
+        hint += "  CLEAR ";
+        hint += mac ? "CMD/CTRL+L" : "CTRL+L";
+
+        hint += "  EDIT LEFT/RIGHT HOME/END (CTRL+A/E";
+        if (mac) hint += ", " + gui + "+LEFT/RIGHT";
+        hint += ")";
+
+        hint += "  WORD " + alt + "+LEFT/RIGHT";
+        hint += "  WORDDEL CTRL+W/" + alt + "+BKSP";
+        hint += "  KILL CTRL+U/CTRL+K";
+        if (mac) hint += "/" + gui + "+BKSP";
+        hint += "  UP/DOWN HISTORY (TAB LIST: UP/DOWN SELECT)";
+
         drawText5x7(renderer, x, y, 1, gray, fitHead1(hint));
     }
 
@@ -9475,13 +11187,13 @@ void Renderer::drawHelpOverlay(const Game& game) {
         add("F FIRE  G/, PICKUP  I/TAB INVENTORY", gray);
         add("D DIG  B KICK  L/V LOOK  SHIFT+C SEARCH  T DISARM  K CLOSE  SHIFT+K LOCK", gray);
     }
-    add("O EXPLORE  P AUTOPICKUP  M MINIMAP  SHIFT+TAB STATS", gray);
+    add("O EXPLORE  P AUTOPICKUP  M MINIMAP  SHIFT+M OVERWORLD MAP  SHIFT+TAB STATS", gray);
     add("MINIMAP: MOVE CURSOR (ARROWS/WASD), [ ] ZOOM, ENTER TRAVEL, L/RMB LOOK, LMB TRAVEL", gray);
-    add("F2 OPTIONS  #/CTRL+P EXTENDED COMMANDS  (TAB COMPLETE CMD+ARGS, LEFT/RIGHT EDIT)", gray);
+    add("F2/CTRL+, OPTIONS  #/CTRL+P/SHIFT+CTRL+P EXTENDED COMMANDS  (TAB COMPLETE CMD+ARGS OR @ACTIONS, LEFT/RIGHT EDIT, CTRL/CMD+V PASTE)", gray);
     add("F5 SAVE  F9 LOAD  F10 LOAD AUTO  F6 RESTART", gray);
     add("F11 FULLSCREEN  F12 SCREENSHOT (BINDABLE)", gray);
     add("SHIFT+F10 PERF OVERLAY (BINDABLE)", gray);
-    add("F3/SHIFT+M MESSAGE HISTORY  (/ SEARCH, CTRL+L CLEAR)", gray);
+    add("F3 MESSAGE HISTORY  (/ OR CTRL/CMD+F SEARCH, CTRL/CMD+L CLEAR, CTRL/CMD+C COPY, CTRL/CMD+V PASTE)", gray);
     add("F4 MONSTER CODEX  (TAB SORT, LEFT/RIGHT FILTER)", gray);
     add("\\ DISCOVERIES  (TAB/LEFT/RIGHT FILTER, SHIFT+S SORT)", gray);
     add("PGUP/PGDN LOG  ESC CANCEL/QUIT", gray);
@@ -9532,7 +11244,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     add("OPEN CHESTS CAN STORE ITEMS: ENTER OPENS, ENTER MOVES STACK, D MOVES 1, G MOVES ALL.", gray);
     add("SOME VAULT DOORS MAY BE TRAPPED.", gray);
     add("AUTO-EXPLORE STOPS IF YOU SEE AN ENEMY OR GET HURT/DEBUFFED.", gray);
-    add("INVENTORY: E EQUIP  U USE  X DROP  SHIFT+X DROP ALL", gray);
+    add("INVENTORY: E EQUIP  U USE  SHIFT+B BUTCHER  X DROP  SHIFT+X DROP ALL", gray);
     add("SCROLL THE MESSAGE LOG WITH PGUP/PGDN.", gray);
 
     // Simple word wrap (ASCII-ish) with hard breaks for long tokens.
@@ -10125,7 +11837,7 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
             drawLine(green, "HOME CAMP");
         } else {
             const overworld::ChunkProfile prof = overworld::profileFor(game.seed(), cursorChunk.x, cursorChunk.y, game.dungeonMaxDepth());
-            const overworld::WeatherProfile wx = overworld::weatherFor(game.seed(), cursorChunk.x, cursorChunk.y, prof.biome);
+            const overworld::WeatherProfile wx = overworld::weatherFor(game.seed(), cursorChunk.x, cursorChunk.y, prof.biome, game.turns());
 
             drawLine(cyan, std::string("REGION: ") + overworld::chunkNameFor(prof));
             drawLine(white, std::string("BIOME: ") + overworld::biomeName(prof.biome));
@@ -10236,7 +11948,7 @@ void Renderer::drawStatsOverlay(const Game& game) {
                << " (" << game.overworldX() << "," << game.overworldY() << ")"
                << " [" << overworld::biomeName(prof.biome) << " D" << prof.dangerDepth << "]";
 
-            const overworld::WeatherProfile wx = overworld::weatherFor(game.seed(), game.overworldX(), game.overworldY(), prof.biome);
+            const overworld::WeatherProfile wx = overworld::weatherFor(game.seed(), game.overworldX(), game.overworldY(), prof.biome, game.turns());
             ss << " WX:" << overworld::weatherName(wx.kind);
             if (wx.windStrength > 0) {
                 char c = '-';
@@ -11325,7 +13037,7 @@ void Renderer::drawMessageHistoryOverlay(const Game& game) {
         y += 20;
     }
 
-    drawText5x7(renderer, x0 + pad, y, 1, gray, "UP/DOWN scroll  LEFT/RIGHT filter  PGUP/PGDN scroll  / search  CTRL+L clear  CTRL+C copy  ESC close");
+    drawText5x7(renderer, x0 + pad, y, 1, gray, "UP/DOWN scroll  LEFT/RIGHT filter  PGUP/PGDN scroll  / search  CTRL/CMD+L clear  CTRL/CMD+C copy  CTRL/CMD+V paste  ESC close");
     y += 18;
 
     // Build filtered view.

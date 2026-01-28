@@ -25,8 +25,31 @@ struct Settings {
     int viewH = 0;
 
     // Camera presentation / view mode
-    // view_mode: topdown|isometric
+    // view_mode: topdown|isometric|3d
     ViewMode viewMode = ViewMode::TopDown;
+
+    // Raycast 3D view options (visual-only)
+    // These only affect the experimental first-person/pseudo-3D view mode.
+    int raycast3DScale = 2;     // raycast3d_scale: 1..4 (higher = faster, lower = sharper)
+    int raycast3DFovDeg = 67;   // raycast3d_fov: 40..100 (horizontal field of view in degrees)
+    bool raycast3DCeiling = true; // raycast3d_ceiling: true|false (textured ceiling vs simple gradient)
+    bool raycast3DBump = true;    // raycast3d_bump: true|false (normal-mapped relief shading)
+
+    // Extra 3D surfacing controls (visual-only)
+    bool raycast3DParallax = true;       // raycast3d_parallax: true|false (parallax texture mapping for extra depth)
+    int raycast3DParallaxStrength = 60;  // raycast3d_parallax_strength: 0..100 (parallax depth)
+    bool raycast3DSpecular = true;       // raycast3d_specular: true|false (material specular highlights)
+    int raycast3DSpecularStrength = 70;  // raycast3d_specular_strength: 0..100 (specular intensity)
+
+    // Raycast3D camera controls (visual-only)
+    bool raycast3DFollowMove = true;     // raycast3d_follow_move: true|false (camera dir follows player movement)
+    int raycast3DTurnDegrees = 15;       // raycast3d_turn_deg: 1..90 (degrees per turn action)
+
+    // Raycast 3D billboards (visual-only)
+    // These only affect view_mode = 3d.
+    bool raycast3DSprites = true; // raycast3d_sprites: true|false (render entity billboards in the 3D view)
+    bool raycast3DItems = true;   // raycast3d_items: true|false (render ground-item billboards in the 3D view)
+
 
     // Player identity (used for the scoreboard and HUD)
     std::string playerName = "PLAYER";

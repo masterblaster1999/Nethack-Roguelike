@@ -63,8 +63,9 @@ A tiny NetHack-inspired roguelike with:
   - **Enter** performs a **context action** (equip if gear, use if consumable)
 - **Game controller support** (SDL2 GameController): D-pad move, **A** confirm, **B** cancel, **X** inventory, **Y** pickup, shoulders for look/fire.
 - **VSync + FPS cap settings**: new `vsync` and `max_fps` keys in `procrogue_settings.ini`.
-- **Experimental isometric 2.5D camera**: set `view_mode = isometric` in `procrogue_settings.ini` or toggle it in-game (default keybind: **F7**).
+- **Experimental camera modes**: set `view_mode = topdown|isometric|raycast3d` (aliases: `3d`, `raycast`, `firstperson`, ...) in `procrogue_settings.ini` or cycle in-game (default keybind: **F7**).
   - Isometric mode renders terrain with diamond-projected tiles + taller wall blocks.
+  - Raycast3D mode renders a first-person pseudo‑3D view; it respects per-tile **lighting/darkness** and **colored light sources**.
 
 - **Toggle 2D/3D procedural sprites at runtime**: set `voxel_sprites = true/false` or toggle in-game (default keybind: **F8**).
 
@@ -282,6 +283,10 @@ The settings file is created automatically on first run.
 ## Extended commands
 
 Press **`#`** (Shift+3) to open the in-game command prompt.
+
+Action palette (new): inside the prompt, prefix with **`@`** to run any **action token** (the same tokens used by `#bind` / keybinds).
+- Press **TAB** after `@` to autocomplete actions and see keybind hints.
+- Examples: `@inventory`, `@toggle_minimap`, `@stairs_down`, `@look`
 
 Useful commands:
 - `#help` – list commands

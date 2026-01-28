@@ -41,7 +41,8 @@ Comments start with `#` or `;`.
 - `view_mode` (string, default `topdown`)
   - `topdown`: classic 2D grid view
   - `isometric`: experimental 2.5D isometric camera
-  - You can also toggle this in-game (default keybind: **F7**).
+  - `3d`: experimental first-person **raycast 3D** view (pseudo-3D)
+  - You can also toggle this in-game (default keybind: **F7**), which cycles all available modes.
   - In isometric mode, terrain is rendered using diamond-projected tiles and taller wall blocks.
 
 - `voxel_sprites` (`true/false`, default `true`)
@@ -61,6 +62,52 @@ Comments start with `#` or `;`.
   - When `true`, isometric terrain "block" sprites (walls/doors/pillars/boulders) are generated from small voxel models, so they match the voxel-sprite shading pipeline.
   - When `iso_voxel_raytrace` is enabled, terrain blocks use raytrace **only** for small tile sizes (<=64px); larger sizes fall back to the faster mesh renderer to avoid long stalls.
   - Toggle at runtime via `#isoterrainvox on|off|toggle` (alias: `#isoblocks`).
+
+### Raycast 3D (3D view only)
+
+These keys tune the experimental `view_mode = 3d` renderer:
+
+- `raycast3d_scale` (int, default `2`)
+  - Clamped to `1..4`
+  - Internal resolution divisor (higher = faster, lower = sharper).
+
+- `raycast3d_fov` (int, default `67`)
+  - Clamped to `40..100`
+  - Horizontal field-of-view in degrees.
+
+- `raycast3d_ceiling` (`true/false`, default `true`)
+  - Enables a textured ceiling (otherwise a simple gradient).
+
+- `raycast3d_bump` (`true/false`, default `true`)
+  - Enables cheap relief shading derived from procedural textures.
+
+- `raycast3d_parallax` (`true/false`, default `true`)
+  - Enables parallax texture mapping.
+
+- `raycast3d_parallax_strength` (int, default `60`)
+  - Clamped to `0..100`
+  - Controls parallax depth.
+
+- `raycast3d_specular` (`true/false`, default `true`)
+  - Enables material specular highlights.
+
+- `raycast3d_specular_strength` (int, default `70`)
+  - Clamped to `0..100`
+  - Controls specular intensity.
+
+- `raycast3d_follow_move` (`true/false`, default `true`)
+  - When `true`, the 3D camera direction automatically snaps to your most recent movement tween (classic "always face where you last walked" feel).
+  - When `false`, the camera direction persists and you can rotate it freely with the view-turn actions.
+
+- `raycast3d_turn_deg` (int, default `15`)
+  - Clamped to `1..90`
+  - Degrees rotated per **view turn** keypress (`view_turn_left` / `view_turn_right`).
+
+- `raycast3d_sprites` (`true/false`, default `true`)
+  - Renders billboard sprites for visible entities (monsters/NPCs).
+
+- `raycast3d_items` (`true/false`, default `true`)
+  - Renders billboard sprites for visible ground items (pickups).
 
 - `player_name` (string, default `PLAYER`)
   - Used in the HUD + scoreboard.
@@ -172,7 +219,8 @@ You can also use the **Options → Keybinds** editor:
 - **Left**: reset to default (removes the `bind_` override)
 - **Delete**: unbind/disable (writes `none`)
 - **/**: filter/search (type to narrow the list)
-- **Ctrl+L**: clear the filter
+- **Ctrl/Cmd+F**: toggle the filter/search box
+- **Ctrl/Cmd+L**: clear the filter
 
 
 Format:
@@ -182,10 +230,13 @@ bind_<action> = key[, key, ...]
 ```
 
 - Multiple keys can be bound to the same action by separating them with commas.
-- Modifiers are written as `shift+`, `ctrl+`, `alt+`, or `cmd+` prefixes (example: `shift+comma`).
+- Modifiers are written as `shift+`, `ctrl+`, `alt+` (`altgr+`/`mode+` accepted), or `cmd+` prefixes (example: `shift+comma`).
 
   - On macOS, `cmd+` corresponds to the Command key. On Windows/Linux it maps to the GUI/Windows/Super key.
 - Key names are case-insensitive.
+
+- Since `+` is the chord delimiter, you can write the literal **plus** key as `++` (example: `ctrl++`).
+  - Equivalent spelling: `ctrl+shift+equals`.
 
 Examples:
 
@@ -210,7 +261,8 @@ Common key names:
 - Directions: `up`, `down`, `left`, `right`
 - Punctuation: `comma`, `period`, `slash`, `backslash`
 - Other keys: `tab`, `space`, `enter`, `escape`, `pageup`, `pagedown`
-- Numpad: `kp_0` .. `kp_9`, `kp_enter`
+- Numpad: `kp_0` .. `kp_9`, `kp_enter`, `kp_plus`, `kp_minus`, `kp_multiply`, `kp_divide`, `kp_period`, `kp_comma`, `kp_equals`
+  - Shorthand (optional): `kp+`, `kp-`, `kp*`, `kp/`, `kp.`, `kp,`, `kp=`
 - Function keys: `f1` .. `f24`
 
 Available actions:
@@ -221,22 +273,24 @@ Available actions:
 
 **Gameplay**
 - `confirm`, `cancel`
-- `wait`, `rest`, `sneak` (toggle sneak mode: quieter actions, weaker scent trail, shorter enemy sight range, but slower)
-- `pickup`, `inventory`
+- `wait`, `parry`, `butcher`, `rest`, `sneak` (toggle sneak mode: quieter actions, weaker scent trail, shorter enemy sight range, but slower), `evade`
+- `pickup`, `inventory`, `spells`
 - `fire`, `search`, `disarm`
 - `close_door`, `lock_door`
 - `kick`, `dig`
 - `look`
 - `stairs_up`, `stairs_down`
 - `auto_explore`, `toggle_auto_pickup`
+
 **Inventory**
 - `equip`, `use`, `drop`, `drop_all`, `sort_inventory`
 
 **UI / Meta**
 - `help`, `options`, `command`
-- `sound_preview`, `hearing_preview`, `scent_preview`, `threat_preview` (LOOK lenses: sound propagation, audibility, scent trail, and threat ETA heatmaps)
-- `message_history`, `codex`, `discoveries`
-- `toggle_minimap`, `minimap_zoom_in`, `minimap_zoom_out`, `toggle_stats`, `toggle_perf_overlay`
+- `message_history`, `codex`, `discoveries`, `scores`
+- `toggle_minimap`, `overworld_map`, `minimap_zoom_in`, `minimap_zoom_out`
+- `toggle_stats`, `toggle_perf_overlay`, `toggle_view_mode`, `toggle_voxel_sprites`
+- `sound_preview`, `threat_preview`, `hearing_preview`, `scent_preview` (LOOK lenses: sound propagation, threat ETA, audibility, scent trail heatmaps)
 - `fullscreen`, `screenshot`
 - `save`, `load`, `load_auto`, `restart`
 - `log_up`, `log_down`

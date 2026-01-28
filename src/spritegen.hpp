@@ -12,6 +12,8 @@ enum class ProjectileKind : uint8_t;
 enum class EffectKind : uint8_t;
 // UI skin theme (defined in game.hpp).
 enum class UITheme : uint8_t;
+// Terrain material for procedural environment rendering (defined in dungeon.hpp).
+enum class TerrainMaterial : uint8_t;
 
 struct SpritePixels {
     int w = 0;
@@ -140,6 +142,15 @@ SpritePixels generateFloorDecalTile(uint32_t seed, uint8_t style, int frame, int
 // Drawn directly in diamond space to avoid projection artifacts in isometric view.
 SpritePixels generateIsometricFloorDecalOverlay(uint32_t seed, uint8_t style, int frame, int pxSize = 16);
 SpritePixels generateWallDecalTile(uint32_t seed, uint8_t style, int frame, int pxSize = 16);
+
+
+// Terrain material overlays (transparent patterns layered onto base terrain tiles).
+// These add material-specific texture cues (wood grain, metal seams, marble veins, etc.)
+// on top of the themed floor / wall base tiles.
+SpritePixels generateFloorMaterialOverlay(uint32_t seed, TerrainMaterial material, int frame, int pxSize = 16);
+SpritePixels generateWallMaterialOverlay(uint32_t seed, TerrainMaterial material, int frame, int pxSize = 16);
+// Isometric variant for floor material overlays (diamond, transparent).
+SpritePixels generateIsometricFloorMaterialOverlay(uint32_t seed, TerrainMaterial material, int frame, int pxSize = 16);
 
 // Themed floor border overlay (transparent).
 // mask bits: 1=N, 2=E, 4=S, 8=W (bit set means "draw a border on that edge")

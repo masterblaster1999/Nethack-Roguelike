@@ -1,5 +1,99 @@
 # Changelog
 
+## Round 195
+- **Raycast 3D free-look turning**: added view-only camera turning actions `view_turn_left` / `view_turn_right`.
+  - Default keybinds: **Alt+Q** = turn left, **Alt+E** = turn right (plus Alt+Left/Right as an alternative).
+  - New settings: `raycast3d_follow_move` (camera follows last movement tween) and `raycast3d_turn_deg` (degrees per keypress).
+  - Turning triggers a short "manual look" hold to prevent follow-move snapping from overwriting the turn instantly.
+- Added a unit test that asserts the new action tokens exist in the shared action registry.
+
+## Round 194
+- **Action palette (command prompt)**: the extended command prompt now acts like a lightweight **command palette**.
+  - Prefix with **`@`** to run any **action token** (the same tokens used for `#bind`).
+  - **TAB completion** lists actions and shows their **keybind hint + description**.
+  - Examples: `@inventory`, `@toggle_minimap`, `@stairs_down`, `@look`.
+- **TAB cycling fix**: completion cycling now works even when the base prefix is empty (e.g. `#bind` / `#unbind` argument completion from a blank value, and `@` action palette from empty input).
+- Added a unit test that exercises `@inv` autocomplete and `@inventory` execution.
+
+## Round 193
+- **Raycast 3D**: render depth-correct **billboard sprites** for visible entities and ground items.
+  - Per-column z-buffer occlusion (sprites properly hide behind walls).
+  - Per-tile lighting/tint modulation + distance shading to match the raycast world.
+  - New settings: `raycast3d_sprites`, `raycast3d_items`.
+
+## Round 192
+
+- **Raycast3D lighting parity**: the pseudo‑3D raycaster now uses the **same per-tile lightmap + depth tint** as the 2D/isometric renderer, so walls/floors/ceilings react to **colored lighting, darkness, and bioluminescence** instead of only “visible vs explored”.
+- **Torch flicker in 3D**: nearby torches now add a subtle, deterministic flame flicker to the first-person view.
+- **Specular highlights respect lighting**: shiny materials now tint specular highlights using the current light color (and only on visible tiles), so reflections feel anchored to in-world light sources.
+
+## Round 191
+
+- **Keybind auto-migration (persisted)**: common legacy `procrogue_settings.ini` defaults are now detected, repaired, and written back to disk:
+  - `bind_search = c` is migrated to `shift+c` when it conflicts with modern diagonal `c` movement.
+  - `bind_message_history` no longer steals `shift+m` from the **Overworld Map**.
+  - `bind_restart` no longer steals `f6` from **High Scores** (Restart stays on `shift+f6`).
+  - Legacy single-key binds are upgraded with conventional shortcuts when they don't introduce obvious conflicts: **Ctrl/Cmd+Comma** for Options, and **Ctrl+P / Shift+Ctrl/Cmd+P** for the extended command prompt.
+- **Default settings keybinds updated**: the generated settings file now ships the up-to-date action set and keybind defaults (Overworld Map, Spells, Parry, Butcher, High Scores, etc.), preventing “fresh install” drift and conflicts.
+
+## Round 190
+
+- **Keybind syntax fix**: chord parsing now supports the common `++` spelling for the literal **plus** key (so `ctrl++` / `cmd++` works in `procrogue_settings.ini` and in `#bind`), while keeping `+` as the modifier delimiter.
+- **Keypad shorthand support**: added forgiving parsing for keypad operator keys and common shorthands (`kp+`, `kp-`, `kp*`, `kp/`, `kp.`, `kp,`, `kp=`; plus `kp_add`/`kp_sub`) so bindings are easier to author by hand.
+- **AltGr reliability**: when SDL reports **AltGr** via `KMOD_MODE` (and some platforms also set `CTRL`), keybind matching now treats MODE as ALT and drops CTRL while MODE is held; config also accepts `altgr+` / `mode+` modifier names.
+
+## Round 189
+
+- **Keypad keybind fix**: added explicit, config-safe tokens for keypad operator keys (`kp_plus`, `kp_minus`, `kp_multiply`, `kp_divide`, `kp_period`, `kp_comma`, `kp_equals`) so they can be captured, displayed, and parsed reliably (and no longer collide with the `+` chord delimiter).
+- **CMD prompt UX**: when the TAB completion dropdown is active, **Up/Down now navigates the suggestion list** (instead of jumping straight into history). Cursor navigation (Left/Right/Home/End) now clears the completion dropdown so it never “sticks” after you start editing.
+- **Keybinds QoL**: in REPLACE mode, binding a chord now **auto-reassigns** it by removing that chord from any other action it was bound to (ADD mode still allows intentional overlaps, with a warning).
+
+## Round 188
+
+- **CMD prompt fix**: Home/End navigation in the extended command prompt now works again (Cmd+Left/Right and Ctrl+A/E no longer get eaten by message-log scrolling).
+- **Key mapping robustness**: keybind action evaluation order now automatically appends the canonical action registry (`action_info.hpp`) after the hand-tuned priority list, preventing future “bindable but unreachable” actions when new Actions are added.
+- **International keyboard fix**: treat SDL's **KMOD_MODE** (often AltGr) as **ALT** for keybind capture/matching and for slash-driven search toggles, avoiding false “no-modifier” detection on layouts that require AltGr.
+- **UI polish**: command prompt footer now says **COMMAND/ARGS** (not "CMD/ARGS") and shows platform-appropriate modifier labels (OPT on macOS; avoids advertising WIN/SUPER combos on non-mac).
+
+## Round 187
+
+- **Options menu fix**: "Control Preset", "Keybinds", and "Close" now trigger the correct actions (they were index-misaligned).
+- **Key mapping fix**: `Butcher` is now reachable from both gameplay and the inventory overlay (it was bindable but never mapped in the keybind priority lists, so `SHIFT+B` did nothing).
+- **CMD layout/QoL**: added **Ctrl/Cmd+F** to open/toggle search in **Message History** and the **Keybinds** filter; updated UI hint strings.
+
+## Round 186
+
+- **Keybind reliability fix**: canonicalize SDL modifier groups (Shift/Ctrl/Alt/Cmd) so left/right variants match bindings consistently (fixes Shift+... actions and Cmd+... binds).
+- **Key mapping fix**: `ToggleOverworldMap` is now included in the keybind action priority list so its binding actually works; default `SHIFT+M` is reserved for the Overworld Map and Message History defaults to `F3` to avoid conflicts.
+- **Command prompt UX (CMD layout)**: added mac/desktop-friendly text-editing shortcuts (Cmd+Left/Right = Home/End, Alt+Left/Right = word move, Alt+Backspace = word delete, Cmd+Backspace = kill-to-start, Cmd+L = clear line) and **Ctrl/Cmd+V paste** support (command prompt + search filters).
+- Updated in-game HUD/help strings to reflect the new shortcuts (CTRL/CMD variants) and show platform-appropriate GUI modifier labels (CMD/WIN/SUPER; OPT on macOS).
+
+## Round 185
+
+- **Raycast 3D surfacing upgrade**: added **parallax texture mapping** and **material specular highlights**
+  to the pseudo‑3D renderer, plus subtle **contact shadows** along wall/floor/ceiling seams for improved
+  depth perception.
+- Added new `settings.txt` knobs for the 3D view: `raycast3d_parallax`, `raycast3d_parallax_strength`,
+  `raycast3d_specular`, and `raycast3d_specular_strength` (hot-reloadable via Config Reload).
+
+## Round 184
+
+- **Raycast 3D view upgrade**: added **procedurally generated textured ceilings** (ceiling casting) and
+  optional **relief shading** (cheap bump/normal mapping derived from texture luminance gradients) for
+  walls/floors/ceilings to make the pseudo‑3D view read as more “3D”.
+- Added new `settings.txt` knobs for the 3D view: `raycast3d_scale`, `raycast3d_fov`,
+  `raycast3d_ceiling`, and `raycast3d_bump` (hot-reloadable via Config Reload).
+
+## Round 183
+- Add **raycast 3D view mode**: experimental first-person/pseudo-3D renderer that draws textured walls + floors using the same deterministic proc-generation pipeline (including terrain material overlays).
+- View modes now **cycle** with the Toggle View Mode action (F7 by default): **TOPDOWN → ISOMETRIC → 3D → TOPDOWN**.
+- New doc: `docs/PROCGEN_RAYCAST3D_VIEW.md`.
+
+
+## Round 182
+- Add **procedural terrain material overlays**: per-`TerrainMaterial` transparent detail patterns (wood grain, metal seams, marble veins, moss patches, etc.) layered onto floor + wall tiles, including isometric floor support.
+- New doc: `docs/PROCGEN_TERRAIN_MATERIAL_OVERLAYS.md`.
+
 
 ## [0.22.0] - Unreleased
 
@@ -16,6 +110,7 @@
 - **Procedural biolum terrain**: a deterministic Gray-Scott reaction-diffusion lichen/crystal glow field that injects **colored ambient light sources** in darkness mode (plus subtle biolum motes); see `docs/PROCGEN_TERRAIN_BIOLUM.md`.
 - Procedural terrain materials: deterministic, depth-aware cellular-noise substrate (STONE/BRICK/BASALT/...) used for subtle tinting (scaled by proc_palette strength) and LOOK descriptions.
 - **Overworld wilderness chunk profiles**: wilderness chunks now have deterministic biome/name/danger identities, continuous terrain noise across chunk borders, meandering trail connections between edge gates, lightweight biome landmarks, per-chunk material palettes, and HUD/travel messaging that surfaces region identity.
+- **Time-varying overworld weather fronts**: wilderness chunk weather now accepts `turnCount` and drifts wind/cloud noise fields to create slowly changing fronts (still deterministic; no gameplay RNG use; no save-file state); see `docs/PROCGEN_OVERWORLD_WEATHER.md`.
 - **Overworld macro rivers**: surface wilderness chunks now include world-space continuous river ribbons carved as camp-water chasms; river width is biome-tuned and can widen in wet microclimates; trails are carved after rivers so edge-gate traversal stays reliable.
 - **Overworld weather**: wilderness chunks now have deterministic weather profiles (wind/fog/rain/snow/dust) derived from run seed + chunk coords; fog reduces FOV on the surface, precipitation quenches fire/burning, and the HUD/travel log show WX/WIND.
 - **Overworld waystations**: wilderness chunks now have rare, biome-aware **traveling merchant caravans** (small `RoomType::Shop` setpieces) connected to the chunk trail hub; waystations reuse the normal shopkeeper + stocking system for surface trading.

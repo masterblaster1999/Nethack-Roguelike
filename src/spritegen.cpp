@@ -4554,6 +4554,279 @@ SpritePixels genWallDecal16(uint32_t seed, uint8_t style, int frame) {
 }
 
 
+// Terrain material overlays -------------------------------------------------
+//
+// These are transparent, mostly-grayscale pattern sprites meant to be layered
+// on top of the base themed floor/wall tiles. The renderer then tints them via
+// TerrainMaterial color mods (and lighting) so the same procedural pattern can
+// read as stone, wood, metal, moss, etc.
+//
+// The overlays deliberately avoid strong hue so palette/style modulation remains
+// in control; the pattern is carried primarily by value/alpha.
+SpritePixels genTerrainMaterialOverlay16(uint32_t seed, TerrainMaterial mat, bool wall, int frame) {
+    SpritePixels s = makeSprite(16, 16, {0,0,0,0});
+
+    // Seeded RNG so each variant (seed) has distinct but deterministic micro-patterns.
+    RNG rng(hashCombine(seed ^ 0x7EA2u,
+                        static_cast<uint32_t>(mat) * 131u + (wall ? 0xB10Cu : 0xF100u)));
+
+    const Color hardDark = {24, 24, 28, 175};
+    const Color hardLight = {240, 240, 245, 150};
+    const Color softDark = {40, 40, 46, 95};
+    const Color softLight = {220, 220, 230, 70};
+
+    // Subtle base grain that helps very flat tints read as a "material".
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            const float n = noise01(seed ^ 0x9E3779B9u, x, y);
+            if (n > 0.84f) {
+                blendOver(s, x, y, {255, 255, 255, 14});
+            } else if (n < 0.12f) {
+                blendOver(s, x, y, {0, 0, 0, 12});
+            }
+        }
+    }
+
+    auto specks = [&](int count, Color cA, Color cB) {
+        for (int i = 0; i < count; ++i) {
+            const int x = rng.range(0, 15);
+            const int y = rng.range(0, 15);
+            blendOver(s, x, y, rng.chance(0.55f) ? cA : cB);
+        }
+    };
+
+    auto sparkleDots = [&](int count) {
+        // Sparse, animated twinkles for glossy materials.
+        for (int i = 0; i < count; ++i) {
+            const uint32_t h = hash32(seed ^ (0x51A11u + static_cast<uint32_t>(i) * 97u));
+            const int x = static_cast<int>(h & 0x0Fu);
+            const int y = static_cast<int>((h >> 4) & 0x0Fu);
+            if (((static_cast<int>(h >> 8) + frame) & 3) == 0) {
+                blendOver(s, x, y, {255, 255, 255, 190});
+            }
+        }
+    };
+
+    switch (mat) {
+        default:
+        case TerrainMaterial::Stone: {
+            specks(18, softDark, softLight);
+            // Occasional hairline crack.
+            if (rng.chance(0.65f)) {
+                const int x0 = rng.range(0, 15);
+                const int x1 = rng.range(0, 15);
+                line(s, x0, 0, x1, 15, withAlpha(hardDark, 115));
+            }
+            break;
+        }
+        case TerrainMaterial::Brick: {
+            // Mortar seams (brickwork). Wall variant uses staggered rows.
+            const int bw = wall ? 5 : 4;
+            const int bh = wall ? 3 : 4;
+            const Color mortar = withAlpha(hardDark, 165);
+
+            // Horizontal seams.
+            for (int y = 0; y < 16; ++y) {
+                if ((y % bh) == 0) {
+                    for (int x = 0; x < 16; ++x) blendOver(s, x, y, mortar);
+                }
+            }
+
+            // Vertical seams (staggered when wall=true).
+            for (int y = 0; y < 16; ++y) {
+                const int row = y / bh;
+                const int off = wall ? ((row & 1) ? (bw / 2) : 0) : 0;
+                for (int x = 0; x < 16; ++x) {
+                    if (((x + off) % bw) == 0) {
+                        blendOver(s, x, y, mortar);
+                    }
+                }
+            }
+
+            // A couple chips/highlights per tile.
+            for (int i = 0; i < 3; ++i) {
+                const int x = rng.range(1, 14);
+                const int y = rng.range(1, 14);
+                blendOver(s, x, y, withAlpha(hardLight, 80));
+            }
+            break;
+        }
+        case TerrainMaterial::Marble: {
+            // Marble veins: wandering polyline strokes.
+            const int veins = 2 + (rng.u32() % 2);
+            for (int v = 0; v < veins; ++v) {
+                int x = rng.range(0, 15);
+                int y = rng.range(0, 15);
+                for (int k = 0; k < 10; ++k) {
+                    const int nx = std::max(0, std::min(15, x + rng.range(-2, 2)));
+                    const int ny = std::max(0, std::min(15, y + rng.range(-1, 1)));
+                    line(s, x, y, nx, ny, withAlpha(hardLight, 90));
+                    // subtle shadow edge
+                    line(s, x + 1, y + 1, nx + 1, ny + 1, withAlpha(softDark, 55));
+                    x = nx; y = ny;
+                }
+            }
+            specks(6, softLight, softDark);
+            break;
+        }
+        case TerrainMaterial::Basalt: {
+            // Dark, fine-grained rock with faint bands.
+            specks(24, withAlpha(hardDark, 115), withAlpha(softDark, 85));
+            for (int y = 1; y < 16; y += 4) {
+                line(s, 0, y, 15, y, withAlpha(softDark, 45));
+            }
+            break;
+        }
+        case TerrainMaterial::Obsidian: {
+            // Smooth + glossy sparkles.
+            sparkleDots(10);
+            if (rng.chance(0.8f)) {
+                const int x0 = rng.range(0, 15);
+                const int x1 = rng.range(0, 15);
+                line(s, x0, 0, x1, 15, withAlpha(hardDark, 95));
+            }
+            // Subtle specular streak.
+            if (wall) {
+                const int x = 3 + (rng.u32() % 10);
+                line(s, x, 1, x, 14, withAlpha(hardLight, 45));
+            } else {
+                const int y = 3 + (rng.u32() % 10);
+                line(s, 1, y, 14, y, withAlpha(hardLight, 40));
+            }
+            break;
+        }
+        case TerrainMaterial::Moss: {
+            // Organic patches (noise threshold) + optional drips on walls.
+            for (int y = 0; y < 16; ++y) {
+                for (int x = 0; x < 16; ++x) {
+                    const float n = noise01(seed ^ 0xA055u, x * 3, y * 3);
+                    if (n > 0.76f) {
+                        blendOver(s, x, y, {60, 60, 62, 135});
+                        if (n > 0.90f) blendOver(s, x, y, {240, 240, 245, 30});
+                    }
+                }
+            }
+            if (wall) {
+                for (int d = 0; d < 2; ++d) {
+                    const int x = rng.range(1, 14);
+                    const int y0 = rng.range(2, 10);
+                    line(s, x, y0, x + rng.range(-1, 1), 15, withAlpha(softDark, 95));
+                }
+            }
+            break;
+        }
+        case TerrainMaterial::Dirt: {
+            // High-grain + a few pebbles.
+            for (int y = 0; y < 16; ++y) {
+                for (int x = 0; x < 16; ++x) {
+                    const float n = noise01(seed ^ 0xD1A7u, x, y);
+                    if (n > 0.66f) blendOver(s, x, y, withAlpha(softDark, 110));
+                    if (n < 0.10f) blendOver(s, x, y, withAlpha(softLight, 65));
+                }
+            }
+            for (int i = 0; i < 4; ++i) {
+                const int x = rng.range(2, 13);
+                const int y = rng.range(2, 13);
+                circle(s, x, y, 1, withAlpha(softLight, 70));
+                circle(s, x, y, 1, withAlpha(softDark, 55));
+            }
+            break;
+        }
+        case TerrainMaterial::Wood: {
+            // Planks: seams + grain lines.
+            const Color seam = withAlpha(hardDark, 170);
+            const int step = 4;
+            if (wall) {
+                for (int x = 0; x < 16; x += step) line(s, x, 0, x, 15, seam);
+            } else {
+                for (int y = 0; y < 16; y += step) line(s, 0, y, 15, y, seam);
+            }
+
+            const int grains = 5;
+            for (int g = 0; g < grains; ++g) {
+                if (wall) {
+                    const int x0 = rng.range(1, 14);
+                    int y = rng.range(0, 15);
+                    for (int k = 0; k < 16; ++k) {
+                        const int xx = std::max(0, std::min(15, x0 + ((hash32(seed ^ (g * 131u + static_cast<uint32_t>(k))) & 3u) == 0u ? 1 : 0)));
+                        blendOver(s, xx, y, withAlpha(softDark, 75));
+                        y = std::min(15, y + 1);
+                    }
+                } else {
+                    const int y0 = rng.range(1, 14);
+                    int x = rng.range(0, 15);
+                    for (int k = 0; k < 16; ++k) {
+                        const int yy = std::max(0, std::min(15, y0 + ((hash32(seed ^ (g * 97u + static_cast<uint32_t>(k))) & 3u) == 0u ? 1 : 0)));
+                        blendOver(s, x, yy, withAlpha(softDark, 70));
+                        x = std::min(15, x + 1);
+                    }
+                }
+            }
+
+            // Knot.
+            if (!wall && rng.chance(0.45f)) {
+                const int x = rng.range(4, 11);
+                const int y = rng.range(4, 11);
+                circle(s, x, y, 2, withAlpha(softDark, 85));
+                circle(s, x, y, 1, withAlpha(hardLight, 45));
+            }
+            break;
+        }
+        case TerrainMaterial::Metal: {
+            // Sheet seams + rivets.
+            const Color seam = withAlpha(hardDark, 175);
+            if (wall) {
+                for (int x : {5, 10}) line(s, x, 0, x, 15, seam);
+                line(s, 0, 8, 15, 8, withAlpha(seam, 120));
+            } else {
+                line(s, 0, 8, 15, 8, seam);
+                line(s, 8, 0, 8, 15, seam);
+            }
+
+            for (int i = 0; i < 6; ++i) {
+                const int x = rng.range(1, 14);
+                const int y = rng.range(1, 14);
+                blendOver(s, x, y, withAlpha(hardLight, 85));
+            }
+
+            // Brushed highlight.
+            if (wall) {
+                const int x = 2 + (rng.u32() % 12);
+                line(s, x, 1, x, 14, withAlpha(hardLight, 55));
+            } else {
+                const int y = 2 + (rng.u32() % 12);
+                line(s, 1, y, 14, y, withAlpha(hardLight, 45));
+            }
+            break;
+        }
+        case TerrainMaterial::Crystal: {
+            // Facets: diagonal linework + sparkles.
+            for (int i = -16; i <= 16; i += 4) {
+                line(s, i, 0, i + 16, 16, withAlpha(hardLight, 70));
+                line(s, i + 16, 0, i, 16, withAlpha(softDark, 45));
+            }
+            sparkleDots(14);
+            break;
+        }
+        case TerrainMaterial::Bone: {
+            // Porous pits + cracks.
+            specks(16, withAlpha(softDark, 115), withAlpha(softLight, 55));
+            for (int i = 0; i < 6; ++i) {
+                const int x = rng.range(2, 13);
+                const int y = rng.range(2, 13);
+                circle(s, x, y, 1, withAlpha(softDark, 95));
+            }
+            if (rng.chance(0.7f)) {
+                line(s, 1, rng.range(4, 12), 15, rng.range(2, 10), withAlpha(hardDark, 105));
+            }
+            break;
+        }
+    }
+
+    return s;
+}
+
+
 // Themed floor border overlay: subtle accent lines drawn *inside* a room's floor tiles
 // to visually frame special rooms and mark style transitions.
 //
@@ -5556,6 +5829,26 @@ SpritePixels generateWallDecalTile(uint32_t seed, uint8_t style, int frame, int 
     pxSize = clampSpriteSize(pxSize);
     SpritePixels base = genWallDecal16(seed, style, frame);
     return resampleSpriteToSizeInternal(base, pxSize);
+}
+
+
+SpritePixels generateFloorMaterialOverlay(uint32_t seed, TerrainMaterial material, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    SpritePixels base = genTerrainMaterialOverlay16(seed, material, /*wall=*/false, frame);
+    return resampleSpriteToSizeInternal(base, pxSize);
+}
+
+SpritePixels generateWallMaterialOverlay(uint32_t seed, TerrainMaterial material, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    SpritePixels base = genTerrainMaterialOverlay16(seed, material, /*wall=*/true, frame);
+    return resampleSpriteToSizeInternal(base, pxSize);
+}
+
+SpritePixels generateIsometricFloorMaterialOverlay(uint32_t seed, TerrainMaterial material, int frame, int pxSize) {
+    pxSize = clampSpriteSize(pxSize);
+    SpritePixels square = genTerrainMaterialOverlay16(seed, material, /*wall=*/false, frame);
+    SpritePixels base = genIsoOverlayFromSquare16(square, seed, frame);
+    return resampleSpriteToRectInternal(base, pxSize, std::max(1, pxSize / 2));
 }
 
 SpritePixels generateFloorBorderOverlay(uint32_t seed, uint8_t style, uint8_t mask, int variant, int frame, int pxSize) {

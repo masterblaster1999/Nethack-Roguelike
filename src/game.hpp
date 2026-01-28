@@ -576,6 +576,11 @@ enum class Action : uint8_t {
 
     // UI / meta (append-only)
     ToggleOverworldMap, // Toggle overworld atlas/map overlay
+
+    // View-only controls (renderer presentation). These are safe to record in
+    // replays because they do not affect game simulation.
+    ViewTurnLeft,  // Rotate the raycast 3D camera left
+    ViewTurnRight, // Rotate the raycast 3D camera right
 };
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
@@ -759,12 +764,14 @@ enum class ControlPreset : uint8_t {
 enum class ViewMode : uint8_t {
     TopDown = 0,
     Isometric,
+    Raycast3D,
 };
 
 inline const char* viewModeId(ViewMode m) {
     switch (m) {
         case ViewMode::TopDown:   return "topdown";
         case ViewMode::Isometric: return "isometric";
+        case ViewMode::Raycast3D: return "3d";
         default:                  return "topdown";
     }
 }
@@ -773,6 +780,7 @@ inline const char* viewModeDisplayName(ViewMode m) {
     switch (m) {
         case ViewMode::TopDown:   return "TOPDOWN";
         case ViewMode::Isometric: return "ISOMETRIC";
+        case ViewMode::Raycast3D: return "3D";
         default:                  return "TOPDOWN";
     }
 }
@@ -791,6 +799,11 @@ inline bool parseViewMode(const std::string& raw, ViewMode& out) {
     }
     if (s == "isometric" || s == "iso" || s == "2.5d" || s == "2_5d" || s == "dimetric") {
         out = ViewMode::Isometric;
+        return true;
+    }
+    if (s == "3d" || s == "raycast" || s == "raycast3d" || s == "firstperson" || s == "first_person" ||
+        s == "fps" || s == "perspective") {
+        out = ViewMode::Raycast3D;
         return true;
     }
     return false;

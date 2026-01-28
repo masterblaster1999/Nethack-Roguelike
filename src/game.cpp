@@ -2745,7 +2745,7 @@ bool Game::tryOverworldStep(int dx, int dy) {
             ss << "YOU TRAVEL TO ";
         }
 
-        const auto wx = overworld::weatherFor(seed_, overworldX_, overworldY_, prof.biome);
+        const auto wx = overworld::weatherFor(seed_, overworldX_, overworldY_, prof.biome, turnCount);
 
         auto windChar = [&](const Vec2i& d) -> char {
             if (d.x == 1) return 'E';
@@ -4472,7 +4472,7 @@ Game::OverworldWeatherFx Game::overworldWeatherFx() const {
     if (!atCamp() || atHomeCamp()) return out;
 
     const overworld::ChunkProfile prof = overworld::profileFor(seed_, overworldX_, overworldY_, dungeonMaxDepth());
-    const overworld::WeatherProfile wx = overworld::weatherFor(seed_, overworldX_, overworldY_, prof.biome);
+    const overworld::WeatherProfile wx = overworld::weatherFor(seed_, overworldX_, overworldY_, prof.biome, turnCount);
 
     out.active = true;
     out.wind = wx.windDir;

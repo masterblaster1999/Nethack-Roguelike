@@ -218,9 +218,9 @@ void Game::handleAction(Action a) {
     // Message log scroll (PageUp/PageDown) works in most modes.
     // Overlays that want to use LOG UP/DOWN for their own navigation must be listed here.
     if (a == Action::LogUp || a == Action::LogDown) {
-        // Allow certain overlays (codex / discoveries / scores / minimap / inventory / chests / spells / options / help / message history)
+        // Allow certain overlays (codex / discoveries / scores / minimap / inventory / chests / spells / options / help / message history / command prompt)
         // to use LOG UP/DOWN (PageUp/PageDown) for their own navigation.
-        if (!(codexOpen || discoveriesOpen || scoresOpen || minimapOpen || invOpen || chestOpen || spellsOpen || optionsOpen || msgHistoryOpen || helpOpen)) {
+        if (!(codexOpen || discoveriesOpen || scoresOpen || minimapOpen || invOpen || chestOpen || spellsOpen || optionsOpen || msgHistoryOpen || helpOpen || commandOpen)) {
             const int maxScroll = std::max(0, static_cast<int>(msgs.size()) - 1);
             if (a == Action::LogUp) {
                 msgScroll = clampi(msgScroll + 1, 0, maxScroll);
@@ -1096,11 +1096,20 @@ void Game::handleAction(Action a) {
             pushMsg(std::string("PERF OVERLAY: ") + (perfOverlayEnabled() ? "ON" : "OFF") + ".", MessageKind::System);
             return;
 
-        case Action::ToggleViewMode:
-            viewMode_ = (viewMode_ == ViewMode::TopDown) ? ViewMode::Isometric : ViewMode::TopDown;
+        case Action::ToggleViewMode: {
+            // Cycle: TopDown -> Isometric -> 3D -> TopDown.
+            ViewMode next = ViewMode::TopDown;
+            switch (viewMode_) {
+                case ViewMode::TopDown:   next = ViewMode::Isometric; break;
+                case ViewMode::Isometric: next = ViewMode::Raycast3D; break;
+                case ViewMode::Raycast3D: next = ViewMode::TopDown;   break;
+                default:                  next = ViewMode::TopDown;   break;
+            }
+            viewMode_ = next;
             settingsDirtyFlag = true;
             pushMsg(std::string("VIEW: ") + viewModeDisplayName() + ".", MessageKind::System);
             return;
+        }
 
         case Action::ToggleVoxelSprites:
             setVoxelSpritesEnabled(!voxelSpritesEnabled());
@@ -1241,6 +1250,19 @@ void Game::handleAction(Action a) {
         }
 
         if (a == Action::Up) {
+            // If a TAB completion list is active, UP/DOWN navigates within it.
+            if (commandAutoIndex >= 0 && !commandAutoMatches.empty()) {
+                const int n = static_cast<int>(commandAutoMatches.size());
+                commandAutoIndex = (commandAutoIndex - 1 + n) % n;
+
+                const bool hadHash = (!commandBuf.empty() && commandBuf[0] == '#');
+                const std::string& cand = commandAutoMatches[static_cast<size_t>(commandAutoIndex)];
+                const std::string outLine = commandAutoPrefix + cand;
+                commandBuf = hadHash ? ("#" + outLine) : outLine;
+                commandCursor_ = static_cast<int>(commandBuf.size());
+                return;
+            }
+
             // Navigating history cancels any active TAB-completion cycling state.
             commandAutoBase.clear();
             commandAutoPrefix.clear();
@@ -1264,6 +1286,19 @@ void Game::handleAction(Action a) {
         }
 
         if (a == Action::Down) {
+            // If a TAB completion list is active, UP/DOWN navigates within it.
+            if (commandAutoIndex >= 0 && !commandAutoMatches.empty()) {
+                const int n = static_cast<int>(commandAutoMatches.size());
+                commandAutoIndex = (commandAutoIndex + 1) % n;
+
+                const bool hadHash = (!commandBuf.empty() && commandBuf[0] == '#');
+                const std::string& cand = commandAutoMatches[static_cast<size_t>(commandAutoIndex)];
+                const std::string outLine = commandAutoPrefix + cand;
+                commandBuf = hadHash ? ("#" + outLine) : outLine;
+                commandCursor_ = static_cast<int>(commandBuf.size());
+                return;
+            }
+
             // Navigating history cancels any active TAB-completion cycling state.
             commandAutoBase.clear();
             commandAutoPrefix.clear();
@@ -1540,7 +1575,7 @@ if (optionsSel == 17) {
 }
 
 // 18) Control preset (Modern / NetHack)
-if (optionsSel == 20) {
+if (optionsSel == 18) {
     if (left || right || confirm) {
         ControlPreset next = (controlPreset_ == ControlPreset::Modern) ? ControlPreset::Nethack : ControlPreset::Modern;
         setControlPreset(next);
@@ -1550,7 +1585,7 @@ if (optionsSel == 20) {
 }
 
 // 19) Keybinds editor
-if (optionsSel == 18) {
+if (optionsSel == 19) {
     if (left || right || confirm) {
         optionsOpen = false;
         keybindsOpen = true;
@@ -1564,7 +1599,7 @@ if (optionsSel == 18) {
 }
 
 // 20) Close
-if (optionsSel == 19) {
+if (optionsSel == 20) {
     if (left || right || confirm) optionsOpen = false;
     return;
 }
@@ -3482,26 +3517,30 @@ void Game::keybindsCaptureToken(const std::string& chordToken) {
         next = chordToken;
     }
 
-    // Conflict warning (best effort, based on the cached table).
-    std::vector<std::string> conflicts;
+    const std::string chordLower = toLower(chordToken);
+
+    auto joinList = [&](const std::vector<std::string>& v) -> std::string {
+        std::string out;
+        for (const auto& s : v) {
+            if (s.empty()) continue;
+            if (!out.empty()) out += ", ";
+            out += s;
+        }
+        return out;
+    };
+
+    // Detect conflicts (best effort, based on the cached table).
+    std::vector<int> conflictIdx;
+    std::vector<std::string> conflictNames;
     for (int i = 0; i < static_cast<int>(keybindsDesc_.size()); ++i) {
         if (i == idx) continue;
         for (const auto& c : splitCommaList(keybindsDesc_[i].second)) {
-            if (toLower(c) == toLower(chordToken)) {
-                conflicts.push_back(keybindsDesc_[i].first);
+            if (toLower(c) == chordLower) {
+                conflictIdx.push_back(i);
+                conflictNames.push_back(keybindsDesc_[i].first);
                 break;
             }
         }
-    }
-
-    if (!conflicts.empty()) {
-        std::string msg = "WARNING: " + chordToken + " ALSO BINDS ";
-        for (size_t i = 0; i < conflicts.size(); ++i) {
-            if (i) msg += ", ";
-            msg += conflicts[i];
-        }
-        msg += ".";
-        pushSystemMessage(msg);
     }
 
     if (settingsPath_.empty()) {
@@ -3509,6 +3548,7 @@ void Game::keybindsCaptureToken(const std::string& chordToken) {
         return;
     }
 
+    // Write the target bind first (so we don't accidentally unbind other actions if this fails).
     if (!updateIniKey(settingsPath_, bindKey, next)) {
         pushSystemMessage("FAILED TO WRITE " + bindKey + ".");
         return;
@@ -3516,6 +3556,56 @@ void Game::keybindsCaptureToken(const std::string& chordToken) {
 
     // Optimistic UI update; main.cpp will reload and refresh the cache shortly.
     keybindsDesc_[idx].second = next;
+
+    // In REPLACE mode, auto-resolve conflicts by "stealing" the chord from other actions.
+    // (In ADD mode, conflicts may be intentional, so we only warn.)
+    std::vector<std::string> clearedFrom;
+    if (!addMode && !conflictIdx.empty()) {
+        for (const int oi : conflictIdx) {
+            if (oi < 0 || oi >= static_cast<int>(keybindsDesc_.size())) continue;
+
+            const std::string otherAction = keybindsDesc_[oi].first;
+            const std::string otherKey = std::string("bind_") + otherAction;
+
+            std::vector<std::string> parts = splitCommaList(keybindsDesc_[oi].second);
+            const size_t before = parts.size();
+            parts.erase(std::remove_if(parts.begin(), parts.end(),
+                                      [&](const std::string& s) { return toLower(s) == chordLower; }),
+                        parts.end());
+
+            // If we didn't actually remove anything, skip.
+            if (parts.size() == before) continue;
+
+            std::string otherNext = joinList(parts);
+            if (otherNext.empty()) otherNext = "none";
+
+            if (updateIniKey(settingsPath_, otherKey, otherNext)) {
+                keybindsDesc_[oi].second = otherNext;
+                clearedFrom.push_back(otherAction);
+            } else {
+                pushSystemMessage("FAILED TO UPDATE " + otherKey + ".");
+            }
+        }
+    }
+
+    if (!clearedFrom.empty()) {
+        pushSystemMessage("REASSIGNED " + chordToken + " FROM " + joinList(clearedFrom) + ".");
+    }
+
+    // Warn about conflicts that remain (or all conflicts if we are in ADD mode).
+    std::vector<std::string> remaining = conflictNames;
+    if (!addMode && !clearedFrom.empty()) {
+        remaining.erase(std::remove_if(remaining.begin(), remaining.end(),
+                                      [&](const std::string& s) { return std::find(clearedFrom.begin(), clearedFrom.end(), s) != clearedFrom.end(); }),
+                        remaining.end());
+    }
+
+    if (!remaining.empty()) {
+        std::string msg = "WARNING: " + chordToken + " ALSO BINDS ";
+        msg += joinList(remaining);
+        msg += ".";
+        pushSystemMessage(msg);
+    }
 
     requestKeyBindsReload();
     pushSystemMessage("SET " + bindKey + " = " + next);

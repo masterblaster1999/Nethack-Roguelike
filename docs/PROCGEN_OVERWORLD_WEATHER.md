@@ -13,6 +13,7 @@ Weather is computed on-demand from:
 - **run seed**
 - **overworld chunk coordinates (x,y)**
 - **biome** (so deserts tend to stay dry, tundra stays cold, etc.)
+- **turn count** (for slow-moving time-varying fronts; no extra save state)
 
 Implementation lives in `src/overworld.hpp`.
 
@@ -54,6 +55,26 @@ There’s no added per-tile simulation beyond small tweaks to existing hazard up
 
 ---
 
+
+
+### 4) Time-varying fronts (Round 180)
+
+Weather is still **deterministic** and still avoids a per-tile simulation, but it can now *change over time*.
+
+`overworld::weatherFor(...)` accepts an optional `turnCount` and uses it to create slow-moving **wind bands and cloud fronts** by drifting the *sampling coordinates* of the underlying noise fields:
+
+- pick a deterministic drift direction/speed from `(runSeed, domainTag)`,
+- convert `turnCount` into a coarse “weather time” scale (hundreds of turns),
+- offset the wind/cloud noise coordinates by that drift.
+
+This preserves:
+
+- replay safety (no gameplay RNG consumption),
+- regional coherence across neighboring chunks,
+- and zero save-file overhead.
+
+Passing `turnCount == 0` reproduces the original “static snapshot” behavior.
+
 ## Weather kinds
 
 `overworld::WeatherKind` currently includes:
@@ -91,7 +112,6 @@ The HUD surface line also displays the current wilderness weather.
 
 This system is intentionally conservative. Some natural extensions (not implemented yet):
 
-- time-varying weather fronts (using turnCount as an input)
 - temperature affecting stamina/food spoilage
 - precipitation affecting scent decay and tracks
 - rare lightning events in storms

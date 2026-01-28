@@ -173,6 +173,45 @@ Settings loadSettings(const std::string& path) {
         } else if (key == "view_mode" || key == "camera_mode" || key == "camera") {
             ViewMode vm = ViewMode::TopDown;
             if (parseViewMode(val, vm)) s.viewMode = vm;
+        } else if (key == "raycast3d_scale" || key == "raycast_3d_scale" || key == "raycast3d_res") {
+            int v = 0;
+            if (parseInt(val, v)) s.raycast3DScale = std::clamp(v, 1, 4);
+        } else if (key == "raycast3d_fov" || key == "raycast3d_fov_deg" || key == "raycast_3d_fov") {
+            int v = 0;
+            if (parseInt(val, v)) s.raycast3DFovDeg = std::clamp(v, 40, 100);
+        } else if (key == "raycast3d_ceiling" || key == "raycast3d_ceiling_tex" || key == "raycast_3d_ceiling") {
+            bool b = true;
+            if (parseBool(val, b)) s.raycast3DCeiling = b;
+        } else if (key == "raycast3d_bump" || key == "raycast3d_bumpmap" || key == "raycast_3d_bump") {
+            bool b = true;
+            if (parseBool(val, b)) s.raycast3DBump = b;
+        } else if (key == "raycast3d_parallax" || key == "raycast3d_parallax_map" || key == "raycast_3d_parallax") {
+            bool b = true;
+            if (parseBool(val, b)) s.raycast3DParallax = b;
+        } else if (key == "raycast3d_parallax_strength" || key == "raycast3d_parallax_pct") {
+            int v = 0;
+            if (parseInt(val, v)) s.raycast3DParallaxStrength = std::clamp(v, 0, 100);
+        } else if (key == "raycast3d_specular" || key == "raycast3d_spec" || key == "raycast_3d_specular") {
+            bool b = true;
+            if (parseBool(val, b)) s.raycast3DSpecular = b;
+        } else if (key == "raycast3d_specular_strength" || key == "raycast3d_specular_pct") {
+            int v = 0;
+            if (parseInt(val, v)) s.raycast3DSpecularStrength = std::clamp(v, 0, 100);
+
+        } else if (key == "raycast3d_follow_move" || key == "raycast3d_follow" || key == "raycast3d_camera_follow") {
+            bool b = true;
+            if (parseBool(val, b)) s.raycast3DFollowMove = b;
+        } else if (key == "raycast3d_turn_deg" || key == "raycast3d_turn_degrees" || key == "raycast3d_turn") {
+            int v = 0;
+            if (parseInt(val, v)) s.raycast3DTurnDegrees = std::clamp(v, 1, 90);
+
+        } else if (key == "raycast3d_sprites" || key == "raycast3d_entities" || key == "raycast_3d_sprites") {
+            bool b = true;
+            if (parseBool(val, b)) s.raycast3DSprites = b;
+        } else if (key == "raycast3d_items" || key == "raycast3d_ground_items" || key == "raycast_3d_items") {
+            bool b = true;
+            if (parseBool(val, b)) s.raycast3DItems = b;
+
         } else if (key == "isometric_view") {
             bool b = false;
             if (parseBool(val, b)) s.viewMode = b ? ViewMode::Isometric : ViewMode::TopDown;
@@ -349,9 +388,38 @@ minimap_zoom = 0
 # follows the player (and the look/target cursor when those modes are active).
 view_w = 0
 view_h = 0
-# view_mode: topdown | isometric
-# (isometric is an experimental 2.5D camera; toggle in-game with F7 by default)
+# view_mode: topdown | isometric | 3d
+# (isometric is an experimental 2.5D camera; 3d is an experimental raycast view; toggle in-game with F7 by default)
 view_mode = topdown
+
+# Raycast 3D view tuning (visual-only)
+# Only applies when view_mode = 3d (or when you toggle to 3D view in-game).
+# raycast3d_scale: 1..4  (internal render resolution divisor; higher = faster, lower = sharper)
+# raycast3d_fov: 40..100 (horizontal FOV in degrees; ~67 is classic Wolf3D-like)
+# raycast3d_ceiling: true/false (textured ceiling vs simple gradient)
+# raycast3d_bump: true/false (adds normal-mapped relief shading from procedural textures)
+# raycast3d_parallax: true/false (parallax texture mapping for extra depth)
+# raycast3d_parallax_strength: 0..100 (parallax depth)
+# raycast3d_specular: true/false (material specular highlights)
+# raycast3d_specular_strength: 0..100 (specular intensity)
+# raycast3d_follow_move: true/false (camera dir follows player movement vs stays where you turn it)
+# raycast3d_turn_deg: 1..90 (degrees rotated per view-turn keypress)
+raycast3d_scale = 2
+raycast3d_fov = 67
+raycast3d_ceiling = true
+raycast3d_bump = true
+raycast3d_parallax = true
+raycast3d_parallax_strength = 60
+raycast3d_specular = true
+raycast3d_specular_strength = 70
+raycast3d_follow_move = true
+raycast3d_turn_deg = 15
+
+# Raycast 3D billboards (visual-only)
+# raycast3d_sprites: true/false (render entity billboards in the 3D view)
+# raycast3d_items: true/false (render ground-item billboards in the 3D view)
+raycast3d_sprites = true
+raycast3d_items = true
 
 # Player identity (used in the HUD + scoreboard)
 player_name = PLAYER
@@ -509,11 +577,14 @@ bind_down_right = c, kp_3
 bind_confirm = enter, kp_enter
 bind_cancel = escape, backspace
 bind_wait = space, period
+bind_parry = shift+p
+bind_butcher = shift+b
 bind_rest = r
 bind_sneak = n
 bind_evade = ctrl+e
 bind_pickup = g, comma, kp_0
 bind_inventory = i, tab
+bind_spells = shift+z
 bind_fire = f
 bind_search = shift+c
 bind_disarm = t
@@ -522,13 +593,16 @@ bind_lock_door = shift+k
 bind_kick = b
 bind_dig = shift+d
 bind_look = l, v
+bind_stairs_up = shift+comma, less
+bind_stairs_down = shift+period, shift+less, greater
+bind_auto_explore = o
+bind_toggle_auto_pickup = p
+
+# UI helpers (LOOK overlays)
 bind_sound_preview = ctrl+n
 bind_threat_preview = ctrl+t
 bind_hearing_preview = ctrl+h
-bind_stairs_up = shift+comma, less
-bind_stairs_down = shift+period, greater
-bind_auto_explore = o
-bind_toggle_auto_pickup = p
+bind_scent_preview = ctrl+s
 
 # Inventory-specific
 bind_equip = e
@@ -539,21 +613,25 @@ bind_sort_inventory = shift+s
 
 # UI / meta
 bind_help = f1, shift+slash, h, cmd+?
-bind_options = f2
-bind_command = shift+3
+bind_options = f2, ctrl+comma, cmd+comma
+bind_command = shift+3, ctrl+p, shift+ctrl+p, shift+cmd+p
 bind_toggle_minimap = m
+bind_overworld_map = shift+m
 bind_minimap_zoom_out = [
 bind_minimap_zoom_in = ]
 bind_toggle_stats = shift+tab
 bind_toggle_view_mode = f7
+bind_view_turn_left = alt+q, alt+left
+bind_view_turn_right = alt+e, alt+right
 bind_toggle_voxel_sprites = f8
-bind_message_history = f3, shift+m
+bind_message_history = f3
 bind_codex = f4
 bind_discoveries = backslash
 bind_fullscreen = f11
 bind_screenshot = f12
 bind_save = f5
-bind_restart = f6
+bind_scores = f6
+bind_restart = shift+f6
 bind_load = f9
 bind_load_auto = f10
 bind_toggle_perf_overlay = shift+f10

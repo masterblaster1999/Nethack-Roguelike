@@ -408,6 +408,22 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Raycast 3D view options (visual-only / hot-reloadable via settings reload).
+    renderer.setRaycast3DScale(settings.raycast3DScale);
+    renderer.setRaycast3DFovDegrees(static_cast<float>(settings.raycast3DFovDeg));
+    renderer.setRaycast3DCeilingEnabled(settings.raycast3DCeiling);
+    renderer.setRaycast3DBumpEnabled(settings.raycast3DBump);
+
+    renderer.setRaycast3DParallaxEnabled(settings.raycast3DParallax);
+    renderer.setRaycast3DParallaxStrengthPct(settings.raycast3DParallaxStrength);
+    renderer.setRaycast3DSpecularEnabled(settings.raycast3DSpecular);
+    renderer.setRaycast3DSpecularStrengthPct(settings.raycast3DSpecularStrength);
+
+    renderer.setRaycast3DSpritesEnabled(settings.raycast3DSprites);
+    renderer.setRaycast3DItemsEnabled(settings.raycast3DItems);
+    renderer.setRaycast3DFollowMoveEnabled(settings.raycast3DFollowMove);
+    renderer.setRaycast3DTurnDegrees(static_cast<float>(settings.raycast3DTurnDegrees));
+
     if (settings.startFullscreen) {
         renderer.toggleFullscreen();
     }
@@ -838,6 +854,17 @@ int main(int argc, char** argv) {
             return;
         }
 
+        // View-only raycast 3D camera turning.
+        // (Handled here so it works even during auto-move, and without affecting simulation.)
+        if (a == Action::ViewTurnLeft) {
+            if (game.viewMode() == ViewMode::Raycast3D) renderer.raycast3DTurnLeft();
+            return;
+        }
+        if (a == Action::ViewTurnRight) {
+            if (game.viewMode() == ViewMode::Raycast3D) renderer.raycast3DTurnRight();
+            return;
+        }
+
         game.handleAction(a);
     };
 
@@ -1007,9 +1034,91 @@ int main(int argc, char** argv) {
                                 break;
                             }
 
+                            const bool hasCtrl = (mod & KMOD_CTRL) != 0;
+                            const bool hasAlt  = (mod & (KMOD_ALT | KMOD_MODE)) != 0;
+                            const bool hasCmd  = (mod & KMOD_GUI) != 0;
+
                             auto recordBackspace = [&]() {
                                 if (recording) recorder.writeCommandBackspace(recordTimeMs());
                                 game.commandBackspace();
+                            };
+
+                            auto isSpacePrev = [&]() -> bool {
+                                const std::string& b = game.commandBuffer();
+                                size_t curB = static_cast<size_t>(std::clamp(game.commandCursorByte(), 0, static_cast<int>(b.size())));
+                                if (curB == 0) return false;
+                                size_t i = curB - 1;
+                                while (i > 0 && (static_cast<unsigned char>(b[i]) & 0xC0u) == 0x80u) {
+                                    --i;
+                                }
+                                const unsigned char ch = static_cast<unsigned char>(b[i]);
+                                return std::isspace(static_cast<int>(ch)) != 0;
+                            };
+
+                            auto isSpaceCur = [&]() -> bool {
+                                const std::string& b = game.commandBuffer();
+                                size_t curB = static_cast<size_t>(std::clamp(game.commandCursorByte(), 0, static_cast<int>(b.size())));
+                                if (curB >= b.size()) return false;
+                                const unsigned char ch = static_cast<unsigned char>(b[curB]);
+                                return std::isspace(static_cast<int>(ch)) != 0;
+                            };
+
+                            auto deletePrevWord = [&]() {
+                                // First delete any whitespace run.
+                                while (game.commandCursorByte() > 0 && isSpacePrev()) {
+                                    recordBackspace();
+                                }
+                                // Then delete the word body.
+                                while (game.commandCursorByte() > 0 && !isSpacePrev()) {
+                                    recordBackspace();
+                                }
+                            };
+
+                            auto moveWordLeft = [&]() {
+                                // Skip any whitespace run first.
+                                while (game.commandCursorByte() > 0 && isSpacePrev()) {
+                                    dispatchAction(Action::Left);
+                                }
+                                // Then skip the word body.
+                                while (game.commandCursorByte() > 0 && !isSpacePrev()) {
+                                    dispatchAction(Action::Left);
+                                }
+                            };
+
+                            auto moveWordRight = [&]() {
+                                const int endB = static_cast<int>(game.commandBuffer().size());
+                                // Skip whitespace.
+                                while (game.commandCursorByte() >= 0 && game.commandCursorByte() < endB && isSpaceCur()) {
+                                    dispatchAction(Action::Right);
+                                }
+                                // Skip word.
+                                while (game.commandCursorByte() >= 0 && game.commandCursorByte() < endB && !isSpaceCur()) {
+                                    dispatchAction(Action::Right);
+                                }
+                            };
+
+                            auto pasteClipboard = [&]() {
+                                char* clip = SDL_GetClipboardText();
+                                if (!clip) return;
+                                std::string txt = clip;
+                                SDL_free(clip);
+                                if (txt.empty()) return;
+
+                                // One-line only: flatten newlines.
+                                for (char& ch : txt) {
+                                    if (ch == '\r' || ch == '\n') ch = ' ';
+                                }
+
+                                // Respect command length cap (Game will clamp too; we clamp so replays match).
+                                const size_t cap = 120;
+                                const size_t cur = game.commandBuffer().size();
+                                if (cur >= cap) return;
+                                const size_t avail = cap - cur;
+                                if (txt.size() > avail) txt.resize(avail);
+                                if (txt.empty()) return;
+
+                                if (recording) recorder.writeTextInput(recordTimeMs(), txt);
+                                game.commandTextInput(txt.c_str());
                             };
 
                             // Basic modal behaviour.
@@ -1023,13 +1132,31 @@ int main(int argc, char** argv) {
                                 break;
                             }
 
-                            // Cursor navigation.
+                            // Clipboard shortcuts (Ctrl/Cmd+V to paste).
+                            if ((hasCtrl || hasCmd) && !isRepeat && key == SDLK_v) {
+                                pasteClipboard();
+                                break;
+                            }
+
+                            // Cursor navigation (with common macOS-style accelerators).
                             if (key == SDLK_LEFT) {
-                                dispatchAction(Action::Left);
+                                if (hasCmd) {
+                                    dispatchAction(Action::LogUp);   // Cmd+Left: home
+                                } else if (hasAlt && !hasCtrl) {
+                                    moveWordLeft();                 // Opt+Left: word-left
+                                } else {
+                                    dispatchAction(Action::Left);
+                                }
                                 break;
                             }
                             if (key == SDLK_RIGHT) {
-                                dispatchAction(Action::Right);
+                                if (hasCmd) {
+                                    dispatchAction(Action::LogDown); // Cmd+Right: end
+                                } else if (hasAlt && !hasCtrl) {
+                                    moveWordRight();                // Opt+Right: word-right
+                                } else {
+                                    dispatchAction(Action::Right);
+                                }
                                 break;
                             }
                             if (key == SDLK_HOME) {
@@ -1043,7 +1170,17 @@ int main(int argc, char** argv) {
 
                             // Deletion/editing.
                             if (key == SDLK_BACKSPACE) {
-                                recordBackspace();
+                                if (hasCmd) {
+                                    // macOS: Cmd+Backspace kills to start of line.
+                                    while (game.commandCursorByte() > 0) {
+                                        recordBackspace();
+                                    }
+                                } else if (hasAlt) {
+                                    // macOS/terminal convention: Opt+Backspace deletes previous word.
+                                    deletePrevWord();
+                                } else {
+                                    recordBackspace();
+                                }
                                 break;
                             }
                             if (key == SDLK_DELETE) {
@@ -1058,7 +1195,7 @@ int main(int argc, char** argv) {
                             }
 
                             // Readline-style helpers (recorded as primitive edit ops so replays work).
-                            if ((mod & KMOD_CTRL) != 0 && !isRepeat) {
+                            if (hasCtrl && !isRepeat) {
                                 // Move by one character (Readline: C-b/C-f).
                                 if (key == SDLK_b) {
                                     dispatchAction(Action::Left);
@@ -1126,28 +1263,18 @@ int main(int argc, char** argv) {
                                 }
                                 if (key == SDLK_w) {
                                     // Delete previous word.
-                                    auto isSpacePrev = [&]() -> bool {
-                                        const std::string& b = game.commandBuffer();
-                                        size_t curB = static_cast<size_t>(std::clamp(game.commandCursorByte(), 0, static_cast<int>(b.size())));
-                                        if (curB == 0) return false;
-                                        size_t i = curB - 1;
-                                        while (i > 0 && (static_cast<unsigned char>(b[i]) & 0xC0u) == 0x80u) {
-                                            --i;
-                                        }
-                                        const unsigned char ch = static_cast<unsigned char>(b[i]);
-                                        return std::isspace(static_cast<int>(ch)) != 0;
-                                    };
-
-                                    // First delete any whitespace run.
-                                    while (game.commandCursorByte() > 0 && isSpacePrev()) {
-                                        recordBackspace();
-                                    }
-                                    // Then delete the word body.
-                                    while (game.commandCursorByte() > 0 && !isSpacePrev()) {
-                                        recordBackspace();
-                                    }
+                                    deletePrevWord();
                                     break;
                                 }
+                            }
+
+                            // macOS-friendly: Cmd+L clears the line too.
+                            if (hasCmd && !isRepeat && key == SDLK_l) {
+                                dispatchAction(Action::LogDown);
+                                while (game.commandCursorByte() > 0) {
+                                    recordBackspace();
+                                }
+                                break;
                             }
 
                             // History navigation.
@@ -1172,7 +1299,13 @@ int main(int argc, char** argv) {
                         // Message history overlay: intercept a few text/navigation keys so they
                         // don't get interpreted as gameplay actions (especially Backspace).
                         if (game.isMessageHistoryOpen()) {
-                            if (!game.isMessageHistorySearchMode() && key == SDLK_SLASH && (mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) == 0 && (mod & KMOD_SHIFT) == 0 && !isRepeat) {
+                            if (!game.isMessageHistorySearchMode() && key == SDLK_SLASH && (mod & (KMOD_CTRL | KMOD_ALT | KMOD_MODE | KMOD_GUI)) == 0 && (mod & KMOD_SHIFT) == 0 && !isRepeat) {
+                                if (recording) recorder.writeMessageHistoryToggleSearchMode(recordTimeMs());
+                                game.messageHistoryToggleSearchMode();
+                                break;
+                            }
+                            // Common desktop UX: Ctrl/Cmd+F to search.
+                            if ((mod & (KMOD_CTRL | KMOD_GUI)) != 0 && key == SDLK_f && !isRepeat) {
                                 if (recording) recorder.writeMessageHistoryToggleSearchMode(recordTimeMs());
                                 game.messageHistoryToggleSearchMode();
                                 break;
@@ -1182,12 +1315,27 @@ int main(int argc, char** argv) {
                                 game.messageHistoryBackspace();
                                 break;
                             }
-                            if ((mod & KMOD_CTRL) != 0 && (key == SDLK_l) && !isRepeat) {
+                            if ((mod & (KMOD_CTRL | KMOD_GUI)) != 0 && (key == SDLK_l) && !isRepeat) {
                                 if (recording) recorder.writeMessageHistoryClearSearch(recordTimeMs());
                                 game.messageHistoryClearSearch();
                                 break;
                             }
-                            if ((mod & KMOD_CTRL) != 0 && (key == SDLK_c) && !isRepeat) {
+                            if (game.isMessageHistorySearchMode() && (mod & (KMOD_CTRL | KMOD_GUI)) != 0 && (key == SDLK_v) && !isRepeat) {
+                                char* clip = SDL_GetClipboardText();
+                                if (clip) {
+                                    std::string txt = clip;
+                                    SDL_free(clip);
+                                    for (char& ch : txt) {
+                                        if (ch == '\r' || ch == '\n') ch = ' ';
+                                    }
+                                    if (!txt.empty()) {
+                                        if (recording) recorder.writeTextInput(recordTimeMs(), txt);
+                                        game.messageHistoryTextInput(txt.c_str());
+                                    }
+                                }
+                                break;
+                            }
+                            if ((mod & (KMOD_CTRL | KMOD_GUI)) != 0 && (key == SDLK_c) && !isRepeat) {
                                 // UI-only convenience: copy the filtered message history to clipboard.
                                 const std::string txt = game.messageHistoryClipboardText();
                                 if (!txt.empty() && SDL_SetClipboardText(txt.c_str()) == 0) {
@@ -1202,7 +1350,11 @@ int main(int argc, char** argv) {
                         // Keybinds overlay: when typing in the filter box, treat the keyboard as text input
                         // so movement keys (WASD/vi-keys) don't move the selection while you're searching.
                         if (game.isKeybindsOpen() && game.isKeybindsSearchMode() && !game.isKeybindsCapturing()) {
-                            if (key == SDLK_SLASH && (mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) == 0 && (mod & KMOD_SHIFT) == 0 && !isRepeat) {
+                            if (key == SDLK_SLASH && (mod & (KMOD_CTRL | KMOD_ALT | KMOD_MODE | KMOD_GUI)) == 0 && (mod & KMOD_SHIFT) == 0 && !isRepeat) {
+                                game.keybindsToggleSearchMode();
+                                break;
+                            }
+                            if ((mod & (KMOD_CTRL | KMOD_GUI)) != 0 && key == SDLK_f && !isRepeat) {
                                 game.keybindsToggleSearchMode();
                                 break;
                             }
@@ -1224,8 +1376,23 @@ int main(int argc, char** argv) {
                                 game.keybindsUnbindSelected();
                                 break;
                             }
-                            if ((mod & KMOD_CTRL) != 0 && (key == SDLK_l) && !isRepeat) {
+                            if ((mod & (KMOD_CTRL | KMOD_GUI)) != 0 && (key == SDLK_l) && !isRepeat) {
                                 game.keybindsClearSearch();
+                                break;
+                            }
+                            if ((mod & (KMOD_CTRL | KMOD_GUI)) != 0 && (key == SDLK_v) && !isRepeat) {
+                                char* clip = SDL_GetClipboardText();
+                                if (clip) {
+                                    std::string txt = clip;
+                                    SDL_free(clip);
+                                    for (char& ch : txt) {
+                                        if (ch == '\r' || ch == '\n') ch = ' ';
+                                    }
+                                    if (!txt.empty()) {
+                                        if (recording) recorder.writeTextInput(recordTimeMs(), txt);
+                                        game.keybindsTextInput(txt.c_str());
+                                    }
+                                }
                                 break;
                             }
                             if (key == SDLK_UP) {
@@ -1254,11 +1421,15 @@ int main(int argc, char** argv) {
                                 game.keybindsUnbindSelected();
                                 break;
                             }
-                            if (key == SDLK_SLASH && (mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) == 0 && (mod & KMOD_SHIFT) == 0 && !isRepeat) {
+                            if (key == SDLK_SLASH && (mod & (KMOD_CTRL | KMOD_ALT | KMOD_MODE | KMOD_GUI)) == 0 && (mod & KMOD_SHIFT) == 0 && !isRepeat) {
                                 game.keybindsToggleSearchMode();
                                 break;
                             }
-                            if ((mod & KMOD_CTRL) != 0 && (key == SDLK_l) && !isRepeat) {
+                            if ((mod & (KMOD_CTRL | KMOD_GUI)) != 0 && key == SDLK_f && !isRepeat) {
+                                game.keybindsToggleSearchMode();
+                                break;
+                            }
+                            if ((mod & (KMOD_CTRL | KMOD_GUI)) != 0 && (key == SDLK_l) && !isRepeat) {
                                 game.keybindsClearSearch();
                                 break;
                             }
@@ -1273,7 +1444,7 @@ int main(int argc, char** argv) {
                             }
                         }
 
-                        const bool noCountMods = (mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI | KMOD_SHIFT)) == 0;
+                        const bool noCountMods = (mod & (KMOD_CTRL | KMOD_ALT | KMOD_MODE | KMOD_GUI | KMOD_SHIFT)) == 0;
 
                         // Count prefix editing (Backspace removes the last digit).
                         if (!isRepeat && noCountMods && inputCountPrefix > 0 && key == SDLK_BACKSPACE) {
@@ -1749,6 +1920,22 @@ int main(int argc, char** argv) {
 
             // Keep the local copy up-to-date for any later use.
             settings = newSettings;
+
+            // Apply renderer-only 3D view knobs immediately.
+            renderer.setRaycast3DScale(settings.raycast3DScale);
+            renderer.setRaycast3DFovDegrees(static_cast<float>(settings.raycast3DFovDeg));
+            renderer.setRaycast3DCeilingEnabled(settings.raycast3DCeiling);
+            renderer.setRaycast3DBumpEnabled(settings.raycast3DBump);
+
+            renderer.setRaycast3DParallaxEnabled(settings.raycast3DParallax);
+            renderer.setRaycast3DParallaxStrengthPct(settings.raycast3DParallaxStrength);
+            renderer.setRaycast3DSpecularEnabled(settings.raycast3DSpecular);
+            renderer.setRaycast3DSpecularStrengthPct(settings.raycast3DSpecularStrength);
+
+            renderer.setRaycast3DSpritesEnabled(settings.raycast3DSprites);
+            renderer.setRaycast3DItemsEnabled(settings.raycast3DItems);
+            renderer.setRaycast3DFollowMoveEnabled(settings.raycast3DFollowMove);
+            renderer.setRaycast3DTurnDegrees(static_cast<float>(settings.raycast3DTurnDegrees));
 
             // Controller can be toggled at runtime (best-effort).
             if (!settings.controllerEnabled && prevControllerEnabled) {

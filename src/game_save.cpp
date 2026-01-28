@@ -192,15 +192,33 @@ void Game::commandAutocomplete() {
         if (raw.empty()) return;
     }
 
+    // Action palette shorthand: "@<action>" completes/executes actions (keybind tokens) instead of extended commands.
+    bool hadAt = false;
+    if (!raw.empty() && raw[0] == '@') {
+        hadAt = true;
+        raw = trim(raw.substr(1));
+        // Note: allow empty after '@' so TAB can list actions from an empty prefix.
+    }
+
     // Split into whitespace tokens (command + args).
-    const std::vector<std::string> toks = splitWS(raw);
-    if (toks.empty()) return;
+    std::vector<std::string> toks = splitWS(raw);
+    if (toks.empty()) {
+        if (hadAt) {
+            // Treat "@" as an empty-prefix action palette query.
+            toks.push_back(std::string());
+        } else {
+            return;
+        }
+    }
 
     // Determine which token to complete.
     // - If there's only one token and no trailing whitespace: complete the command itself.
     // - Otherwise, complete the last token, or the next token if the user ended with whitespace.
     int completeIdx = 0;
-    if (toks.size() == 1 && !trailingWS) {
+    if (hadAt) {
+        // Action palette has no arguments: always complete the action token itself.
+        completeIdx = 0;
+    } else if (toks.size() == 1 && !trailingWS) {
         completeIdx = 0;
     } else {
         completeIdx = trailingWS ? static_cast<int>(toks.size()) : static_cast<int>(toks.size()) - 1;
@@ -315,7 +333,7 @@ void Game::commandAutocomplete() {
         completeIdx = 0;
     } else if (completeIdx == 0) {
         mode = Mode::CommandToken;
-        prefix.clear();
+        prefix = hadAt ? "@" : "";
     } else if (completeIdx == 1) {
         // Context-sensitive argument completion (limited to a small set of commands).
         if (resolvedCmd == "bind" || resolvedCmd == "unbind" || resolvedCmd == "preset" ||
@@ -334,7 +352,7 @@ void Game::commandAutocomplete() {
     }
 
     // If we're already cycling completions (from a previous TAB), advance to the next match.
-    if (commandAutoIndex >= 0 && !commandAutoMatches.empty() && !commandAutoBase.empty()) {
+    if (commandAutoIndex >= 0 && !commandAutoMatches.empty()) {
         // Keep cycling as long as:
         //  - we're completing the same token position (same prefix), and
         //  - the current token is one of the candidates, and
@@ -363,7 +381,18 @@ void Game::commandAutocomplete() {
     std::vector<std::string> descs;
 
     if (mode == Mode::CommandToken) {
-        universe = extendedCommandList();
+        if (hadAt) {
+            // Action palette universe: all action tokens (same strings used for bind_/keybinds).
+            const size_t n = sizeof(actioninfo::kActionInfoTable) / sizeof(actioninfo::kActionInfoTable[0]);
+            universe.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                const auto& info = actioninfo::kActionInfoTable[i];
+                if (!info.token || info.token[0] == 0) continue;
+                universe.push_back(std::string(info.token));
+            }
+        } else {
+            universe = extendedCommandList();
+        }
 
         // 1) Prefix matches first (classic NetHack-like behaviour).
         for (const auto& c : universe) {
@@ -403,16 +432,27 @@ void Game::commandAutocomplete() {
         descs.reserve(matches.size());
 
         for (const auto& m : matches) {
-            const char* tok = extendedCommandActionToken(m);
-            if (tok && tok[0] != '\0') hints.push_back(keybindHintForActionToken(tok));
-            else hints.push_back(std::string());
+            if (hadAt) {
+                hints.push_back(keybindHintForActionToken(m));
 
-            const char* d = extendedCommandShortDesc(m);
-            descs.push_back(d ? std::string(d) : std::string());
+                std::string d;
+                if (const auto* info = actioninfo::findByToken(m)) {
+                    if (info->desc && info->desc[0] != '\0') d = info->desc;
+                }
+                descs.push_back(d);
+            } else {
+                const char* tok = extendedCommandActionToken(m);
+                if (tok && tok[0] != '\0') hints.push_back(keybindHintForActionToken(tok));
+                else hints.push_back(std::string());
+
+                const char* d = extendedCommandShortDesc(m);
+                descs.push_back(d ? std::string(d) : std::string());
+            }
         }
 
         if (matches.size() == 1) {
-            const std::string outLine = matches[0] + " ";
+            std::string outLine = prefix + matches[0];
+            if (!hadAt) outLine += " ";
             commandBuf = hadHash ? ("#" + outLine) : outLine;
             commandCursor_ = static_cast<int>(commandBuf.size());
             clearState();
@@ -424,12 +464,13 @@ void Game::commandAutocomplete() {
         if (!fuzzyUsed) {
             const std::string lcp = longestCommonPrefix(matches);
             if (!lcp.empty() && lcp.size() > cur.size()) {
-                commandBuf = hadHash ? ("#" + lcp) : lcp;
+                const std::string outLine = prefix + lcp;
+                commandBuf = hadHash ? ("#" + outLine) : outLine;
                 commandCursor_ = static_cast<int>(commandBuf.size());
 
                 // Keep the match set around so a subsequent TAB can begin cycling from this new prefix.
                 commandAutoBase = lcp;
-                commandAutoPrefix.clear();
+                commandAutoPrefix = prefix;
                 commandAutoMatches = matches;
                 commandAutoHints = hints;
                 commandAutoDescs = descs;
@@ -441,7 +482,7 @@ void Game::commandAutocomplete() {
 
         // Otherwise, start cycling through the available matches.
         commandAutoBase = cur;
-        commandAutoPrefix.clear();
+        commandAutoPrefix = prefix;
         commandAutoMatches = matches;
         commandAutoHints = hints;
         commandAutoDescs = descs;
@@ -457,10 +498,12 @@ void Game::commandAutocomplete() {
 
         if (startIdx >= 0) {
             commandAutoIndex = startIdx;
-            commandBuf = hadHash ? ("#" + cur) : cur;
+            const std::string outLine = prefix + cur;
+            commandBuf = hadHash ? ("#" + outLine) : outLine;
         } else {
             commandAutoIndex = 0;
-            commandBuf = hadHash ? ("#" + matches[0]) : matches[0];
+            const std::string outLine = prefix + matches[0];
+            commandBuf = hadHash ? ("#" + outLine) : outLine;
         }
 
         commandCursor_ = static_cast<int>(commandBuf.size());
@@ -627,8 +670,27 @@ void Game::commandAutocomplete() {
 void Game::commandCursorLeft() {
     if (!commandOpen) return;
     size_t cur = static_cast<size_t>(std::clamp(commandCursor_, 0, static_cast<int>(commandBuf.size())));
-    if (cur == 0) return;
+    if (cur == 0) {
+        // Any cursor movement / navigation cancels tab-completion cycling state.
+        commandAutoBase.clear();
+        commandAutoPrefix.clear();
+        commandAutoMatches.clear();
+        commandAutoHints.clear();
+        commandAutoDescs.clear();
+        commandAutoIndex = -1;
+        commandAutoFuzzy = false;
+        return;
+    }
     commandCursor_ = static_cast<int>(utf8PrevIndex(commandBuf, cur));
+
+    // Any cursor movement / navigation cancels tab-completion cycling state.
+    commandAutoBase.clear();
+    commandAutoPrefix.clear();
+    commandAutoMatches.clear();
+    commandAutoHints.clear();
+    commandAutoDescs.clear();
+    commandAutoIndex = -1;
+    commandAutoFuzzy = false;
 }
 
 void Game::commandCursorRight() {
@@ -636,19 +698,55 @@ void Game::commandCursorRight() {
     size_t cur = static_cast<size_t>(std::clamp(commandCursor_, 0, static_cast<int>(commandBuf.size())));
     if (cur >= commandBuf.size()) {
         commandCursor_ = static_cast<int>(commandBuf.size());
+
+        // Any cursor movement / navigation cancels tab-completion cycling state.
+        commandAutoBase.clear();
+        commandAutoPrefix.clear();
+        commandAutoMatches.clear();
+        commandAutoHints.clear();
+        commandAutoDescs.clear();
+        commandAutoIndex = -1;
+        commandAutoFuzzy = false;
         return;
     }
     commandCursor_ = static_cast<int>(utf8NextIndex(commandBuf, cur));
+
+    // Any cursor movement / navigation cancels tab-completion cycling state.
+    commandAutoBase.clear();
+    commandAutoPrefix.clear();
+    commandAutoMatches.clear();
+    commandAutoHints.clear();
+    commandAutoDescs.clear();
+    commandAutoIndex = -1;
+    commandAutoFuzzy = false;
 }
 
 void Game::commandCursorHome() {
     if (!commandOpen) return;
     commandCursor_ = 0;
+
+    // Any cursor movement / navigation cancels tab-completion cycling state.
+    commandAutoBase.clear();
+    commandAutoPrefix.clear();
+    commandAutoMatches.clear();
+    commandAutoHints.clear();
+    commandAutoDescs.clear();
+    commandAutoIndex = -1;
+    commandAutoFuzzy = false;
 }
 
 void Game::commandCursorEnd() {
     if (!commandOpen) return;
     commandCursor_ = static_cast<int>(commandBuf.size());
+
+    // Any cursor movement / navigation cancels tab-completion cycling state.
+    commandAutoBase.clear();
+    commandAutoPrefix.clear();
+    commandAutoMatches.clear();
+    commandAutoHints.clear();
+    commandAutoDescs.clear();
+    commandAutoIndex = -1;
+    commandAutoFuzzy = false;
 }
 
 

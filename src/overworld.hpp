@@ -302,17 +302,17 @@ inline const char* biomeName(Biome b) {
 
 
 // -----------------------------------------------------------------------------
-// Overworld weather (deterministic per chunk)
+// Overworld weather (deterministic per chunk, time-varying fronts)
 // -----------------------------------------------------------------------------
 //
 // Wilderness chunks expose a lightweight weather profile derived deterministically
-// from (runSeed, chunkX, chunkY). This is intentionally *not* a full time simulation;
-// it is a per-region "climate" snapshot that:
+// from (runSeed, chunkX, chunkY) and (optionally) turnCount. This is intentionally *not* a full time simulation;
+// it is a per-region "climate" snapshot with slowly drifting wind/cloud fronts that:
 //   - provides coherent wind for scent/gas/fire drift on the overworld,
 //   - occasionally reduces visibility (fog/snow/dust), and
 //   - can quench fire during rain/storms.
 //
-// The profile is cheap to compute and does not consume gameplay RNG.
+// The profile is cheap to compute, does not consume gameplay RNG, and needs no save-file state.
 
 enum class WeatherKind : uint8_t {
     Clear = 0,
@@ -352,10 +352,60 @@ struct WeatherProfile {
     int burnQuench = 0;   // extra per-turn decay for burnTurns (0..2)
 };
 
-inline WeatherProfile weatherFor(uint32_t runSeed, int chunkX, int chunkY, Biome biome) {
+// Time-varying weather fronts
+//
+// Rather than simulating per-tile weather (which would require save-file state and
+// additional per-turn processing), we "animate" the large-scale cloud/front and wind
+// noise fields by drifting their sampling coordinates as a pure function of
+// (runSeed, turnCount).
+//
+// This keeps the system:
+//   - deterministic (replay-safe),
+//   - coherent across neighboring chunks,
+//   - cheap to evaluate on demand, and
+//   - fully backwards compatible: turnCount==0 reproduces the old static snapshot.
+
+inline Vec2f driftDir8(uint32_t h) {
+    constexpr float d = 0.70710678f; // 1/sqrt(2)
+    switch (h % 8u) {
+        case 0: return { 1.0f, 0.0f };
+        case 1: return { -1.0f, 0.0f };
+        case 2: return { 0.0f, 1.0f };
+        case 3: return { 0.0f, -1.0f };
+        case 4: return { d, d };
+        case 5: return { -d, d };
+        case 6: return { d, -d };
+        default: return { -d, -d };
+    }
+}
+
+inline Vec2f weatherDrift(uint32_t runSeed, uint32_t domainTag, uint32_t turnCount, float turnsPerUnit, float driftPerUnit) {
+    if (turnCount == 0u) return {0.0f, 0.0f};
+    if (turnsPerUnit <= 0.0f) return {0.0f, 0.0f};
+
+    const uint32_t base = hashCombine(runSeed, "OW_WEATHER_DRIFT"_tag);
+    const uint32_t h = hashCombine(base, domainTag);
+
+    const Vec2f dir = driftDir8(h);
+
+    // Small per-run/per-domain speed variation to keep fronts from feeling too clockwork.
+    const float jitter = 0.75f + 0.50f * rand01(hashCombine(h, "SPEED"_tag));
+    const float t = static_cast<float>(turnCount) / turnsPerUnit;
+
+    return { dir.x * t * driftPerUnit * jitter, dir.y * t * driftPerUnit * jitter };
+}
+
+
+inline WeatherProfile weatherFor(uint32_t runSeed, int chunkX, int chunkY, Biome biome, uint32_t turnCount = 0u) {
     WeatherProfile w;
 
     const uint32_t base = hashCombine(runSeed, "OW_WEATHER"_tag);
+
+    // Time-varying drift (fronts): animate the wind + cloud fields with turnCount.
+    // Using different drift domains keeps wind bands and cloud fronts loosely coupled.
+    const Vec2f windDrift  = weatherDrift(runSeed, "WX_WIND"_tag,  turnCount, 650.0f, 0.12f);
+    const Vec2f cloudDrift = weatherDrift(runSeed, "WX_FRONT"_tag, turnCount, 900.0f, 0.16f);
+
 
     // Use the same broad climate fields as biome selection for coherence.
     const uint32_t biomeBase = hashCombine(runSeed, "OW_BIOME"_tag);
@@ -374,8 +424,8 @@ inline WeatherProfile weatherFor(uint32_t runSeed, int chunkX, int chunkY, Biome
 
     // Wind field: sample a large-scale noise potential and take a finite-difference gradient.
     const uint32_t sWind = hashCombine(base, "WIND"_tag);
-    const float wfx = static_cast<float>(chunkX) * 0.17f;
-    const float wfy = static_cast<float>(chunkY) * 0.17f;
+    const float wfx = static_cast<float>(chunkX) * 0.17f + windDrift.x;
+    const float wfy = static_cast<float>(chunkY) * 0.17f + windDrift.y;
 
     constexpr float eps = 0.65f;
     const float fxp = fbm01(sWind, wfx + eps, wfy, 3);
@@ -425,10 +475,13 @@ inline WeatherProfile weatherFor(uint32_t runSeed, int chunkX, int chunkY, Biome
 
     // Micro-variation fields for fog/storm selection.
     const uint32_t sCloud = hashCombine(base, "CLOUD"_tag);
-    const float cloud = fbm01(sCloud, fx + 91.0f, fy - 37.0f, 3);
+
+    const float cfx = fx + cloudDrift.x;
+    const float cfy = fy + cloudDrift.y;
+    const float cloud = fbm01(sCloud, cfx + 91.0f, cfy - 37.0f, 3);
 
     const uint32_t sFront = hashCombine(base, "FRONT"_tag);
-    const float front = fbm01(sFront, fx - 13.0f, fy + 77.0f, 3);
+    const float front = fbm01(sFront, cfx - 13.0f, cfy + 77.0f, 3);
 
     // Start with clear/windy, then overlay precipitation/visibility effects.
     w.kind = WeatherKind::Clear;

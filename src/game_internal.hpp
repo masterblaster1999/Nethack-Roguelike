@@ -1230,6 +1230,14 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
         ok &= updateIniKey(settingsPath, "bind_evade", "ctrl+e");
     }
 
+    // UI/meta: keep these consistent across presets.
+    // Note: SHIFT+M is reserved for the overworld map, so message history defaults to F3 only.
+    ok &= updateIniKey(settingsPath, "bind_message_history", "f3");
+    ok &= updateIniKey(settingsPath, "bind_overworld_map", "shift+m");
+    // Extended command prompt: allow classic # plus editor-style palettes.
+    ok &= updateIniKey(settingsPath, "bind_command", "shift+3, ctrl+p, shift+ctrl+p, shift+cmd+p");
+    // Options: add common desktop shortcuts (Ctrl/Cmd+,).
+    ok &= updateIniKey(settingsPath, "bind_options", "f2, ctrl+comma, cmd+comma");
 
     // Acoustic preview helper (UI-only). Keep a consistent bind across presets.
     ok &= updateIniKey(settingsPath, "bind_sound_preview", "ctrl+n");
@@ -1257,6 +1265,96 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     // Allow users to paste NetHack-style inputs like "#quit" even though we open the prompt separately.
     if (!line.empty() && line[0] == '#') {
         line = trim(line.substr(1));
+    }
+
+    // Action palette: "@<action>" runs an Action by its token (same tokens used for keybinds).
+    // This turns the extended command prompt into a searchable command palette without adding new UI.
+    if (!line.empty() && line[0] == '@') {
+        std::string rest = trim(line.substr(1));
+        if (rest.empty()) {
+            game.pushSystemMessage("ACTION PALETTE: @<action>  (TIP: press TAB after '@' to complete)");
+            game.pushSystemMessage("EXAMPLES: @inventory | @toggle_minimap | @stairs_down | @look");
+            return;
+        }
+
+        auto atoks = splitWS(rest);
+        if (atoks.empty()) return;
+
+        const std::string tokRaw = atoks[0];
+        const auto a = actioninfo::parse(tokRaw);
+        if (!a.has_value()) {
+            game.pushSystemMessage("UNKNOWN ACTION: " + tokRaw);
+
+            // Suggest close action tokens (typos / muscle-memory).
+            auto editDistance = [](const std::string& a, const std::string& b) -> int {
+                // Levenshtein distance (iterative DP).
+                const size_t n = a.size();
+                const size_t m = b.size();
+                if (n == 0) return static_cast<int>(m);
+                if (m == 0) return static_cast<int>(n);
+
+                std::vector<int> prev(m + 1), cur(m + 1);
+                for (size_t j = 0; j <= m; ++j) prev[j] = static_cast<int>(j);
+
+                for (size_t i = 1; i <= n; ++i) {
+                    cur[0] = static_cast<int>(i);
+                    for (size_t j = 1; j <= m; ++j) {
+                        const int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+                        cur[j] = std::min({ prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost });
+                    }
+                    prev.swap(cur);
+                }
+
+                return prev[m];
+            };
+
+            const std::string in = actioninfo::normalizeToken(tokRaw);
+            struct Cand { int d; std::string tok; };
+
+            std::vector<Cand> cands;
+            const size_t n = sizeof(actioninfo::kActionInfoTable) / sizeof(actioninfo::kActionInfoTable[0]);
+            cands.reserve(n);
+
+            for (size_t i = 0; i < n; ++i) {
+                const auto& info = actioninfo::kActionInfoTable[i];
+                if (!info.token || info.token[0] == 0) continue;
+                const std::string t = info.token;
+
+                // Very cheap filter: for very short inputs, only suggest tokens that share the first char.
+                if (!in.empty() && in.size() <= 3 && !t.empty() && in[0] != t[0]) continue;
+
+                cands.push_back(Cand{editDistance(in, t), t});
+            }
+
+            std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+                if (a.d != b.d) return a.d < b.d;
+                return a.tok < b.tok;
+            });
+
+            std::vector<std::string> sug;
+            for (const auto& c : cands) {
+                if (static_cast<int>(sug.size()) >= 5) break;
+                // Keep suggestions conservative to avoid noisy spam for tiny inputs.
+                if (!in.empty() && in.size() <= 3 && c.d > 2) continue;
+                if (!in.empty() && in.size() > 3 && c.d > 3) continue;
+                sug.push_back(c.tok);
+            }
+
+            if (!sug.empty()) {
+                std::string line = "DID YOU MEAN: ";
+                for (size_t i = 0; i < sug.size(); ++i) {
+                    if (i) line += ", ";
+                    line += sug[i];
+                }
+                game.pushSystemMessage(line);
+            }
+
+            game.pushSystemMessage("TIP: press TAB after '@' for completion, or use #binds to list keybind tokens.");
+            return;
+        }
+
+        game.handleAction(*a);
+        return;
     }
 
     auto toks = splitWS(line);
@@ -1420,6 +1518,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         }
         if (outLine != "  ") game.pushSystemMessage(outLine);
         game.pushSystemMessage("TIP: type a prefix (e.g., 'autop') and press ENTER.");
+        game.pushSystemMessage("ACTIONS: @<action> runs a keybind action (TAB completes). EX: @inventory | @toggle_minimap");
         game.pushSystemMessage("INFO: pos [x y] | what [x y] | mapstats (TIP: uses LOOK cursor when active)");
         game.pushSystemMessage("SLOTS: slot [name], save [slot], load [slot], loadauto [slot], saves");
         game.pushSystemMessage("EXPORT: exportlog/exportmap/export/exportall/dump");

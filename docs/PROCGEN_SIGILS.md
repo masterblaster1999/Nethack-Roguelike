@@ -58,3 +58,13 @@ The generator lives in `src/sigil_gen.hpp`:
 
 Sigils are placed as part of `Game::spawnGraffiti()` and triggered in
 `Game::triggerSigilAt()`.
+
+### Seed/depth domain note (Overworld)
+
+In the overworld wilderness (Camp depth 0, non-home chunks), the game uses
+`Game::materialWorldSeed()` and `Game::materialDepth()` to key procedural content
+so each chunk can have its own "dialect" and difficulty scaling.
+
+Sigil parameters/effects use the **same** material-seed + material-depth domain so
+the inscription you see and the effect you get stay consistent even in wilderness
+chunks.

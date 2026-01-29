@@ -1,5 +1,135 @@
 # Changelog
 
+## Round 211
+
+- **Procedural leylines (arcane resonance field):** a deterministic per-tile (0..255) "mana current" cache computed alongside terrain materials and ecosystem seeds.
+  - Leylines tend to form thin linework along macro ridges and ecosystem boundaries, with extra strength on conductive substrates (metal/crystal).
+  - **Gameplay:** standing on strong currents nudges mana regeneration; spell failure chance is slightly reduced on strong currents (and slightly increased in dead-zones).
+  - **UI:** LOOK now shows `LEY: FAINT/BRIGHT/STRONG` when relevant.
+- Tests: add `proc_leylines` sanity/determinism test.
+- Docs: `docs/PROCGEN_LEYLINES.md`.
+
+## Round 210
+- Fix: remove duplicate inline definition of `ecosystemKindFlavor()` (header compile error).
+- **Ecosystem Loot Ecology:** biome-biased weapon egos (brands) + small themed loot caches near ecosystem seeds (derived RNG; doesn’t perturb main loot stream).
+- Refactor: `spawnItems()` item dropping now supports **derived RNG streams** for deterministic “side systems” (used by loot caches).
+- Tests: add `ecosystem_weapon_ego_loot_bias` guardrail test.
+- Docs: `docs/PROCGEN_ECOSYSTEM_LOOT_ECOLOGY.md`.
+
+## Round 209
+- **Ecosystem microclimates**: biome regions now have small, deterministic *local* environment modifiers that change how areas feel tactically.
+  - **Visibility (FOV)**: ecosystems can nudge sight radius (`VIS:+1` / `VIS:-1`) while you stand in them.
+  - **Hazard persistence**: gas/fire diffusion uses ecosystem-specific quench/spread deltas, so some regions scrub vapors quickly while others let dense clouds cling.
+  - LOOK mode now shows `VIS` next to `ECO` for quick at-a-glance readouts.
+- Added `docs/PROCGEN_ECOSYSTEM_MICROCLIMATES.md`.
+
+## Round 208
+- **Ecosystem resource nodes**: stationary harvestable nodes spawn near biome seeds, themed by ecosystem.
+  - Harvesting yields shards and can trigger a biome-specific backlash hazard.
+- Added `docs/PROCGEN_ECOSYSTEM_RESOURCE_NODES.md` and `docs/ROUND208_NOTES.md`.
+
+## Round 207
+- **Ecosystem stealth ecology (acoustics + scent)**: procedural biome regions now influence stealth and tracking in a deterministic, material-composable way.
+  - Footstep noise is nudged by ecosystem (e.g., FloodedGrotto splashes louder; FungalBloom hushes steps).
+  - Monster hearing is adjusted by local biome acoustics (masking water/wind vs echoing crystal/metal) so the same noise may or may not alert foes depending on where they are.
+  - The player’s **#listen** range is similarly affected by local acoustics.
+  - Scent trail simulation now layers ecosystem deltas on top of substrate materials: FungalBloom scents linger/spread; FloodedGrotto washes scent quickly.
+- Added docs: `docs/PROCGEN_ECOSYSTEM_STEALTH_ECOLOGY.md`.
+
+## Round 206
+- **Ecosystem crafting catalysts**: the local procedural biome now acts as a deterministic **catalyst** for Crafting Kit recipes (in addition to room-type workstations).
+  - Crafting seed is salted by `EcosystemKind`, so the **same ingredients** can yield **different sigils/outcomes** in different biomes (stable across save/load).
+  - The crafting preview now shows both **WORKSTATION** and **CATALYST** lines.
+  - The Craft Recipe journal now records `@WORKSTATION/CATALYST` for each learned sigil.
+  - Biome flavor nudges (deterministic):
+    - FungalBloom: can yield **extra Essence Shard byproduct**.
+    - CrystalGarden: can **boost wand charges**.
+    - RustVeins: can **temper gear enchantment**.
+    - BoneField: can **forge enchantment** with a small **cursed risk**.
+    - AshenRidge: can **boost fire-wand charges** and lightly **temper gear**.
+    - FloodedGrotto: can **brew fuller potions** and sometimes **wash away curses**.
+- Added docs: `docs/PROCGEN_ECOSYSTEM_CRAFTING_CATALYSTS.md`.
+
+## Round 205
+- **Ecosystem pulses (biome events)**: main-dungeon floors with ecosystem seeds now emit periodic, deterministic **pulses** near ecosystem cores, seeding short-lived hazards/boons that then drift via the existing field simulation.
+  - FungalBloom: spore burst → **confusion gas**.
+  - RustVeins: acrid vent → **corrosive gas**.
+  - AshenRidge: ember fissure → **fire** (plus a tiny smoky/confusion fringe at depth).
+  - FloodedGrotto: cool mist **quenches nearby fire**, can reduce your **burn duration**, and emits dripping **echo noise**.
+  - CrystalGarden: resonance chime emits noise and can restore **1–2 mana** if you’re nearby.
+  - BoneField: ossuary miasma → **poison gas**.
+- Pulses are **RNG-isolated** (hash-derived) and keyed off `turnCount` + a per-floor phase, so they are stable across save/load and do not perturb other procedural rolls.
+- Added docs: `docs/PROCGEN_ECOSYSTEM_PULSES.md`.
+
+## Round 204
+- **Ecosystem-aware spawn ecology**: room and guardian monster spawns now consult the local procedural **ecosystem field**, biasing spawn-table weights toward biome-appropriate monsters.
+  - Ecotone (biome boundary) tiles blend in a weaker secondary bias from the neighboring ecosystem to create natural transitional mixes.
+  - Ecotones also slightly increase the odds of liminal tricksters (**Mimics/Leprechauns/Nymphs**) and (at depth) **Wizards** so borders feel unstable and weird.
+- **Biome-tuned nest clusters**: existing small nest/cluster spawns (spider/snake/slime/bat) now receive ecosystem-based chance adjustments, and BoneField regions can occasionally raise a small **zombie pack**.
+- Added docs: `docs/PROCGEN_ECOSYSTEM_SPAWN_ECOLOGY.md`.
+
+## Round 203
+- **Ecosystem guardians (apex packs)**: main-dungeon floors with procedural biome seeds may now spawn **0–2 deterministic guardian packs** near ecosystem cores.
+  - Leader is a proc-ranked **Elite/Champion/Mythic** with **Gilded** + a biome-themed signature affix and proc abilities.
+  - Spawns avoid stairs, shops, and treasure/vault/secret rooms to keep difficulty spikes fair.
+  - Placement uses an **RNG-isolated** stream (derived from run seed + depth) so it doesn’t perturb other spawn randomness.
+- **Proc-ranked Essence Shard drops**: Champion/Mythic enemies (proc tier ≥ 2) can now shed a small stack of **ecosystem-aligned Essence Shards** on death.
+  - Drop/tag/tier/shiny are **hash-derived** (deterministic) so they don’t perturb the global RNG stream that drives other loot/events.
+- Added docs: `docs/PROCGEN_ECOSYSTEM_GUARDIANS.md`.
+
+## Round 202
+- **Ecosystem sigils**: floors with procedural biome seeds now occasionally place ecosystem-aware **"Heartstone" sigils** near a biome core and rarer **"Ecotone" sigils** at biome boundaries.
+  - Heartstones map each ecosystem to a **good/bad sigil pair** (e.g., Fungal → REGEN/VENOM; Ashen → AEGIS/EMBER) with depth-biased hazard odds.
+  - Ecotones detect boundary tiles (cardinal neighbor ecosystem diversity) and choose a sigil kind from a mixed pool derived from both adjacent biomes.
+  - Both placements are **hash-derived** (RNG-isolated) so they don’t perturb the main RNG stream.
+- **Sigil parameter consistency in overworld**: sigil triggering now uses the same `(materialWorldSeed, materialDepth)` domain as sigil spawning so wilderness chunks get consistent sigil effects.
+
+## Round 201
+- **Ecosystem trap clusters**: biome regions now sometimes spawn small, ecosystem-themed trap patches (webby spore pockets, rune-y crystal wards, bone spikes, corrosive rust vents, ashen haze, grotto drips).
+  - Uses an isolated RNG stream so these hazards don’t perturb other trap setpieces.
+  - Counts toward the normal trap budget (flavor, not a global difficulty spike).
+- **Ecosystem ambient particles (visual-only)**: visible tiles in ecosystem regions now emit subtle biome-specific particles (spores, crystal motes, dust, ash, droplets) using the renderer’s deterministic phase-crossing emitter logic.
+- Fixed a latent build issue in `game_spawn.cpp`: include `craft_tags.hpp` explicitly and use `RNG::next01()` instead of a non-existent `unit()` helper.
+
+## Round 200
+- **Stratum-biased ecosystems**: each infinite-world stratum (and signature floors) now selects a deterministic **primary/secondary ecosystem palette**; biome seeds are biased toward these picks for stronger macro-coherence across depths.
+- **Ecosystem essence resources**: floors now spawn small, deterministic clusters of **Essence Shards** aligned to local ecosystems (tag/tier/shiny based on ecosystem + substrate + depth) for crafting synergy.
+- **Biome UI feedback**:
+  - LOOK/inspect now shows `ECO: ...` for terrain tiles.
+  - Stepping into a new ecosystem kind triggers a one-time per-floor callout (and pauses auto-move/auto-explore on first entry).
+- **Mapstats upgrade**: `#mapstats` now reports ecosystem seed count and the top 3 ecosystem coverages.
+
+## Round 199
+- **Procedural ecosystem seeds**: added a deterministic per-floor **ecosystem field** (soft Voronoi biome patches) derived from the same level key as terrain materials.
+  - Ecosystem types: **FungalBloom**, **CrystalGarden**, **BoneField**, **RustVeins**, **AshenRidge**, **FloodedGrotto**.
+  - Not serialized; recomputed on demand alongside `Dungeon::ensureMaterials()`.
+- **Biome substrate overlays**: ecosystem patches softly bias floor materials (moss/dirt, crystal growth, bone dust, metal seams, volcanic stone), which then feeds into the existing substrate FX + biolum seeding.
+- **Ecosystem-aware proc monster variants**: ranked procedural monsters now incorporate the local ecosystem into their deterministic variant seed and apply small ecosystem-themed weight nudges to proc **affix** and **ability** rolls.
+
+## Round 198
+- **Directional auto-run**: added a classic roguelike “run” mode that keeps stepping in a chosen direction until you reach an **intersection**, **obstacle**, **loot**, **stairs**, or a **safety stop** triggers.
+  - Default bindings: **Shift + Arrow Keys** (cardinals) and **Shift + Numpad** (8-way)
+  - Rebindable actions: `run_up`, `run_down`, `run_left`, `run_right`, `run_up_left`, `run_up_right`, `run_down_left`, `run_down_right`
+- **Smart corridor following**: auto-run will automatically follow forced corridor corners (when there’s exactly one forward option), but stops at branch points so you can decide.
+- **Fair exploration**: auto-run will not path into **unexplored** tiles (so it can’t “peek” at the true map); just hit run again when you’re ready to push into new territory.
+
+## Round 197
+- **Interactive replay playback controls**: `--replay` sessions are no longer “hands off”. While a replay is playing you can now:
+  - **Pause / resume** (`replay_pause`, default **Space**)
+  - **Step** to the next recorded input event (`replay_step`, default **.** / **Right Arrow**)
+  - Adjust **playback speed** (`replay_speed_down` / `replay_speed_up`, defaults **-** and **+**)
+  - **Stop playback** (Esc) to immediately unlock input and continue playing from the current state
+- **Replay HUD indicator**: the HUD stat line now shows `REPLAY` with **speed** and a **mm:ss/mm:ss** timeline, plus `PAUSED` when paused.
+- **Replay safety**: during playback, only replay controls + a small set of visual-only toggles are accepted to avoid desync; stopping playback (or a hash mismatch) automatically disarms verification so you can safely take over.
+- **Playback speed is simulation-aware**: speeding up also scales the simulation timestep (auto-travel and other time-based systems keep up), using small fixed update steps for stability.
+
+## Round 196
+- **In-game replay recording controls**: added extended commands `record` / `stoprecord` (plus `rec` / `stoprec`) so you can start/stop `.prr` replay capture **without restarting the app**.
+  - `record [path]` starts recording to an optional filename (defaults to the same timestamped name used by `--record`).
+  - `stoprecord` closes the replay file and prints the saved path.
+- **HUD indicator**: while recording, the main HUD stat line shows a compact `REC` tag so you can tell at a glance when capture is active.
+- Added a unit test that asserts the new command prompt routes `record` / `stoprecord` into platform-layer recording requests.
+
 ## Round 195
 - **Raycast 3D free-look turning**: added view-only camera turning actions `view_turn_left` / `view_turn_right`.
   - Default keybinds: **Alt+Q** = turn left, **Alt+E** = turn right (plus Alt+Left/Right as an alternative).

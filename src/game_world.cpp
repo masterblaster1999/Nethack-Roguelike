@@ -528,6 +528,17 @@ void Game::recomputeFov() {
         if (pen > 0) radius = std::max(4, radius - pen);
     }
 
+    // Ecosystem microclimate: local haze can slightly alter sight radius.
+    if (branch_ != DungeonBranch::Camp && dung.inBounds(p.pos.x, p.pos.y)) {
+        // ensureMaterials() also populates the per-tile ecosystem cache.
+        dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+        const EcosystemKind ecoHere = dung.ecosystemAtCached(p.pos.x, p.pos.y);
+        const int delta = ecosystemFx(ecoHere).fovDelta;
+        if (delta != 0) {
+            radius = std::max(4, radius + delta);
+        }
+    }
+
     recomputeLightMap();
 
     if (!darknessActive()) {
@@ -664,9 +675,12 @@ void Game::updateScentMap() {
     auto fxAt = [&](int x, int y) -> ScentCellFx {
         const TerrainMaterial m = dung.materialAtCached(x, y);
         const TerrainMaterialFx matFx = terrainMaterialFx(m);
+        const EcosystemKind eco = dung.ecosystemAtCached(x, y);
+        const EcosystemFx ecoFx = ecosystemFx(eco);
+
         ScentCellFx out;
-        out.decayDelta = matFx.scentDecayDelta;
-        out.spreadDropDelta = matFx.scentSpreadDropDelta;
+        out.decayDelta = matFx.scentDecayDelta + ecoFx.scentDecayDelta;
+        out.spreadDropDelta = matFx.scentSpreadDropDelta + ecoFx.scentSpreadDropDelta;
         return out;
     };
 

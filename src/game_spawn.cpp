@@ -1,5 +1,7 @@
 #include "game_internal.hpp"
 #include "content.hpp"
+#include "craft_tags.hpp"
+#include "ecosystem_loot.hpp"
 #include "proc_rd.hpp"
 #include "proc_spells.hpp"
 #include "shop_profile_gen.hpp"
@@ -12,7 +14,7 @@ bool canHaveWeaponEgo(ItemKind k) {
     return k == ItemKind::Dagger || k == ItemKind::Sword || k == ItemKind::Axe;
 }
 
-ItemEgo rollWeaponEgo(RNG& rng, uint32_t runSeed, ItemKind k, int depth, RoomType rt, TerrainMaterial mat, bool fromShop, bool forMonster) {
+ItemEgo rollWeaponEgo(RNG& rng, uint32_t runSeed, ItemKind k, int depth, RoomType rt, TerrainMaterial mat, EcosystemKind eco, bool fromShop, bool forMonster) {
     if (!canHaveWeaponEgo(k)) return ItemEgo::None;
     if (depth < 3) return ItemEgo::None;
 
@@ -33,6 +35,10 @@ ItemEgo rollWeaponEgo(RNG& rng, uint32_t runSeed, ItemKind k, int depth, RoomTyp
 
     // Monsters shouldn't carry too many premium weapons.
     if (forMonster) chance *= 0.60f;
+
+    // Biome ecology: some ecosystems "forge" or "quench" branded weapons.
+    // (Small multiplier; balance stays driven by depth/rooms.)
+    chance *= ecoWeaponEgoChanceMul(eco);
 
     chance = std::max(0.0f, std::min(0.26f, chance));
     if (!rng.chance(chance)) return ItemEgo::None;
@@ -170,6 +176,16 @@ ItemEgo rollWeaponEgo(RNG& rng, uint32_t runSeed, ItemKind k, int depth, RoomTyp
                 break;
             default:
                 break;
+        }
+    }
+
+    // Ecosystem ecology.
+    // A final nudge based on the *local* biome region at the spawn position.
+    // This stacks with room/substrate so (for example) a crystal floor shrine still
+    // tends to yield DAZING gear, but the local ecosystem can tip edge cases.
+    if (eco != EcosystemKind::None) {
+        for (auto& o : opts) {
+            o.w += ecoWeaponEgoWeightDelta(eco, o.e);
         }
     }
 
@@ -421,7 +437,75 @@ static void buildProcAffixPool(std::vector<ProcAffixWeight>& out, EntityKind k, 
     add(ProcMonsterAffix::Webbing, wWeb);
 }
 
-static uint32_t rollProcAffixes(RNG& rr, EntityKind k, ProcMonsterRank rank, RoomType rt, int depth) {
+static void bumpExistingProcAffix(std::vector<ProcAffixWeight>& pool, ProcMonsterAffix a, int delta) {
+    if (delta == 0) return;
+    for (auto& e : pool) {
+        if (e.affix != a) continue;
+        e.weight = std::max(0, e.weight + delta);
+        return;
+    }
+}
+
+static void applyEcosystemProcAffixBias(std::vector<ProcAffixWeight>& pool, EcosystemKind eco, EntityKind k, RoomType rt, int depth) {
+    (void)rt;
+    (void)depth;
+
+    if (eco == EcosystemKind::None) return;
+
+    const bool humanoid = (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k));
+    const bool undead = entityIsUndead(k);
+
+    switch (eco) {
+        case EcosystemKind::FungalBloom:
+            // Damp, toxic warrens: more venom/webs, less fire.
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Venomous, 4);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Webbing, 3);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Swift, 2);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Flaming, -3);
+            break;
+
+        case EcosystemKind::CrystalGarden:
+            // Glittering growth: more blinking/stonehide/gilded.
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Blinking, 4);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Stonehide, 3);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Gilded, 2);
+            break;
+
+        case EcosystemKind::BoneField:
+            // Ossuary pressure: vampiric + commanders (when it makes sense).
+            if (!undead) bumpExistingProcAffix(pool, ProcMonsterAffix::Vampiric, 3);
+            if (humanoid) bumpExistingProcAffix(pool, ProcMonsterAffix::Commander, 3);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Flaming, -2);
+            break;
+
+        case EcosystemKind::RustVeins:
+            // Metal seams: stonehide + gilded nudges.
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Stonehide, 2);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Gilded, 2);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Venomous, -2);
+            break;
+
+        case EcosystemKind::AshenRidge:
+            // Hot stone: more flaming + savage.
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Flaming, 5);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Savage, 2);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Venomous, -3);
+            break;
+
+        case EcosystemKind::FloodedGrotto:
+            // Wet caves: toxic/webby and slightly faster.
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Venomous, 3);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Webbing, 2);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Swift, 1);
+            bumpExistingProcAffix(pool, ProcMonsterAffix::Flaming, -2);
+            break;
+
+        default:
+            break;
+    }
+}
+
+static uint32_t rollProcAffixes(RNG& rr, EntityKind k, ProcMonsterRank rank, RoomType rt, int depth, EcosystemKind eco) {
     const int tier = procRankTier(rank);
     if (tier <= 0) return 0u;
 
@@ -432,6 +516,7 @@ static uint32_t rollProcAffixes(RNG& rr, EntityKind k, ProcMonsterRank rank, Roo
 
     std::vector<ProcAffixWeight> pool;
     buildProcAffixPool(pool, k, rt, depth);
+    applyEcosystemProcAffixBias(pool, eco, k, rt, depth);
 
     uint32_t mask = 0u;
     for (int n = 0; n < want; ++n) {
@@ -559,7 +644,70 @@ static void buildProcAbilityPool(std::vector<ProcAbilityWeight>& out,
     add(ProcMonsterAbility::VoidHook, wHook);
 }
 
-static void rollProcAbilities(RNG& rr, EntityKind k, ProcMonsterRank rank, RoomType rt, int depth, uint32_t affixMask,
+static void bumpExistingProcAbility(std::vector<ProcAbilityWeight>& pool, ProcMonsterAbility a, int delta) {
+    if (a == ProcMonsterAbility::None) return;
+    if (delta == 0) return;
+    for (auto& e : pool) {
+        if (e.ability != a) continue;
+        e.weight = std::max(0, e.weight + delta);
+        return;
+    }
+}
+
+static void applyEcosystemProcAbilityBias(std::vector<ProcAbilityWeight>& pool, EcosystemKind eco, EntityKind k, RoomType rt, int depth, uint32_t affixMask) {
+    (void)rt;
+    (void)depth;
+    (void)affixMask;
+
+    if (eco == EcosystemKind::None) return;
+
+    const bool undead = entityIsUndead(k);
+    const bool humanoid = (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k));
+
+    switch (eco) {
+        case EcosystemKind::FungalBloom:
+            bumpExistingProcAbility(pool, ProcMonsterAbility::ToxicMiasma, 7);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::Pounce, 3);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::CinderNova, -4);
+            break;
+
+        case EcosystemKind::CrystalGarden:
+            bumpExistingProcAbility(pool, ProcMonsterAbility::ArcaneWard, 6);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::VoidHook, 3);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::Screech, 2);
+            break;
+
+        case EcosystemKind::BoneField:
+            // Encourage summoning on casters/undead-ish foes.
+            if (undead || humanoid) bumpExistingProcAbility(pool, ProcMonsterAbility::SummonMinions, 6);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::Screech, 3);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::ToxicMiasma, -3);
+            break;
+
+        case EcosystemKind::RustVeins:
+            bumpExistingProcAbility(pool, ProcMonsterAbility::VoidHook, 4);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::ArcaneWard, 2);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::Pounce, -2);
+            break;
+
+        case EcosystemKind::AshenRidge:
+            bumpExistingProcAbility(pool, ProcMonsterAbility::CinderNova, 7);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::VoidHook, 2);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::ToxicMiasma, -4);
+            break;
+
+        case EcosystemKind::FloodedGrotto:
+            bumpExistingProcAbility(pool, ProcMonsterAbility::ToxicMiasma, 5);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::Pounce, 2);
+            bumpExistingProcAbility(pool, ProcMonsterAbility::CinderNova, -3);
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void rollProcAbilities(RNG& rr, EntityKind k, ProcMonsterRank rank, RoomType rt, int depth, uint32_t affixMask, EcosystemKind eco,
                               ProcMonsterAbility& a1, ProcMonsterAbility& a2) {
     a1 = ProcMonsterAbility::None;
     a2 = ProcMonsterAbility::None;
@@ -573,6 +721,7 @@ static void rollProcAbilities(RNG& rr, EntityKind k, ProcMonsterRank rank, RoomT
 
     std::vector<ProcAbilityWeight> pool;
     buildProcAbilityPool(pool, k, rt, depth, affixMask);
+    applyEcosystemProcAbilityBias(pool, eco, k, rt, depth, affixMask);
     if (pool.empty()) return;
 
     auto pickOne = [&](ProcMonsterAbility avoid) -> ProcMonsterAbility {
@@ -771,6 +920,7 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
     if (allowGear && (monsterCanEquipWeapons(k) || monsterCanEquipArmor(k))) {
         const RoomType rt = rtHere;
         const TerrainMaterial matHere = dung.materialAtCached(e.pos.x, e.pos.y);
+        const EcosystemKind ecoHere = dung.ecosystemAtCached(e.pos.x, e.pos.y);
 
         auto makeGear = [&](ItemKind kind) -> Item {
             Item it;
@@ -792,7 +942,7 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
             }
 
             // Rare ego weapons.
-            it.ego = rollWeaponEgo(rng, seed_, kind, depth_, rt, matHere, /*fromShop=*/false, /*forMonster=*/true);
+            it.ego = rollWeaponEgo(rng, seed_, kind, depth_, rt, matHere, ecoHere, /*fromShop=*/false, /*forMonster=*/true);
 
             // Rare artifacts on monster gear.
             if (rollArtifact(rng, kind, depth_, rt, /*fromShop=*/false, /*forMonster=*/true)) {
@@ -977,16 +1127,22 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
     // Procedural monster variants (rank + affixes + abilities).
     // Applied after baseline stats/gear so modifiers scale the final creature.
     if (allowProcVariant && branch_ == DungeonBranch::Main && procVariantEligible(k, rtHere, depth_)) {
+        // Consult the deterministic ecosystem field so proc variants differ subtly
+        // between biome patches on the same floor.
+        const EcosystemKind ecoHere = dung.ecosystemAt(e.pos.x, e.pos.y, materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+
         const uint32_t seed = hashCombine(e.spriteSeed ^ 0xC0FFEEu,
                                           hashCombine(static_cast<uint32_t>(k),
-                                                      hashCombine(static_cast<uint32_t>(depth_), static_cast<uint32_t>(rtHere))));
+                                                      hashCombine(static_cast<uint32_t>(depth_),
+                                                                  hashCombine(static_cast<uint32_t>(rtHere),
+                                                                              static_cast<uint32_t>(ecoHere)))));
         RNG prng(seed);
         const ProcMonsterRank pr = rollProcRank(prng, k, depth_, rtHere);
-        const uint32_t pm = rollProcAffixes(prng, k, pr, rtHere, depth_);
+        const uint32_t pm = rollProcAffixes(prng, k, pr, rtHere, depth_, ecoHere);
         applyProcVariant(e, pr, pm);
 
         // Roll a small active-ability kit for ranked monsters.
-        rollProcAbilities(prng, k, pr, rtHere, depth_, pm, e.procAbility1, e.procAbility2);
+        rollProcAbilities(prng, k, pr, rtHere, depth_, pm, ecoHere, e.procAbility1, e.procAbility2);
         e.procAbility1Cd = 0;
         e.procAbility2Cd = 0;
     }
@@ -1139,11 +1295,221 @@ inline void applyMaterialBias(std::vector<SpawnEntry>& table, SpawnCategory cate
     }
 }
 
-inline EntityKind pickSpawnMonsterEcology(SpawnCategory category, RNG& rng, int depth, RoomType rt, TerrainMaterial mat) {
+
+
+struct EcoCtx {
+    EcosystemKind here = EcosystemKind::None;
+    EcosystemKind other = EcosystemKind::None; // dominant neighbor ecosystem (ecotone)
+    int diversity = 0;                         // distinct non-None ecosystems in {here + cardinal neighbors}
+    bool ecotone = false;                      // true when diversity >= 2 and other != None
+};
+
+inline EcoCtx ecoCtxAt(const Dungeon& d, int x, int y) {
+    EcoCtx out;
+    out.here = d.ecosystemAtCached(x, y);
+    if (out.here == EcosystemKind::None) return out;
+
+    EcosystemKind ns[4] = {EcosystemKind::None, EcosystemKind::None, EcosystemKind::None, EcosystemKind::None};
+    int n = 0;
+
+    const Vec2i dirs[4] = {{1,0}, {-1,0}, {0,1}, {0,-1}};
+    for (const auto& dd : dirs) {
+        const int nx = x + dd.x;
+        const int ny = y + dd.y;
+        if (!d.inBounds(nx, ny)) continue;
+        if (d.at(nx, ny).type != TileType::Floor) continue;
+        const EcosystemKind e = d.ecosystemAtCached(nx, ny);
+        if (e == EcosystemKind::None) continue;
+        if (n < 4) ns[n++] = e;
+    }
+
+    // Distinct ecosystem count (ignore None).
+    EcosystemKind uniq[5] = {EcosystemKind::None, EcosystemKind::None, EcosystemKind::None, EcosystemKind::None, EcosystemKind::None};
+    int uniqN = 0;
+    uniq[uniqN++] = out.here;
+
+    for (int i = 0; i < n; ++i) {
+        const EcosystemKind e = ns[i];
+        bool seen = false;
+        for (int j = 0; j < uniqN; ++j) {
+            if (uniq[j] == e) { seen = true; break; }
+        }
+        if (!seen && uniqN < 5) {
+            uniq[uniqN++] = e;
+        }
+    }
+
+    out.diversity = uniqN;
+    if (uniqN < 2) return out;
+
+    // Choose the most frequent "other" ecosystem among neighbors.
+    EcosystemKind other = EcosystemKind::None;
+    int bestCount = 0;
+    for (int j = 0; j < uniqN; ++j) {
+        const EcosystemKind e = uniq[j];
+        if (e == out.here) continue;
+        int c = 0;
+        for (int i = 0; i < n; ++i) {
+            if (ns[i] == e) ++c;
+        }
+        if (c > bestCount) {
+            bestCount = c;
+            other = e;
+        }
+    }
+
+    out.other = other;
+    out.ecotone = (other != EcosystemKind::None);
+    return out;
+}
+
+inline void applyEcosystemBias(std::vector<SpawnEntry>& table, SpawnCategory category, EcosystemKind eco, int depth, bool weak) {
+    if (eco == EcosystemKind::None) return;
+
+    // Mild, deterministic ecology: ecosystems subtly bias spawns without overriding spawn-table mods.
+    // Ecotones can apply a second, weaker pass for the neighboring ecosystem.
+    const int d = std::clamp(depth, 1, 12);
+    const bool deep = (d >= 7);
+
+    // Strength knobs.
+    // strong: 2.0x (or 1.5x when weak)
+    // mid:    1.5x (or 1.33x when weak)
+    // damp:   0.66x (or 0.83x when weak)
+    const int strongNum = weak ? 3 : 2;
+    const int strongDen = weak ? 2 : 1;
+
+    const int midNum = weak ? 4 : 3;
+    const int midDen = weak ? 3 : 2;
+
+    const int dampNum = weak ? 5 : 2;
+    const int dampDen = weak ? 6 : 3;
+
+    auto bumpStrong = [&](EntityKind k) { mulWeight(table, k, strongNum, strongDen); };
+    auto bumpMid = [&](EntityKind k) { mulWeight(table, k, midNum, midDen); };
+    auto damp = [&](EntityKind k) { mulWeight(table, k, dampNum, dampDen); };
+
+    switch (eco) {
+        case EcosystemKind::FungalBloom: {
+            bumpStrong(EntityKind::Spider);
+            bumpStrong(EntityKind::Slime);
+            bumpMid(EntityKind::Snake);
+            bumpMid(EntityKind::Bat);
+
+            damp(EntityKind::SkeletonArcher);
+            damp(EntityKind::Zombie);
+            damp(EntityKind::Ghost);
+        } break;
+
+        case EcosystemKind::CrystalGarden: {
+            bumpStrong(EntityKind::Wizard);
+            bumpStrong(EntityKind::Mimic);
+            bumpMid(EntityKind::Nymph);
+            bumpMid(EntityKind::Slime);
+
+            damp(EntityKind::Snake);
+            damp(EntityKind::Spider);
+
+            if (category == SpawnCategory::Guardian && deep) {
+                // Deep crystal halls lean toward "constructed" resistance.
+                bumpMid(EntityKind::Guard);
+            }
+        } break;
+
+        case EcosystemKind::BoneField: {
+            bumpStrong(EntityKind::SkeletonArcher);
+            bumpStrong(EntityKind::Zombie);
+            bumpMid(EntityKind::Ghost);
+
+            damp(EntityKind::Slime);
+            damp(EntityKind::Spider);
+            damp(EntityKind::Snake);
+
+            if (category == SpawnCategory::Guardian) {
+                // Tomb-adjacent security.
+                bumpMid(EntityKind::Guard);
+            }
+        } break;
+
+        case EcosystemKind::RustVeins: {
+            bumpStrong(EntityKind::KoboldSlinger);
+            bumpStrong(EntityKind::Mimic);
+            bumpMid(EntityKind::Orc);
+
+            damp(EntityKind::Slime);
+            damp(EntityKind::Bat);
+
+            if (category == SpawnCategory::Guardian) {
+                bumpMid(EntityKind::Guard);
+            }
+        } break;
+
+        case EcosystemKind::AshenRidge: {
+            bumpStrong(EntityKind::Orc);
+            bumpStrong(EntityKind::Troll);
+            bumpMid(EntityKind::Ogre);
+            if (deep) bumpMid(EntityKind::Wizard);
+
+            damp(EntityKind::Bat);
+            damp(EntityKind::Slime);
+        } break;
+
+        case EcosystemKind::FloodedGrotto: {
+            bumpStrong(EntityKind::Bat);
+            bumpStrong(EntityKind::Slime);
+            bumpMid(EntityKind::Snake);
+
+            damp(EntityKind::Orc);
+            damp(EntityKind::Ogre);
+        } break;
+
+        case EcosystemKind::None:
+        default:
+            break;
+    }
+}
+
+inline void applyEcotoneBias(std::vector<SpawnEntry>& table, SpawnCategory /*category*/, const EcoCtx& ctx, int depth) {
+    if (!ctx.ecotone) return;
+
+    const int d = std::clamp(depth, 1, 12);
+    const bool chaotic = (ctx.diversity >= 3);
+
+    auto bump = [&](EntityKind k) {
+        if (chaotic) mulWeight(table, k, 2, 1);
+        else mulWeight(table, k, 3, 2);
+    };
+
+    // Boundaries are liminal: tricksters + weirdness.
+    bump(EntityKind::Mimic);
+    bump(EntityKind::Leprechaun);
+    bump(EntityKind::Nymph);
+
+    if (d >= 4) {
+        // Wizards show up more often once depth introduces mid-tier magic threats.
+        if (chaotic) mulWeight(table, EntityKind::Wizard, 3, 2);
+        else mulWeight(table, EntityKind::Wizard, 4, 3);
+    }
+
+    // Undead bleed through bonefield borders.
+    if (ctx.here == EcosystemKind::BoneField || ctx.other == EcosystemKind::BoneField) {
+        mulWeight(table, EntityKind::Ghost, 3, 2);
+        mulWeight(table, EntityKind::Zombie, 4, 3);
+    }
+}
+
+inline EntityKind pickSpawnMonsterEcology(SpawnCategory category, RNG& rng, int depth, RoomType rt, TerrainMaterial mat, const EcoCtx& eco) {
     std::vector<SpawnEntry> table = effectiveSpawnTable(category, depth);
 
     applyRoomBias(table, category, rt, depth);
     applyMaterialBias(table, category, mat, depth);
+
+    // Ecosystem bias: strong toward the local biome. If the tile is an ecotone,
+    // blend in a weaker pass from the neighboring biome and add liminal "weirdness".
+    applyEcosystemBias(table, category, eco.here, depth, /*weak=*/false);
+    if (eco.ecotone && eco.other != EcosystemKind::None && eco.other != eco.here) {
+        applyEcosystemBias(table, category, eco.other, depth, /*weak=*/true);
+        applyEcotoneBias(table, category, eco, depth);
+    }
 
     // Synergy nudges: shrines in dressed stone feel more "haunted".
     if (rt == RoomType::Shrine && (mat == TerrainMaterial::Marble || mat == TerrainMaterial::Brick)) {
@@ -1153,6 +1519,7 @@ inline EntityKind pickSpawnMonsterEcology(SpawnCategory category, RNG& rng, int 
 
     return rollFromTable(rng, table);
 }
+
 
 } // namespace
 
@@ -1194,8 +1561,7 @@ void Game::spawnMonsters() {
         if (candidates.empty()) return {-1, -1};
         return candidates[static_cast<size_t>(rng.range(0, static_cast<int>(candidates.size()) - 1))];
     };
-
-    auto maybeSpawnEcologyCluster = [&](Entity& leader, EntityKind kind, const Room& room, TerrainMaterial mat, bool isStartRoom) {
+    auto maybeSpawnEcologyCluster = [&](Entity& leader, EntityKind kind, const Room& room, TerrainMaterial mat, EcosystemKind eco, bool isStartRoom) {
         // Keep the start room calmer so the player isn't immediately nested by a pack.
         if (isStartRoom) return;
 
@@ -1208,6 +1574,11 @@ void Game::spawnMonsters() {
             case EntityKind::Spider: {
                 if (isMat(TerrainMaterial::Dirt, TerrainMaterial::Moss)) {
                     chance = 0.38f;
+                    if (eco == EcosystemKind::FungalBloom) chance += 0.10f;
+                    if (eco == EcosystemKind::FloodedGrotto) chance += 0.05f;
+                    if (eco == EcosystemKind::BoneField) chance -= 0.06f;
+                    chance = std::clamp(chance, 0.0f, 0.60f);
+
                     extra = rng.chance(chance) ? 1 : 0;
                     if (spawnDepth >= 6 && rng.chance(0.12f)) extra += 1;
                 }
@@ -1215,19 +1586,47 @@ void Game::spawnMonsters() {
             case EntityKind::Snake: {
                 if (mat == TerrainMaterial::Dirt) {
                     chance = 0.28f;
+                    if (eco == EcosystemKind::FungalBloom) chance += 0.06f;
+                    if (eco == EcosystemKind::FloodedGrotto) chance += 0.05f;
+                    if (eco == EcosystemKind::CrystalGarden) chance -= 0.04f;
+                    chance = std::clamp(chance, 0.0f, 0.50f);
+
                     extra = rng.chance(chance) ? 1 : 0;
                 }
             } break;
             case EntityKind::Slime: {
                 if (isMat(TerrainMaterial::Moss, TerrainMaterial::Crystal)) {
                     chance = 0.22f;
+                    if (eco == EcosystemKind::FungalBloom) chance += 0.05f;
+                    if (eco == EcosystemKind::CrystalGarden) chance += 0.08f;
+                    if (eco == EcosystemKind::FloodedGrotto) chance += 0.06f;
+                    if (eco == EcosystemKind::AshenRidge) chance -= 0.05f;
+                    chance = std::clamp(chance, 0.0f, 0.55f);
+
                     extra = rng.chance(chance) ? 1 : 0;
                 }
             } break;
             case EntityKind::Bat: {
                 if (isMat(TerrainMaterial::Moss, TerrainMaterial::Stone) && spawnDepth >= 2) {
                     chance = 0.18f;
+                    if (eco == EcosystemKind::FloodedGrotto) chance += 0.12f;
+                    if (eco == EcosystemKind::FungalBloom) chance += 0.04f;
+                    if (eco == EcosystemKind::BoneField) chance -= 0.05f;
+                    chance = std::clamp(chance, 0.0f, 0.45f);
+
                     extra = rng.chance(chance) ? 1 : 0;
+                }
+            } break;
+            case EntityKind::Zombie: {
+                // Bone-field clusters: shambling packs near ossuaries.
+                if (eco == EcosystemKind::BoneField || isMat(TerrainMaterial::Marble, TerrainMaterial::Brick)) {
+                    chance = 0.16f;
+                    if (eco == EcosystemKind::BoneField) chance += 0.10f;
+                    if (spawnDepth >= 7) chance += 0.04f;
+                    chance = std::clamp(chance, 0.0f, 0.40f);
+
+                    extra = rng.chance(chance) ? 1 : 0;
+                    if (spawnDepth >= 9 && rng.chance(0.10f)) extra += 1;
                 }
             } break;
             default:
@@ -1251,6 +1650,7 @@ void Game::spawnMonsters() {
             spawnMonster(kind, q, gid);
         }
     };
+
 
     for (const Room& r : rooms) {
         // Shops: spawn a single shopkeeper and keep the shop otherwise free of hostiles.
@@ -1291,15 +1691,15 @@ void Game::spawnMonsters() {
 
         for (int i = 0; i < n; ++i) {
             Vec2i p = randomFreeTileInRoom(r);
-
             const TerrainMaterial mat = dung.materialAtCached(p.x, p.y);
-            EntityKind k = pickSpawnMonsterEcology(SpawnCategory::Room, rng, spawnDepth, r.type, mat);
+            const EcoCtx eco = ecoCtxAt(dung, p.x, p.y);
+            EntityKind k = pickSpawnMonsterEcology(SpawnCategory::Room, rng, spawnDepth, r.type, mat, eco);
 
             if (k == EntityKind::Wolf) {
                 spawnMonster(k, p, nextGroup++);
             } else {
                 Entity& m0 = spawnMonster(k, p, 0);
-                maybeSpawnEcologyCluster(m0, k, r, mat, isStart);
+                maybeSpawnEcologyCluster(m0, k, r, mat, eco.here, isStart);
             }
         }
 
@@ -1313,7 +1713,8 @@ void Game::spawnMonsters() {
             for (int i = 0; i < guardians; ++i) {
                 Vec2i p = randomFreeTileInRoom(r);
                 const TerrainMaterial mat = dung.materialAtCached(p.x, p.y);
-                EntityKind k = pickSpawnMonsterEcology(SpawnCategory::Guardian, rng, spawnDepth, r.type, mat);
+                const EcoCtx eco = ecoCtxAt(dung, p.x, p.y);
+                EntityKind k = pickSpawnMonsterEcology(SpawnCategory::Guardian, rng, spawnDepth, r.type, mat, eco);
 
                 spawnMonster(k, p, 0);
             }
@@ -1403,6 +1804,338 @@ void Game::spawnMonsters() {
             w.hp = std::min(w.hpMax, w.hp + 6);
         }
     }
+
+
+    // ---------------------------------------------------------------------
+    // Ecosystem guardians: rare proc-elite packs spawned near biome cores.
+    //
+    // These are *additional* encounters that make biome cores feel like places
+    // with an apex predator / champion cult, and provide a consistent source of
+    // ecosystem-aligned Essence Shards (see cleanupDead()).
+    //
+    // RNG-isolated: uses a derived seed so it doesn't perturb other spawns.
+    // ---------------------------------------------------------------------
+    if (branch_ == DungeonBranch::Main && spawnDepth >= 2 && depth_ < QUEST_DEPTH - 1) {
+        const auto& ecoSeeds = dung.ecosystemSeedsCached();
+        if (!ecoSeeds.empty()) {
+            struct Cand { size_t idx; int w; };
+            std::vector<Cand> cands;
+            cands.reserve(ecoSeeds.size());
+
+            for (size_t i = 0; i < ecoSeeds.size(); ++i) {
+                const EcosystemSeed& s = ecoSeeds[i];
+                if (s.kind == EcosystemKind::None) continue;
+                if (s.radius < 5) continue; // tiny specks don't get guardians
+
+                int w = 8 + std::min(24, s.radius);
+                switch (s.kind) {
+                    case EcosystemKind::CrystalGarden: w += 3; break;
+                    case EcosystemKind::BoneField:     w += 2; break;
+                    case EcosystemKind::AshenRidge:    w += 2; break;
+                    default: break;
+                }
+                cands.push_back({i, w});
+            }
+
+            if (!cands.empty()) {
+                uint32_t baseSeed = hashCombine(seed_, "ECO_GUARDIANS"_tag);
+                baseSeed = hashCombine(baseSeed, static_cast<uint32_t>(branch_));
+                baseSeed = hashCombine(baseSeed, static_cast<uint32_t>(spawnDepth));
+                baseSeed = hashCombine(baseSeed, static_cast<uint32_t>(depth_));
+
+                RNG grng(baseSeed);
+
+                int budget = 0;
+                float chance = 0.16f + 0.035f * static_cast<float>(std::min(12, spawnDepth));
+                chance = std::min(0.72f, std::max(0.0f, chance));
+                if (grng.chance(chance)) budget = 1;
+                if (spawnDepth >= 9 && grng.chance(0.25f)) budget += 1;
+                budget = clampi(budget, 0, 2);
+                budget = std::min(budget, static_cast<int>(cands.size()));
+
+                auto pickWeighted = [&](RNG& rr, std::vector<Cand>& pool) -> size_t {
+                    int total = 0;
+                    for (const auto& c : pool) total += std::max(0, c.w);
+                    if (total <= 0) {
+                        const size_t j = static_cast<size_t>(rr.range(0, static_cast<int>(pool.size()) - 1));
+                        const size_t idx = pool[j].idx;
+                        pool.erase(pool.begin() + static_cast<std::vector<Cand>::difference_type>(j));
+                        return idx;
+                    }
+
+                    int roll = rr.range(1, total);
+                    for (size_t j = 0; j < pool.size(); ++j) {
+                        roll -= std::max(0, pool[j].w);
+                        if (roll <= 0) {
+                            const size_t idx = pool[j].idx;
+                            pool.erase(pool.begin() + static_cast<std::vector<Cand>::difference_type>(j));
+                            return idx;
+                        }
+                    }
+
+                    const size_t idx = pool.back().idx;
+                    pool.pop_back();
+                    return idx;
+                };
+
+                auto hasTrapAt = [&](Vec2i p) -> bool {
+                    for (const auto& t : trapsCur) {
+                        if (t.pos == p) return true;
+                    }
+                    return false;
+                };
+                auto hasEngravingAt = [&](Vec2i p) -> bool {
+                    for (const auto& eg : engravings_) {
+                        if (eg.pos == p) return true;
+                    }
+                    return false;
+                };
+
+                auto isBadGuardianPos = [&](Vec2i p, EcosystemKind wantEco) -> bool {
+                    if (!dung.inBounds(p.x, p.y)) return true;
+                    if (!dung.isWalkable(p.x, p.y)) return true;
+                    if (entityAt(p.x, p.y) != nullptr) return true;
+
+                    const TileType tt = dung.at(p.x, p.y).type;
+                    if (tt == TileType::DoorClosed || tt == TileType::DoorLocked) return true;
+                    if (tt == TileType::Fountain || tt == TileType::Altar) return true;
+
+                    if (p == dung.stairsUp || p == dung.stairsDown) return true;
+                    if (dung.inBounds(dung.stairsUp.x, dung.stairsUp.y) && manhattan(p, dung.stairsUp) <= 5) return true;
+                    if (dung.inBounds(dung.stairsDown.x, dung.stairsDown.y) && manhattan(p, dung.stairsDown) <= 4) return true;
+
+                    if (dung.ecosystemAtCached(p.x, p.y) != wantEco) return true;
+
+                    const RoomType rt = roomTypeAt(dung, p);
+                    if (rt == RoomType::Shop || rt == RoomType::Camp) return true;
+                    // Avoid high-value rooms so loot rooms don't become pure death traps.
+                    if (rt == RoomType::Vault || rt == RoomType::Treasure || rt == RoomType::Secret) return true;
+
+                    // Avoid stacking with other sparse systems.
+                    if (hasTrapAt(p)) return true;
+                    if (hasEngravingAt(p)) return true;
+
+                    return false;
+                };
+
+                auto findEcoCorePos = [&](RNG& rr, const EcosystemSeed& s) -> Vec2i {
+                    const int r0 = clampi(s.radius, 6, 18);
+
+                    auto sample = [&](int r) -> Vec2i {
+                        const int r2 = r * r;
+                        for (int it = 0; it < 90; ++it) {
+                            int dx = rr.range(-r, r);
+                            int dy = rr.range(-r, r);
+                            if (dx * dx + dy * dy > r2) continue;
+                            Vec2i p{s.pos.x + dx, s.pos.y + dy};
+                            if (isBadGuardianPos(p, s.kind)) continue;
+                            return p;
+                        }
+                        return Vec2i{-1, -1};
+                    };
+
+                    // Prefer the inner core first, then expand.
+                    Vec2i p = sample(std::max(4, r0 / 2));
+                    if (dung.inBounds(p.x, p.y)) return p;
+                    p = sample(r0);
+                    if (dung.inBounds(p.x, p.y)) return p;
+
+                    // Fallback scan: brute spiral-ish search around the seed center.
+                    for (int rad = 2; rad <= r0 + 6; ++rad) {
+                        const int rad2 = rad * rad;
+                        for (int dy = -rad; dy <= rad; ++dy) {
+                            for (int dx = -rad; dx <= rad; ++dx) {
+                                if (dx * dx + dy * dy > rad2) continue;
+                                Vec2i q{s.pos.x + dx, s.pos.y + dy};
+                                if (isBadGuardianPos(q, s.kind)) continue;
+                                return q;
+                            }
+                        }
+                    }
+
+                    return Vec2i{-1, -1};
+                };
+
+                auto pickGuardianKind = [&](RNG& rr, EcosystemKind eco) -> EntityKind {
+                    struct Opt { EntityKind k; int w; int minDepth; };
+                    std::vector<Opt> opts;
+
+                    auto add = [&](EntityKind k, int w, int minD = 0) {
+                        if (w <= 0) return;
+                        opts.push_back({k, w, minD});
+                    };
+
+                    switch (eco) {
+                        case EcosystemKind::FungalBloom:
+                            add(EntityKind::Spider, 10, 0);
+                            add(EntityKind::Slime, 6, 0);
+                            add(EntityKind::Snake, 4, 0);
+                            add(EntityKind::Troll, 2, 6);
+                            break;
+                        case EcosystemKind::CrystalGarden:
+                            add(EntityKind::Mimic, 8, 0);
+                            add(EntityKind::Wizard, 6, 3);
+                            add(EntityKind::Slime, 5, 0);
+                            add(EntityKind::Nymph, 4, 2);
+                            break;
+                        case EcosystemKind::BoneField:
+                            add(EntityKind::SkeletonArcher, 8, 0);
+                            add(EntityKind::Zombie, 7, 0);
+                            add(EntityKind::Ghost, 5, 4);
+                            add(EntityKind::Ogre, 2, 7);
+                            break;
+                        case EcosystemKind::RustVeins:
+                            add(EntityKind::KoboldSlinger, 9, 0);
+                            add(EntityKind::Mimic, 6, 0);
+                            add(EntityKind::Orc, 5, 2);
+                            add(EntityKind::Guard, 2, 6);
+                            break;
+                        case EcosystemKind::AshenRidge:
+                            add(EntityKind::Orc, 8, 0);
+                            add(EntityKind::Ogre, 6, 4);
+                            add(EntityKind::Troll, 5, 5);
+                            add(EntityKind::Wizard, 2, 8);
+                            break;
+                        case EcosystemKind::FloodedGrotto:
+                            add(EntityKind::Slime, 10, 0);
+                            add(EntityKind::Snake, 6, 0);
+                            add(EntityKind::Spider, 4, 1);
+                            add(EntityKind::Bat, 4, 1);
+                            break;
+                        default:
+                            break;
+                    }
+
+                    int total = 0;
+                    for (const auto& o : opts) {
+                        if (spawnDepth < o.minDepth) continue;
+                        total += std::max(0, o.w);
+                    }
+                    if (total <= 0) return EntityKind::Goblin;
+
+                    int roll = rr.range(1, total);
+                    for (const auto& o : opts) {
+                        if (spawnDepth < o.minDepth) continue;
+                        roll -= std::max(0, o.w);
+                        if (roll <= 0) return o.k;
+                    }
+                    return opts.back().k;
+                };
+
+                auto pickMinionKind = [&](RNG& rr, EcosystemKind eco, EntityKind leaderKind) -> EntityKind {
+                    // Bias strongly toward the leader kind, but allow some variety.
+                    if (rr.chance(0.70f)) return leaderKind;
+
+                    switch (eco) {
+                        case EcosystemKind::FungalBloom:   return rr.chance(0.50f) ? EntityKind::Spider : EntityKind::Slime;
+                        case EcosystemKind::CrystalGarden: return rr.chance(0.55f) ? EntityKind::Slime : EntityKind::Mimic;
+                        case EcosystemKind::BoneField:     return rr.chance(0.50f) ? EntityKind::Zombie : EntityKind::SkeletonArcher;
+                        case EcosystemKind::RustVeins:     return rr.chance(0.60f) ? EntityKind::KoboldSlinger : EntityKind::Orc;
+                        case EcosystemKind::AshenRidge:    return rr.chance(0.55f) ? EntityKind::Orc : EntityKind::Troll;
+                        case EcosystemKind::FloodedGrotto: return rr.chance(0.55f) ? EntityKind::Slime : EntityKind::Snake;
+                        default:
+                            break;
+                    }
+                    return leaderKind;
+                };
+
+                auto findNear = [&](RNG& rr, Vec2i center, const EcosystemSeed& s, int radius) -> Vec2i {
+                    for (int it = 0; it < 70; ++it) {
+                        const int dx = rr.range(-radius, radius);
+                        const int dy = rr.range(-radius, radius);
+                        if (dx == 0 && dy == 0) continue;
+                        Vec2i p{center.x + dx, center.y + dy};
+                        if (isBadGuardianPos(p, s.kind)) continue;
+                        return p;
+                    }
+                    return Vec2i{-1, -1};
+                };
+
+                for (int gi = 0; gi < budget; ++gi) {
+                    const size_t idx = pickWeighted(grng, cands);
+                    if (idx >= ecoSeeds.size()) continue;
+
+                    const EcosystemSeed& s = ecoSeeds[idx];
+
+                    uint32_t localSeed = hashCombine(baseSeed, static_cast<uint32_t>(idx));
+                    localSeed = hashCombine(localSeed, static_cast<uint32_t>(s.pos.x));
+                    localSeed = hashCombine(localSeed, static_cast<uint32_t>(s.pos.y));
+                    localSeed = hashCombine(localSeed, static_cast<uint32_t>(s.kind));
+                    RNG rr(localSeed);
+
+                    const Vec2i p = findEcoCorePos(rr, s);
+                    if (!dung.inBounds(p.x, p.y)) continue;
+
+                    const RoomType rtHere = roomTypeAt(dung, p);
+
+                    // Decide base kind and proc rank.
+                    const EntityKind baseKind = pickGuardianKind(rr, s.kind);
+
+                    ProcMonsterRank rank = ProcMonsterRank::Elite;
+                    if (spawnDepth >= 6) rank = ProcMonsterRank::Champion;
+                    if (spawnDepth >= 10 && rr.chance(0.65f)) rank = ProcMonsterRank::Mythic;
+
+                    // Guardians are rare and should never be trivially weak.
+                    if (spawnDepth >= 12 && rr.chance(0.20f)) rank = ProcMonsterRank::Mythic;
+
+                    // Shared group id for the pack.
+                    const int gid = nextGroup++;
+
+                    // Spawn leader with RNG-isolated sprite seed and no gear rolls.
+                    const uint32_t leaderSpriteSeed = hashCombine(localSeed, "ECO_GUARD_LEADER"_tag);
+                    ents.push_back(makeMonster(baseKind, p, gid, /*allowGear=*/false,
+                                               /*forcedSpriteSeed=*/leaderSpriteSeed, /*allowProcVariant=*/false));
+                    Entity& leader = ents.back();
+
+                    // Apply a themed proc kit (rank + affixes + abilities), biased by ecosystem.
+                    {
+                        RNG prng(hashCombine(localSeed, "ECO_GUARD_PROC"_tag));
+                        uint32_t aff = rollProcAffixes(prng, baseKind, rank, rtHere, spawnDepth, s.kind);
+
+                        // Guarantee some reward / identity.
+                        aff |= procAffixBit(ProcMonsterAffix::Gilded);
+
+                        // Encourage a signature affix so different biomes feel distinct.
+                        switch (s.kind) {
+                            case EcosystemKind::FungalBloom:   aff |= procAffixBit(prng.chance(0.60f) ? ProcMonsterAffix::Venomous : ProcMonsterAffix::Webbing); break;
+                            case EcosystemKind::CrystalGarden: aff |= procAffixBit(prng.chance(0.55f) ? ProcMonsterAffix::Blinking : ProcMonsterAffix::Stonehide); break;
+                            case EcosystemKind::BoneField:     aff |= procAffixBit(prng.chance(0.55f) ? ProcMonsterAffix::Commander : ProcMonsterAffix::Vampiric); break;
+                            case EcosystemKind::RustVeins:     aff |= procAffixBit(prng.chance(0.60f) ? ProcMonsterAffix::Stonehide : ProcMonsterAffix::Swift); break;
+                            case EcosystemKind::AshenRidge:    aff |= procAffixBit(prng.chance(0.70f) ? ProcMonsterAffix::Flaming : ProcMonsterAffix::Savage); break;
+                            case EcosystemKind::FloodedGrotto: aff |= procAffixBit(prng.chance(0.60f) ? ProcMonsterAffix::Venomous : ProcMonsterAffix::Swift); break;
+                            default:
+                                break;
+                        }
+
+                        applyProcVariant(leader, rank, aff);
+
+                        rollProcAbilities(prng, baseKind, leader.procRank, rtHere, spawnDepth, leader.procAffixMask, s.kind,
+                                          leader.procAbility1, leader.procAbility2);
+                    }
+
+                    // Guardians shouldn't flee; they are the biome's apex.
+                    leader.willFlee = false;
+
+                    // Spawn a small escort pack.
+                    const int tier = std::max(1, procRankTier(leader.procRank));
+                    int minions = 1 + tier; // 2..4
+                    if (spawnDepth <= 3) minions = std::min(minions, 2);
+                    if (spawnDepth >= 12) minions = std::min(4, minions + 1);
+                    minions = clampi(minions, 2, 4);
+
+                    for (int mi = 0; mi < minions; ++mi) {
+                        Vec2i q = findNear(rr, leader.pos, s, 4);
+                        if (!dung.inBounds(q.x, q.y)) break;
+
+                        const EntityKind mk = pickMinionKind(rr, s.kind, baseKind);
+                        const uint32_t ms = hashCombine(localSeed, hashCombine("ECO_GUARD_MINION"_tag, static_cast<uint32_t>(mi + 1)));
+                        ents.push_back(makeMonster(mk, q, gid, /*allowGear=*/false,
+                                                   /*forcedSpriteSeed=*/ms, /*allowProcVariant=*/false));
+                    }
+                }
+            }
+        }
+    }
 }
 
 void Game::spawnItems() {
@@ -1414,15 +2147,15 @@ void Game::spawnItems() {
     // Use a depth-like scalar for the overworld (Camp/0 wilderness chunks).
     const int spawnDepth = materialDepth();
 
-// Spawn item ecology consults the deterministic terrain-material field (ego rolls, etc).
-dung.ensureMaterials(materialWorldSeed(), branch_, spawnDepth, dungeonMaxDepth());
+    // Spawn item ecology consults the deterministic terrain-material field (ego rolls, etc).
+    dung.ensureMaterials(materialWorldSeed(), branch_, spawnDepth, dungeonMaxDepth());
 
-    auto dropItemAt = [&](ItemKind k, Vec2i pos, int count = 1) {
+    auto dropItemAtWithRng = [&](RNG& rr, ItemKind k, Vec2i pos, int count = 1) {
         Item it;
         it.id = nextItemId++;
         it.kind = k;
         it.count = std::max(1, count);
-        it.spriteSeed = rng.nextU32();
+        it.spriteSeed = rr.nextU32();
         const ItemDef& d = itemDef(k);
         if (d.maxCharges > 0) it.charges = d.maxCharges;
 
@@ -1437,17 +2170,17 @@ dung.ensureMaterials(materialWorldSeed(), branch_, spawnDepth, dungeonMaxDepth()
             if (rt == RoomType::Shop) tier = std::max(1, tier - 1);
 
             // A small depth-based chance to bump tier upward so deep tablets feel spicy.
-            if (spawnDepth >= 6 && rng.chance(0.18f)) tier += 1;
+            if (spawnDepth >= 6 && rr.chance(0.18f)) tier += 1;
 
             tier = clampi(tier, 1, 15);
-            const uint32_t seed28 = rng.nextU32() & PROC_SPELL_SEED_MASK;
+            const uint32_t seed28 = rr.nextU32() & PROC_SPELL_SEED_MASK;
             it.spriteSeed = makeProcSpellId(static_cast<uint8_t>(tier), seed28);
         }
 
         // Roll BUC (blessed/uncursed/cursed) for gear; and light enchant chance on deeper floors.
         if (isWearableGear(k)) {
             const RoomType rt = roomTypeAt(dung, pos);
-            it.buc = rollBucForGear(rng, spawnDepth, rt);
+            it.buc = rollBucForGear(rr, spawnDepth, rt);
 
             if (it.enchant == 0 && spawnDepth >= 3) {
                 float enchChance = 0.15f;
@@ -1455,26 +2188,25 @@ dung.ensureMaterials(materialWorldSeed(), branch_, spawnDepth, dungeonMaxDepth()
                 if (rt == RoomType::Lair) enchChance -= 0.05f;
                 enchChance = std::max(0.05f, std::min(0.35f, enchChance));
 
-                if (rng.chance(enchChance)) {
+                if (rr.chance(enchChance)) {
                     it.enchant = 1;
-                    if (spawnDepth >= 6 && rng.chance(0.08f)) {
+                    if (spawnDepth >= 6 && rr.chance(0.08f)) {
                         it.enchant = 2;
                     }
                 }
             }
 
             // Rare ego weapons (brands).
-            it.ego = rollWeaponEgo(rng, seed_, k, spawnDepth, rt, dung.materialAtCached(pos.x, pos.y), /*fromShop=*/false, /*forMonster=*/false);
-
+            it.ego = rollWeaponEgo(rr, seed_, k, spawnDepth, rt, dung.materialAtCached(pos.x, pos.y), dung.ecosystemAtCached(pos.x, pos.y), /*fromShop=*/false, /*forMonster=*/false);
 
             // Rare artifacts.
-            if (rollArtifact(rng, k, spawnDepth, rt, /*fromShop=*/false, /*forMonster=*/false)) {
+            if (rollArtifact(rr, k, spawnDepth, rt, /*fromShop=*/false, /*forMonster=*/false)) {
                 setItemArtifact(it, true);
                 // Keep artifacts visually distinct from ego gear.
                 it.ego = ItemEgo::None;
                 // Artifacts tend to be at least +1.
                 it.enchant = std::max(it.enchant, 1);
-                if (spawnDepth >= 7 && rng.chance(0.30f)) it.enchant = std::max(it.enchant, 2);
+                if (spawnDepth >= 7 && rr.chance(0.30f)) it.enchant = std::max(it.enchant, 2);
             }
         }
 
@@ -1483,6 +2215,11 @@ dung.ensureMaterials(materialWorldSeed(), branch_, spawnDepth, dungeonMaxDepth()
         gi.pos = pos;
         ground.push_back(gi);
     };
+
+    auto dropItemAt = [&](ItemKind k, Vec2i pos, int count = 1) {
+        dropItemAtWithRng(rng, k, pos, count);
+    };
+;
 
     auto dropShopItemAt = [&](const shopgen::ShopProfile& prof, ItemKind k, Vec2i pos, int count = 1) {
         Item it;
@@ -1530,7 +2267,7 @@ dung.ensureMaterials(materialWorldSeed(), branch_, spawnDepth, dungeonMaxDepth()
             }
 
             // Rare premium ego weapons.
-            it.ego = rollWeaponEgo(rng, seed_, k, spawnDepth, rt, dung.materialAtCached(pos.x, pos.y), /*fromShop=*/true, /*forMonster=*/false);
+            it.ego = rollWeaponEgo(rng, seed_, k, spawnDepth, rt, dung.materialAtCached(pos.x, pos.y), dung.ecosystemAtCached(pos.x, pos.y), /*fromShop=*/true, /*forMonster=*/false);
 
 
             // Extremely rare artifacts in shops.
@@ -2240,7 +2977,7 @@ dung.ensureMaterials(materialWorldSeed(), branch_, spawnDepth, dungeonMaxDepth()
             if (it.shopPrice > 0) continue;
 
             // Skip world-interactables / noisy clutter.
-            if (isChestKind(it.kind)) continue;
+            if (isStationaryPropKind(it.kind) || itemIsStationary(it)) continue;
             if (isCorpseKind(it.kind)) continue;
             if (it.kind == ItemKind::Gold) continue;
             if (it.kind == ItemKind::AmuletYendor) continue;
@@ -2312,6 +3049,464 @@ dung.ensureMaterials(materialWorldSeed(), branch_, spawnDepth, dungeonMaxDepth()
             }
         }
     }
+
+    // ---------------------------------------------------------------------
+    // Ecosystem resource spawns: small clusters of Essence Shards aligned
+    // to procedural biome seeds. These feed the crafting loop and make
+    // biome regions feel materially distinct.
+    // ---------------------------------------------------------------------
+    if (branch_ != DungeonBranch::Camp) {
+        const auto& seeds = dung.ecosystemSeedsCached();
+        if (!seeds.empty()) {
+            // Budget is deliberately conservative so this feels like
+            // "interesting pockets" rather than floor-wide loot spam.
+            int budget = 2 + std::min(6, std::max(0, spawnDepth) / 3);
+            budget = clampi(budget, 2, 8);
+
+            struct SeedCand { size_t idx; int w; };
+            std::vector<SeedCand> cands;
+            cands.reserve(seeds.size());
+
+            int totalW = 0;
+            for (size_t i = 0; i < seeds.size(); ++i) {
+                const EcosystemSeed& s = seeds[i];
+                if (s.kind == EcosystemKind::None) continue;
+                int w = 10;
+                w += std::min(16, std::max(0, s.radius));
+                if (s.kind == EcosystemKind::CrystalGarden) w += 10;
+                if (s.kind == EcosystemKind::FloodedGrotto) w += 4;
+                if (s.kind == EcosystemKind::BoneField && spawnDepth >= 6) w += 6;
+                if (w <= 0) continue;
+                cands.push_back({i, w});
+                totalW += w;
+            }
+
+            auto pickSeedIndex = [&]() -> size_t {
+                if (cands.empty() || totalW <= 0) return static_cast<size_t>(-1);
+                int r = rng.range(1, totalW);
+                for (const auto& c : cands) {
+                    r -= c.w;
+                    if (r <= 0) return c.idx;
+                }
+                return cands.back().idx;
+            };
+
+            auto countGroundAt = [&](Vec2i p) -> int {
+                int n = 0;
+                for (const auto& gi : ground) {
+                    if (gi.pos == p) {
+                        ++n;
+                        if (n >= 3) break;
+                    }
+                }
+                return n;
+            };
+
+            auto findEcoDropPos = [&](const EcosystemSeed& s) -> Vec2i {
+                const int r = std::max(6, s.radius);
+                const int r2 = r * r;
+
+                for (int tries = 0; tries < 220; ++tries) {
+                    const int dx = rng.range(-r, r);
+                    const int dy = rng.range(-r, r);
+                    if (dx * dx + dy * dy > r2) continue;
+                    Vec2i p{s.pos.x + dx, s.pos.y + dy};
+                    if (!dung.inBounds(p.x, p.y)) continue;
+                    if (dung.at(p.x, p.y).type != TileType::Floor) continue;
+                    if (roomTypeAt(dung, p) == RoomType::Shop) continue;
+
+                    // Keep the stair landing zones readable.
+                    if (dung.inBounds(dung.stairsUp.x, dung.stairsUp.y) && manhattan(p, dung.stairsUp) <= 2) continue;
+                    if (dung.inBounds(dung.stairsDown.x, dung.stairsDown.y) && manhattan(p, dung.stairsDown) <= 2) continue;
+
+                    // Stay within the intended ecosystem region.
+                    if (dung.ecosystemAtCached(p.x, p.y) != s.kind) continue;
+
+                    // Avoid stacking too much clutter on one tile.
+                    if (countGroundAt(p) >= 2) continue;
+
+                    return p;
+                }
+                return Vec2i{-1, -1};
+            };
+
+            auto pickEssenceTag = [&](EcosystemKind eco, TerrainMaterial mat) -> crafttags::Tag {
+                // A small "material-sensitive" tag mapping makes biomes feel like
+                // more than just color: the same ecosystem can yield different
+                // essences when it grows through different substrates.
+                switch (eco) {
+                    case EcosystemKind::FungalBloom: {
+                        if (mat == TerrainMaterial::Moss || mat == TerrainMaterial::Dirt) {
+                            return rng.chance(0.55f) ? crafttags::Tag::Regen : crafttags::Tag::Venom;
+                        }
+                        return rng.chance(0.80f) ? crafttags::Tag::Venom : crafttags::Tag::Regen;
+                    }
+                    case EcosystemKind::CrystalGarden: {
+                        float u = rng.next01();
+                        if (mat == TerrainMaterial::Crystal) {
+                            if (u < 0.45f) return crafttags::Tag::Rune;
+                            if (u < 0.85f) return crafttags::Tag::Arc;
+                            return crafttags::Tag::Shield;
+                        }
+                        if (u < 0.60f) return crafttags::Tag::Arc;
+                        if (u < 0.90f) return crafttags::Tag::Rune;
+                        return crafttags::Tag::Shield;
+                    }
+                    case EcosystemKind::BoneField: {
+                        return rng.chance(0.65f) ? crafttags::Tag::Daze : crafttags::Tag::Clarity;
+                    }
+                    case EcosystemKind::RustVeins: {
+                        if (mat == TerrainMaterial::Metal) {
+                            return rng.chance(0.70f) ? crafttags::Tag::Alch : crafttags::Tag::Stone;
+                        }
+                        return rng.chance(0.55f) ? crafttags::Tag::Stone : crafttags::Tag::Alch;
+                    }
+                    case EcosystemKind::AshenRidge: {
+                        return rng.chance(0.75f) ? crafttags::Tag::Ember : crafttags::Tag::Stone;
+                    }
+                    case EcosystemKind::FloodedGrotto: {
+                        return rng.chance(0.55f) ? crafttags::Tag::Aurora : crafttags::Tag::Regen;
+                    }
+                    default:
+                        break;
+                }
+                return crafttags::Tag::None;
+            };
+
+            for (int i = 0; i < budget; ++i) {
+                const size_t si = pickSeedIndex();
+                if (si == static_cast<size_t>(-1) || si >= seeds.size()) break;
+
+                const EcosystemSeed& s = seeds[si];
+                const Vec2i pos = findEcoDropPos(s);
+                if (!dung.inBounds(pos.x, pos.y)) continue;
+
+                const TerrainMaterial mat = dung.materialAtCached(pos.x, pos.y);
+                const crafttags::Tag tag = pickEssenceTag(s.kind, mat);
+                if (tag == crafttags::Tag::None) continue;
+
+                int tier = 1 + std::max(0, spawnDepth) / 6;
+                if (spawnDepth >= 10 && rng.chance(0.15f)) tier += 1;
+                if (s.kind == EcosystemKind::CrystalGarden && rng.chance(0.25f)) tier += 1;
+                tier = clampi(tier, 1, 8);
+
+                float shinyChance = 0.04f + 0.01f * static_cast<float>(std::min(10, std::max(0, spawnDepth)));
+                if (s.kind == EcosystemKind::CrystalGarden) shinyChance += 0.08f;
+                if (s.kind == EcosystemKind::FloodedGrotto) shinyChance += 0.02f;
+                shinyChance = std::min(0.22f, shinyChance);
+
+                const bool shiny = rng.chance(shinyChance);
+
+                int count = 1;
+                if (rng.chance(0.40f)) count += 1;
+                if (spawnDepth >= 8 && rng.chance(0.18f)) count += 1;
+                count = clampi(count, 1, 4);
+
+                Item shard;
+                shard.id = nextItemId++;
+                shard.kind = ItemKind::EssenceShard;
+                shard.count = count;
+                shard.charges = 0;
+                shard.enchant = packEssenceShardEnchant(crafttags::tagIndex(tag), tier, shiny);
+                shard.buc = 0;
+                shard.spriteSeed = rng.nextU32();
+                shard.ego = ItemEgo::None;
+                shard.flags = 0;
+                shard.shopPrice = 0;
+                shard.shopDepth = 0;
+
+                GroundItem gi;
+                gi.item = shard;
+                gi.pos = pos;
+                ground.push_back(gi);
+            }
+
+
+            // ---------------------------------------------------------------------
+            // Ecosystem resource nodes: stationary props (Spore Pods, Crystal Nodes,
+            // etc.) spawned near biome seeds. Harvest with CONFIRM for shards, but
+            // expect a small biome-appropriate backlash (gas/embers/etc.).
+            //
+            // Uses a derived RNG so node placement doesn't perturb the main loot RNG.
+            // ---------------------------------------------------------------------
+            {
+                const uint32_t nodeSeed = hash32(hashCombine(seed_, 0xB10DE5EDu ^ static_cast<uint32_t>(depth_) ^ (static_cast<uint32_t>(branch_) << 16)));
+                RNG nodeRng(nodeSeed);
+
+                int nodeBudget = 1 + std::min(5, std::max(0, spawnDepth) / 4);
+                if (spawnDepth >= 9 && nodeRng.chance(0.35f)) nodeBudget += 1;
+                nodeBudget = clampi(nodeBudget, 1, 8);
+
+                auto pickSeedIndexNode = [&]() -> size_t {
+                    if (cands.empty() || totalW <= 0) return static_cast<size_t>(-1);
+                    int r = nodeRng.range(1, totalW);
+                    for (const auto& c : cands) {
+                        r -= c.w;
+                        if (r <= 0) return c.idx;
+                    }
+                    return cands.back().idx;
+                };
+
+                auto nodeKindForEco = [&](EcosystemKind eco) -> ItemKind {
+                    switch (eco) {
+                        case EcosystemKind::FungalBloom:   return ItemKind::SporePod;
+                        case EcosystemKind::CrystalGarden: return ItemKind::CrystalNode;
+                        case EcosystemKind::BoneField:     return ItemKind::BonePile;
+                        case EcosystemKind::RustVeins:     return ItemKind::RustVent;
+                        case EcosystemKind::AshenRidge:    return ItemKind::AshVent;
+                        case EcosystemKind::FloodedGrotto: return ItemKind::GrottoSpring;
+                        default: break;
+                    }
+                    return ItemKind::SporePod; // unreachable in practice
+                };
+
+                auto findNodePos = [&](const EcosystemSeed& s) -> Vec2i {
+                    const int r = std::max(5, s.radius);
+                    const int r2 = r * r;
+
+                    for (int tries = 0; tries < 240; ++tries) {
+                        const int dx = nodeRng.range(-r, r);
+                        const int dy = nodeRng.range(-r, r);
+                        if (dx * dx + dy * dy > r2) continue;
+                        Vec2i p{s.pos.x + dx, s.pos.y + dy};
+                        if (!dung.inBounds(p.x, p.y)) continue;
+                        if (dung.at(p.x, p.y).type != TileType::Floor) continue;
+                        if (roomTypeAt(dung, p) == RoomType::Shop) continue;
+
+                        // Keep the stair landing zones readable.
+                        if (dung.inBounds(dung.stairsUp.x, dung.stairsUp.y) && manhattan(p, dung.stairsUp) <= 2) continue;
+                        if (dung.inBounds(dung.stairsDown.x, dung.stairsDown.y) && manhattan(p, dung.stairsDown) <= 2) continue;
+
+                        // Stay within the intended ecosystem region.
+                        if (dung.ecosystemAtCached(p.x, p.y) != s.kind) continue;
+
+                        // Prefer clean tiles: don't stack with other loot.
+                        if (countGroundAt(p) > 0) continue;
+
+                        // Also avoid placing directly under an entity start position (rare).
+                        if (entityAt(p.x, p.y)) continue;
+
+                        return p;
+                    }
+                    return Vec2i{-1, -1};
+                };
+
+                // Bias: fewer nodes if seeds are sparse.
+                if (static_cast<int>(cands.size()) < 3) nodeBudget = std::min(nodeBudget, 2);
+
+                for (int i = 0; i < nodeBudget; ++i) {
+                    const size_t si = pickSeedIndexNode();
+                    if (si == static_cast<size_t>(-1) || si >= seeds.size()) break;
+
+                    const EcosystemSeed& s = seeds[si];
+                    const ItemKind nodeKind = nodeKindForEco(s.kind);
+                    if (!isEcosystemNodeKind(nodeKind)) continue;
+
+                    const Vec2i pos = findNodePos(s);
+                    if (!dung.inBounds(pos.x, pos.y)) continue;
+
+                    Item node;
+                    node.id = nextItemId++;
+                    node.kind = nodeKind;
+                    node.count = 1;
+
+                    // Remaining harvest uses stored in charges.
+                    int taps = 1;
+                    if (nodeRng.chance(0.38f)) taps += 1;
+                    if (spawnDepth >= 8 && nodeRng.chance(0.18f)) taps += 1;
+                    taps = clampi(taps, 1, 3);
+                    node.charges = taps;
+
+                    node.enchant = 0;
+                    node.buc = 0;
+                    node.spriteSeed = (nodeRng.nextU32() | 1u);
+                    node.ego = ItemEgo::None;
+                    node.flags = 0;
+                    setItemStationary(node, true);
+                    node.shopPrice = 0;
+                    node.shopDepth = 0;
+
+                    ground.push_back(GroundItem{node, pos});
+                }
+            }
+
+            // ---------------------------------------------------------------------
+            // Ecosystem loot caches: small themed piles of "real" items near biome seeds.
+            //
+            // These are intentionally modest (two items + occasional third) and are placed
+            // using a derived RNG so they don't perturb the main loot RNG stream.
+            // ---------------------------------------------------------------------
+            {
+                const uint32_t cacheSeed = hash32(hashCombine(seed_, 0xEC0CA5E5u ^ static_cast<uint32_t>(depth_) ^ (static_cast<uint32_t>(branch_) << 16)));
+                RNG cacheRng(cacheSeed);
+
+                int cacheBudget = 0;
+                if (spawnDepth >= 2 && cacheRng.chance(0.55f)) cacheBudget = 1;
+                if (spawnDepth >= 5 && cacheRng.chance(0.30f)) cacheBudget += 1;
+                if (spawnDepth >= 9 && cacheRng.chance(0.20f)) cacheBudget += 1;
+
+                // Don't over-clutter sparse biome layouts.
+                if (static_cast<int>(cands.size()) < 3) cacheBudget = std::min(cacheBudget, 1);
+                cacheBudget = clampi(cacheBudget, 0, 3);
+
+                auto pickSeedIndexCache = [&]() -> size_t {
+                    if (cands.empty() || totalW <= 0) return static_cast<size_t>(-1);
+                    int r = cacheRng.range(1, totalW);
+                    for (const auto& c : cands) {
+                        r -= c.w;
+                        if (r <= 0) return c.idx;
+                    }
+                    return cands.back().idx;
+                };
+
+                auto findCacheAnchor = [&](const EcosystemSeed& s) -> Vec2i {
+                    const int r = std::max(4, std::min(10, s.radius));
+                    const int r2 = r * r;
+
+                    for (int tries = 0; tries < 200; ++tries) {
+                        const int dx = cacheRng.range(-r, r);
+                        const int dy = cacheRng.range(-r, r);
+                        if (dx * dx + dy * dy > r2) continue;
+                        Vec2i p{s.pos.x + dx, s.pos.y + dy};
+                        if (!dung.inBounds(p.x, p.y)) continue;
+                        if (dung.at(p.x, p.y).type != TileType::Floor) continue;
+                        if (roomTypeAt(dung, p) == RoomType::Shop) continue;
+
+                        // Keep the stair landing zones readable.
+                        if (dung.inBounds(dung.stairsUp.x, dung.stairsUp.y) && manhattan(p, dung.stairsUp) <= 2) continue;
+                        if (dung.inBounds(dung.stairsDown.x, dung.stairsDown.y) && manhattan(p, dung.stairsDown) <= 2) continue;
+
+                        // Stay within the intended ecosystem region.
+                        if (dung.ecosystemAtCached(p.x, p.y) != s.kind) continue;
+
+                        // Keep caches readable: don't stack on existing piles or nodes.
+                        if (countGroundAt(p) > 0) continue;
+
+                        return p;
+                    }
+                    return Vec2i{-1, -1};
+                };
+
+                auto findCacheItemPos = [&](Vec2i anchor, EcosystemKind eco) -> Vec2i {
+                    // Prefer keeping the cache as a tight pile, but avoid absurd stacking.
+                    if (countGroundAt(anchor) < 2) return anchor;
+
+                    for (int tries = 0; tries < 60; ++tries) {
+                        const int dx = cacheRng.range(-1, 1);
+                        const int dy = cacheRng.range(-1, 1);
+                        if (dx == 0 && dy == 0) continue;
+                        Vec2i p{anchor.x + dx, anchor.y + dy};
+                        if (!dung.inBounds(p.x, p.y)) continue;
+                        if (dung.at(p.x, p.y).type != TileType::Floor) continue;
+                        if (roomTypeAt(dung, p) == RoomType::Shop) continue;
+                        if (dung.ecosystemAtCached(p.x, p.y) != eco) continue;
+                        if (countGroundAt(p) >= 2) continue;
+                        return p;
+                    }
+                    return anchor;
+                };
+
+                auto dropCache = [&](const EcosystemSeed& s) {
+                    const Vec2i anchor = findCacheAnchor(s);
+                    if (!dung.inBounds(anchor.x, anchor.y)) return;
+
+                    // Two themed items, plus a small chance for a third.
+                    std::vector<std::pair<ItemKind, int>> items;
+                    items.reserve(3);
+
+                    switch (s.kind) {
+                        case EcosystemKind::FungalBloom: {
+                            ItemKind p = cacheRng.chance(0.22f) ? ItemKind::PotionRegeneration : ItemKind::PotionAntidote;
+                            int pc = (cacheRng.chance(0.35f) ? 2 : 1);
+                            items.push_back({p, pc});
+
+                            ItemKind b = cacheRng.chance(0.55f) ? ItemKind::Dagger : ItemKind::ScrollConfusion;
+                            items.push_back({b, 1});
+
+                            if (spawnDepth >= 5 && cacheRng.chance(0.25f)) {
+                                items.push_back({ItemKind::PotionClarity, 1});
+                            }
+                        } break;
+                        case EcosystemKind::CrystalGarden: {
+                            ItemKind a = cacheRng.chance(0.32f) ? ItemKind::RuneTablet : ItemKind::WandSparks;
+                            items.push_back({a, 1});
+
+                            ItemKind b = cacheRng.chance(0.58f) ? ItemKind::ScrollIdentify : ItemKind::PotionVision;
+                            items.push_back({b, 1});
+
+                            if (spawnDepth >= 6 && cacheRng.chance(0.18f)) {
+                                ItemKind rk = cacheRng.chance(0.50f) ? ItemKind::RingFocus : ItemKind::RingSearching;
+                                items.push_back({rk, 1});
+                            }
+                        } break;
+                        case EcosystemKind::BoneField: {
+                            ItemKind a = cacheRng.chance(0.55f) ? ItemKind::ScrollRemoveCurse : ItemKind::ScrollEnchantArmor;
+                            items.push_back({a, 1});
+
+                            ItemKind b = cacheRng.chance(0.60f) ? ItemKind::ButcheredBones : ItemKind::PotionClarity;
+                            int bc = (b == ItemKind::ButcheredBones) ? cacheRng.range(2, 4) : 1;
+                            items.push_back({b, bc});
+
+                            if (spawnDepth >= 7 && cacheRng.chance(0.20f)) {
+                                items.push_back({ItemKind::Sword, 1});
+                            }
+                        } break;
+                        case EcosystemKind::RustVeins: {
+                            ItemKind a = cacheRng.chance(0.60f) ? ItemKind::Lockpick : ItemKind::Key;
+                            items.push_back({a, 1});
+
+                            ItemKind b = cacheRng.chance(0.50f) ? ItemKind::ScrollKnock : ItemKind::Dagger;
+                            items.push_back({b, 1});
+
+                            if (spawnDepth >= 4 && cacheRng.chance(0.22f)) {
+                                items.push_back({ItemKind::PotionStrength, 1});
+                            }
+                        } break;
+                        case EcosystemKind::AshenRidge: {
+                            ItemKind a = cacheRng.chance(0.55f) ? ItemKind::PotionHaste : ItemKind::PotionStrength;
+                            items.push_back({a, 1});
+
+                            ItemKind w = (spawnDepth >= 5 && cacheRng.chance(0.40f)) ? ItemKind::WandFireball : ItemKind::WandSparks;
+                            items.push_back({w, 1});
+
+                            if (spawnDepth >= 6 && cacheRng.chance(0.20f)) {
+                                items.push_back({ItemKind::ScrollEarth, 1});
+                            }
+                        } break;
+                        case EcosystemKind::FloodedGrotto: {
+                            int hc = 1 + (cacheRng.chance(0.45f) ? 1 : 0);
+                            items.push_back({ItemKind::PotionHealing, hc});
+
+                            ItemKind b = cacheRng.chance(0.55f) ? ItemKind::ScrollMapping : ItemKind::PotionVision;
+                            items.push_back({b, 1});
+
+                            if (spawnDepth >= 4 && cacheRng.chance(0.18f)) {
+                                items.push_back({ItemKind::PotionLevitation, 1});
+                            }
+                        } break;
+                        default:
+                            return;
+                    }
+
+                    // Place items, allowing a tight pile but avoiding absurd stacking.
+                    for (const auto& kv : items) {
+                        const Vec2i p = findCacheItemPos(anchor, s.kind);
+                        dropItemAtWithRng(cacheRng, kv.first, p, kv.second);
+                    }
+                };
+
+                for (int i = 0; i < cacheBudget; ++i) {
+                    const size_t si = pickSeedIndexCache();
+                    if (si == static_cast<size_t>(-1) || si >= seeds.size()) break;
+                    const EcosystemSeed& s = seeds[si];
+                    if (s.kind == EcosystemKind::None) continue;
+                    dropCache(s);
+                }
+            }
+
+
+        }
+    }
 }
 
 void Game::spawnTraps() {
@@ -2321,6 +3516,10 @@ void Game::spawnTraps() {
 
     // Use a depth-like scalar for the overworld (Camp/0 wilderness chunks).
     const int spawnDepth = materialDepth();
+
+    // Ecosystem field is computed alongside the material cache; ensure it exists
+    // before any ecosystem-aware trap placement below.
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
     // A small number of traps per floor, scaling gently with depth.
     // (Setpieces below may "spend" some of this budget by placing traps in patterns,
@@ -2843,6 +4042,179 @@ void Game::spawnTraps() {
     }
 
 
+
+    // ------------------------------------------------------------
+    // Ecosystem-biased trap clusters: small regional hazards that make
+    // biome patches feel mechanically distinct.
+    //
+    // NOTE: These use an isolated RNG stream so they don't perturb other
+    // setpieces within spawnTraps(). They still consume trap *budget*
+    // naturally (they count toward trapsCur.size()).
+    // ------------------------------------------------------------
+    {
+        const auto& ecoSeeds = dung.ecosystemSeedsCached();
+        if (!ecoSeeds.empty()) {
+            RNG erng(hashCombine(levelGenSeed(LevelId{branch_, depth_}), 0xEC057A2Bu));
+
+            // How many ecosystem traps to try to add this floor.
+            // Keep it subtle: this is flavor, not a new global difficulty knob.
+            int ecoBudget = 0;
+            if (spawnDepth >= 2 && erng.chance(0.65f)) ecoBudget += 1;
+            if (spawnDepth >= 5 && erng.chance(0.50f)) ecoBudget += 1;
+            if (spawnDepth >= 9 && erng.chance(0.35f)) ecoBudget += 1;
+            if (spawnDepth >= 12 && erng.chance(0.25f)) ecoBudget += 1;
+            if (spawnDepth == QUEST_DEPTH - 1 && erng.chance(0.55f)) ecoBudget += 1;
+            ecoBudget = clampi(ecoBudget, 0, 4);
+            ecoBudget = std::min(ecoBudget, std::max(0, targetCount - 1));
+
+            auto ecoTrapWeight = [&](EcosystemKind k) -> int {
+                // Slight bias toward more "readable"/distinct hazards.
+                switch (k) {
+                    case EcosystemKind::FungalBloom:   return 8;
+                    case EcosystemKind::CrystalGarden: return 9;
+                    case EcosystemKind::BoneField:     return 7;
+                    case EcosystemKind::RustVeins:     return 7;
+                    case EcosystemKind::AshenRidge:    return 8;
+                    case EcosystemKind::FloodedGrotto: return 6;
+                    default:                           return 0;
+                }
+            };
+
+            struct EcoPick { int idx = 0; int w = 0; };
+            std::vector<EcoPick> table;
+            table.reserve(ecoSeeds.size());
+            for (int i = 0; i < static_cast<int>(ecoSeeds.size()); ++i) {
+                const EcosystemSeed& s = ecoSeeds[static_cast<size_t>(i)];
+                if (s.kind == EcosystemKind::None) continue;
+                int w = ecoTrapWeight(s.kind);
+                w += clampi(s.radius, 2, 7);
+                if (spawnDepth >= 10) w += 1;
+                if (w > 0) table.push_back(EcoPick{i, w});
+            }
+
+            auto pickSeedIndex = [&]() -> int {
+                if (table.empty()) return -1;
+                int total = 0;
+                for (const auto& e : table) total += std::max(0, e.w);
+                if (total <= 0) return -1;
+                int r = erng.range(1, total);
+                for (const auto& e : table) {
+                    r -= std::max(0, e.w);
+                    if (r <= 0) return e.idx;
+                }
+                return table.back().idx;
+            };
+
+            auto pickEcoTrap = [&](EcosystemKind eco) -> TrapKind {
+                // Keep these as "floor feel" hazards rather than instant-kill spikes.
+                const int r = erng.range(0, 99);
+                switch (eco) {
+                    case EcosystemKind::FungalBloom: {
+                        if (r < 50) return TrapKind::Web;
+                        if (r < 78) return TrapKind::ConfusionGas;
+                        if (spawnDepth >= 4 && r < 92) return TrapKind::PoisonGas;
+                        return TrapKind::PoisonDart;
+                    }
+                    case EcosystemKind::CrystalGarden: {
+                        // "Runes" and sudden angles.
+                        if (r < 42) return TrapKind::Alarm;
+                        if (r < 70) return TrapKind::Teleport;
+                        if (spawnDepth >= 6 && r < 86) return TrapKind::LetheMist;
+                        return TrapKind::Spike;
+                    }
+                    case EcosystemKind::BoneField: {
+                        if (r < 62) return TrapKind::Spike;
+                        if (spawnDepth != DUNGEON_MAX_DEPTH && spawnDepth >= 4 && r < 74) return TrapKind::TrapDoor;
+                        if (r < 88) return TrapKind::Alarm;
+                        return TrapKind::PoisonDart;
+                    }
+                    case EcosystemKind::RustVeins: {
+                        if (spawnDepth >= 8 && r < 35) return TrapKind::CorrosiveGas;
+                        if (r < 62) return TrapKind::Spike;
+                        if (r < 84) return TrapKind::PoisonDart;
+                        return TrapKind::Alarm;
+                    }
+                    case EcosystemKind::AshenRidge: {
+                        if (r < 50) return TrapKind::LetheMist;
+                        if (r < 74) return TrapKind::ConfusionGas;
+                        if (spawnDepth >= 6 && r < 86) return TrapKind::RollingBoulder;
+                        return TrapKind::Spike;
+                    }
+                    case EcosystemKind::FloodedGrotto: {
+                        if (r < 55) return TrapKind::LetheMist;
+                        if (r < 78) return TrapKind::Alarm;
+                        if (spawnDepth >= 5 && r < 90) return TrapKind::Teleport;
+                        return TrapKind::Web;
+                    }
+                    default:
+                        break;
+                }
+                return TrapKind::Spike;
+            };
+
+            auto findEcoTrapPos = [&](const EcosystemSeed& s) -> Vec2i {
+                // Try a handful of points near the seed center.
+                const int rr = clampi(s.radius, 2, 7);
+                for (int tries = 0; tries < 60; ++tries) {
+                    const int dx = erng.range(-rr, rr);
+                    const int dy = erng.range(-rr, rr);
+                    if (std::max(std::abs(dx), std::abs(dy)) > rr) continue;
+                    Vec2i p{s.pos.x + dx, s.pos.y + dy};
+                    if (!dung.inBounds(p.x, p.y)) continue;
+                    if (dung.at(p.x, p.y).type != TileType::Floor) continue;
+                    if (dung.ecosystemAtCached(p.x, p.y) != s.kind) continue;
+                    if (isBadFloorPos(p)) continue;
+                    return p;
+                }
+                return Vec2i{-1, -1};
+            };
+
+            int ecoPlaced = 0;
+            int ecoTries = 0;
+            while (ecoPlaced < ecoBudget && ecoTries < 80 + ecoBudget * 40 && static_cast<int>(trapsCur.size()) < targetCount) {
+                ecoTries += 1;
+                const int si = pickSeedIndex();
+                if (si < 0 || si >= static_cast<int>(ecoSeeds.size())) break;
+                const EcosystemSeed& s = ecoSeeds[static_cast<size_t>(si)];
+                const Vec2i p0 = findEcoTrapPos(s);
+                if (!dung.inBounds(p0.x, p0.y)) continue;
+
+                // Place the anchor trap.
+                const TrapKind t0 = pickEcoTrap(s.kind);
+                if (!addFloorTrap(p0, t0, false, true)) continue;
+                ecoPlaced += 1;
+
+                // Optional small cluster (adjacent tile). This makes biome hazards "read" as a patch.
+                const bool cluster = (ecoPlaced < ecoBudget) && erng.chance(0.55f);
+                if (!cluster) continue;
+
+                std::vector<Vec2i> adj;
+                adj.reserve(8);
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) continue;
+                        Vec2i p{p0.x + dx, p0.y + dy};
+                        if (!dung.inBounds(p.x, p.y)) continue;
+                        if (dung.at(p.x, p.y).type != TileType::Floor) continue;
+                        if (dung.ecosystemAtCached(p.x, p.y) != s.kind) continue;
+                        adj.push_back(p);
+                    }
+                }
+                for (int i = static_cast<int>(adj.size()) - 1; i > 0; --i) {
+                    const int j = erng.range(0, i);
+                    std::swap(adj[static_cast<size_t>(i)], adj[static_cast<size_t>(j)]);
+                }
+
+                for (const Vec2i& p : adj) {
+                    if (ecoPlaced >= ecoBudget) break;
+                    if (static_cast<int>(trapsCur.size()) >= targetCount) break;
+                    if (addFloorTrap(p, pickEcoTrap(s.kind), false, true)) {
+                        ecoPlaced += 1;
+                    }
+                }
+            }
+        }
+    }
 
     // ------------------------------------------------------------
     // Baseline trap scatter: fill the remaining budget, biased toward
@@ -3618,6 +4990,273 @@ void Game::applyEndOfTurnEffects() {
             if (fireField_.size() != expect) fireField_.assign(expect, 0u);
         }
 
+        // ------------------------------------------------------------
+        // Ecosystem pulses: periodic, deterministic biome events
+        //
+        // These inject small localized hazard/boon "pulses" near ecosystem cores.
+        // They are RNG-isolated (hash-derived) and keyed off turnCount so they
+        // remain stable across save/load and don't perturb the main RNG stream.
+        // ------------------------------------------------------------
+        if (branch_ == DungeonBranch::Main) {
+            const auto& ecoSeeds = dung.ecosystemSeedsCached();
+            if (!ecoSeeds.empty()) {
+                std::vector<size_t> candidates;
+                candidates.reserve(ecoSeeds.size());
+                for (size_t i = 0; i < ecoSeeds.size(); ++i) {
+                    const EcosystemSeed& s = ecoSeeds[i];
+                    if (s.kind == EcosystemKind::None) continue;
+                    if (s.radius <= 0) continue;
+                    if (!dung.inBounds(s.pos.x, s.pos.y)) continue;
+                    candidates.push_back(i);
+                }
+
+                if (!candidates.empty()) {
+                    const int md = materialDepth();
+                    int interval = 34 - std::min(12, std::max(0, md) / 2);
+                    interval = clampi(interval, 22, 34);
+
+                    uint32_t base = hashCombine(materialWorldSeed(), "ECO_PULSE"_tag);
+                    base = hashCombine(base, static_cast<uint32_t>(md));
+                    base = hashCombine(base, static_cast<uint32_t>(dungeonMaxDepth()));
+                    base = hashCombine(base, static_cast<uint32_t>(branch_));
+
+                    const uint32_t uInterval = static_cast<uint32_t>(std::max(1, interval));
+                    const uint32_t phase = base % uInterval;
+
+                    if (((turnCount + phase) % uInterval) == 0u) {
+                        const uint32_t pulseIdx = (turnCount + phase) / uInterval;
+
+                        const Vec2i pp = p.pos;
+
+                        uint32_t h = hashCombine(base, pulseIdx);
+                        const size_t pick = candidates[static_cast<size_t>(h % static_cast<uint32_t>(candidates.size()))];
+                        const EcosystemSeed& s = ecoSeeds[pick];
+
+                        RNG prng(hashCombine(h, static_cast<uint32_t>(pick)));
+
+                        // Choose a pulse center within the seed radius, on a walkable tile of the same ecosystem.
+                        Vec2i center{-1, -1};
+                        const int maxOff = clampi(std::max(2, s.radius / 3), 2, 6);
+
+                        for (int attempt = 0; attempt < 28; ++attempt) {
+                            const int ox = prng.range(-maxOff, maxOff);
+                            const int oy = prng.range(-maxOff, maxOff);
+                            const Vec2i cand{ s.pos.x + ox, s.pos.y + oy };
+
+                            if (!dung.inBounds(cand.x, cand.y)) continue;
+                            if (cand.x == pp.x && cand.y == pp.y) continue;
+                            if (cand == dung.stairsUp || cand == dung.stairsDown) continue;
+
+                            // Prefer pulses on solid ground, but allow gas/fire to drift over chasms after emission.
+                            if (!dung.isWalkable(cand.x, cand.y)) continue;
+
+                            if (dung.ecosystemAtCached(cand.x, cand.y) != s.kind) continue;
+
+                            // Avoid spawning pulses directly under another entity (especially shopkeepers).
+                            if (const Entity* occ = entityAt(cand.x, cand.y)) {
+                                if (occ->id != playerId_) continue;
+                            }
+
+                            center = cand;
+                            break;
+                        }
+
+                        if (center.x >= 0) {
+                            auto addToField = [&](std::vector<uint8_t>& field, int x, int y, int add) {
+                                if (!dung.inBounds(x, y)) return;
+                                const size_t i = static_cast<size_t>(y * dung.width + x);
+                                if (i >= field.size()) return;
+                                const int nv = static_cast<int>(field[i]) + add;
+                                field[i] = static_cast<uint8_t>(clampi(nv, 0, 255));
+                            };
+
+                            auto subFromField = [&](std::vector<uint8_t>& field, int x, int y, int sub) {
+                                if (!dung.inBounds(x, y)) return;
+                                const size_t i = static_cast<size_t>(y * dung.width + x);
+                                if (i >= field.size()) return;
+                                const int nv = static_cast<int>(field[i]) - sub;
+                                field[i] = static_cast<uint8_t>(clampi(nv, 0, 255));
+                            };
+
+                            auto bloom = [&](std::vector<uint8_t>& field, Vec2i c, int radius, int peak, bool requireWalkable) {
+                                radius = clampi(radius, 0, 12);
+                                peak = clampi(peak, 0, 255);
+
+                                const int fall = std::max(1, peak / std::max(1, radius + 1));
+
+                                for (int dy = -radius; dy <= radius; ++dy) {
+                                    for (int dx = -radius; dx <= radius; ++dx) {
+                                        const int x = c.x + dx;
+                                        const int y = c.y + dy;
+                                        if (!dung.inBounds(x, y)) continue;
+                                        if (x == pp.x && y == pp.y) continue;
+
+                                        if (requireWalkable) {
+                                            // Allow fields to be *applied* to walkable tiles only; they can still drift
+                                            // over pits later via the normal hazard simulation.
+                                            if (!dung.isWalkable(x, y)) continue;
+                                        }
+
+                                        const int dist = std::max(std::abs(dx), std::abs(dy));
+                                        int add = peak - dist * fall;
+                                        if (add <= 0) continue;
+                                        addToField(field, x, y, add);
+                                    }
+                                }
+                            };
+
+                            // Mild depth scaling; keep pulses flavorful, not a global difficulty spike.
+                            const int depthN = std::max(1, md);
+                            const bool vis = dung.inBounds(center.x, center.y) && dung.at(center.x, center.y).visible;
+                            const int near = chebyshev(pp, center);
+
+                            std::string msg;
+                            MessageKind mk = MessageKind::Info;
+                            bool fromPlayer = false;
+
+                            switch (s.kind) {
+                                case EcosystemKind::FungalBloom: {
+                                    const int radius = 2 + ((s.radius >= 10) ? 1 : 0);
+                                    int peak = 10 + depthN / 3;
+                                    peak = clampi(peak, 10, 22);
+                                    bloom(confusionGas_, center, radius, peak, /*requireWalkable=*/true);
+
+                                    if (vis) {
+                                        pushFxParticle(FXParticlePreset::Detect, center, 18, 0.22f, 0.0f, hashCombine(h, "SPORE"_tag));
+                                    }
+                                    if (vis || near <= 6) {
+                                        msg = "SPORES BURST FROM THE FUNGAL GROWTH!";
+                                        mk = MessageKind::Warning;
+                                    }
+                                    break;
+                                }
+                                case EcosystemKind::RustVeins: {
+                                    const int radius = 2;
+                                    int peak = 10 + depthN / 4;
+                                    peak = clampi(peak, 10, 20);
+                                    bloom(corrosiveGas_, center, radius, peak, /*requireWalkable=*/true);
+
+                                    if (vis) {
+                                        pushFxParticle(FXParticlePreset::Poison, center, 16, 0.20f, 0.0f, hashCombine(h, "RUST"_tag));
+                                    }
+                                    if (vis || near <= 6) {
+                                        msg = "ACRID VAPORS SEEP FROM THE RUST VEINS!";
+                                        mk = MessageKind::Warning;
+                                    }
+                                    break;
+                                }
+                                case EcosystemKind::AshenRidge: {
+                                    const int radius = 1 + ((depthN >= 10) ? 1 : 0);
+                                    int peak = 10 + depthN / 5;
+                                    peak = clampi(peak, 10, 22);
+                                    bloom(fireField_, center, radius, peak, /*requireWalkable=*/true);
+
+                                    // Small smoke-like confusion fringe at higher depths.
+                                    if (depthN >= 12) {
+                                        bloom(confusionGas_, center, 1, 6 + depthN / 6, /*requireWalkable=*/true);
+                                    }
+
+                                    if (vis) {
+                                        pushFxParticle(FXParticlePreset::EmberBurst, center, 20, 0.18f, 0.0f, hashCombine(h, "EMBER"_tag));
+                                    }
+                                    if (vis || near <= 6) {
+                                        msg = "EMBERS ERUPT FROM A SMOLDERING FISSURE!";
+                                        mk = MessageKind::Warning;
+                                    }
+                                    break;
+                                }
+                                case EcosystemKind::FloodedGrotto: {
+                                    // Cool mist: gently dampens nearby fire and can ease burning.
+                                    const int radius = 3;
+                                    const int quench = 10 + depthN / 6;
+                                    for (int dy = -radius; dy <= radius; ++dy) {
+                                        for (int dx = -radius; dx <= radius; ++dx) {
+                                            const int x = center.x + dx;
+                                            const int y = center.y + dy;
+                                            if (!dung.inBounds(x, y)) continue;
+                                            const int dist = std::max(std::abs(dx), std::abs(dy));
+                                            if (dist > radius) continue;
+                                            const int sub = std::max(0, quench - dist * 3);
+                                            if (sub <= 0) continue;
+                                            subFromField(fireField_, x, y, sub);
+                                        }
+                                    }
+
+                                    if (near <= 5 && p.effects.burnTurns > 0) {
+                                        const int before = p.effects.burnTurns;
+                                        p.effects.burnTurns = std::max(0, p.effects.burnTurns - 2);
+                                        if (before > 0 && p.effects.burnTurns == 0) {
+                                            pushMsg(effectEndMessage(EffectKind::Burn), MessageKind::System, true);
+                                        }
+                                    }
+
+                                    // Drips echo: a small audible cue that can also attract monsters.
+                                    emitNoise(center, 10 + std::min(8, depthN));
+
+                                    if (vis) {
+                                        pushFxParticle(FXParticlePreset::Detect, center, 14, 0.22f, 0.0f, hashCombine(h, "DRIP"_tag));
+                                    }
+                                    if (vis || near <= 6) {
+                                        msg = "COOL MIST RISES FROM THE GROTTO.";
+                                        mk = MessageKind::Info;
+                                    }
+                                    break;
+                                }
+                                case EcosystemKind::CrystalGarden: {
+                                    // Resonance: crystals chime, sometimes restoring a bit of mana if you're nearby.
+                                    emitNoise(center, 12 + std::min(10, depthN));
+
+                                    const int manaMax = playerManaMax();
+                                    if (near <= 6 && manaMax > 0 && mana_ < manaMax) {
+                                        const int before = mana_;
+                                        const int gain = 1 + ((depthN >= 12) ? 1 : 0);
+                                        mana_ = std::min(manaMax, mana_ + gain);
+
+                                        if (mana_ > before) {
+                                            msg = "THE CRYSTALS HUM WITH ARCANE POWER. YOU FEEL ENERGIZED.";
+                                            mk = MessageKind::Success;
+                                            fromPlayer = true;
+                                        }
+                                    }
+
+                                    if (vis) {
+                                        pushFxParticle(FXParticlePreset::Buff, center, 18, 0.22f, 0.0f, hashCombine(h, "CHIME"_tag));
+                                    }
+                                    if (msg.empty() && (vis || near <= 6)) {
+                                        msg = "THE CRYSTALS RING SOFTLY.";
+                                        mk = MessageKind::Info;
+                                    }
+                                    break;
+                                }
+                                case EcosystemKind::BoneField: {
+                                    // Necrotic haze: a mild toxic puff (flavor + small hazard).
+                                    const int radius = 2;
+                                    int peak = 9 + depthN / 4;
+                                    peak = clampi(peak, 9, 18);
+                                    bloom(poisonGas_, center, radius, peak, /*requireWalkable=*/true);
+
+                                    if (vis) {
+                                        pushFxParticle(FXParticlePreset::Poison, center, 14, 0.20f, 0.0f, hashCombine(h, "BONE"_tag));
+                                    }
+                                    if (vis || near <= 6) {
+                                        msg = "A FOUL MIASMA RISES FROM THE OSSUARY.";
+                                        mk = MessageKind::Warning;
+                                    }
+                                    break;
+                                }
+                                default:
+                                    break;
+                            }
+
+                            if (!msg.empty()) {
+                                pushMsg(msg, mk, fromPlayer);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Only do any work if there is any overlap potential.
         {
             const int w = dung.width;
@@ -4305,10 +5944,35 @@ void Game::applyEndOfTurnEffects() {
             // Baseline: 1 mana per ~9 turns at low focus, improving with focus/level.
             int interval = 11 - (focus / 2) - (level / 3);
             interval = clampi(interval, 2, 12);
-            if (interval <= 0) interval = 2;
+
+            // Round 211: procedural leylines (arcane resonance) can nudge mana regen.
+            // This is kept deterministic by keying any bonus purely off (turnCount, tile intensity).
+            uint8_t ley = 0u;
+            if (branch_ != DungeonBranch::Camp) {
+                ley = dung.leylineAt(p.pos.x, p.pos.y,
+                                     materialWorldSeed(),
+                                     branch_,
+                                     materialDepth(),
+                                     dungeonMaxDepth());
+            }
+
+            int intervalDelta = 0;
+            if (ley >= 220u) intervalDelta = 3;
+            else if (ley >= 170u) intervalDelta = 2;
+            else if (ley >= 120u) intervalDelta = 1;
+
+            interval = clampi(interval - intervalDelta, 1, 12);
+            if (interval <= 0) interval = 1;
 
             if ((turnCount % static_cast<uint32_t>(interval)) == 0u) {
-                mana_ = std::min(manaMax, mana_ + 1);
+                int gain = 1;
+                // Very strong currents occasionally grant an extra tick.
+                if (ley >= 235u) {
+                    if ((turnCount % 5u) == 0u) gain += 1;
+                } else if (ley >= 220u) {
+                    if ((turnCount % 9u) == 0u) gain += 1;
+                }
+                mana_ = std::min(manaMax, mana_ + gain);
             }
         }
     }
@@ -4865,13 +6529,22 @@ void Game::applyEndOfTurnEffects() {
 
                     const TileType tt = dung.at(x, y).type;
                     const TerrainMaterial mat = dung.materialAtCached(x, y);
+                    const EcosystemKind eco = dung.ecosystemAtCached(x, y);
+                    const EcosystemFx ecoFx = ecosystemFx(eco);
 
                     int decay = 1 + gasAbsorb(mat);
                     // Light haze disperses quickly over open pits.
                     if (tt == TileType::Chasm) decay += 1;
 
+                    // Ecosystem microclimate: some regions scrub vapors quickly, others let dense clouds linger.
+                    if (ecoFx.confusionGasQuenchDelta > 0) decay += ecoFx.confusionGasQuenchDelta;
+
                     // Always decay in place.
-                    const uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
+                    uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
+                    if (ecoFx.confusionGasQuenchDelta < 0 && s >= 8u) {
+                        const int boost = -ecoFx.confusionGasQuenchDelta;
+                        self = static_cast<uint8_t>(clampi(static_cast<int>(self) + boost, 0, 255));
+                    }
                     if (next[i] < self) next[i] = self;
 
                     // Spread to neighbors with extra decay.
@@ -4882,6 +6555,7 @@ void Game::applyEndOfTurnEffects() {
                         int base = static_cast<int>(s) - 2;
                         base -= gasAbsorb(mat);
                         base += gasSlick(mat); // smooth surfaces let vapor slide a little farther
+                        base += ecoFx.confusionGasSpreadDelta;
                         base = std::clamp(base, 0, static_cast<int>(s));
 
                         for (const Vec2i& d : kDirs) {
@@ -4955,11 +6629,18 @@ void Game::applyEndOfTurnEffects() {
 
                     const TileType tt = dung.at(x, y).type;
                     const TerrainMaterial mat = dung.materialAtCached(x, y);
+                    const EcosystemKind eco = dung.ecosystemAtCached(x, y);
+                    const EcosystemFx ecoFx = ecosystemFx(eco);
 
-                    const int decay = 1 + gasAbsorb(mat);
+                    int decay = 1 + gasAbsorb(mat);
+                    if (ecoFx.poisonGasQuenchDelta > 0) decay += ecoFx.poisonGasQuenchDelta;
 
                     // Always decay in place.
-                    const uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
+                    uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
+                    if (ecoFx.poisonGasQuenchDelta < 0 && s >= 8u) {
+                        const int boost = -ecoFx.poisonGasQuenchDelta;
+                        self = static_cast<uint8_t>(clampi(static_cast<int>(self) + boost, 0, 255));
+                    }
                     if (next[i] < self) next[i] = self;
 
                     // Spread to neighbors with extra decay (more dissipative than confusion gas).
@@ -4969,6 +6650,7 @@ void Game::applyEndOfTurnEffects() {
                         int base = static_cast<int>(s) - 3;
                         base -= gasAbsorb(mat);
                         base += gasSlick(mat); // sealed surfaces let fumes "slide" a bit
+                        base += ecoFx.poisonGasSpreadDelta;
                         base = std::clamp(base, 0, static_cast<int>(s));
 
                         for (const Vec2i& d : kDirs) {
@@ -5044,11 +6726,18 @@ void Game::applyEndOfTurnEffects() {
 
                     const TileType tt = dung.at(x, y).type;
                     const TerrainMaterial mat = dung.materialAtCached(x, y);
+                    const EcosystemKind eco = dung.ecosystemAtCached(x, y);
+                    const EcosystemFx ecoFx = ecosystemFx(eco);
 
-                    const int decay = 1 + gasAbsorb(mat);
+                    int decay = 1 + gasAbsorb(mat);
+                    if (ecoFx.corrosiveGasQuenchDelta > 0) decay += ecoFx.corrosiveGasQuenchDelta;
 
                     // Always decay in place.
-                    const uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
+                    uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
+                    if (ecoFx.corrosiveGasQuenchDelta < 0 && s >= 8u) {
+                        const int boost = -ecoFx.corrosiveGasQuenchDelta;
+                        self = static_cast<uint8_t>(clampi(static_cast<int>(self) + boost, 0, 255));
+                    }
                     if (next[i] < self) next[i] = self;
 
                     // Spread is more dissipative than poison gas.
@@ -5062,6 +6751,7 @@ void Game::applyEndOfTurnEffects() {
                             base -= 1;
                         }
 
+                        base += ecoFx.corrosiveGasSpreadDelta;
                         base = std::clamp(base, 0, static_cast<int>(s));
 
                         for (const Vec2i& d : kDirs) {
@@ -5342,9 +7032,19 @@ void Game::applyEndOfTurnEffects() {
                     if (s == 0u) continue;
                     if (!passable(x, y)) continue;
 
-                    // Always decay in place. Rain/snow/storms can quench it faster on the overworld.
-                    const int decay = 1 + wxFireQuench;
-                    const uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
+                    // Ecosystem microclimate + overworld weather can quench or sustain fires.
+                    const EcosystemKind eco = dung.ecosystemAtCached(x, y);
+                    const EcosystemFx ecoFx = ecosystemFx(eco);
+
+                    int decay = 1 + wxFireQuench;
+                    if (ecoFx.fireQuenchDelta > 0) decay += ecoFx.fireQuenchDelta;
+
+                    uint8_t self = (s > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(s - static_cast<uint8_t>(decay)) : 0u;
+                    // In hot/dry regions, strong fires can linger a bit longer before guttering out.
+                    if (ecoFx.fireQuenchDelta < 0 && s >= 6u) {
+                        const int boost = -ecoFx.fireQuenchDelta;
+                        self = static_cast<uint8_t>(clampi(static_cast<int>(self) + boost, 0, 255));
+                    }
                     if (next[i] < self) next[i] = self;
 
                     // Strong fires can spread a bit, but we keep this rare to avoid runaway map-wide burns.
@@ -5358,7 +7058,7 @@ void Game::applyEndOfTurnEffects() {
                             const size_t j = idx2(nx, ny);
                             if (fireField_[j] != 0u) continue;
 
-                            float chance = baseChance;
+                            float chance = baseChance * (static_cast<float>(ecoFx.fireSpreadMulPct) / 100.0f);
                             if (windStr > 0) {
                                 // Downwind flames jump more readily; upwind spread is suppressed.
                                 if (d.x == wind.x && d.y == wind.y) {
@@ -5413,6 +7113,10 @@ void Game::cleanupDead() {
         }
         pushMsg("THE SHOPKEEPER IS DEAD. EVERYTHING IS FREE!", MessageKind::Success, true);
     }
+
+    // Ensure ecosystem/material caches are ready for any deterministic biome-aligned drops.
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+
 
     // Drop loot from dead monsters (before removal)
     for (const auto& e : ents) {
@@ -5512,6 +7216,112 @@ void Game::cleanupDead() {
             int bonus = rng.range(4, 10) + depthBonus * 2 + std::min(3, tier) * 4;
             bonus = std::max(1, bonus);
             dropGroundItem(e.pos, ItemKind::Gold, bonus);
+        }
+
+        // Proc-ranked essence: Champion/Mythic proc foes can shed a small stack of biome-aligned
+        // Essence Shards. This is deterministic (hash-derived) to avoid perturbing the main RNG stream.
+        if (tier >= 2) {
+            const EcosystemKind ecoHere = dung.ecosystemAtCached(e.pos.x, e.pos.y);
+            const TerrainMaterial matHere = dung.materialAtCached(e.pos.x, e.pos.y);
+
+            if (ecoHere != EcosystemKind::None) {
+                // Hash stream: stable for this run+floor+entity.
+                uint32_t h = hashCombine(seed_, "PROC_ESS_DROP"_tag);
+                h = hashCombine(h, static_cast<uint32_t>(branch_));
+                h = hashCombine(h, static_cast<uint32_t>(materialDepth()));
+                h = hashCombine(h, static_cast<uint32_t>(depth_));
+                h = hashCombine(h, static_cast<uint32_t>(e.id));
+                h = hashCombine(h, static_cast<uint32_t>(e.kind));
+                h = hashCombine(h, static_cast<uint32_t>(e.spriteSeed));
+
+                auto u01 = [](uint32_t v) -> float {
+                    return static_cast<float>(v & 0xFFFFu) / 65535.0f;
+                };
+
+                float dropChance = (tier >= 3) ? 0.85f : 0.55f;
+                if (gilded) dropChance += 0.10f;
+
+                // Subtle ecosystem nudges.
+                if (ecoHere == EcosystemKind::CrystalGarden) dropChance += 0.05f;
+                if (ecoHere == EcosystemKind::FloodedGrotto) dropChance += 0.03f;
+                dropChance = std::min(0.98f, std::max(0.0f, dropChance));
+
+                if (u01(hashCombine(h, "D"_tag)) < dropChance) {
+                    crafttags::Tag tag = crafttags::Tag::None;
+                    const float uTag = u01(hashCombine(h, "TAG"_tag));
+
+                    // Keep the same "eco + substrate" mapping used by the ecosystem resource spawner.
+                    switch (ecoHere) {
+                        case EcosystemKind::FungalBloom: {
+                            if (matHere == TerrainMaterial::Moss || matHere == TerrainMaterial::Dirt) {
+                                tag = (uTag < 0.55f) ? crafttags::Tag::Regen : crafttags::Tag::Venom;
+                            } else {
+                                tag = (uTag < 0.80f) ? crafttags::Tag::Venom : crafttags::Tag::Regen;
+                            }
+                        } break;
+                        case EcosystemKind::CrystalGarden: {
+                            if (matHere == TerrainMaterial::Crystal) {
+                                if (uTag < 0.45f) tag = crafttags::Tag::Rune;
+                                else if (uTag < 0.85f) tag = crafttags::Tag::Arc;
+                                else tag = crafttags::Tag::Shield;
+                            } else {
+                                if (uTag < 0.60f) tag = crafttags::Tag::Arc;
+                                else if (uTag < 0.90f) tag = crafttags::Tag::Rune;
+                                else tag = crafttags::Tag::Shield;
+                            }
+                        } break;
+                        case EcosystemKind::BoneField: {
+                            tag = (uTag < 0.65f) ? crafttags::Tag::Daze : crafttags::Tag::Clarity;
+                        } break;
+                        case EcosystemKind::RustVeins: {
+                            const float cut = (matHere == TerrainMaterial::Metal) ? 0.70f : 0.55f;
+                            tag = (uTag < cut) ? ((matHere == TerrainMaterial::Metal) ? crafttags::Tag::Alch : crafttags::Tag::Stone)
+                                               : ((matHere == TerrainMaterial::Metal) ? crafttags::Tag::Stone : crafttags::Tag::Alch);
+                        } break;
+                        case EcosystemKind::AshenRidge: {
+                            tag = (uTag < 0.75f) ? crafttags::Tag::Ember : crafttags::Tag::Stone;
+                        } break;
+                        case EcosystemKind::FloodedGrotto: {
+                            tag = (uTag < 0.55f) ? crafttags::Tag::Aurora : crafttags::Tag::Regen;
+                        } break;
+                        default:
+                            break;
+                    }
+
+                    if (tag != crafttags::Tag::None) {
+                        const int spawnDepth = materialDepth();
+
+                        int shardTier = 1 + std::max(0, spawnDepth) / 6;
+                        shardTier += (tier - 1); // champion/mythic bonus
+                        if (spawnDepth >= 10 && u01(hashCombine(h, "T10"_tag)) < 0.15f) shardTier += 1;
+                        if (ecoHere == EcosystemKind::CrystalGarden && u01(hashCombine(h, "TCR"_tag)) < 0.25f) shardTier += 1;
+                        shardTier = std::max(1, std::min(8, shardTier));
+
+                        float shinyChance = 0.04f + 0.008f * static_cast<float>(std::min(12, spawnDepth));
+                        if (tier >= 3) shinyChance += 0.05f;
+                        if (ecoHere == EcosystemKind::CrystalGarden) shinyChance += 0.08f;
+                        if (ecoHere == EcosystemKind::FloodedGrotto) shinyChance += 0.02f;
+                        shinyChance = std::min(0.50f, shinyChance);
+
+                        const bool shiny = u01(hashCombine(h, "SH"_tag)) < shinyChance;
+
+                        int count = 1;
+                        if (u01(hashCombine(h, "C1"_tag)) < 0.40f) count += 1;
+                        if (tier >= 3 && u01(hashCombine(h, "C2"_tag)) < 0.35f) count += 1;
+                        if (spawnDepth >= 12 && u01(hashCombine(h, "C3"_tag)) < 0.25f) count += 1;
+                        count = std::max(1, std::min(4, count));
+
+                        Item shard;
+                        shard.kind = ItemKind::EssenceShard;
+                        shard.count = count;
+                        shard.enchant = packEssenceShardEnchant(crafttags::tagIndex(tag), shardTier, shiny);
+                        shard.spriteSeed = hashCombine(h, "ESS"_tag);
+                        if (shard.spriteSeed == 0) shard.spriteSeed = 1;
+
+                        dropGroundItemItem(e.pos, shard);
+                    }
+                }
+            }
         }
 
         // Pocket consumable: drop any remaining carried consumable so the player

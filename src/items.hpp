@@ -217,6 +217,15 @@ enum class ItemKind : uint8_t {
 
     // Procedural crafting byproducts (append-only)
     EssenceShard,
+
+    // --- Ecosystem resource nodes (append-only) ---
+    // Stationary ground props spawned near biome seeds; harvest with CONFIRM.
+    SporePod,
+    CrystalNode,
+    BonePile,
+    RustVent,
+    AshVent,
+    GrottoSpring,
 };
 
 // Item "egos" (NetHack-style brands / special properties) applied to some gear.
@@ -293,7 +302,7 @@ inline int egoValueMultiplierPct(ItemEgo e) {
 }
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::EssenceShard) + 1; // keep in sync with last enum value
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::GrottoSpring) + 1; // keep in sync with last enum value
 
 inline bool isVtuberCollectible(ItemKind k) {
     return k == ItemKind::VtuberFigurine || k == ItemKind::VtuberHoloCard;
@@ -679,6 +688,26 @@ inline int captureSpherePetHpBonus(int level) {
 
 inline bool isChestKind(ItemKind k) {
     return k == ItemKind::Chest || k == ItemKind::ChestOpen;
+}
+
+// Ecosystem resource nodes: stationary ground props spawned near biome seeds.
+inline bool isEcosystemNodeKind(ItemKind k) {
+    switch (k) {
+        case ItemKind::SporePod:
+        case ItemKind::CrystalNode:
+        case ItemKind::BonePile:
+        case ItemKind::RustVent:
+        case ItemKind::AshVent:
+        case ItemKind::GrottoSpring:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Stationary props are non-pickup ground items that provide interaction.
+inline bool isStationaryPropKind(ItemKind k) {
+    return isChestKind(k) || isEcosystemNodeKind(k);
 }
 
 inline bool isCorpseKind(ItemKind k) {

@@ -2554,6 +2554,14 @@ if (optionsSel == 20) {
         case Action::UpRight:   acted = tryMove(p, 1, -1); break;
         case Action::DownLeft:  acted = tryMove(p, -1, 1); break;
         case Action::DownRight: acted = tryMove(p, 1, 1); break;
+        case Action::RunUp:        requestAutoRun(Vec2i{0, -1}); acted = false; break;
+        case Action::RunDown:      requestAutoRun(Vec2i{0, 1}); acted = false; break;
+        case Action::RunLeft:      requestAutoRun(Vec2i{-1, 0}); acted = false; break;
+        case Action::RunRight:     requestAutoRun(Vec2i{1, 0}); acted = false; break;
+        case Action::RunUpLeft:    requestAutoRun(Vec2i{-1, -1}); acted = false; break;
+        case Action::RunUpRight:   requestAutoRun(Vec2i{1, -1}); acted = false; break;
+        case Action::RunDownLeft:  requestAutoRun(Vec2i{-1, 1}); acted = false; break;
+        case Action::RunDownRight: requestAutoRun(Vec2i{1, 1}); acted = false; break;
         case Action::Wait:
             pushMsg("YOU WAIT.", MessageKind::Info);
             acted = true;
@@ -2683,6 +2691,7 @@ if (optionsSel == 20) {
                 // 1) Chests (world-interactable) have priority.
                 bool hasClosedChest = false;
                 bool hasOpenChest = false;
+                bool hasEcosystemNode = false;
                 bool hasPickableItem = false;
 
                 for (const auto& gi : ground) {
@@ -2690,6 +2699,7 @@ if (optionsSel == 20) {
 
                     if (gi.item.kind == ItemKind::Chest) hasClosedChest = true;
                     else if (gi.item.kind == ItemKind::ChestOpen) hasOpenChest = true;
+                    else if (isEcosystemNodeKind(gi.item.kind)) hasEcosystemNode = true;
                     else hasPickableItem = true;
                 }
 
@@ -2705,10 +2715,15 @@ if (optionsSel == 20) {
                     acted = false; // opening the UI is instant; time passes when you move items
                 }
 
+                if (!handled && hasEcosystemNode) {
+                    acted = harvestEcosystemNodeAtPlayer();
+                    handled = acted;
+                }
+
                 // If we didn't interact with a chest, allow picking up other items on the tile.
                 if (!handled && hasPickableItem) {
                     acted = pickupAtPlayer();
-                } else if (!hasClosedChest && !hasOpenChest && !hasPickableItem) {
+                } else if (!hasClosedChest && !hasOpenChest && !hasEcosystemNode && !hasPickableItem) {
                     pushMsg("THERE IS NOTHING HERE.");
                 }
             }
@@ -2889,14 +2904,21 @@ void Game::listen() {
     // It reports *unseen* creatures that are close enough to be heard through doors/corridors.
     int range = 10 + (playerFocus() / 2);
     if (isSneaking()) range += 2;
-    range = clampi(range, 6, 20);
+
+    // Ensure deterministic substrate cache so sound propagation can incorporate
+    // material acoustics (moss/dirt dampen; metal/crystal carry) and to populate
+    // the procedural ecosystem cache used for local acoustics.
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+
+    // Local acoustics: some ecosystems mask sound (water/wind), others amplify it (echoing crystal).
+    const EcosystemKind ecoHere = dung.ecosystemAtCached(p.pos.x, p.pos.y);
+    range += ecosystemFx(ecoHere).listenRangeDelta;
+
+    // Keep the action useful but bounded.
+    range = clampi(range, 4, 22);
 
     const int W = dung.width;
     auto idx = [&](int x, int y) { return y * W + x; };
-
-    // Ensure deterministic substrate cache so sound propagation can incorporate
-    // material acoustics (moss/dirt dampen; metal/crystal carry).
-    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
     const std::vector<int> sound = dung.computeSoundMap(p.pos.x, p.pos.y, range);
 

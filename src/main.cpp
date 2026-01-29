@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdint>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <iomanip>
 #include <filesystem>
@@ -661,14 +662,16 @@ int main(int argc, char** argv) {
         // newGame() resets some settings; re-apply the intended auto-pickup mode.
         if (replayMode) {
             game.setAutoPickupMode(replayFile.meta.autoPickup);
-        game.setAutoExploreSearchEnabled(replayFile.meta.autoExploreSearch);
+            game.setAutoExploreSearchEnabled(replayFile.meta.autoExploreSearch);
         } else {
             game.setAutoPickupMode(settings.autoPickup);
-    game.setAutoExploreSearchEnabled(settings.autoExploreSearch);
+            game.setAutoExploreSearchEnabled(settings.autoExploreSearch);
+        }
         }
 
         if (replayMode) {
             game.pushSystemMessage("REPLAY MODE: " + replayPathFs.string());
+        game.pushSystemMessage("REPLAY CONTROLS: Space=pause, .=step, +/-=speed, Esc=stop (tokens: replay_pause/replay_step/replay_speed_up/replay_speed_down).");
             if (!replayFile.meta.gameVersion.empty() && replayFile.meta.gameVersion != PROCROGUE_VERSION) {
                 game.pushSystemMessage("WARNING: REPLAY VERSION MISMATCH (" + replayFile.meta.gameVersion + " != " + std::string(PROCROGUE_VERSION) + ")");
             }
@@ -715,8 +718,43 @@ int main(int argc, char** argv) {
     // Replay playback state
     // ------------------------------------------------------------
     bool replayActive = replayMode;
+    bool replayPaused = false;
+    double replaySpeed = 1.0;     // wall-time -> replay-time multiplier
+    double replaySimMs = 0.0;     // virtual time in the replay timeline (milliseconds)
     size_t replayIndex = 0;
-    uint32_t replayStartTicks = SDL_GetTicks();
+
+    const uint32_t replayTotalMs =
+        replayMode && !replayFile.events.empty() ? replayFile.events.back().tMs : 0u;
+
+    auto formatReplaySpeed = [](double s) -> std::string {
+        std::ostringstream ss;
+        ss.setf(std::ios::fixed);
+        // Prefer integer-ish formatting for common speeds.
+        const double r = std::round(s);
+        if (std::abs(s - r) < 1e-6) {
+            ss << "x" << static_cast<int>(r);
+        } else {
+            ss << "x" << std::setprecision(2) << s;
+        }
+        return ss.str();
+    };
+
+    auto updateReplayIndicator = [&]() {
+        if (!replayMode) {
+            game.setReplayPlaybackIndicator(false);
+            return;
+        }
+        game.setReplayPlaybackIndicator(
+            replayActive,
+            static_cast<float>(replaySpeed),
+            replayPaused,
+            static_cast<uint32_t>(std::clamp(replaySimMs, 0.0, static_cast<double>(UINT32_MAX))),
+            replayTotalMs,
+            replayPathFs.string()
+        );
+    };
+
+    updateReplayIndicator();
 
 
     // ------------------------------------------------------------
@@ -781,16 +819,24 @@ int main(int argc, char** argv) {
         } else {
             game.setTurnHook(nullptr, nullptr);
         }
+        game.setReplayRecordingIndicator(true, outPath.string());
         game.pushSystemMessage("RECORDING REPLAY: " + outPath.string());
         return true;
     };
 
     auto stopRecording = [&]() {
         if (!recording) return;
+        const std::string path = recorder.path().string();
         game.setTurnHook(nullptr, nullptr);
         recorder.close();
         recording = false;
-        game.pushSystemMessage("STOPPED RECORDING REPLAY.");
+        game.setReplayRecordingIndicator(false);
+
+        if (!path.empty()) {
+            game.pushSystemMessage("STOPPED RECORDING REPLAY: " + path);
+        } else {
+            game.pushSystemMessage("STOPPED RECORDING REPLAY.");
+        }
     };
 
     // Replay hash verification (optional)
@@ -800,7 +846,13 @@ int main(int argc, char** argv) {
     auto handleReplayHashFailure = [&]() {
         if (!replayVerifyCtx.failed) return;
         replayActive = false;
+        replayPaused = false;
         game.setTurnHook(nullptr, nullptr);
+
+        // Disarm verification so the player can safely take over after a failure.
+        replayVerifyArmed = false;
+        replayVerifyCtx.expected = nullptr;
+        updateReplayIndicator();
         const std::string expected = hex64(replayVerifyCtx.expectedHash);
         const std::string got = hex64(replayVerifyCtx.gotHash);
         std::ostringstream ss;
@@ -840,6 +892,13 @@ int main(int argc, char** argv) {
 
     auto dispatchAction = [&](Action a, bool fromReplay = false) {
         if (a == Action::None) return;
+
+        // Replay playback controls are platform/UI-only and should never be recorded or played back.
+        if (a == Action::ReplayPause || a == Action::ReplayStep ||
+            a == Action::ReplaySpeedUp || a == Action::ReplaySpeedDown) {
+            return;
+        }
+
         if (recording && !fromReplay) {
             recorder.writeAction(recordTimeMs(), a);
         }
@@ -913,6 +972,116 @@ int main(int argc, char** argv) {
         }
     };
 
+
+    // ------------------------------------------------------------
+    // Replay playback controls (pause/step/speed/stop)
+    // ------------------------------------------------------------
+    auto disarmReplayVerifier = [&]() {
+        if (!replayVerifyArmed) return;
+        game.setTurnHook(nullptr, nullptr);
+        replayVerifyArmed = false;
+        replayVerifyCtx.expected = nullptr;
+    };
+
+    auto stopReplayPlayback = [&](const std::string& reason) {
+        if (!replayActive) return;
+        replayActive = false;
+        replayPaused = false;
+        disarmReplayVerifier();
+        game.pushSystemMessage(reason.empty() ? "REPLAY STOPPED (input unlocked)." : reason);
+        updateReplayIndicator();
+    };
+
+    auto toggleReplayPause = [&]() {
+        if (!replayActive) return;
+        replayPaused = !replayPaused;
+        game.pushSystemMessage(replayPaused ? "REPLAY PAUSED." : "REPLAY RESUMED.");
+        updateReplayIndicator();
+    };
+
+    auto bumpReplaySpeed = [&](int delta) {
+        if (!replayActive) return;
+        static const double kSpeeds[] = {0.25, 0.5, 1.0, 2.0, 4.0, 8.0};
+        constexpr int kNumSpeeds = static_cast<int>(sizeof(kSpeeds) / sizeof(kSpeeds[0]));
+
+        int best = 0;
+        double bestDist = std::abs(replaySpeed - kSpeeds[0]);
+        for (int i = 1; i < kNumSpeeds; ++i) {
+            const double d = std::abs(replaySpeed - kSpeeds[i]);
+            if (d < bestDist) {
+                bestDist = d;
+                best = i;
+            }
+        }
+
+        const int next = std::clamp(best + delta, 0, kNumSpeeds - 1);
+        replaySpeed = kSpeeds[next];
+        game.pushSystemMessage("REPLAY SPEED: " + formatReplaySpeed(replaySpeed) + ".");
+        updateReplayIndicator();
+    };
+
+    auto stepReplay = [&]() {
+        if (!replayActive) return;
+
+        if (!replayPaused) {
+            replayPaused = true;
+            game.pushSystemMessage("REPLAY PAUSED (step mode).");
+        }
+
+        if (replayIndex >= replayFile.events.size()) {
+            stopReplayPlayback("REPLAY FINISHED (input unlocked).");
+            return;
+        }
+
+        const uint32_t targetMs = replayFile.events[replayIndex].tMs;
+
+        const uint32_t curMs =
+            static_cast<uint32_t>(std::clamp(replaySimMs, 0.0, static_cast<double>(UINT32_MAX)));
+
+        // Fast-forward simulation time up to the next event timestamp so time-based systems
+        // (auto-move, FX timers, etc.) stay consistent even in step mode.
+        if (targetMs > curMs) {
+            uint32_t remaining = targetMs - curMs;
+            constexpr uint32_t kStepMs = 16;
+            while (remaining > 0 && !replayVerifyCtx.failed) {
+                const uint32_t step = std::min(kStepMs, remaining);
+                float dtStep = step / 1000.0f;
+                if (dtStep > 0.1f) dtStep = 0.1f;
+                game.update(dtStep);
+                replaySimMs += static_cast<double>(step);
+                remaining -= step;
+            }
+            handleReplayHashFailure();
+            if (!replayActive) {
+                updateReplayIndicator();
+                return;
+            }
+        } else {
+            replaySimMs = static_cast<double>(targetMs);
+        }
+
+        // Dispatch all events at this timestamp.
+        while (replayIndex < replayFile.events.size() && replayFile.events[replayIndex].tMs <= targetMs) {
+            dispatchReplayEvent(replayFile.events[replayIndex]);
+            if (replayVerifyCtx.failed) break;
+            ++replayIndex;
+        }
+
+        handleReplayHashFailure();
+        if (!replayActive) {
+            updateReplayIndicator();
+            return;
+        }
+
+        if (replayIndex >= replayFile.events.size()) {
+            stopReplayPlayback("REPLAY FINISHED (input unlocked).");
+            return;
+        }
+
+        updateReplayIndicator();
+    };
+
+
     while (running) {
         const uint32_t frameStart = SDL_GetTicks();
         const uint32_t now = frameStart;
@@ -945,7 +1114,22 @@ int main(int argc, char** argv) {
                     break;
 
                 case SDL_CONTROLLERBUTTONDOWN:
-                    if (replayActive) break;
+                    if (replayActive) {
+                        // Replay playback (controller): keep it simple + safe.
+                        //  - Start: pause/resume
+                        //  - A: step (when paused)
+                        //  - LB/RB: slower/faster
+                        //  - B: stop replay playback (unlock input)
+                        switch (ev.cbutton.button) {
+                            case SDL_CONTROLLER_BUTTON_START:         toggleReplayPause(); break;
+                            case SDL_CONTROLLER_BUTTON_A:             stepReplay(); break;
+                            case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  bumpReplaySpeed(-1); break;
+                            case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: bumpReplaySpeed(+1); break;
+                            case SDL_CONTROLLER_BUTTON_B:             stopReplayPlayback("REPLAY STOPPED (input unlocked)."); break;
+                            default: break;
+                        }
+                        break;
+                    }
                     if (!settings.controllerEnabled) break;
                     switch (ev.cbutton.button) {
                         case SDL_CONTROLLER_BUTTON_DPAD_UP:    dispatchAction(Action::Up); break;
@@ -1002,9 +1186,58 @@ int main(int argc, char** argv) {
 
                         const Uint16 mod = ev.key.keysym.mod;
 
-                        // During replay playback, ignore live input (optional ESC to exit).
+                        // During replay playback, only allow replay controls + safe visual toggles.
                         if (replayActive) {
-                            if (key == SDLK_ESCAPE) running = false;
+                            const Action ra = keyBinds.mapKey(game, key, mod);
+
+                            // Ignore key repeat for replay controls (prevents accidental rapid toggles).
+                            if (isRepeat && ra != Action::LogUp && ra != Action::LogDown) {
+                                break;
+                            }
+
+                            switch (ra) {
+                                case Action::ReplayPause:     toggleReplayPause(); break;
+                                case Action::ReplayStep:      stepReplay(); break;
+                                case Action::ReplaySpeedUp:   bumpReplaySpeed(+1); break;
+                                case Action::ReplaySpeedDown: bumpReplaySpeed(-1); break;
+
+                                case Action::Cancel:
+                                    stopReplayPlayback("REPLAY STOPPED (input unlocked).");
+                                    break;
+
+                                // Visual-only toggles we handle here so they don't stop auto-move (which would
+                                // desync the replay timeline).
+                                case Action::TogglePerfOverlay:
+                                    game.setPerfOverlayEnabled(!game.perfOverlayEnabled());
+                                    game.markSettingsDirty();
+                                    game.pushSystemMessage(std::string("PERF OVERLAY: ") +
+                                                           (game.perfOverlayEnabled() ? "ON." : "OFF."));
+                                    break;
+
+                                case Action::ToggleViewMode:
+                                    if (game.viewMode() != ViewMode::TopDown) {
+                                        game.setViewMode(ViewMode::TopDown);
+                                    } else {
+                                        game.setViewMode(ViewMode::Iso);
+                                    }
+                                    game.markSettingsDirty();
+                                    game.pushSystemMessage(std::string("VIEW: ") + game.viewModeDisplayName() + ".");
+                                    break;
+
+                                case Action::ToggleVoxelSprites:
+                                    game.setVoxelSpritesEnabled(!game.voxelSpritesEnabled());
+                                    game.markSettingsDirty();
+                                    game.pushSystemMessage(std::string("3D SPRITES: ") +
+                                                           (game.voxelSpritesEnabled() ? "ON." : "OFF."));
+                                    break;
+
+                                default:
+                                    // Fullscreen/screenshot/view-turn + log paging are handled via dispatchAction.
+                                    dispatchAction(ra);
+                                    break;
+                            }
+
+                            updateReplayIndicator();
                             break;
                         }
 
@@ -1609,8 +1842,12 @@ int main(int argc, char** argv) {
                     break;
 
                 case SDL_MOUSEWHEEL:
-                    if (replayActive) break;
                     if (ev.wheel.y == 0) break;
+                    if (replayActive) {
+                        // Replay playback: allow paging the message log (safe; doesn't affect simulation).
+                        dispatchAction(ev.wheel.y > 0 ? Action::LogUp : Action::LogDown);
+                        break;
+                    }
 
                     // Mouse wheel is contextual:
                     //  - In list-based overlays, scroll selection one row (UP/DOWN)
@@ -1734,22 +1971,6 @@ int main(int argc, char** argv) {
             }
 
             if (!running) break;
-        }
-
-        // Replay playback: feed recorded input events based on elapsed wall-clock time.
-        if (replayActive) {
-            const uint32_t elapsedMs = SDL_GetTicks() - replayStartTicks;
-            while (replayIndex < replayFile.events.size() && replayFile.events[replayIndex].tMs <= elapsedMs) {
-                dispatchReplayEvent(replayFile.events[replayIndex]);
-                if (replayVerifyCtx.failed) break;
-                ++replayIndex;
-            }
-
-            handleReplayHashFailure();
-            if (replayIndex >= replayFile.events.size()) {
-                replayActive = false;
-                game.pushSystemMessage("REPLAY FINISHED (input unlocked).");
-            }
         }
 
         // Platform-level action repeat (numeric prefix).
@@ -1973,6 +2194,24 @@ int main(int argc, char** argv) {
             game.clearKeyBindsDumpRequest();
         }
 
+        // Replay recording requests (extended commands)
+        if (game.replayRecordStartRequested()) {
+            if (replayActive) {
+                game.pushSystemMessage("CAN'T RECORD DURING REPLAY PLAYBACK.");
+            } else {
+                std::filesystem::path outPath;
+                const std::string req = game.replayRecordStartPath();
+                if (!req.empty()) outPath = req;
+                startRecording(outPath);
+            }
+            game.clearReplayRecordStartRequest();
+        }
+
+        if (game.replayRecordStopRequested()) {
+            stopRecording();
+            game.clearReplayRecordStopRequest();
+        }
+
         // Quit requests (e.g. from extended command "quit").
         if (game.quitRequested()) {
             running = false;
@@ -1981,8 +2220,49 @@ int main(int argc, char** argv) {
 
         if (!running) break;
 
-        game.update(dt);
-        handleReplayHashFailure();
+        // ------------------------------------------------------------
+        // Simulation advance (replay-aware timing)
+        // ------------------------------------------------------------
+        if (replayActive) {
+            // Advance in small steps so replay events are applied in roughly-correct time order,
+            // even at high playback speeds.
+            double remainingMs = replayPaused ? 0.0 : (static_cast<double>(dt) * 1000.0 * replaySpeed);
+            constexpr double kStepMs = 16.0;
+
+            while (remainingMs > 0.0 && replayActive) {
+                const double stepMs = std::min(remainingMs, kStepMs);
+
+                replaySimMs += stepMs;
+                const uint32_t simMsU =
+                    static_cast<uint32_t>(std::clamp(replaySimMs, 0.0, static_cast<double>(UINT32_MAX)));
+
+                while (replayIndex < replayFile.events.size() && replayFile.events[replayIndex].tMs <= simMsU) {
+                    dispatchReplayEvent(replayFile.events[replayIndex]);
+                    if (replayVerifyCtx.failed) break;
+                    ++replayIndex;
+                }
+
+                handleReplayHashFailure();
+                if (!replayActive) break;
+
+                if (replayIndex >= replayFile.events.size()) {
+                    stopReplayPlayback("REPLAY FINISHED (input unlocked).");
+                    break;
+                }
+
+                game.update(static_cast<float>(stepMs / 1000.0));
+                handleReplayHashFailure();
+                if (!replayActive) break;
+
+                remainingMs -= stepMs;
+            }
+
+            // Even if paused, keep the HUD indicator fresh.
+            updateReplayIndicator();
+        } else {
+            game.update(dt);
+        }
+
         renderer.render(game);
 
         if (wantScreenshot) {

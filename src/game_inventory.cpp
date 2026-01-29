@@ -25,6 +25,43 @@ static const ChestContainer* findChestContainer(const std::vector<ChestContainer
 }
 
 
+static uint32_t ecosystemCraftSalt(EcosystemKind eco) {
+    switch (eco) {
+        case EcosystemKind::FungalBloom:   return "ECO_CRAFT_FUNGAL"_tag;
+        case EcosystemKind::CrystalGarden: return "ECO_CRAFT_CRYSTAL"_tag;
+        case EcosystemKind::BoneField:     return "ECO_CRAFT_BONE"_tag;
+        case EcosystemKind::RustVeins:     return "ECO_CRAFT_RUST"_tag;
+        case EcosystemKind::AshenRidge:    return "ECO_CRAFT_ASH"_tag;
+        case EcosystemKind::FloodedGrotto: return "ECO_CRAFT_FLOOD"_tag;
+        default:                           return 0u;
+    }
+}
+
+static const char* ecosystemCatalystShort(EcosystemKind eco) {
+    switch (eco) {
+        case EcosystemKind::FungalBloom:   return "FUNGAL";
+        case EcosystemKind::CrystalGarden: return "CRYSTAL";
+        case EcosystemKind::BoneField:     return "BONE";
+        case EcosystemKind::RustVeins:     return "RUST";
+        case EcosystemKind::AshenRidge:    return "ASHEN";
+        case EcosystemKind::FloodedGrotto: return "FLOODED";
+        default:                           return "NONE";
+    }
+}
+
+static const char* ecosystemCatalystEffect(EcosystemKind eco) {
+    switch (eco) {
+        case EcosystemKind::FungalBloom:   return "+BYPRODUCT";
+        case EcosystemKind::CrystalGarden: return "+CHARGES";
+        case EcosystemKind::BoneField:     return "+FORGE";
+        case EcosystemKind::RustVeins:     return "+ENCHANT";
+        case EcosystemKind::AshenRidge:    return "+PYRO";
+        case EcosystemKind::FloodedGrotto: return "+BREW";
+        default:                           return "";
+    }
+}
+
+
 void Game::openInventory() {
     // Close other overlays
     targeting = false;
@@ -139,6 +176,11 @@ Game::CraftComputed Game::computeCraftComputed(const Item& a0, const Item& b0) c
     const RoomType rt = roomTypeAt(dung, player().pos);
     cc.workstation = rt;
 
+    // Ecosystem catalyst: local biome shifts outcomes in a deterministic way.
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+    const EcosystemKind eco = dung.ecosystemAtCached(player().pos.x, player().pos.y);
+    cc.ecosystem = eco;
+
     uint32_t envSalt = 0u;
     switch (rt) {
         case RoomType::Armory:     envSalt = 0xA11C0B1Du; break;
@@ -151,6 +193,9 @@ Game::CraftComputed Game::computeCraftComputed(const Item& a0, const Item& b0) c
 
     // Mix branch so Camp crafting doesn't accidentally mirror dungeon crafting exactly.
     envSalt ^= static_cast<uint32_t>(branch_) * 0x9E3779B9u;
+
+    // Mix ecosystem so crafting in different biomes yields distinct sigils and outcomes.
+    envSalt ^= ecosystemCraftSalt(eco);
 
     const uint32_t craftSeed = seed_ ^ hash32(envSalt);
 
@@ -191,6 +236,72 @@ Game::CraftComputed Game::computeCraftComputed(const Item& a0, const Item& b0) c
         if (out.buc < 0) out.buc = 0;
     }
 
+    // Ecosystem catalyst flavor: small deterministic nudges by biome.
+    auto bumpCharges = [&](int delta, uint32_t salt, int pct) {
+        if (!isWandKind(out.kind) || out.charges <= 0) return;
+        if (!qualityRoll(salt, pct)) return;
+        const ItemDef& d = itemDef(out.kind);
+        const int maxC = std::max(1, d.maxCharges);
+        out.charges = clampi(out.charges + delta, 1, maxC);
+    };
+
+    auto bumpEnchant = [&](int delta, uint32_t salt, int pct) {
+        if (!(isWeapon(out.kind) || isArmor(out.kind))) return;
+        if (!qualityRoll(salt, pct)) return;
+        out.enchant = clampi(out.enchant + delta, -3, 6);
+    };
+
+    auto bumpStack = [&](int delta, uint32_t salt, int pct, int maxCount) {
+        if (!isStackable(out.kind)) return;
+        if (!qualityRoll(salt, pct)) return;
+        out.count = clampi(out.count + delta, 1, maxCount);
+    };
+
+    switch (eco) {
+        case EcosystemKind::FungalBloom: {
+            // Fungal fermentation tends to leave extra usable residue (more byproduct).
+            if (cc.hasByproduct && cc.byproduct.kind == ItemKind::EssenceShard) {
+                if (qualityRoll("ECO_FUNG_BYP"_tag, 55)) {
+                    cc.byproduct.count = clampi(cc.byproduct.count + 1, 1, 3);
+                }
+            }
+        } break;
+
+        case EcosystemKind::CrystalGarden: {
+            // Crystalline resonance amplifies charged artifacts.
+            bumpCharges(1, "ECO_CRY_CHG"_tag, 45);
+            if (isWandKind(out.kind) && qualityRoll("ECO_CRY_PURE"_tag, 25) && out.buc < 0) out.buc = 0;
+        } break;
+
+        case EcosystemKind::RustVeins: {
+            // Rust-vein forges temper gear.
+            bumpEnchant(1, "ECO_RUST_ENC"_tag, 30);
+            if (isWearableGear(out.kind) && out.buc == 0 && qualityRoll("ECO_RUST_BLESS"_tag, 12)) out.buc = 1;
+        } break;
+
+        case EcosystemKind::BoneField: {
+            // Ossuary craft: strong but slightly risky.
+            bumpEnchant(1, "ECO_BONE_ENC"_tag, 22);
+            if (out.buc == 0 && qualityRoll("ECO_BONE_RISK"_tag, 10)) out.buc = -1;
+        } break;
+
+        case EcosystemKind::AshenRidge: {
+            // Heat + ember: fire wands crackle brighter; metal gets tempered.
+            if (out.kind == ItemKind::WandFireball || out.kind == ItemKind::WandSparks) {
+                bumpCharges(1, "ECO_ASH_FIRE"_tag, 55);
+            }
+            bumpEnchant(1, "ECO_ASH_TEMPER"_tag, 18);
+        } break;
+
+        case EcosystemKind::FloodedGrotto: {
+            // Distillation: potions brew fuller; impurities wash away.
+            if (isPotionKind(out.kind)) bumpStack(1, "ECO_FLOOD_BREW"_tag, 40, 3);
+            if (out.buc < 0 && qualityRoll("ECO_FLOOD_CLEAN"_tag, 45)) out.buc = 0;
+        } break;
+
+        default: break;
+    }
+
     return cc;
 }
 
@@ -212,6 +323,7 @@ void Game::recordCraftRecipe(const CraftComputed& cc) {
     e.times = 1;
     e.tier = cc.tier;
     e.workstation = cc.workstation;
+    e.ecosystem = cc.ecosystem;
     e.tagA = cc.tagA;
     e.tagB = cc.tagB;
 
@@ -240,6 +352,7 @@ void Game::showCraftRecipes() {
     if (craftRecipeBook_.empty()) {
         pushSystemMessage("NO CRAFT RECIPES LEARNED YET.");
         pushSystemMessage("TIP: USE A CRAFTING KIT (#CRAFT) AND COMBINE TWO INGREDIENTS.");
+        pushSystemMessage("TIP: TRY CRAFTING IN DIFFERENT ROOMS (WORKSTATIONS) AND BIOMES (CATALYSTS).");
         return;
     }
 
@@ -260,6 +373,7 @@ void Game::showCraftRecipes() {
         ss << " + " << (r.tagB.empty() ? "MUNDANE" : r.tagB);
         ss << " T" << r.tier;
         ss << " @" << wsShort(r.workstation);
+        ss << "/" << ecosystemCatalystShort(r.ecosystem);
         ss << " -> " << displayItemNameSingle(r.outKind);
         if (r.times > 1) ss << " x" << r.times;
 
@@ -271,7 +385,8 @@ void Game::showCraftRecipes() {
         pushSystemMessage("  ...");
     }
 
-    pushSystemMessage("TIP: DIFFERENT ROOMS ACT AS WORKSTATIONS AND CAN YIELD NEW SIGILS.");
+    pushSystemMessage("TIP: DIFFERENT ROOMS ACT AS WORKSTATIONS, AND BIOMES ACT AS CATALYSTS ");
+    pushSystemMessage("     (BOTH CAN YIELD NEW SIGILS FOR THE SAME INGREDIENTS).");
 }
 
 void Game::rebuildCraftingPreview() {
@@ -305,6 +420,17 @@ void Game::rebuildCraftingPreview() {
         std::ostringstream ss;
         ss << "WORKSTATION: " << wsName(rt);
         const char* eff = wsEffect(rt);
+        if (eff && eff[0]) ss << " (" << eff << ")";
+        invCraftPreviewLines_.push_back(ss.str());
+    }
+
+    // Biome catalysts: the local ecosystem also shifts crafting outcomes.
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+    const EcosystemKind eco = dung.ecosystemAtCached(player().pos.x, player().pos.y);
+    {
+        std::ostringstream ss;
+        ss << "CATALYST: " << ecosystemKindName(eco);
+        const char* eff = ecosystemCatalystEffect(eco);
         if (eff && eff[0]) ss << " (" << eff << ")";
         invCraftPreviewLines_.push_back(ss.str());
     }
@@ -601,6 +727,14 @@ bool Game::craftCombineById(int itemAId, int itemBId) {
         ss2 << " + ";
         ss2 << (cc0.tagB.empty() ? "MUNDANE" : cc0.tagB);
         pushMsg(ss2.str(), MessageKind::System, true);
+    }
+
+    if (cc0.ecosystem != EcosystemKind::None) {
+        std::ostringstream ssC;
+        ssC << "CATALYST: " << ecosystemKindName(cc0.ecosystem);
+        const char* eff = ecosystemCatalystEffect(cc0.ecosystem);
+        if (eff && eff[0]) ssC << " (" << eff << ")";
+        pushMsg(ssC.str(), MessageKind::System, true);
     }
 
     {
@@ -1508,7 +1642,7 @@ bool Game::pickupAtPlayer() {
     // Chests are not pick-up items.
     bool hasPickable = false;
     for (size_t gi : idxs) {
-        if (gi < ground.size() && !isChestKind(ground[gi].item.kind)) {
+        if (gi < ground.size() && !(isStationaryPropKind(ground[gi].item.kind) || itemIsStationary(ground[gi].item))) {
             hasPickable = true;
             break;
         }
@@ -1523,7 +1657,7 @@ bool Game::pickupAtPlayer() {
     for (size_t gi : idxs) {
         if (gi >= ground.size()) continue;
         const Item& it = ground[gi].item;
-        if (isChestKind(it.kind)) continue;
+        if (isStationaryPropKind(it.kind) || itemIsStationary(it)) continue;
         if (it.shopPrice > 0) continue; // should never happen (we do not seed shop mimics)
         if (!itemIsMimicBait(it)) continue;
 
@@ -1548,7 +1682,7 @@ bool Game::pickupAtPlayer() {
 
         Item it = ground[gi].item;
 
-        if (isChestKind(it.kind)) {
+        if (isStationaryPropKind(it.kind) || itemIsStationary(it)) {
             // Skip non-pickable world items.
             continue;
         }

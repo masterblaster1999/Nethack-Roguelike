@@ -92,6 +92,28 @@ int Game::spellFailChancePct(SpellKind k) const {
     if (p.effects.confusionTurns > 0) penalty += 18;
     if (p.effects.hallucinationTurns > 0) penalty += 10;
 
+    // Round 211: procedural leylines (arcane resonance) subtly affect spellcasting.
+    // Strong currents aid focus; dead-zones introduce a small amount of static.
+    {
+        const uint8_t ley = (branch_ != DungeonBranch::Camp)
+            ? dung.leylineAt(p.pos.x, p.pos.y,
+                             materialWorldSeed(),
+                             branch_,
+                             materialDepth(),
+                             dungeonMaxDepth())
+            : 0u;
+
+        if (ley >= 220u) {
+            power += 7;
+        } else if (ley >= 170u) {
+            power += 5;
+        } else if (ley >= 120u) {
+            power += 3;
+        } else if (ley <= 8u) {
+            penalty += 2;
+        }
+    }
+
     int chance = diff - power + penalty;
     return clampi(chance, 0, 95);
 }

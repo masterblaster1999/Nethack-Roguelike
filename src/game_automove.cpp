@@ -4,6 +4,8 @@
 #include "hearing_field.hpp"
 
 #include <limits>
+#include <algorithm>
+#include <cstdint>
 
 namespace {
 const Trap* discoveredTrapAt(const std::vector<Trap>& traps, int x, int y) {
@@ -69,7 +71,7 @@ bool Game::hasRangedWeaponForAmmo(AmmoKind ammo) const {
 
 bool Game::autoPickupWouldPick(ItemKind k) const {
     // Chests are world-interactables; never auto-pickup.
-    if (isChestKind(k)) return false;
+    if (isStationaryPropKind(k)) return false;
 
     switch (autoPickup) {
         case AutoPickupMode::Off:
@@ -113,6 +115,7 @@ bool Game::autoExploreWantsLoot(ItemKind k) const {
     // Only unopened chests are "interesting".
     if (k == ItemKind::Chest) return true;
     if (k == ItemKind::ChestOpen) return false;
+    if (isEcosystemNodeKind(k)) return true;
 
     // If this would be picked up automatically, don't stop/retarget for it.
     if (autoPickup != AutoPickupMode::Off && autoPickupWouldPick(k)) return false;
@@ -245,6 +248,35 @@ void Game::requestAutoExplore() {
     pushMsg("AUTO-EXPLORE: ON (ESC TO CANCEL).", MessageKind::System);
 }
 
+
+bool Game::requestAutoRun(Vec2i dir) {
+    // Normalize direction to -1/0/1 per component.
+    dir.x = (dir.x < 0) ? -1 : (dir.x > 0) ? 1 : 0;
+    dir.y = (dir.y < 0) ? -1 : (dir.y > 0) ? 1 : 0;
+
+    if (dir.x == 0 && dir.y == 0) return false;
+
+    // If something else was auto-moving, reset it silently.
+    if (autoMode != AutoMoveMode::None) {
+        stopAutoMove(true);
+    }
+
+    autoMode = AutoMoveMode::Run;
+
+    if (!buildAutoRunPath(dir)) {
+        autoMode = AutoMoveMode::None;
+        autoPathTiles.clear();
+        autoPathIndex = 0;
+        autoStepTimer = 0.0f;
+        pushMsg("AUTO-RUN: NO PATH.", MessageKind::System);
+        return false;
+    }
+
+    pushMsg("AUTO-RUN: ON.", MessageKind::System);
+    return true;
+}
+
+
 bool Game::stepAutoMove() {
     if (autoMode == AutoMoveMode::None) return false;
 
@@ -258,8 +290,8 @@ bool Game::stepAutoMove() {
     // Auto-explore is intentionally conservative: if any hostile is visible, stop immediately.
     // Auto-travel can keep going when hostiles are visible but still far away; a threat/ETA
     // check is performed later once we know the next step.
-    if (autoMode == AutoMoveMode::Explore && anyVisibleHostiles()) {
-        pushMsg("AUTO-EXPLORE INTERRUPTED!", MessageKind::Warning);
+    if ((autoMode == AutoMoveMode::Explore || autoMode == AutoMoveMode::Run) && anyVisibleHostiles()) {
+        pushMsg((autoMode == AutoMoveMode::Run) ? "AUTO-RUN INTERRUPTED!" : "AUTO-EXPLORE INTERRUPTED!", MessageKind::Warning);
         stopAutoMove(true);
         return false;
     }
@@ -504,6 +536,12 @@ bool Game::stepAutoMove() {
             return false;
         }
 
+        if (autoMode == AutoMoveMode::Run) {
+            pushMsg("AUTO-RUN COMPLETE.", MessageKind::System);
+            stopAutoMove(true);
+            return false;
+        }
+
         // Explore: find the next frontier.
         if (!buildAutoExplorePath()) {
             pushMsg("FLOOR FULLY EXPLORED.", MessageKind::System);
@@ -580,7 +618,9 @@ bool Game::stepAutoMove() {
             ? "AUTO-TRAVEL STOPPED (KNOWN TRAP AHEAD)."
             : (autoMode == AutoMoveMode::Explore)
                 ? "AUTO-EXPLORE STOPPED (KNOWN TRAP AHEAD)."
-                : "AUTO-MOVE STOPPED (KNOWN TRAP AHEAD).";
+                : (autoMode == AutoMoveMode::Run)
+                    ? "AUTO-RUN STOPPED (KNOWN TRAP AHEAD)."
+                    : "AUTO-MOVE STOPPED (KNOWN TRAP AHEAD).";
         pushMsg(msg, MessageKind::Warning);
         stopAutoMove(true);
         return false;
@@ -688,6 +728,12 @@ bool Game::stepAutoMove() {
         return false;
     }
 
+    if (autoMode == AutoMoveMode::Run && autoPathIndex >= autoPathTiles.size()) {
+        pushMsg("AUTO-RUN COMPLETE.", MessageKind::System);
+        stopAutoMove(true);
+        return false;
+    }
+
     return true;
 }
 
@@ -746,6 +792,170 @@ bool Game::buildAutoExplorePath() {
     return buildAutoTravelPath(searchGoal, /*requireExplored*/true, /*allowKnownTraps*/false);
 }
 
+
+bool Game::buildAutoRunPath(Vec2i dir) {
+    autoPathTiles.clear();
+    autoPathIndex = 0;
+    autoStepTimer = 0.0f;
+
+    // Normalize direction to -1/0/1 per component.
+    dir.x = (dir.x < 0) ? -1 : (dir.x > 0) ? 1 : 0;
+    dir.y = (dir.y < 0) ? -1 : (dir.y > 0) ? 1 : 0;
+    if (dir.x == 0 && dir.y == 0) return false;
+
+    const Vec2i start = player().pos;
+    Vec2i cur = start;
+    Vec2i prev = start;
+    Vec2i dirCur = dir;
+
+    const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
+
+    const bool levitating = (player().effects.levitationTurns > 0);
+
+    const int W = std::max(1, dung.width);
+    const int H = std::max(1, dung.height);
+    const int maxSteps = W * H;
+
+    std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
+    auto vidx = [&](Vec2i p) -> size_t {
+        return static_cast<size_t>(p.y * W + p.x);
+    };
+    if (start.x >= 0 && start.y >= 0 && start.x < W && start.y < H) {
+        visited[vidx(start)] = 1;
+    }
+
+    auto inBounds = [&](Vec2i p) -> bool {
+        return p.x >= 0 && p.y >= 0 && p.x < dung.width && p.y < dung.height;
+    };
+
+    auto isInRoom = [&](Vec2i p) -> bool {
+        for (const Room& r : dung.rooms) {
+            if (r.contains(p)) return true;
+        }
+        return false;
+    };
+
+    // Heuristic fallback: some themed floors (caverns/mines) have few or no rooms.
+    // Consider a tile "open" if it has many walkable neighbors.
+    auto isOpenArea = [&](Vec2i p) -> bool {
+        if (isInRoom(p)) return true;
+        int open = 0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                Vec2i q{p.x + dx, p.y + dy};
+                if (!inBounds(q)) continue;
+                const Tile& t = dung.at(q.x, q.y);
+                if (!t.explored) continue;
+                if (t.type == TileType::Wall || t.type == TileType::Pillar || t.type == TileType::DoorSecret) continue;
+                if (t.type == TileType::Chasm && !levitating) continue;
+                if (t.type == TileType::DoorLocked && !canUnlockDoors) continue;
+                if (entityAt(q.x, q.y)) continue;
+                if (fireAt(q.x, q.y) > 0u) continue;
+                if (discoveredTrapAt(trapsCur, q.x, q.y)) continue;
+                // This is only a heuristic for openness, so be generous about passability.
+                if (dung.isPassable(q.x, q.y) || t.type == TileType::Chasm || t.type == TileType::DoorLocked) {
+                    ++open;
+                }
+            }
+        }
+        return open >= 5;
+    };
+
+    auto canStepTo = [&](Vec2i p) -> bool {
+        if (!inBounds(p)) return false;
+
+        const Tile& t = dung.at(p.x, p.y);
+
+        // Don't auto-run into unknown tiles; stop at the explored frontier so the player
+        // doesn't get "free" information from the true underlying map layout.
+        if (!t.explored) return false;
+
+        // Stop before known traps/hazards.
+        if (discoveredTrapAt(trapsCur, p.x, p.y)) return false;
+        if (fireAt(p.x, p.y) > 0u) return false;
+
+        // Don't run into occupied tiles.
+        if (entityAt(p.x, p.y)) return false;
+
+        // Normal passability.
+        if (dung.isPassable(p.x, p.y)) return true;
+
+        // Locked doors are traversable if we have keys or lockpicks (tryMove will handle failures).
+        if (t.type == TileType::DoorLocked && canUnlockDoors) return true;
+
+        // Chasms are traversable while levitating.
+        if (t.type == TileType::Chasm && levitating) return true;
+
+        return false;
+    };
+
+    for (int step = 0; step < maxSteps; ++step) {
+        Vec2i next{cur.x + dirCur.x, cur.y + dirCur.y};
+
+        if (!canStepTo(next)) break;
+
+        // Loop safety: if we've been here already in this run path, stop.
+        if (next.x >= 0 && next.y >= 0 && next.x < W && next.y < H) {
+            const size_t vi = vidx(next);
+            if (visited[vi]) break;
+            visited[vi] = 1;
+        }
+
+        autoPathTiles.push_back(next);
+
+        // Advance.
+        prev = cur;
+        cur = next;
+
+        // Stop on interesting tiles (loot/stairs) so the player doesn't skip decisions.
+        const TileType tt = dung.at(cur.x, cur.y).type;
+        if (tt == TileType::StairsUp || tt == TileType::StairsDown) break;
+        if (tileHasAutoExploreLoot(cur)) break;
+
+        // In rooms/open areas, keep running straight (do not auto-turn).
+        const bool openArea = isOpenArea(cur);
+        if (openArea) continue;
+
+        // Corridor-following:
+        // - If forward is blocked but exactly one non-backward step exists, turn to follow a corner.
+        // - If forward is available but there are *multiple* options (branch/intersection), stop.
+        Vec2i back{prev.x - cur.x, prev.y - cur.y};
+
+        std::vector<Vec2i> cand;
+        cand.reserve(8);
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                Vec2i d{dx, dy};
+                if (d.x == back.x && d.y == back.y) continue;
+                if (canStepTo(Vec2i{cur.x + d.x, cur.y + d.y})) {
+                    cand.push_back(d);
+                }
+            }
+        }
+
+        const bool forwardOk = canStepTo(Vec2i{cur.x + dirCur.x, cur.y + dirCur.y});
+        if (!forwardOk) {
+            if (cand.size() == 1) {
+                dirCur = cand[0];
+            } else {
+                break;
+            }
+        } else {
+            if (cand.size() > 1) {
+                break;
+            }
+        }
+    }
+
+    autoPathIndex = 0;
+    autoStepTimer = 0.0f;
+
+    return !autoPathTiles.empty();
+}
+
+
 Vec2i Game::findNearestExploreFrontier() const {
     // A "frontier" is any explored, passable tile that borders at least one unexplored tile.
     //
@@ -756,6 +966,8 @@ Vec2i Game::findNearestExploreFrontier() const {
 
     const Vec2i start = player().pos;
     const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
+
+    const bool levitating = (player().effects.levitationTurns > 0);
     const int W = std::max(1, dung.width);
     const int H = std::max(1, dung.height);
 
@@ -1000,6 +1212,8 @@ Vec2i Game::findNearestExploreSearchSpot() const {
 
     const Vec2i start = player().pos;
     const bool canUnlockDoors = (keyCount() > 0) || (lockpickCount() > 0);
+
+    const bool levitating = (player().effects.levitationTurns > 0);
     const int W = std::max(1, dung.width);
     const int H = std::max(1, dung.height);
 

@@ -3651,6 +3651,127 @@ case ItemKind::Arrow: {
 
                 break;
             }
+
+            if (isEcosystemNodeKind(kind)) {
+                // Ecosystem nodes: distinct stationary props. Use spriteSeed for subtle variation.
+                const uint32_t h = hashCombine(seed, 0xEC0B10DEu ^ static_cast<uint32_t>(kind8));
+                RNG nrng(hash32(h));
+
+                // A tiny wobble/animation for vents/springs.
+                const bool blink = (frame % 2) == 1;
+
+                switch (kind) {
+                    case ItemKind::SporePod: {
+                        Color pod = add({90, 170, 105, 255}, nrng.range(-18, 18), nrng.range(-18, 18), nrng.range(-18, 18));
+                        Color dark = mul(pod, 0.65f);
+                        Color dot  = {210, 240, 220, 200};
+
+                        circle(s, 9, 11, 4, pod);
+                        circle(s, 7, 10, 2, pod);
+                        circle(s, 11, 10, 2, mul(pod, 0.92f));
+                        // Rim shadow
+                        line(s, 6, 14, 12, 14, dark);
+                        // Spore dots (animate a tiny glint)
+                        for (int i = 0; i < 6; ++i) {
+                            const int x = 7 + nrng.range(0, 6);
+                            const int y = 9 + nrng.range(0, 5);
+                            setPx(s, x, y, mul(dot, 0.85f));
+                        }
+                        if (blink) setPx(s, 11, 9, {255,255,255,120});
+                        break;
+                    }
+                    case ItemKind::CrystalNode: {
+                        Color gem = add({105, 200, 245, 255}, nrng.range(-12, 12), nrng.range(-12, 12), nrng.range(-12, 12));
+                        Color edge = mul(gem, 0.55f);
+                        // Central shard
+                        line(s, 9, 6, 6, 12, edge);
+                        line(s, 9, 6, 12, 12, edge);
+                        line(s, 6, 12, 9, 15, edge);
+                        line(s, 12, 12, 9, 15, edge);
+                        // Fill
+                        for (int y = 7; y <= 14; ++y) {
+                            const int w = (y < 11) ? (y - 6) : (15 - y);
+                            for (int dx = -w; dx <= w; ++dx) setPx(s, 9 + dx, y, gem);
+                        }
+                        // Side shards
+                        line(s, 5, 13, 7, 9, edge);
+                        line(s, 13, 13, 11, 9, edge);
+                        setPx(s, 7, 10, mul(gem, 0.95f));
+                        setPx(s, 11, 10, mul(gem, 0.92f));
+                        // Glint
+                        if (blink) {
+                            setPx(s, 10, 7, {255,255,255,150});
+                            setPx(s, 11, 8, {255,255,255,90});
+                        }
+                        break;
+                    }
+                    case ItemKind::BonePile: {
+                        Color bone = add({235, 235, 225, 255}, nrng.range(-10, 10), nrng.range(-10, 10), nrng.range(-10, 10));
+                        Color dark = mul(bone, 0.65f);
+                        // Pile: two crossed bones + skull-ish nub
+                        line(s, 6, 14, 14, 9, bone);
+                        line(s, 6, 9, 14, 14, bone);
+                        circle(s, 6, 9, 1, dark);
+                        circle(s, 6, 14, 1, dark);
+                        circle(s, 14, 9, 1, dark);
+                        circle(s, 14, 14, 1, dark);
+                        // Skull nub
+                        circle(s, 10, 10, 2, bone);
+                        setPx(s, 9, 10, dark);
+                        setPx(s, 11, 10, dark);
+                        if (blink) setPx(s, 10, 9, {255,255,255,110});
+                        break;
+                    }
+                    case ItemKind::RustVent: {
+                        Color rust = add({190, 125, 70, 255}, nrng.range(-18, 18), nrng.range(-14, 14), nrng.range(-14, 14));
+                        Color dark = mul(rust, 0.55f);
+                        Color fume = {200, 220, 180, static_cast<uint8_t>(blink ? 110 : 80)};
+                        // Crack + vents
+                        line(s, 6, 13, 13, 10, dark);
+                        line(s, 7, 14, 14, 11, rust);
+                        // Fumes
+                        setPx(s, 10, 8, fume);
+                        setPx(s, 11, 7, fume);
+                        setPx(s, 12, 8, fume);
+                        break;
+                    }
+                    case ItemKind::AshVent: {
+                        Color ash = add({75, 75, 85, 255}, nrng.range(-10, 10), nrng.range(-10, 10), nrng.range(-10, 10));
+                        Color rim = mul(ash, 0.65f);
+                        Color ember = {245, 120, 85, static_cast<uint8_t>(blink ? 220 : 150)};
+                        // Dark pit
+                        circle(s, 9, 12, 4, ash);
+                        circle(s, 9, 12, 3, mul(ash, 0.85f));
+                        outlineRect(s, 6, 9, 7, 7, rim);
+                        // Embers
+                        setPx(s, 8, 11, ember);
+                        setPx(s, 10, 13, ember);
+                        setPx(s, 11, 11, mul(ember, 0.90f));
+                        if (blink) setPx(s, 9, 10, {255,255,255,120});
+                        break;
+                    }
+                    case ItemKind::GrottoSpring: {
+                        Color water = add({90, 165, 240, 200}, nrng.range(-12, 12), nrng.range(-12, 12), nrng.range(-12, 12));
+                        Color edge = mul(water, 0.65f);
+                        // Pool
+                        circle(s, 9, 12, 4, water);
+                        line(s, 6, 14, 12, 14, edge);
+                        // Ripples
+                        setPx(s, 8, 12, mul(water, 1.05f));
+                        setPx(s, 10, 12, mul(water, 0.90f));
+                        // Bubble
+                        if (blink) {
+                            setPx(s, 11, 10, {220, 240, 255, 120});
+                            setPx(s, 12, 11, {255, 255, 255, 90});
+                        }
+                        break;
+                    }
+                    default: break;
+                }
+
+                break;
+            }
+
 		            if (kind == ItemKind::EssenceShard) {
 		                // Essence shard metadata is packed into the low bits of the sprite seed.
 		                // bits 0..4: craft tag id (0..31)

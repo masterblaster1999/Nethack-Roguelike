@@ -581,7 +581,25 @@ enum class Action : uint8_t {
     // replays because they do not affect game simulation.
     ViewTurnLeft,  // Rotate the raycast 3D camera left
     ViewTurnRight, // Rotate the raycast 3D camera right
+
+    // Replay playback controls (UI/platform-only). These actions never affect game simulation.
+    ReplayPause,     // Pause/unpause replay playback (during --replay)
+    ReplayStep,      // Step to the next replay timestamp (dispatches all events at that time)
+    ReplaySpeedUp,   // Increase replay playback speed
+    ReplaySpeedDown, // Decrease replay playback speed
+
+    // Auto-run (append-only). Directional "run" that keeps stepping until an
+    // intersection/obstacle/interesting tile or a safety stop triggers.
+    RunUp,
+    RunDown,
+    RunLeft,
+    RunRight,
+    RunUpLeft,
+    RunUpRight,
+    RunDownLeft,
+    RunDownRight,
 };
+
 
 // Item discoveries overlay filter/sort modes (NetHack-style "discoveries").
 enum class DiscoveryFilter : uint8_t {
@@ -627,6 +645,7 @@ enum class AutoMoveMode : uint8_t {
     None = 0,
     Travel,
     Explore,
+    Run, // Append-only
 };
 
 enum class ScoresView : uint8_t {
@@ -1926,6 +1945,62 @@ bool clearItemCallLabel(ItemKind k);
     void requestConfigReload() { configReloadReq = true; }
     void clearConfigReloadRequest() { configReloadReq = false; }
 
+    // Replay recording (platform-driven): UI-only indicator + requests from extended commands.
+    bool replayRecordingActive() const { return replayRecordingActive_; }
+    const std::string& replayRecordingPath() const { return replayRecordingPath_; }
+    void setReplayRecordingIndicator(bool active, const std::string& path = std::string()) {
+        replayRecordingActive_ = active;
+        replayRecordingPath_ = active ? path : std::string();
+    }
+
+    bool replayRecordStartRequested() const { return replayRecordStartReq; }
+    const std::string& replayRecordStartPath() const { return replayRecordStartPathReq; }
+    void requestReplayRecordStart(const std::string& path = std::string()) {
+        replayRecordStartReq = true;
+        replayRecordStartPathReq = path;
+    }
+    void clearReplayRecordStartRequest() {
+        replayRecordStartReq = false;
+        replayRecordStartPathReq.clear();
+    }
+
+    bool replayRecordStopRequested() const { return replayRecordStopReq; }
+    void requestReplayRecordStop() { replayRecordStopReq = true; }
+    void clearReplayRecordStopRequest() { replayRecordStopReq = false; }
+
+
+    // Replay playback (platform-driven): UI-only indicator so the SDL layer can:
+    //  - show a small HUD tag while a replay is playing
+    //  - treat replay controls as context-only keybinds (so they don't steal keys during normal play)
+    bool replayPlaybackActive() const { return replayPlaybackActive_; }
+    bool replayPlaybackPaused() const { return replayPlaybackPaused_; }
+    float replayPlaybackSpeed() const { return replayPlaybackSpeed_; }
+    uint32_t replayPlaybackTimeMs() const { return replayPlaybackTimeMs_; }
+    uint32_t replayPlaybackTotalMs() const { return replayPlaybackTotalMs_; }
+    const std::string& replayPlaybackPath() const { return replayPlaybackPath_; }
+
+    void setReplayPlaybackIndicator(bool active,
+                                    float speed = 1.0f,
+                                    bool paused = false,
+                                    uint32_t timeMs = 0,
+                                    uint32_t totalMs = 0,
+                                    const std::string& path = std::string()) {
+        replayPlaybackActive_ = active;
+        if (!active) {
+            replayPlaybackPaused_ = false;
+            replayPlaybackSpeed_ = 1.0f;
+            replayPlaybackTimeMs_ = 0;
+            replayPlaybackTotalMs_ = 0;
+            replayPlaybackPath_.clear();
+        } else {
+            replayPlaybackPaused_ = paused;
+            replayPlaybackSpeed_ = speed;
+            replayPlaybackTimeMs_ = timeMs;
+            replayPlaybackTotalMs_ = totalMs;
+            replayPlaybackPath_ = path;
+        }
+    }
+
     // Turn counter (increments once per player action that consumes time)
     uint32_t turns() const { return turnCount; }
 
@@ -2083,9 +2158,11 @@ bool clearItemCallLabel(ItemKind k);
     bool isAutoActive() const { return autoMode != AutoMoveMode::None; }
     bool isAutoTraveling() const { return autoMode == AutoMoveMode::Travel; }
     bool isAutoExploring() const { return autoMode == AutoMoveMode::Explore; }
+    bool isAutoRunning() const { return autoMode == AutoMoveMode::Run; }
     const std::vector<Vec2i>& autoPath() const { return autoPathTiles; }
     bool requestAutoTravel(Vec2i goal);
     void requestAutoExplore();
+    bool requestAutoRun(Vec2i dir);
     void cancelAutoMove(bool silent = false);
     void setAutoStepDelayMs(int ms);
     void setAutoExploreSearchEnabled(bool enabled) { autoExploreSearchEnabled_ = enabled; }
@@ -2298,6 +2375,7 @@ private:
         int times = 0;
         int tier = 0;
         RoomType workstation = RoomType::Normal;
+        EcosystemKind ecosystem = EcosystemKind::None;
         std::string tagA;
         std::string tagB;
     };
@@ -2502,6 +2580,24 @@ private:
     bool keyBindsDumpReq = false;
     bool configReloadReq = false;
 
+    // Replay recording requests (handled in main.cpp).
+    bool replayRecordStartReq = false;
+    bool replayRecordStopReq = false;
+    std::string replayRecordStartPathReq;
+
+    // Replay recording UI indicator (set by main.cpp).
+    bool replayRecordingActive_ = false;
+    std::string replayRecordingPath_;
+
+
+    // Replay playback UI indicator (set by main.cpp).
+    bool replayPlaybackActive_ = false;
+    bool replayPlaybackPaused_ = false;
+    float replayPlaybackSpeed_ = 1.0f;
+    uint32_t replayPlaybackTimeMs_ = 0;
+    uint32_t replayPlaybackTotalMs_ = 0;
+    std::string replayPlaybackPath_;
+
     // Messages
     std::vector<Message> msgs;
     int msgScroll = 0;
@@ -2593,6 +2689,12 @@ private:
 
     // Auto-travel: one-time warning throttle when hostiles are visible but still far away.
     bool autoTravelCautionAnnounced = false;
+
+    // Procedural ecosystem discovery (UI-only; not serialized).
+    // Tracks which biome regions the player has already stepped into on the current floor
+    // to avoid spammy callouts.
+    EcosystemKind lastEcosystem_ = EcosystemKind::None;
+    uint32_t ecosystemSeenMask_ = 0u;
 
     // Save path overrides (set by main using SDL_GetPrefPath)
     std::string savePathOverride;
@@ -2764,6 +2866,7 @@ private:
     void moveInventorySelection(int dy);
     void sortInventory();
     bool pickupAtPlayer();
+    bool harvestEcosystemNodeAtPlayer();
     bool dropSelected();
     bool dropSelectedAll();
     bool equipSelected();
@@ -2781,6 +2884,7 @@ private:
         std::string tagB;
         int tier = 0;
         RoomType workstation = RoomType::Normal;
+        EcosystemKind ecosystem = EcosystemKind::None;
 
         bool hasByproduct = false;
         Item byproduct;
@@ -2949,6 +3053,7 @@ private:
     bool evadeStep();
     bool buildAutoTravelPath(Vec2i goal, bool requireExplored, bool allowKnownTraps);
     bool buildAutoExplorePath();
+    bool buildAutoRunPath(Vec2i dir);
     Vec2i findNearestExploreFrontier() const;
     Vec2i findNearestExploreSearchSpot() const;
     std::vector<Vec2i> findPathBfs(Vec2i start, Vec2i goal, bool requireExplored, bool allowKnownTraps) const;

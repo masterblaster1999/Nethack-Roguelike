@@ -3163,7 +3163,9 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
             const TileType tt = t.type;
             const uint8_t bio = (tt == TileType::Floor) ? d.biolumAtCached(x, y) : 0u;
             const bool isBiolum = dark && (bio >= 48u);
-            if (tt != TileType::Fountain && tt != TileType::Altar && !isBiolum) continue;
+            const EcosystemKind eco = (tt == TileType::Floor) ? d.ecosystemAtCached(x, y) : EcosystemKind::None;
+            const bool ecoAmbient = (tt == TileType::Floor) && (eco != EcosystemKind::None);
+            if (tt != TileType::Fountain && tt != TileType::Altar && !isBiolum && !ecoAmbient) continue;
 
             const uint8_t L = dark ? game.tileLightLevel(x, y) : 255u;
             if (dark && L == 0u) continue;
@@ -3302,6 +3304,150 @@ void Renderer::updateParticlesFromGame(const Game& game, float frameDt, uint32_t
                         p.life = randRange(s, 0.45f, 0.90f);
                         p.size0 = randRange(s, 0.04f, 0.10f);
                         p.size1 = p.size0 * randRange(s, 0.35f, 0.60f);
+
+                        particles_->add(p);
+                    }
+                }
+            } else if (ecoAmbient) {
+                // Ecosystem ambience: a subtle, biome-specific particle field.
+                // This makes biome boundaries "feel" distinct without affecting gameplay.
+
+                // Thin emitters: only 1 in 4 eligible tiles can emit (stable per tile), keeping
+                // particle counts stable even if a whole room is one ecosystem.
+                if ((hash32(tileSeed ^ "ECOAMB"_tag) & 3u) != 0u) {
+                    continue;
+                }
+
+                uint32_t stepMs = 520u;
+                uint32_t chance = 2u; // in 0..255 per cycle
+                ParticleEngine::Kind pk = ParticleEngine::Kind::Mote;
+                Color c0{220, 220, 220, 160};
+                Color c1{ 70,  70,  70,   0};
+
+                switch (eco) {
+                    case EcosystemKind::FungalBloom:
+                        stepMs = 420u;
+                        chance = 3u;
+                        pk = ParticleEngine::Kind::Smoke;
+                        c0 = Color{  95, 220, 135, 120};
+                        c1 = Color{  25,  70,  45,   0};
+                        break;
+                    case EcosystemKind::CrystalGarden:
+                        stepMs = 360u;
+                        chance = 3u;
+                        pk = ParticleEngine::Kind::Mote;
+                        c0 = Color{ 190, 235, 255, 165};
+                        c1 = Color{  55,  95, 140,   0};
+                        break;
+                    case EcosystemKind::BoneField:
+                        stepMs = 560u;
+                        chance = 2u;
+                        pk = ParticleEngine::Kind::Mote;
+                        c0 = Color{ 235, 225, 190, 130};
+                        c1 = Color{  80,  70,  45,   0};
+                        break;
+                    case EcosystemKind::RustVeins:
+                        stepMs = 520u;
+                        chance = 2u;
+                        pk = ParticleEngine::Kind::Smoke;
+                        c0 = Color{ 210, 200, 190, 115};
+                        c1 = Color{  70,  55,  45,   0};
+                        break;
+                    case EcosystemKind::AshenRidge:
+                        stepMs = 420u;
+                        chance = 3u;
+                        pk = ParticleEngine::Kind::Smoke;
+                        c0 = Color{ 200, 190, 175, 120};
+                        c1 = Color{  70,  55,  45,   0};
+                        break;
+                    case EcosystemKind::FloodedGrotto:
+                        stepMs = 520u;
+                        chance = 2u;
+                        pk = ParticleEngine::Kind::Mote;
+                        c0 = Color{ 190, 225, 255, 145};
+                        c1 = Color{  55,  95, 140,   0};
+                        break;
+                    default:
+                        break;
+                }
+
+                const uint32_t dtClamped = std::min<uint32_t>(dtMs, stepMs - 1u);
+                const uint32_t phase = hash32(tileSeed ^ "ECOAMB"_tag ^ static_cast<uint32_t>(eco)) % stepMs;
+                const uint32_t now = (ticks + phase) % stepMs;
+                const uint32_t prev = (((ticks > dtClamped) ? (ticks - dtClamped) : 0u) + phase) % stepMs;
+
+                if (now < prev) {
+                    const uint32_t cycle = (ticks + phase) / stepMs;
+                    uint32_t s = hash32(hashCombine(tileSeed ^ "ECOAMB"_tag, static_cast<uint32_t>(eco)) ^ (cycle * 0x9E3779B9u));
+                    if ((s & 0xFFu) < chance) {
+                        ParticleEngine::Particle p{};
+                        p.layer = ParticleEngine::LAYER_BEHIND;
+                        p.kind = pk;
+                        p.seed = s;
+
+                        if (pk == ParticleEngine::Kind::Smoke) {
+                            p.var = static_cast<uint8_t>(static_cast<int>(
+                                randRange(s, 0.0f, static_cast<float>(ParticleEngine::SMOKE_VARS))));
+                        } else if (pk == ParticleEngine::Kind::Ember) {
+                            p.var = static_cast<uint8_t>(static_cast<int>(
+                                randRange(s, 0.0f, static_cast<float>(ParticleEngine::EMBER_VARS))));
+                        } else {
+                            p.var = static_cast<uint8_t>(static_cast<int>(
+                                randRange(s, 0.0f, static_cast<float>(ParticleEngine::MOTE_VARS))));
+                        }
+
+                        p.x = static_cast<float>(x) + 0.50f + randRange(s, -0.20f, 0.20f);
+                        p.y = static_cast<float>(y) + 0.50f + randRange(s, -0.20f, 0.20f);
+
+                        // Per-ecosystem motion tuning.
+                        if (eco == EcosystemKind::FloodedGrotto) {
+                            // Drip: start higher and fall with a tiny bounce.
+                            p.z = randRange(s, 0.18f, 0.48f);
+                            p.vx = randRange(s, -0.03f, 0.03f);
+                            p.vy = randRange(s, -0.03f, 0.03f);
+                            p.vz = randRange(s, -0.22f, -0.08f);
+                            p.az = -1.35f;
+                            p.drag = 1.10f;
+                            p.life = randRange(s, 0.55f, 1.15f);
+                            p.size0 = randRange(s, 0.04f, 0.09f);
+                            p.size1 = p.size0 * 0.55f;
+                        } else {
+                            p.z = randRange(s, 0.04f, 0.18f);
+                            p.vx = randRange(s, -0.06f, 0.06f);
+                            p.vy = randRange(s, -0.06f, 0.06f);
+                            p.vz = randRange(s, 0.03f, 0.16f);
+                            p.az = -0.85f;
+                            p.drag = (pk == ParticleEngine::Kind::Smoke) ? 0.90f : 1.15f;
+                            p.life = (pk == ParticleEngine::Kind::Smoke)
+                                   ? randRange(s, 0.70f, 1.35f)
+                                   : randRange(s, 0.40f, 0.85f);
+                            p.size0 = (pk == ParticleEngine::Kind::Smoke)
+                                    ? randRange(s, 0.14f, 0.30f)
+                                    : randRange(s, 0.04f, 0.10f);
+                            p.size1 = (pk == ParticleEngine::Kind::Smoke)
+                                    ? p.size0 * randRange(s, 1.20f, 1.75f)
+                                    : p.size0 * randRange(s, 0.35f, 0.60f);
+                        }
+
+                        // Ash Ridge: occasional ember flicker to sell the theme.
+                        if (eco == EcosystemKind::AshenRidge && (s & 0x1Fu) == 0u) {
+                            p.kind = ParticleEngine::Kind::Ember;
+                            p.var = static_cast<uint8_t>(static_cast<int>(
+                                randRange(s, 0.0f, static_cast<float>(ParticleEngine::EMBER_VARS))));
+                            p.c0 = Color{255, 205, 120, 170};
+                            p.c1 = Color{255,  70,  30,   0};
+                            p.life = randRange(s, 0.20f, 0.50f);
+                            p.size0 = randRange(s, 0.04f, 0.10f);
+                            p.size1 = p.size0 * 0.55f;
+                            p.vz = randRange(s, 0.20f, 0.55f);
+                            p.az = -2.20f;
+                            p.drag = 1.30f;
+                        } else {
+                            const int a0 = std::clamp(static_cast<int>(std::round(static_cast<float>(c0.a) * lum)), 18, 220);
+                            c0.a = static_cast<uint8_t>(a0);
+                            p.c0 = c0;
+                            p.c1 = c1;
+                        }
 
                         particles_->add(p);
                     }
@@ -9424,6 +9570,53 @@ void Renderer::drawHud(const Game& game) {
         ss << " | AS: " << game.autosaveEveryTurns();
     }
 
+    if (game.replayRecordingActive()) {
+        ss << " | REC";
+    }
+
+
+    if (game.replayPlaybackActive()) {
+        ss << " | REPLAY";
+        if (game.replayPlaybackPaused()) {
+            ss << " PAUSED";
+        }
+
+        // Speed indicator (x1, x2, x0.5, ...)
+        const float sp = game.replayPlaybackSpeed();
+        if (sp > 0.0f) {
+            ss << " x";
+            const float rounded = std::round(sp);
+            if (std::fabs(sp - rounded) < 0.01f) {
+                ss << static_cast<int>(rounded);
+            } else {
+                std::ostringstream spSS;
+                spSS.setf(std::ios::fixed);
+                spSS << std::setprecision(2) << sp;
+                ss << spSS.str();
+            }
+        }
+
+        // Timeline indicator (mm:ss/mm:ss)
+        const uint32_t tMs = game.replayPlaybackTimeMs();
+        const uint32_t totalMs = game.replayPlaybackTotalMs();
+        if (totalMs > 0) {
+            auto fmt = [](uint32_t ms) -> std::string {
+                const uint32_t secTotal = ms / 1000;
+                const uint32_t m = secTotal / 60;
+                const uint32_t s = secTotal % 60;
+                std::ostringstream oss;
+                oss << m << ":" << std::setw(2) << std::setfill('0') << s;
+                return oss.str();
+            };
+            ss << " " << fmt(tMs) << "/" << fmt(totalMs);
+        }
+
+        if (!game.replayPlaybackPath().empty()) {
+            ss << ":" << std::filesystem::path(game.replayPlaybackPath()).filename().string();
+        }
+    }
+
+
     // Wrap the long stat line so it doesn't clip off-screen on narrow windows.
     std::vector<std::string> statLines = wrap(ss.str(), maxChars);
     if (statLines.empty()) statLines.push_back(std::string());
@@ -11202,6 +11395,7 @@ void Renderer::drawHelpOverlay(const Game& game) {
     blank();
     add("EXTENDED COMMAND EXAMPLES:", white);
     add("save | load | loadauto | quit | version | seed | name | scores | perf", gray);
+    add("record [path] | stoprecord  (capture a .prr replay)", gray);
     add("autopickup off/gold/all", gray);
     add("mark [note|danger|loot] <label>  marks  travel <index|label>", gray);
     add("name <text>  scores [N]", gray);

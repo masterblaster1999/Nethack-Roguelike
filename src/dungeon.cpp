@@ -21403,7 +21403,9 @@ void Dungeon::ensureMaterials(uint32_t worldSeed, DungeonBranch branch, int dept
         materialCacheW == width &&
         materialCacheH == height &&
         materialCache.size() == expected &&
-        biolumCache.size() == expected) {
+        biolumCache.size() == expected &&
+        ecosystemCache.size() == expected &&
+        leylineCache.size() == expected) {
         return;
     }
 
@@ -21414,6 +21416,9 @@ void Dungeon::ensureMaterials(uint32_t worldSeed, DungeonBranch branch, int dept
     if (width <= 0 || height <= 0) {
         materialCache.clear();
         biolumCache.clear();
+        ecosystemCache.clear();
+        leylineCache.clear();
+        ecosystemSeeds.clear();
         materialCacheCell = 0;
         return;
     }
@@ -21510,6 +21515,481 @@ void Dungeon::ensureMaterials(uint32_t worldSeed, DungeonBranch branch, int dept
             }
 
             materialCache[static_cast<size_t>(y * width + x)] = static_cast<uint8_t>(m);
+        }
+    }
+
+
+    // ---------------------------------------------------------------------
+    // Ecosystem / biome-seed field (non-serialized)
+    // ---------------------------------------------------------------------
+    //
+    // This is a deterministic patch-biome system layered on top of the base
+    // TerrainMaterial field. It is computed from the same level key as materials
+    // so it stays stable for the life of a floor, but it is NOT serialized.
+    //
+    ecosystemCache.assign(static_cast<size_t>(width * height), static_cast<uint8_t>(EcosystemKind::None));
+    ecosystemSeeds.clear();
+
+    if (branch != DungeonBranch::Camp) {
+        const bool cavernTheme = (depth == Dungeon::GROTTO_DEPTH) ||
+                                 (st.index >= 0 && st.theme == EndlessStratumTheme::Caverns);
+        const bool minesTheme = (depth == Dungeon::MINES_DEPTH || depth == Dungeon::DEEP_MINES_DEPTH) ||
+                                (st.index >= 0 && st.theme == EndlessStratumTheme::Mines);
+        const bool tombTheme = (depth == Dungeon::CATACOMBS_DEPTH) ||
+                               (st.index >= 0 && (st.theme == EndlessStratumTheme::Labyrinth || st.theme == EndlessStratumTheme::Catacombs));
+
+        const bool deep = (depth >= 7) || (maxDepth > 0 && depth >= maxDepth);
+
+        const uint32_t ecoSeed = hash32(hashCombine(seedKey ^ "ECO"_tag, hfSeed ^ 0xE012ABCDu));
+        RNG erng(ecoSeed);
+
+        // Biome palette: each (campaign/endless) stratum tends to feature a stable
+        // primary/secondary ecosystem so adjacent floors feel like connected regions,
+        // while still allowing minor "accents" for variety.
+        struct K { EcosystemKind k; int w; };
+
+        auto buildBaseTable = [&]() -> std::vector<K> {
+            std::vector<K> table;
+            table.reserve(8);
+
+            auto add = [&](EcosystemKind k, int w) {
+                if (w <= 0) return;
+                table.push_back({k, w});
+            };
+
+            // Baseline weights.
+            add(EcosystemKind::FungalBloom, 8);
+            add(EcosystemKind::RustVeins, 6);
+            add(EcosystemKind::CrystalGarden, 4);
+            add(EcosystemKind::BoneField, deep ? 4 : 2);
+            add(EcosystemKind::AshenRidge, deep ? 5 : 3);
+            add(EcosystemKind::FloodedGrotto, cavernTheme ? 5 : 1);
+
+            // Theme nudges.
+            if (cavernTheme) {
+                for (auto& e : table) {
+                    if (e.k == EcosystemKind::FungalBloom) e.w += 6;
+                    if (e.k == EcosystemKind::FloodedGrotto) e.w += 6;
+                    if (e.k == EcosystemKind::CrystalGarden) e.w += 2;
+                }
+            }
+            if (minesTheme) {
+                for (auto& e : table) {
+                    if (e.k == EcosystemKind::RustVeins) e.w += 8;
+                    if (e.k == EcosystemKind::CrystalGarden) e.w += 4;
+                    if (e.k == EcosystemKind::FungalBloom) e.w = std::max(0, e.w - 4);
+                    if (e.k == EcosystemKind::FloodedGrotto) e.w = std::max(0, e.w - 3);
+                }
+            }
+            if (tombTheme) {
+                for (auto& e : table) {
+                    if (e.k == EcosystemKind::BoneField) e.w += 10;
+                    if (e.k == EcosystemKind::FungalBloom) e.w = std::max(0, e.w - 5);
+                    if (e.k == EcosystemKind::FloodedGrotto) e.w = std::max(0, e.w - 3);
+                }
+            }
+            return table;
+        };
+
+        auto pickFromTable = [&](RNG& rr, const std::vector<K>& table, EcosystemKind forbid) -> EcosystemKind {
+            int total = 0;
+            for (const auto& e : table) {
+                if (e.k == forbid) continue;
+                total += std::max(0, e.w);
+            }
+            if (total <= 0) return EcosystemKind::None;
+
+            int r = rr.range(1, total);
+            for (const auto& e : table) {
+                if (e.k == forbid) continue;
+                r -= std::max(0, e.w);
+                if (r <= 0) return e.k;
+            }
+            // Fallback: last non-forbidden entry.
+            for (auto it = table.rbegin(); it != table.rend(); ++it) {
+                if (it->k == forbid) continue;
+                if (it->w > 0) return it->k;
+            }
+            return EcosystemKind::None;
+        };
+
+        const std::vector<K> baseTable = buildBaseTable();
+
+        // Palette RNG: use stratum seed so floors in the same macro band lean toward
+        // the same ecosystems. Signature floors get their own palette.
+        uint32_t palSeed = st.seed;
+        if (depth == Dungeon::MINES_DEPTH || depth == Dungeon::DEEP_MINES_DEPTH ||
+            depth == Dungeon::CATACOMBS_DEPTH || depth == Dungeon::GROTTO_DEPTH) {
+            palSeed = hash32(hashCombine(seedKey ^ "ECO_PAL"_tag, static_cast<uint32_t>(depth)));
+        } else {
+            palSeed = hash32(hashCombine(st.seed ^ "ECO_PAL"_tag, static_cast<uint32_t>(st.theme)));
+        }
+        RNG prng(palSeed);
+
+        EcosystemKind primary = pickFromTable(prng, baseTable, EcosystemKind::None);
+        EcosystemKind secondary = pickFromTable(prng, baseTable, primary);
+        if (secondary == primary) secondary = EcosystemKind::None;
+
+        // Apply palette bias to the working table.
+        std::vector<K> table = baseTable;
+        if (primary != EcosystemKind::None) {
+            for (auto& e : table) {
+                if (e.k == primary) e.w += 10;
+            }
+        }
+        if (secondary != EcosystemKind::None) {
+            for (auto& e : table) {
+                if (e.k == secondary) e.w += 6;
+            }
+        }
+
+        auto rollKind = [&]() -> EcosystemKind {
+            return pickFromTable(erng, table, EcosystemKind::None);
+        };
+
+        int wantSeeds = 2 + std::max(0, depth) / 3;
+        if (cavernTheme) wantSeeds += 1;
+        if (tombTheme && depth >= 6) wantSeeds += 1;
+        wantSeeds = clampi(wantSeeds, 2, 7);
+
+        const int cellBase = std::max(12, std::min(42, materialCacheCell));
+        const int minSep = clampi(cellBase / 2, 10, 20);
+
+        auto okStairs = [&](Vec2i p) -> bool {
+            const int stairR = 6;
+            if (inBounds(stairsUp.x, stairsUp.y) && manhattan(p, stairsUp) <= stairR) return false;
+            if (inBounds(stairsDown.x, stairsDown.y) && manhattan(p, stairsDown) <= stairR) return false;
+            return true;
+        };
+
+        auto farFromOtherSeeds = [&](Vec2i p) -> bool {
+            for (const auto& s : ecosystemSeeds) {
+                if (manhattan(p, s.pos) < minSep) return false;
+            }
+            return true;
+        };
+
+        const int maxAttemptsPerSeed = 220;
+        for (int i = 0; i < wantSeeds; ++i) {
+            Vec2i best{-1, -1};
+            for (int attempt = 0; attempt < maxAttemptsPerSeed; ++attempt) {
+                const int x = erng.range(1, std::max(1, width - 2));
+                const int y = erng.range(1, std::max(1, height - 2));
+                if (!inBounds(x, y)) continue;
+                if (at(x, y).type != TileType::Floor) continue;
+                Vec2i p{x, y};
+                if (!okStairs(p)) continue;
+                if (!farFromOtherSeeds(p)) continue;
+                best = p;
+                break;
+            }
+            if (!inBounds(best.x, best.y)) break;
+
+            EcosystemKind kind = rollKind();
+            // Ensure the stratum palette actually shows up (gives floors a readable identity).
+            if (i == 0 && primary != EcosystemKind::None) {
+                kind = primary;
+            } else if (i == 1 && secondary != EcosystemKind::None) {
+                kind = secondary;
+            }
+            int r = cellBase * 3 / 4 + erng.range(-3, 4);
+            r += depth / 6;
+            if (kind == EcosystemKind::FloodedGrotto) r += 2;
+            if (kind == EcosystemKind::AshenRidge) r += 1;
+            r = clampi(r, 10, 28);
+
+            ecosystemSeeds.push_back(EcosystemSeed{best, kind, r});
+        }
+
+        if (!ecosystemSeeds.empty()) {
+            // Warp field used for organic boundaries.
+            const uint32_t warpSeedX = hash32(hashCombine(hfSeed ^ "ECO_WX"_tag, seedKey));
+            const uint32_t warpSeedY = hash32(hashCombine(hfSeed ^ "ECO_WY"_tag, seedKey));
+            const float warpAmp = 3.25f;
+
+            // For overlay pass, track which seed influenced each tile.
+            std::vector<int8_t> seedIndex(expected, static_cast<int8_t>(-1));
+
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    const size_t idx = static_cast<size_t>(y * width + x);
+
+                    const float nx = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+                    const float ny = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+
+                    const float wx = hfHeight01(warpSeedX, nx, ny) - 0.5f;
+                    const float wy = hfHeight01(warpSeedY, nx, ny) - 0.5f;
+
+                    const float fx = static_cast<float>(x) + wx * warpAmp;
+                    const float fy = static_cast<float>(y) + wy * warpAmp;
+
+                    float bestScore = 999.0f;
+                    int best = -1;
+
+                    for (int s = 0; s < static_cast<int>(ecosystemSeeds.size()); ++s) {
+                        const EcosystemSeed& es = ecosystemSeeds[static_cast<size_t>(s)];
+                        const float dx = fx - static_cast<float>(es.pos.x);
+                        const float dy = fy - static_cast<float>(es.pos.y);
+                        const float rr = std::max(1.0f, static_cast<float>(es.radius));
+                        const float d2 = dx * dx + dy * dy;
+                        float score = d2 / (rr * rr);
+
+                        // Small deterministic per-seed jitter to avoid perfectly smooth contours.
+                        const uint32_t h = hash32(hashCombine(ecoSeed ^ static_cast<uint32_t>(s) * 0x9E3779B9u,
+                                                             hashCombine(static_cast<uint32_t>(x),
+                                                                         static_cast<uint32_t>(y))));
+                        score += (rand01(h) - 0.5f) * 0.06f;
+
+                        if (score < bestScore) {
+                            bestScore = score;
+                            best = s;
+                        }
+                    }
+
+                    // Only mark tiles as part of an ecosystem when within the seed radius envelope.
+                    if (best >= 0 && bestScore < 1.12f) {
+                        const EcosystemKind ek = ecosystemSeeds[static_cast<size_t>(best)].kind;
+                        ecosystemCache[idx] = static_cast<uint8_t>(ek);
+                        seedIndex[idx] = static_cast<int8_t>(best);
+                    }
+                }
+            }
+
+            // Apply ecosystem material overlays (cosmetic + minor substrate effects).
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    const size_t idx = static_cast<size_t>(y * width + x);
+                    const int si = (idx < seedIndex.size()) ? static_cast<int>(seedIndex[idx]) : -1;
+                    if (si < 0) continue;
+
+                    if (at(x, y).type != TileType::Floor) continue;
+
+                    const EcosystemSeed& es = ecosystemSeeds[static_cast<size_t>(si)];
+
+                    const float dx = static_cast<float>(x - es.pos.x);
+                    const float dy = static_cast<float>(y - es.pos.y);
+                    const float rr = std::max(1.0f, static_cast<float>(es.radius));
+                    float t = std::sqrt((dx * dx + dy * dy) / (rr * rr)); // 0..~1
+                    t = std::clamp(t, 0.0f, 1.0f);
+
+                    float strength = 1.0f - t;
+                    strength = std::clamp(strength, 0.0f, 1.0f);
+                    strength = strength * strength; // emphasize centers
+
+                    const uint32_t h = hash32(hashCombine(ecoSeed ^ 0xB10F00Du,
+                                                         hashCombine(static_cast<uint32_t>(x),
+                                                                     static_cast<uint32_t>(y))));
+                    const float r01 = rand01(h);
+
+                    TerrainMaterial base = static_cast<TerrainMaterial>(materialCache[idx]);
+                    TerrainMaterial out = base;
+
+                    auto canOverride = [&](TerrainMaterial m) -> bool {
+                        // Avoid stomping highly distinctive/man-made materials.
+                        if (m == TerrainMaterial::Wood) return false;
+                        return true;
+                    };
+
+                    if (!canOverride(base)) continue;
+
+                    const float nx = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+                    const float ny = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+                    const float h01 = hfHeight01(hfSeed, nx, ny);
+                    const float ridge01 = hfRidge01(hfSeed, nx, ny);
+
+                    switch (es.kind) {
+                        case EcosystemKind::FungalBloom: {
+                            // Mossy / earthy patches, stronger in basins.
+                            float pMoss = (0.08f + 0.55f * strength) * (0.70f + 0.60f * (1.0f - h01));
+                            float pDirt = (0.03f + 0.25f * strength);
+                            pMoss = std::clamp(pMoss, 0.0f, 0.80f);
+                            pDirt = std::clamp(pDirt, 0.0f, 0.40f);
+
+                            if (base != TerrainMaterial::Metal && base != TerrainMaterial::Crystal && base != TerrainMaterial::Bone) {
+                                if (r01 < pMoss) out = TerrainMaterial::Moss;
+                                else if (r01 < pMoss + pDirt) out = TerrainMaterial::Dirt;
+                            }
+                        } break;
+
+                        case EcosystemKind::CrystalGarden: {
+                            // Crystalline growths, strongest near ridges (heightfield peaks).
+                            float p = (0.05f + 0.45f * strength) * (0.60f + 0.70f * ridge01);
+                            p = std::clamp(p, 0.0f, 0.70f);
+                            if (base != TerrainMaterial::Bone) {
+                                if (r01 < p) out = TerrainMaterial::Crystal;
+                            }
+                        } break;
+
+                        case EcosystemKind::BoneField: {
+                            // Bone dust / ossuary patches.
+                            float p = 0.06f + 0.42f * strength;
+                            if (tombTheme) p += 0.08f;
+                            p = std::clamp(p, 0.0f, 0.75f);
+                            if (base != TerrainMaterial::Metal && base != TerrainMaterial::Crystal) {
+                                if (r01 < p) out = TerrainMaterial::Bone;
+                            }
+                        } break;
+
+                        case EcosystemKind::RustVeins: {
+                            // Metal/rust seams aligned to ridges.
+                            float p = (0.04f + 0.32f * strength) * (0.45f + 0.85f * ridge01);
+                            if (minesTheme) p += 0.05f;
+                            p = std::clamp(p, 0.0f, 0.65f);
+
+                            if (base != TerrainMaterial::Crystal && base != TerrainMaterial::Bone) {
+                                if (r01 < p) out = TerrainMaterial::Metal;
+                            }
+                        } break;
+
+                        case EcosystemKind::AshenRidge: {
+                            // Volcanic stone: basalt/obsidian; stronger on high ridges.
+                            float p = (0.05f + 0.28f * strength) * (0.55f + 0.80f * ridge01);
+                            p = std::clamp(p, 0.0f, 0.70f);
+
+                            if (base != TerrainMaterial::Metal && base != TerrainMaterial::Crystal && base != TerrainMaterial::Bone) {
+                                if (r01 < p) {
+                                    // Deep => more obsidian.
+                                    const bool obs = deep && (((h >> 8) & 1u) != 0u);
+                                    out = obs ? TerrainMaterial::Obsidian : TerrainMaterial::Basalt;
+                                }
+                            }
+                        } break;
+
+                        case EcosystemKind::FloodedGrotto: {
+                            // Damp sediment, favors basins.
+                            float p = (0.06f + 0.30f * strength) * (0.60f + 0.70f * (1.0f - h01));
+                            p = std::clamp(p, 0.0f, 0.55f);
+
+                            if (base != TerrainMaterial::Metal && base != TerrainMaterial::Crystal && base != TerrainMaterial::Bone) {
+                                if (r01 < p) out = TerrainMaterial::Dirt;
+                                else if (cavernTheme && r01 < p + 0.18f * strength) out = TerrainMaterial::Moss;
+                            }
+                        } break;
+
+                        default:
+                            break;
+                    }
+
+                    materialCache[idx] = static_cast<uint8_t>(out);
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Leyline / arcane resonance field (gameplay + UI)
+    // ---------------------------------------------------------------------
+    //
+    // This produces a thin, deterministic "energy network" layered over the
+    // floor plan. It is NOT serialized.
+    //
+    // Drivers:
+    //  - Heightfield ridges (long continuous linework)
+    //  - Ecosystem ecotones/junctions (reinforces boundaries + 3-way nodes)
+    //  - Conductive substrates (metal/crystal bias)
+    //
+    // Output:
+    //  - 0..255 intensity (higher => stronger ambient mana flow)
+    //
+    leylineCache.assign(static_cast<size_t>(width * height), 0u);
+
+    if (branch != DungeonBranch::Camp) {
+        const uint32_t leySeed = hash32(hashCombine(seedKey ^ "LEY"_tag, hfSeed ^ 0xA11CE5EDu));
+
+        auto popcount32 = [](uint32_t v) {
+            int c = 0;
+            while (v) {
+                v &= v - 1u;
+                ++c;
+            }
+            return c;
+        };
+
+        auto smooth = [](float a, float b, float x) {
+            if (b <= a) return 0.0f;
+            const float t = (x - a) / (b - a);
+            return smoothstep01(t);
+        };
+
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const size_t idx = static_cast<size_t>(y * width + x);
+
+                const TileType tt = at(x, y).type;
+                const bool ok = isWalkable(x, y) || (tt == TileType::Chasm);
+                if (!ok) continue;
+
+                const EcosystemKind self = static_cast<EcosystemKind>(ecosystemCache[idx]);
+                uint32_t mask = 0u;
+                int edgeCount = 0;
+
+                auto addMask = [&](EcosystemKind k) {
+                    if (k != EcosystemKind::None) {
+                        mask |= 1u << static_cast<uint32_t>(k);
+                    }
+                };
+
+                addMask(self);
+
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) continue;
+                        const int nx = x + dx;
+                        const int ny = y + dy;
+                        if (!inBounds(nx, ny)) continue;
+
+                        const size_t nidx = static_cast<size_t>(ny * width + nx);
+                        const EcosystemKind nk = static_cast<EcosystemKind>(ecosystemCache[nidx]);
+                        addMask(nk);
+
+                        if (nk != self) {
+                            if (nk != EcosystemKind::None || self != EcosystemKind::None) {
+                                ++edgeCount;
+                            }
+                        }
+                    }
+                }
+
+                const int distinct = popcount32(mask);
+
+                const float fx = (static_cast<float>(x) + 0.5f) / static_cast<float>(std::max(1, width));
+                const float fy = (static_cast<float>(y) + 0.5f) / static_cast<float>(std::max(1, height));
+                const float ridge01 = hfRidge01(hfSeed, fx, fy);
+
+                const uint32_t h = hash32(hashCombine(leySeed, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y))));
+                const float jitter = (rand01(h) - 0.5f) * 0.20f;
+
+                float v = 0.0f;
+
+                // Ridges: narrow, continuous strands.
+                v += 0.72f * smooth(0.78f, 0.93f, ridge01);
+
+                // Ecotones: more energy at biome boundaries.
+                const float edge01 = std::clamp(static_cast<float>(edgeCount) / 8.0f, 0.0f, 1.0f);
+                v += 0.25f * smooth(0.10f, 1.0f, edge01);
+
+                // Junction nodes.
+                if (distinct >= 3) v += 0.16f;
+                else if (distinct == 2) v += 0.06f;
+
+                // Substrate conduction.
+                const TerrainMaterial m = static_cast<TerrainMaterial>(materialCache[idx]);
+                if (m == TerrainMaterial::Metal) v += 0.08f;
+                else if (m == TerrainMaterial::Crystal) v += 0.10f;
+
+                // Chasms act as shallow sinks (levitation paths).
+                if (tt == TileType::Chasm) v += 0.05f;
+
+                v *= 1.0f + jitter;
+                v = std::clamp(v, 0.0f, 1.0f);
+
+                // Sharpen: emphasize hot lines/nodes.
+                v = v * v;
+
+                int out = static_cast<int>(std::round(v * 255.0f));
+                if (out < 8) out = 0; // dead-zone cutoff
+                leylineCache[idx] = static_cast<uint8_t>(clampi(out, 0, 255));
+            }
         }
     }
 
@@ -21707,6 +22187,34 @@ TerrainMaterial Dungeon::materialAt(int x, int y, uint32_t worldSeed, DungeonBra
     ensureMaterials(worldSeed, branch, depth, maxDepth);
     return materialAtCached(x, y);
 }
+
+EcosystemKind Dungeon::ecosystemAtCached(int x, int y) const {
+    if (!inBounds(x, y)) return EcosystemKind::None;
+    const size_t idx = static_cast<size_t>(y * width + x);
+    if (idx >= ecosystemCache.size()) return EcosystemKind::None;
+    const uint8_t v = ecosystemCache[idx];
+    if (v >= static_cast<uint8_t>(EcosystemKind::COUNT)) return EcosystemKind::None;
+    return static_cast<EcosystemKind>(v);
+}
+
+EcosystemKind Dungeon::ecosystemAt(int x, int y, uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const {
+    ensureMaterials(worldSeed, branch, depth, maxDepth);
+    return ecosystemAtCached(x, y);
+}
+
+
+uint8_t Dungeon::leylineAtCached(int x, int y) const {
+    if (!inBounds(x, y)) return 0u;
+    const size_t idx = static_cast<size_t>(y * width + x);
+    if (idx >= leylineCache.size()) return 0u;
+    return leylineCache[idx];
+}
+
+uint8_t Dungeon::leylineAt(int x, int y, uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const {
+    ensureMaterials(worldSeed, branch, depth, maxDepth);
+    return leylineAtCached(x, y);
+}
+
 
 
 bool Dungeon::lineOfSight(int x0, int y0, int x1, int y1) const {

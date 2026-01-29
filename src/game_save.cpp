@@ -898,20 +898,24 @@ void Game::emitNoise(Vec2i pos, int volume) {
     const int W = dung.width;
     auto idx = [&](int x, int y) { return y * W + x; };
 
+    // Ensure deterministic substrate cache so sound propagation can incorporate
+    // material acoustics (moss/dirt dampen; metal/crystal carry) and to populate
+    // the procedural ecosystem cache used for biome-specific acoustics.
+    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+
     // Compute the max effective volume we might need for the loudest-hearing monster.
     int maxEff = volume;
     for (const auto& m : ents) {
         if (m.id == playerId_) continue;
         if (m.hp <= 0) continue;
         if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
-        const int eff = volume + (entityHearing(m.kind) - BASE_HEARING);
+        const int hearing = entityHearingDelta(m.kind);
+        const EcosystemKind eco = dung.ecosystemAtCached(m.pos.x, m.pos.y);
+        const int mask = ecosystemFx(eco).hearingMaskDelta;
+        const int eff = volume + hearing - mask;
         if (eff > maxEff) maxEff = eff;
     }
     maxEff = std::max(0, maxEff);
-
-    // Ensure deterministic substrate cache so sound propagation can incorporate
-    // material acoustics (moss/dirt dampen; metal/crystal carry).
-    dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
     // Dungeon-aware propagation: walls/secret doors block sound; doors + materials muffle/carry.
     const std::vector<int> sound = dung.computeSoundMap(pos.x, pos.y, maxEff);
@@ -942,7 +946,10 @@ void Game::emitNoise(Vec2i pos, int volume) {
         if (m.kind == EntityKind::Shopkeeper && !m.alerted) continue;
         if (!dung.inBounds(m.pos.x, m.pos.y)) continue;
 
-        const int eff = volume + (entityHearing(m.kind) - BASE_HEARING);
+        const int hearing = entityHearingDelta(m.kind);
+        const EcosystemKind eco = dung.ecosystemAtCached(m.pos.x, m.pos.y);
+        const int mask = ecosystemFx(eco).hearingMaskDelta;
+        const int eff = volume + hearing - mask;
         if (eff <= 0) continue;
 
         const int d = sound[static_cast<size_t>(idx(m.pos.x, m.pos.y))];

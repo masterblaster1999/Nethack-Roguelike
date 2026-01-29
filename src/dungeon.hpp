@@ -174,6 +174,187 @@ inline TerrainMaterialFx terrainMaterialFx(TerrainMaterial m) {
     return fx;
 }
 
+// Procedural ecosystem / biome-seed field (non-serialized).
+//
+// This is a deterministic, per-tile classification computed from the run seed + depth
+// and used to bias cosmetic substrate overlays and spawn variety.
+//
+// NOTE: This is intentionally NOT serialized. It is re-derived on demand alongside
+// the TerrainMaterial cache (Dungeon::ensureMaterials).
+enum class EcosystemKind : uint8_t {
+    None = 0,
+    FungalBloom,
+    CrystalGarden,
+    BoneField,
+    RustVeins,
+    AshenRidge,
+    FloodedGrotto,
+    COUNT,
+};
+
+inline const char* ecosystemKindName(EcosystemKind e) {
+    switch (e) {
+        case EcosystemKind::FungalBloom:   return "FUNGAL_BLOOM";
+        case EcosystemKind::CrystalGarden: return "CRYSTAL_GARDEN";
+        case EcosystemKind::BoneField:     return "BONE_FIELD";
+        case EcosystemKind::RustVeins:     return "RUST_VEINS";
+        case EcosystemKind::AshenRidge:    return "ASHEN_RIDGE";
+        case EcosystemKind::FloodedGrotto: return "FLOODED_GROTTO";
+        default:                           return "NONE";
+    }
+}
+
+// Player-facing label (spaces instead of underscores).
+inline const char* ecosystemKindLabel(EcosystemKind e) {
+    switch (e) {
+        case EcosystemKind::FungalBloom:   return "FUNGAL BLOOM";
+        case EcosystemKind::CrystalGarden: return "CRYSTAL GARDEN";
+        case EcosystemKind::BoneField:     return "BONE FIELD";
+        case EcosystemKind::RustVeins:     return "RUST VEINS";
+        case EcosystemKind::AshenRidge:    return "ASHEN RIDGE";
+        case EcosystemKind::FloodedGrotto: return "FLOODED GROTTO";
+        default:                           return "NONE";
+    }
+}
+
+// A short one-line flavor string when the player first enters an ecosystem region.
+// (Used sparingly; intended to be evocative but not spammy.)
+inline const char* ecosystemKindFlavor(EcosystemKind e) {
+    switch (e) {
+        case EcosystemKind::FungalBloom:   return "SPORES HUSH YOUR STEPS; A THICK HAZE STINGS YOUR EYES.";
+        case EcosystemKind::CrystalGarden: return "CRYSTALS GLINT IN THE DARK; SHARDS THROW LIGHT FARTHER.";
+        case EcosystemKind::BoneField:     return "BONE DUST DRIES THE AIR; SOUNDS CARRY.";
+        case EcosystemKind::RustVeins:     return "RUST DUST HANGS IN THE AIR; CAUSTIC FUMES CLING.";
+        case EcosystemKind::AshenRidge:    return "ASH AND HEAT WARP THE AIR; EMBERS CATCH EASILY.";
+        case EcosystemKind::FloodedGrotto: return "MIST VEILS THE STONE; WATER SCRUBS THE AIR CLEAN.";
+        default:                           return "";
+    }
+}
+
+
+// Gameplay-adjacent ecology modifiers for ecosystems.
+//
+// These are intentionally small nudges (similar to TerrainMaterialFx) that make
+// biome regions feel different tactically without turning them into hard rules:
+//   - sound/stealth + scent tracking
+//   - microclimate: local visibility (FOV) and how long hazards (gas/fire) tend to linger
+struct EcosystemFx {
+    // Stealth / tracking
+    int footstepNoiseDelta = 0;   // add to TerrainMaterialFx::footstepNoiseDelta
+    int scentDecayDelta = 0;      // add to TerrainMaterialFx::scentDecayDelta
+    int scentSpreadDropDelta = 0; // add to TerrainMaterialFx::scentSpreadDropDelta
+    int hearingMaskDelta = 0;     // + = harder to hear; - = echoes amplify
+    int listenRangeDelta = 0;     // add to player #listen range while standing on this tile
+
+    // Microclimate (small, local, deterministic).
+    int fovDelta = 0;                 // add to player FOV radius while standing on this tile
+    int confusionGasQuenchDelta = 0;  // + = dissipates faster; - = dense clouds linger longer
+    int poisonGasQuenchDelta = 0;
+    int corrosiveGasQuenchDelta = 0;
+
+    int confusionGasSpreadDelta = 0;  // add to base neighbor spread power
+    int poisonGasSpreadDelta = 0;
+    int corrosiveGasSpreadDelta = 0;
+
+    int fireQuenchDelta = 0;          // + = fire decays faster; - = strong fires linger
+    int fireSpreadMulPct = 100;       // multiplier to fire spread chance (percent; default 100)
+};
+
+inline EcosystemFx ecosystemFx(const EcosystemKind e)
+{
+    EcosystemFx fx;
+    switch (e) {
+        case EcosystemKind::FungalBloom:
+            fx.footstepNoiseDelta = -1;
+            fx.scentDecayDelta = +2;
+            fx.scentSpreadDropDelta = -1;
+            fx.hearingMaskDelta = +1;
+            fx.listenRangeDelta = -1;
+            fx.fovDelta = -1;
+            fx.confusionGasQuenchDelta = -1;
+            fx.poisonGasQuenchDelta = -1;
+            fx.confusionGasSpreadDelta = +1;
+            fx.poisonGasSpreadDelta = +1;
+            fx.fireQuenchDelta = +1;
+            fx.fireSpreadMulPct = 90;
+            break;
+        case EcosystemKind::CrystalGarden:
+            fx.footstepNoiseDelta = +1;
+            fx.scentDecayDelta = -1;
+            fx.scentSpreadDropDelta = +1;
+            fx.hearingMaskDelta = -1;
+            fx.listenRangeDelta = +1;
+            fx.fovDelta = +1;
+            fx.fireSpreadMulPct = 80;
+            break;
+        case EcosystemKind::BoneField:
+            fx.footstepNoiseDelta = +1;
+            fx.scentDecayDelta = -1;
+            fx.scentSpreadDropDelta = 0;
+            fx.hearingMaskDelta = -1;
+            fx.listenRangeDelta = +1;
+            fx.fireSpreadMulPct = 100;
+            break;
+        case EcosystemKind::RustVeins:
+            fx.footstepNoiseDelta = +1;
+            fx.scentDecayDelta = 0;
+            fx.scentSpreadDropDelta = 0;
+            fx.hearingMaskDelta = +1;
+            fx.listenRangeDelta = -1;
+            fx.fovDelta = -1;
+            fx.corrosiveGasQuenchDelta = -1;
+            fx.corrosiveGasSpreadDelta = +1;
+            fx.fireSpreadMulPct = 90;
+            break;
+        case EcosystemKind::AshenRidge:
+            fx.footstepNoiseDelta = +1;
+            fx.scentDecayDelta = -2;
+            fx.scentSpreadDropDelta = +1;
+            fx.hearingMaskDelta = +1;
+            fx.listenRangeDelta = -1;
+            fx.fovDelta = -1;
+            fx.confusionGasQuenchDelta = +1;
+            fx.poisonGasQuenchDelta = +1;
+            fx.corrosiveGasQuenchDelta = +1;
+            fx.confusionGasSpreadDelta = -1;
+            fx.poisonGasSpreadDelta = -1;
+            fx.fireQuenchDelta = -1;
+            fx.fireSpreadMulPct = 130;
+            break;
+        case EcosystemKind::FloodedGrotto:
+            fx.footstepNoiseDelta = +2;
+            fx.scentDecayDelta = -2;
+            fx.scentSpreadDropDelta = +2;
+            fx.hearingMaskDelta = +2;
+            fx.listenRangeDelta = -2;
+            fx.fovDelta = -1;
+            fx.confusionGasQuenchDelta = +2;
+            fx.poisonGasQuenchDelta = +2;
+            fx.corrosiveGasQuenchDelta = +1;
+            fx.confusionGasSpreadDelta = -1;
+            fx.poisonGasSpreadDelta = -1;
+            fx.corrosiveGasSpreadDelta = -1;
+            fx.fireQuenchDelta = +2;
+            fx.fireSpreadMulPct = 60;
+            break;
+        case EcosystemKind::None:
+        default:
+            break;
+    }
+    return fx;
+}
+
+
+// A single ecosystem "seed" that influences a radius around its center.
+//
+// Seeds are used as the basis for a soft Voronoi-style region assignment.
+// They are stored (non-serialized) primarily for debug/telemetry.
+struct EcosystemSeed {
+    Vec2i pos{0, 0};
+    EcosystemKind kind = EcosystemKind::None;
+    int radius = 0; // in tiles
+};
+
 struct Tile {
     TileType type = TileType::Wall;
     bool visible = false;
@@ -269,6 +450,19 @@ mutable std::vector<uint8_t> materialCache;
 // Procedural bioluminescent terrain field (cosmetic only; not serialized).
 // Stored as per-tile intensity 0..255 and computed alongside the material cache.
 mutable std::vector<uint8_t> biolumCache;
+
+
+// Procedural ecosystem / biome-seed field (cosmetic + spawn variety; not serialized).
+// Stored as per-tile EcosystemKind ids and computed alongside the material cache.
+mutable std::vector<uint8_t> ecosystemCache;
+// Non-serialized list of biome seed centers (useful for debugging / tuning).
+mutable std::vector<EcosystemSeed> ecosystemSeeds;
+
+
+// Procedural leyline / arcane resonance field (gameplay + UI; not serialized).
+// Stored as per-tile intensity 0..255 and computed alongside the material/ecosystem caches.
+// Higher values represent stronger ambient mana flow.
+mutable std::vector<uint8_t> leylineCache;
 
 
     // Generator hints: optional guaranteed bonus loot spawns (e.g. boulder bridge caches).
@@ -578,6 +772,16 @@ TerrainMaterial materialAt(int x, int y, uint32_t worldSeed, DungeonBranch branc
 TerrainMaterial materialAtCached(int x, int y) const;
 uint8_t biolumAt(int x, int y, uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const;
 uint8_t biolumAtCached(int x, int y) const;
+
+EcosystemKind ecosystemAt(int x, int y, uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const;
+EcosystemKind ecosystemAtCached(int x, int y) const;
+const std::vector<EcosystemSeed>& ecosystemSeedsCached() const { return ecosystemSeeds; }
+
+// Procedural leyline / arcane resonance intensity (0..255), computed alongside materials.
+// Call ensureMaterials() before using leylineAtCached() in tight loops.
+uint8_t leylineAt(int x, int y, uint32_t worldSeed, DungeonBranch branch, int depth, int maxDepth) const;
+uint8_t leylineAtCached(int x, int y) const;
+
 int materialCellSize() const { return materialCacheCell; }
 
 

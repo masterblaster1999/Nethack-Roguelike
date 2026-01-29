@@ -13,8 +13,29 @@
 #include "sigil_gen.hpp"
 #include "ident_gen.hpp"
 #include "shop_profile_gen.hpp"
+#include "ecosystem_loot.hpp"
 #include "shrine_profile_gen.hpp"
 #include "victory_gen.hpp"
+
+struct GameTestAccess {
+    static Dungeon& dung(Game& g) { return g.dung; }
+    static const Dungeon& dung(const Game& g) { return g.dung; }
+
+    struct CraftProbe {
+        uint32_t sig = 0;
+        ItemKind kind = ItemKind::Dagger;
+        EcosystemKind eco = EcosystemKind::None;
+    };
+
+    static CraftProbe probeCraft(Game& g, const Item& a, const Item& b) {
+        const Game::CraftComputed cc = g.computeCraftComputed(a, b);
+        CraftProbe p;
+        p.sig = cc.out.spriteSeed;
+        p.kind = cc.out.kind;
+        p.eco = cc.ecosystem;
+        return p;
+    }
+};
 
 #include <cctype>
 #include <filesystem>
@@ -202,6 +223,120 @@ bool test_scent_field_wind_bias() {
     return true;
 }
 
+bool test_ecosystem_stealth_fx_sanity() {
+    // Basic invariants for the ecosystem stealth ecology table.
+    // (This guards against accidental all-zero or sign-flip regressions.)
+
+    {
+        const EcosystemFx fx = ecosystemFx(EcosystemKind::FungalBloom);
+        CHECK(fx.footstepNoiseDelta < 0);
+        CHECK(fx.hearingMaskDelta > 0);
+        CHECK(fx.scentDecayDelta <= 0);
+    }
+
+    {
+        const EcosystemFx fx = ecosystemFx(EcosystemKind::CrystalGarden);
+        CHECK(fx.hearingMaskDelta < 0);
+        CHECK(fx.listenRangeDelta > 0);
+    }
+
+    {
+        const EcosystemFx fx = ecosystemFx(EcosystemKind::FloodedGrotto);
+        CHECK(fx.footstepNoiseDelta >= 2);
+        CHECK(fx.scentDecayDelta > 0);
+        CHECK(fx.hearingMaskDelta > 0);
+        CHECK(fx.listenRangeDelta < 0);
+    }
+
+    return true;
+}
+
+
+bool test_ecosystem_weapon_ego_loot_bias() {
+    // Guardrails for the ecosystem->ego weight table.
+    // These keep biome flavor stable and prevent accidental sign flips.
+
+    CHECK(ecoWeaponEgoWeightDelta(EcosystemKind::FungalBloom, ItemEgo::Venom) > 0);
+    CHECK(ecoWeaponEgoWeightDelta(EcosystemKind::AshenRidge, ItemEgo::Flaming) > 0);
+    CHECK(ecoWeaponEgoWeightDelta(EcosystemKind::RustVeins, ItemEgo::Corrosive) > 0);
+
+    // Flooded grotto "quenches" fire brands.
+    CHECK(ecoWeaponEgoWeightDelta(EcosystemKind::FloodedGrotto, ItemEgo::Flaming) < 0);
+
+    // None should be neutral.
+    CHECK(ecoWeaponEgoWeightDelta(EcosystemKind::None, ItemEgo::Venom) == 0);
+
+    // Chance multipliers are intentionally mild.
+    CHECK(ecoWeaponEgoChanceMul(EcosystemKind::CrystalGarden) >= 1.0f);
+    CHECK(ecoWeaponEgoChanceMul(EcosystemKind::FloodedGrotto) <= 1.0f);
+
+    return true;
+}
+
+
+bool test_proc_leylines_basic() {
+    // Basic sanity + determinism checks for the procedural leyline field.
+    //
+    // This is intentionally *not* a brittle golden-hash test: we only guard
+    // against degenerate outputs (all-zero) and non-determinism.
+
+    const uint32_t seedA = 0xA11CE5EDu;
+    const uint32_t seedB = 0xA11CE5EEu;
+
+    auto fillFloor = [](Dungeon& d) {
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                Tile& t = d.at(x, y);
+                t.type = TileType::Floor;
+                t.explored = true;
+                t.visible = true;
+            }
+        }
+    };
+
+    Dungeon d(60, 40);
+    fillFloor(d);
+    d.ensureMaterials(seedA, DungeonBranch::Main, 7, DUNGEON_MAX_DEPTH);
+
+    int non0 = 0;
+    int maxV = 0;
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const int v = static_cast<int>(d.leylineAtCached(x, y));
+            if (v > 0) ++non0;
+            if (v > maxV) maxV = v;
+        }
+    }
+
+    // Guardrails: should not collapse to all-zero, and should have at least
+    // one reasonably strong line/node on a medium map.
+    CHECK(non0 > (d.width * d.height) / 30);
+    CHECK(maxV >= 180);
+
+    // Determinism: repeated ensureMaterials calls with the same key should not change values.
+    const uint8_t sample0 = d.leylineAtCached(10, 10);
+    d.ensureMaterials(seedA, DungeonBranch::Main, 7, DUNGEON_MAX_DEPTH);
+    CHECK(d.leylineAtCached(10, 10) == sample0);
+
+    // Variation: changing the seed should change the field somewhere.
+    Dungeon d2(60, 40);
+    fillFloor(d2);
+    d2.ensureMaterials(seedB, DungeonBranch::Main, 7, DUNGEON_MAX_DEPTH);
+
+    bool anyDiff = false;
+    for (int y = 0; y < d.height && !anyDiff; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            if (d2.leylineAtCached(x, y) != d.leylineAtCached(x, y)) {
+                anyDiff = true;
+                break;
+            }
+        }
+    }
+    CHECK(anyDiff);
+
+    return true;
+}
+
 bool test_new_game_determinism() {
     Game a;
     a.newGame(123456u);
@@ -381,6 +516,41 @@ bool test_action_info_view_turn_tokens() {
 
 
 
+bool test_extended_command_replay_record_requests() {
+    Game g;
+    g.newGame(10101u);
+
+    // Start recording via the command prompt.
+    g.handleAction(Action::Command);
+    CHECK(g.isCommandOpen());
+
+    g.commandTextInput("record my_test_replay.prr");
+    g.handleAction(Action::Confirm);
+    CHECK(!g.isCommandOpen());
+
+    CHECK(g.replayRecordStartRequested());
+    CHECK(g.replayRecordStartPath() == "my_test_replay.prr");
+    g.clearReplayRecordStartRequest();
+
+    // Stop recording via command prompt.
+    // (We mark the indicator active to simulate main.cpp turning it on.)
+    g.setReplayRecordingIndicator(true, "my_test_replay.prr");
+
+    g.handleAction(Action::Command);
+    CHECK(g.isCommandOpen());
+
+    g.commandTextInput("stoprecord");
+    g.handleAction(Action::Confirm);
+    CHECK(!g.isCommandOpen());
+
+    CHECK(g.replayRecordStopRequested());
+    g.clearReplayRecordStopRequest();
+
+    return true;
+}
+
+
+
 bool test_noise_localization_determinism() {
     // Basic sanity: threshold sounds should yield a non-zero search radius.
     const Vec2i src{10, 10};
@@ -531,6 +701,87 @@ bool test_crafting_procedural_determinism() {
 
     // Forging path should produce wearable gear.
     CHECK(isWearableGear(o1.out.kind));
+
+    return true;
+}
+
+bool test_crafting_ecosystem_catalyst_changes_outcome() {
+    // Crafting should be deterministic, but *location* now matters: ecosystems act as catalysts.
+    // This test verifies that the same ingredients produce a different sigil when crafted
+    // outside a biome vs inside a biome (while keeping workstation constant).
+
+    Game g;
+    g.newGame(0xC0FFEEu);
+
+    Dungeon& d = GameTestAccess::dung(g);
+
+    // Build ecosystem cache.
+    d.ensureMaterials(g.materialWorldSeed(), g.branch(), g.materialDepth(), g.dungeonMaxDepth());
+
+    auto roomTypeAtLocal = [&](Vec2i p) -> RoomType {
+        for (const auto& r : d.rooms) {
+            if (r.contains(p)) return r.type;
+        }
+        return RoomType::Normal;
+    };
+
+    Vec2i posNone{-1, -1};
+    Vec2i posEco{-1, -1};
+    EcosystemKind ecoKind = EcosystemKind::None;
+
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            if (!d.isWalkable(x, y)) continue;
+            Vec2i p{x, y};
+            if (roomTypeAtLocal(p) != RoomType::Normal) continue; // keep workstation constant
+            const EcosystemKind e = d.ecosystemAtCached(x, y);
+            if (e == EcosystemKind::None && posNone.x < 0) posNone = p;
+            if (e != EcosystemKind::None && posEco.x < 0) { posEco = p; ecoKind = e; }
+            if (posNone.x >= 0 && posEco.x >= 0) break;
+        }
+        if (posNone.x >= 0 && posEco.x >= 0) break;
+    }
+
+    CHECK(posNone.x >= 0);
+    CHECK(posEco.x >= 0);
+    CHECK(ecoKind != EcosystemKind::None);
+
+    Item a;
+    a.id = 1;
+    a.kind = ItemKind::Dagger;
+    a.count = 1;
+    a.charges = 0;
+    a.enchant = 0;
+    a.buc = 0;
+    a.spriteSeed = 0x11111111u;
+    a.shopPrice = 0;
+    a.shopDepth = 0;
+    a.ego = ItemEgo::None;
+    a.flags = 0;
+
+    Item b;
+    b.id = 2;
+    b.kind = ItemKind::Rock;
+    b.count = 1;
+    b.charges = 0;
+    b.enchant = 0;
+    b.buc = 0;
+    b.spriteSeed = 0x22222222u;
+    b.shopPrice = 0;
+    b.shopDepth = 0;
+    b.ego = ItemEgo::None;
+    b.flags = 0;
+
+    g.playerMut().pos = posNone;
+    const GameTestAccess::CraftProbe ccNone = GameTestAccess::probeCraft(g, a, b);
+    CHECK(ccNone.eco == EcosystemKind::None);
+
+    g.playerMut().pos = posEco;
+    const GameTestAccess::CraftProbe ccEco = GameTestAccess::probeCraft(g, a, b);
+    CHECK(ccEco.eco == ecoKind);
+
+    // Catalyst salting should change the sigil/output seed.
+    CHECK(ccNone.sig != ccEco.sig);
 
     return true;
 }
@@ -1180,6 +1431,8 @@ int main(int argc, char** argv) {
     std::vector<TestCase> tests = {
         {"new_game_determinism", test_new_game_determinism},
         {"scent_field_wind_bias", test_scent_field_wind_bias},
+        {"ecosystem_stealth_fx", test_ecosystem_stealth_fx_sanity},
+        {"proc_leylines",        test_proc_leylines_basic},
         {"wfc_solver_basic",     test_wfc_solver_basic},
         {"wfc_solver_unsat",     test_wfc_solver_unsat_forced_contradiction},
         {"save_load_roundtrip",  test_save_load_roundtrip},
@@ -1187,10 +1440,12 @@ int main(int argc, char** argv) {
         {"settings_minimap_zoom", test_settings_minimap_zoom_clamp},
         {"action_palette",  test_action_palette_executes_actions},
         {"action_info_view_turn", test_action_info_view_turn_tokens},
+        {"replay_record_cmd", test_extended_command_replay_record_requests},
         {"noise_localization",  test_noise_localization_determinism},
         {"proc_spells",         test_proc_spell_generation_determinism},
         {"proc_monster_codename", test_proc_monster_codename_determinism},
         {"crafting_procgen",  test_crafting_procedural_determinism},
+        {"crafting_ecosystem_catalysts", test_crafting_ecosystem_catalyst_changes_outcome},
         {"trap_salvage_procgen", test_trap_salvage_procgen_determinism},
         {"graffiti_procgen", test_graffiti_procgen_determinism},
         {"sigil_procgen",    test_sigil_procgen_determinism},

@@ -938,6 +938,10 @@ static std::vector<std::string> extendedCommandList() {
         "bind",
         "unbind",
         "reload",
+        "record",
+        "rec",
+        "stoprecord",
+        "stoprec",
         "save",
         "load",
         "loadauto",
@@ -1023,6 +1027,8 @@ static const ExtendedCommandUiMeta* extendedCommandUiMetaFor(const std::string& 
         {"save",     Action::Save,      "Save game"},
         {"load",     Action::Load,      "Load save"},
         {"loadauto", Action::LoadAuto, "Load autosave"},
+        {"record",   Action::None,     "Start replay recording (.prr file)"},
+        {"stoprecord", Action::None,   "Stop replay recording"},
         {"restart",  Action::Restart,   "Restart run"},
         {"scores",   Action::Scores,    "Show high scores"},
 
@@ -1522,6 +1528,7 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.pushSystemMessage("INFO: pos [x y] | what [x y] | mapstats (TIP: uses LOOK cursor when active)");
         game.pushSystemMessage("SLOTS: slot [name], save [slot], load [slot], loadauto [slot], saves");
         game.pushSystemMessage("EXPORT: exportlog/exportmap/export/exportall/dump");
+        game.pushSystemMessage("REPLAY: record [path] | stoprecord");
         game.pushSystemMessage("MARKS: mark [note|danger|loot] <label> | unmark | marks | travel <index|label>");
         game.pushSystemMessage("ENGRAVE: engrave <text> (costs a turn; wards: 'ELBERETH' | 'SALT' | 'IRON' | 'FIRE')");
         game.pushSystemMessage("SOUND: shout | whistle | listen | throwvoice [x y] (TIP: LOOK cursor works)");
@@ -1589,6 +1596,41 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         game.pushSystemMessage("RELOAD REQUESTED.");
         return;
     }
+
+    if (cmd == "record" || cmd == "rec") {
+        if (game.replayRecordingActive()) {
+            game.pushSystemMessage("ALREADY RECORDING A REPLAY.");
+            if (!game.replayRecordingPath().empty()) {
+                game.pushSystemMessage("PATH: " + game.replayRecordingPath());
+            }
+            game.pushSystemMessage("TIP: use stoprecord to finish + close the replay file.");
+            return;
+        }
+
+        // Optional output path: join remaining tokens to preserve spaces.
+        std::string outPath;
+        if (toks.size() > 1) {
+            for (size_t i = 1; i < toks.size(); ++i) {
+                if (i > 1) outPath += " ";
+                outPath += toks[i];
+            }
+            outPath = trim(outPath);
+        }
+
+        game.requestReplayRecordStart(outPath);
+        return;
+    }
+
+    if (cmd == "stoprecord" || cmd == "stoprec") {
+        if (!game.replayRecordingActive()) {
+            game.pushSystemMessage("NOT RECORDING.");
+            game.pushSystemMessage("TIP: use record [path] to start recording a replay.");
+            return;
+        }
+        game.requestReplayRecordStop();
+        return;
+    }
+
 
     if (cmd == "bind" || cmd == "unbind") {
         if (toks.size() <= 1) {
@@ -2782,6 +2824,48 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
         if (top[i].count <= 0 || materialTotal <= 0) break;
         const int materialPct = static_cast<int>(std::round(100.0 * static_cast<double>(top[i].count) / static_cast<double>(materialTotal)));
         ss << " | " << terrainMaterialName(static_cast<TerrainMaterial>(top[i].idx)) << " " << materialPct << "%";
+    }
+
+    game.pushSystemMessage(ss.str());
+}
+
+{
+    // Procedural ecosystems (biome seeds): distribution across walkable tiles.
+    // Uses the same deterministic cache as materials.
+    d.ensureMaterials(game.materialWorldSeed(), game.branch(), game.materialDepth(), game.dungeonMaxDepth());
+
+    std::vector<int> counts(static_cast<size_t>(EcosystemKind::COUNT), 0);
+    int ecoTotal = 0;
+
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const Tile& t = d.at(x, y);
+            if (t.type != TileType::Floor) continue;
+            const EcosystemKind e = d.ecosystemAtCached(x, y);
+            counts[static_cast<size_t>(e)] += 1;
+            ecoTotal += 1;
+        }
+    }
+
+    struct Entry { int idx; int count; };
+    std::vector<Entry> top;
+    top.reserve(counts.size());
+    for (int i = 0; i < static_cast<int>(counts.size()); ++i) {
+        top.push_back({i, counts[static_cast<size_t>(i)]});
+    }
+    std::sort(top.begin(), top.end(), [](const Entry& a, const Entry& b) { return a.count > b.count; });
+
+    std::ostringstream ss;
+    ss << "ECOSYSTEMS";
+    ss << " | SEEDS " << d.ecosystemSeedsCached().size();
+
+    int shown = 0;
+    for (const auto& e : top) {
+        if (e.idx == static_cast<int>(EcosystemKind::None)) continue;
+        if (e.count <= 0 || ecoTotal <= 0) break;
+        const int pct = static_cast<int>(std::round(100.0 * static_cast<double>(e.count) / static_cast<double>(ecoTotal)));
+        ss << " | " << ecosystemKindName(static_cast<EcosystemKind>(e.idx)) << " " << pct << "%";
+        if (++shown >= 3) break;
     }
 
     game.pushSystemMessage(ss.str());

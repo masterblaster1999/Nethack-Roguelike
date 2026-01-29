@@ -454,7 +454,9 @@ void Game::refreshHearingPreview() {
 
             // Substrate materials subtly affect how much sound you make while moving.
             const TerrainMaterial m = dung.materialAtCached(x, y);
-            const int matDelta = terrainMaterialFx(m).footstepNoiseDelta;
+            int matDelta = terrainMaterialFx(m).footstepNoiseDelta;
+            const EcosystemKind eco = dung.ecosystemAtCached(x, y);
+            matDelta += ecosystemFx(eco).footstepNoiseDelta;
 
             if (sneakingNow) {
                 vol -= reduce;
@@ -646,6 +648,39 @@ if (!hallu) {
 }
 
 ss << baseDesc;
+
+// Procedural ecosystem tag (non-spoiler, just a regional label).
+if (!hallu && branch_ != DungeonBranch::Camp) {
+    const bool allowEco =
+        (t.type == TileType::Wall) || (t.type == TileType::DoorSecret) ||
+        (t.type == TileType::Floor) || (t.type == TileType::Pillar) ||
+        (t.type == TileType::Boulder) || (t.type == TileType::Fountain) ||
+        (t.type == TileType::Altar) || (t.type == TileType::StairsUp) ||
+        (t.type == TileType::StairsDown);
+
+    if (allowEco) {
+        // Use cached procedural fields for a single tile inspection.
+        // (ensureMaterials() is cheap when the cache key already matches.)
+        dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+
+        const EcosystemKind eco = dung.ecosystemAtCached(p.x, p.y);
+        if (eco != EcosystemKind::None) {
+            ss << " | ECO: " << ecosystemKindLabel(eco);
+
+            // Microclimate hint: some ecosystems slightly alter visibility.
+            const EcosystemFx fx = ecosystemFx(eco);
+            if (fx.fovDelta != 0) {
+                ss << " | VIS:" << (fx.fovDelta > 0 ? "+" : "") << fx.fovDelta;
+            }
+        }
+
+        const uint8_t ley = dung.leylineAtCached(p.x, p.y);
+        if (ley >= 120u) {
+            const char* tier = (ley >= 220u) ? "STRONG" : (ley >= 170u) ? "BRIGHT" : "FAINT";
+            ss << " | LEY: " << tier;
+        }
+    }
+}
 
 
     // Procedural shrine patron tag for altars.

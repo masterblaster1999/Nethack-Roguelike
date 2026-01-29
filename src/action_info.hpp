@@ -33,6 +33,16 @@ inline constexpr ActionInfo kActionInfoTable[] = {
     {Action::DownLeft,  "down_left",  "Move southwest"},
     {Action::DownRight, "down_right", "Move southeast"},
 
+    {Action::RunUp,        "run_up",         "Run north (auto-run)"},
+    {Action::RunDown,      "run_down",       "Run south (auto-run)"},
+    {Action::RunLeft,      "run_left",       "Run west (auto-run)"},
+    {Action::RunRight,     "run_right",      "Run east (auto-run)"},
+    {Action::RunUpLeft,    "run_up_left",    "Run northwest (auto-run)"},
+    {Action::RunUpRight,   "run_up_right",   "Run northeast (auto-run)"},
+    {Action::RunDownLeft,  "run_down_left",  "Run southwest (auto-run)"},
+    {Action::RunDownRight, "run_down_right", "Run southeast (auto-run)"},
+
+
     // Core actions
     {Action::Confirm, "confirm", "Confirm / interact / select"},
     {Action::Cancel,  "cancel",  "Cancel / close"},
@@ -89,6 +99,12 @@ inline constexpr ActionInfo kActionInfoTable[] = {
     {Action::ToggleVoxelSprites,  "toggle_voxel_sprites", "Toggle 3D voxel sprites"},
     {Action::ToggleFullscreen,    "fullscreen", "Toggle fullscreen"},
     {Action::Screenshot,          "screenshot", "Take screenshot"},
+
+    {Action::ReplayPause,        "replay_pause",      "Replay: pause/unpause playback"},
+    {Action::ReplayStep,         "replay_step",       "Replay: step to next timestamp"},
+    {Action::ReplaySpeedUp,      "replay_speed_up",   "Replay: increase playback speed"},
+    {Action::ReplaySpeedDown,    "replay_speed_down", "Replay: decrease playback speed"},
+
 
     {Action::Save,     "save",      "Save game"},
     {Action::Load,     "load",      "Load save"},
@@ -250,6 +266,29 @@ inline std::string normalizeToken(std::string_view in) {
         {"viewturnright", "view_turn_right"},
         {"turn_right", "view_turn_right"},
         {"turnright", "view_turn_right"},
+
+        {"replay_pause", "replay_pause"},
+        {"replaypause", "replay_pause"},
+        {"pause_replay", "replay_pause"},
+        {"pausereplay", "replay_pause"},
+
+        {"replay_step", "replay_step"},
+        {"replaystep", "replay_step"},
+        {"step_replay", "replay_step"},
+        {"stepreplay", "replay_step"},
+
+        {"replay_speed_up", "replay_speed_up"},
+        {"replay_speedup", "replay_speed_up"},
+        {"replayspeedup", "replay_speed_up"},
+        {"replay_faster", "replay_speed_up"},
+        {"replayfaster", "replay_speed_up"},
+
+        {"replay_speed_down", "replay_speed_down"},
+        {"replay_speeddown", "replay_speed_down"},
+        {"replayspeeddown", "replay_speed_down"},
+        {"replay_slower", "replay_speed_down"},
+        {"replayslower", "replay_speed_down"},
+
 
         {"voxel_sprites", "toggle_voxel_sprites"},
         {"toggle_3d_sprites", "toggle_voxel_sprites"},

@@ -37,6 +37,10 @@ int Game::playerFootstepNoiseVolumeAt(Vec2i pos) const {
         dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
         const TerrainMaterial m = dung.materialAtCached(pos.x, pos.y);
         matDelta = terrainMaterialFx(m).footstepNoiseDelta;
+
+        // Ecosystems add another subtle layer: water splashes, spores hush, crystals crunch.
+        const EcosystemKind eco = dung.ecosystemAtCached(pos.x, pos.y);
+        matDelta += ecosystemFx(eco).footstepNoiseDelta;
     }
 
     if (isSneaking()) {
@@ -407,6 +411,40 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
         // Convenience / QoL: auto-pickup when stepping on items.
         if (autoPickup != AutoPickupMode::Off) {
             (void)autoPickupAtPlayer();
+        }
+
+        // -----------------------------------------------------------------
+        // Ecosystem (biome) discovery callouts.
+        // - Announced once per ecosystem kind per floor (prevents spam).
+        // - Pauses auto-move/auto-explore when you first enter a new biome.
+        // -----------------------------------------------------------------
+        if (branch_ != DungeonBranch::Camp) {
+            dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+            const EcosystemKind eco = dung.ecosystemAtCached(e.pos.x, e.pos.y);
+
+            if (eco != EcosystemKind::None) {
+                const uint32_t bit = (1u << static_cast<uint32_t>(eco));
+                if ((ecosystemSeenMask_ & bit) == 0u) {
+                    ecosystemSeenMask_ |= bit;
+
+                    const bool pausedAuto = (autoMode != AutoMoveMode::None);
+                    if (pausedAuto) cancelAutoMove(true);
+
+                    std::string msg = std::string("BIOME: ") + ecosystemKindLabel(eco) + ".";
+                    if (const char* flavor = ecosystemKindFlavor(eco)) {
+                        if (flavor[0]) {
+                            msg += " ";
+                            msg += flavor;
+                        }
+                    }
+                    if (pausedAuto) msg += " (AUTO-MOVE PAUSED)";
+                    pushMsg(msg, MessageKind::System, true);
+                }
+
+                lastEcosystem_ = eco;
+            } else {
+                lastEcosystem_ = EcosystemKind::None;
+            }
         }
     }
 
@@ -1302,7 +1340,10 @@ void Game::triggerSigilAt(Vec2i pos, Entity& victim) {
         // Sigil parameters are procedurally derived from seed/depth/pos so they are
         // stable per-run without needing extra serialization.
 
-        const sigilgen::SigilSpec spec = sigilgen::makeSigil(seed_, depth_, pos, key);
+        // Sigil parameters should match the seed/depth domain used at spawn time.
+        // In the overworld, sigils are keyed off the per-chunk material seed + danger depth
+        // (see Game::materialWorldSeed/materialDepth), not the Camp hub's branch depth.
+        const sigilgen::SigilSpec spec = sigilgen::makeSigil(materialWorldSeed(), materialDepth(), pos, key);
         if (spec.kind == sigilgen::SigilKind::Unknown) return;
 
         auto ensureField = [&](std::vector<uint8_t>& field) {
@@ -4314,4 +4355,346 @@ bool Game::drinkFromFountain() {
             return true;
         }
     }
+}
+
+
+bool Game::harvestEcosystemNodeAtPlayer() {
+    const Vec2i pos = player().pos;
+
+    // Find a harvestable node underfoot.
+    int giIdx = -1;
+    for (int i = 0; i < static_cast<int>(ground.size()); ++i) {
+        if (ground[i].pos.x != pos.x || ground[i].pos.y != pos.y) continue;
+        if (!isEcosystemNodeKind(ground[i].item.kind)) continue;
+        giIdx = i;
+        break;
+    }
+
+    if (giIdx < 0) return false;
+
+    Item& node = ground[giIdx].item;
+    const ItemKind kind = node.kind;
+
+    // Remaining uses are stored in charges; default to 1 if unset.
+    if (node.charges <= 0) node.charges = 1;
+
+    // Deterministic per-node RNG (doesn't perturb global rng_ / replay stream).
+    const uint32_t h = hash32(hashCombine(seed_, 0xA2E5E57u ^ static_cast<uint32_t>(depth_) ^ node.spriteSeed ^ (static_cast<uint32_t>(kind) << 8)));
+    RNG hrng(h);
+
+    const int spawnDepth = materialDepth();
+
+    auto bloomField = [&](std::vector<uint8_t>& field, int radius, int centerStrength, bool requireWalkable) {
+        if (radius <= 0 || centerStrength <= 0) return;
+        const int w = dung.width;
+        const int hgt = dung.height;
+        if (w <= 0 || hgt <= 0) return;
+        if (static_cast<int>(field.size()) != w * hgt) field.assign(w * hgt, 0);
+
+        const int r2 = radius * radius;
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                const int d2 = dx * dx + dy * dy;
+                if (d2 > r2) continue;
+
+                const int x = pos.x + dx;
+                const int y = pos.y + dy;
+                if (!dung.inBounds(x, y)) continue;
+                if (requireWalkable && !dung.isWalkable(x, y)) continue;
+
+                // Strongest at center, tapered by distance.
+                const float t = 1.0f - (static_cast<float>(d2) / static_cast<float>(std::max(1, r2)));
+                const int add = std::max(0, static_cast<int>(std::round(static_cast<float>(centerStrength) * t)));
+                if (add <= 0) continue;
+
+                const int idx = y * w + x;
+                const int v = std::min(255, static_cast<int>(field[idx]) + add);
+                field[idx] = static_cast<uint8_t>(v);
+            }
+        }
+    };
+
+    auto clearField = [&](std::vector<uint8_t>& field, int radius) {
+        const int w = dung.width;
+        const int hgt = dung.height;
+        if (w <= 0 || hgt <= 0) return;
+        if (static_cast<int>(field.size()) != w * hgt) return;
+
+        const int r2 = radius * radius;
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                const int d2 = dx * dx + dy * dy;
+                if (d2 > r2) continue;
+
+                const int x = pos.x + dx;
+                const int y = pos.y + dy;
+                if (!dung.inBounds(x, y)) continue;
+
+                const int idx = y * w + x;
+                field[idx] = 0;
+            }
+        }
+    };
+
+    // Choose a tag pair per node type; biased slightly by local substrate.
+    auto pickShardTag = [&](ItemKind k, TerrainMaterial mat) -> crafttags::Tag {
+        switch (k) {
+            case ItemKind::SporePod: {
+                if (mat == TerrainMaterial::Moss || mat == TerrainMaterial::Dirt || mat == TerrainMaterial::Swamp) {
+                    return hrng.chance(0.55f) ? crafttags::Tag::Regen : crafttags::Tag::Venom;
+                }
+                return hrng.chance(0.50f) ? crafttags::Tag::Venom : crafttags::Tag::Regen;
+            }
+            case ItemKind::CrystalNode: {
+                if (mat == TerrainMaterial::Crystal) return hrng.chance(0.50f) ? crafttags::Tag::Rune : crafttags::Tag::Arc;
+                return hrng.chance(0.34f) ? crafttags::Tag::Shield : (hrng.chance(0.50f) ? crafttags::Tag::Rune : crafttags::Tag::Arc);
+            }
+            case ItemKind::BonePile: {
+                return hrng.chance(0.55f) ? crafttags::Tag::Clarity : crafttags::Tag::Daze;
+            }
+            case ItemKind::RustVent: {
+                if (mat == TerrainMaterial::Rust || mat == TerrainMaterial::Iron) return hrng.chance(0.55f) ? crafttags::Tag::Alch : crafttags::Tag::Stone;
+                return hrng.chance(0.45f) ? crafttags::Tag::Stone : crafttags::Tag::Alch;
+            }
+            case ItemKind::AshVent: {
+                if (mat == TerrainMaterial::Basalt || mat == TerrainMaterial::Obsidian) return hrng.chance(0.60f) ? crafttags::Tag::Ember : crafttags::Tag::Stone;
+                return hrng.chance(0.55f) ? crafttags::Tag::Stone : crafttags::Tag::Ember;
+            }
+            case ItemKind::GrottoSpring: {
+                if (mat == TerrainMaterial::Water) return hrng.chance(0.55f) ? crafttags::Tag::Aurora : crafttags::Tag::Regen;
+                return hrng.chance(0.50f) ? crafttags::Tag::Regen : crafttags::Tag::Aurora;
+            }
+            default: break;
+        }
+        return crafttags::Tag::Stone;
+    };
+
+    const TerrainMaterial mat = dung.materialAtCached(pos.x, pos.y);
+
+    // Create loot: one Essence Shard per tap (sometimes more), optionally with a small themed bonus.
+    auto giveItem = [&](Item it, bool quiet) {
+        it.id = nextItemId++;
+        if (it.spriteSeed == 0) it.spriteSeed = (hash32(hashCombine(seed_, it.id, static_cast<uint32_t>(it.kind))) | 1u);
+        if (!tryStackItem(inv, it)) inv.push_back(it);
+        if (!quiet) {
+            pushMsg(std::string("YOU OBTAIN ") + itemDisplayName(it) + ".", MessageKind::Success, true);
+        }
+    };
+
+    auto giveShard = [&](crafttags::Tag tag, int tier, bool shiny, int count) {
+        Item shard;
+        shard.kind = ItemKind::EssenceShard;
+        shard.count = count;
+        shard.charges = 0;
+        shard.enchant = packEssenceShardEnchant(crafttags::tagIndex(tag), tier, shiny);
+        shard.buc = 0;
+        shard.spriteSeed = (hash32(hashCombine(seed_, 0x5A2D5A2Du, node.spriteSeed, static_cast<uint32_t>(tag), static_cast<uint32_t>(tier))) | 1u);
+        shard.ego = ItemEgo::None;
+        shard.flags = 0;
+        shard.shopPrice = 0;
+        shard.shopDepth = 0;
+        giveItem(shard, false);
+    };
+
+    // Tier scales gently with depth.
+    int tier = 1 + std::max(0, spawnDepth) / 6;
+    if (kind == ItemKind::CrystalNode && hrng.chance(0.22f)) tier += 1;
+    if (spawnDepth >= 10 && hrng.chance(0.12f)) tier += 1;
+    tier = clampi(tier, 1, 8);
+
+    const bool shiny = (kind == ItemKind::CrystalNode) ? hrng.chance(0.18f) : hrng.chance(0.08f);
+
+    int shardCount = 1;
+    if (hrng.chance(0.35f)) shardCount += 1;
+    if (spawnDepth >= 8 && hrng.chance(0.16f)) shardCount += 1;
+    shardCount = clampi(shardCount, 1, 3);
+
+    // Backlash + flavor per node kind.
+    switch (kind) {
+        case ItemKind::SporePod: {
+            pushMsg("YOU CRUSH THE SPORE POD. A NOXIOUS CLOUD BILLOWS!", MessageKind::Warning, true);
+            emitNoise(pos, 6);
+
+            bloomField(confusionGas_, 2, 14 + std::min(8, spawnDepth), true);
+
+            // Mild immediate confusion (the gas does the rest).
+            Entity& p = playerMut();
+            p.effects.confusionTurns = std::max(p.effects.confusionTurns, 2 + spawnDepth / 6);
+
+            pushFxParticle(FXParticlePreset::Poison, pos);
+
+            // Bonus: small chance of antidote/clarity.
+            if (hrng.chance(0.18f)) {
+                Item bonus;
+                bonus.kind = hrng.chance(0.55f) ? ItemKind::PotionAntidote : ItemKind::PotionClarity;
+                bonus.count = 1;
+                bonus.charges = 0;
+                bonus.enchant = 0;
+                bonus.buc = 0;
+                bonus.spriteSeed = hrng.nextU32() | 1u;
+                bonus.ego = ItemEgo::None;
+                bonus.flags = 0;
+                bonus.shopPrice = 0;
+                bonus.shopDepth = 0;
+                giveItem(bonus, false);
+            }
+            break;
+        }
+        case ItemKind::CrystalNode: {
+            pushMsg("YOU PRY LOOSE A CRYSTAL. IT SINGS LIKE A BELL!", MessageKind::Info, true);
+            emitNoise(pos, 10);
+
+            Entity& p = playerMut();
+            p.effects.shieldTurns = std::max(p.effects.shieldTurns, 3 + spawnDepth / 5);
+
+            pushFxParticle(FXParticlePreset::Buff, pos);
+
+            // Bonus: tiny mana bump if relevant.
+            const int manaMax = playerManaMax();
+            if (manaMax > 0 && hrng.chance(0.22f)) {
+                mana_ = std::min(manaMax, mana_ + 1);
+            }
+
+            if (hrng.chance(0.10f)) {
+                Item bonus;
+                bonus.kind = ItemKind::ScrollIdentify;
+                bonus.count = 1;
+                bonus.charges = 0;
+                bonus.enchant = 0;
+                bonus.buc = 0;
+                bonus.spriteSeed = hrng.nextU32() | 1u;
+                bonus.ego = ItemEgo::None;
+                bonus.flags = 0;
+                bonus.shopPrice = 0;
+                bonus.shopDepth = 0;
+                giveItem(bonus, false);
+            }
+            break;
+        }
+        case ItemKind::BonePile: {
+            pushMsg("YOU RATTLE THE BONE PILE. A GREY MIST CURLS UPWARD...", MessageKind::Warning, true);
+            emitNoise(pos, 7);
+
+            // Lethe-ish amnesia shock (mild).
+            applyAmnesiaShock(6 + hrng.range(0, 4));
+
+            // Bonus: a few usable bones.
+            if (hrng.chance(0.30f)) {
+                Item bones;
+                bones.kind = ItemKind::ButcheredBones;
+                bones.count = 1 + (hrng.chance(0.25f) ? 1 : 0);
+                bones.charges = 0;
+                bones.enchant = 0;
+                bones.buc = 0;
+                bones.spriteSeed = hrng.nextU32() | 1u;
+                bones.ego = ItemEgo::None;
+                bones.flags = 0;
+                bones.shopPrice = 0;
+                bones.shopDepth = 0;
+                giveItem(bones, false);
+            }
+            break;
+        }
+        case ItemKind::RustVent: {
+            pushMsg("YOU CHIP AT THE RUST VEIN. A CORROSIVE HISS ESCAPES!", MessageKind::Warning, true);
+            emitNoise(pos, 8);
+
+            bloomField(corrosiveGas_, 2, 14 + std::min(10, spawnDepth), true);
+
+            Entity& p = playerMut();
+            p.effects.corrosionTurns = std::max(p.effects.corrosionTurns, 2 + spawnDepth / 6);
+
+            pushFxParticle(FXParticlePreset::Detect, pos);
+
+            if (hrng.chance(0.14f)) {
+                Item bonus;
+                bonus.kind = ItemKind::AlchemyCatalyst;
+                bonus.count = 1;
+                bonus.charges = 0;
+                bonus.enchant = 0;
+                bonus.buc = 0;
+                bonus.spriteSeed = hrng.nextU32() | 1u;
+                bonus.ego = ItemEgo::None;
+                bonus.flags = 0;
+                bonus.shopPrice = 0;
+                bonus.shopDepth = 0;
+                giveItem(bonus, false);
+            }
+            break;
+        }
+        case ItemKind::AshVent: {
+            pushMsg("YOU PRY OPEN A FISSURE. EMBERS BURST OUT!", MessageKind::Warning, true);
+            emitNoise(pos, 9);
+
+            bloomField(fireField_, 2, 15 + std::min(10, spawnDepth), true);
+
+            Entity& p = playerMut();
+            p.effects.burnTurns = std::max(p.effects.burnTurns, 1 + spawnDepth / 7);
+
+            pushFxParticle(FXParticlePreset::EmberBurst, pos);
+
+            if (hrng.chance(0.12f)) {
+                Item bonus;
+                bonus.kind = ItemKind::FireBomb;
+                bonus.count = 1;
+                bonus.charges = 0;
+                bonus.enchant = 0;
+                bonus.buc = 0;
+                bonus.spriteSeed = hrng.nextU32() | 1u;
+                bonus.ego = ItemEgo::None;
+                bonus.flags = 0;
+                bonus.shopPrice = 0;
+                bonus.shopDepth = 0;
+                giveItem(bonus, false);
+            }
+            break;
+        }
+        case ItemKind::GrottoSpring: {
+            pushMsg("YOU SIP FROM THE SPRING. COOL WATER SOOTHES YOU.", MessageKind::Success, true);
+            emitNoise(pos, 4);
+
+            Entity& p = playerMut();
+            p.hp = std::min(p.hpMax, p.hp + 1 + (hrng.chance(0.35f) ? 1 : 0));
+            p.effects.burnTurns = std::max(0, p.effects.burnTurns - (3 + hrng.range(0, 2)));
+            p.effects.poisonTurns = std::max(0, p.effects.poisonTurns - (2 + hrng.range(0, 2)));
+            p.effects.corrosionTurns = std::max(0, p.effects.corrosionTurns - (3 + hrng.range(0, 2)));
+
+            // The spring clears a small patch of nearby gas.
+            clearField(confusionGas_, 2);
+            clearField(poisonGas_, 2);
+            clearField(corrosiveGas_, 2);
+
+            pushFxParticle(FXParticlePreset::Heal, pos);
+
+            if (hrng.chance(0.10f)) {
+                Item bonus;
+                bonus.kind = ItemKind::PotionHealing;
+                bonus.count = 1;
+                bonus.charges = 0;
+                bonus.enchant = 0;
+                bonus.buc = 0;
+                bonus.spriteSeed = hrng.nextU32() | 1u;
+                bonus.ego = ItemEgo::None;
+                bonus.flags = 0;
+                bonus.shopPrice = 0;
+                bonus.shopDepth = 0;
+                giveItem(bonus, false);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    // Always yield at least one shard per tap.
+    const crafttags::Tag tag = pickShardTag(kind, mat);
+    giveShard(tag, tier, shiny, shardCount);
+
+    // Consume one tap; remove node when exhausted.
+    node.charges -= 1;
+    if (node.charges <= 0) {
+        ground.erase(ground.begin() + giIdx);
+    }
+
+    return true;
 }

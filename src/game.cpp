@@ -1890,6 +1890,10 @@ void Game::newGame(uint32_t seed) {
     autoExploreSearchAnnounced = false;
     autoExploreSearchTriedTurns.clear();
 
+    // Per-floor ecosystem discovery (UI only).
+    lastEcosystem_ = EcosystemKind::None;
+    ecosystemSeenMask_ = 0u;
+
     turnCount = 0;
     naturalRegenCounter = 0;
     lastAutosaveTurn = 0;
@@ -2726,6 +2730,19 @@ bool Game::tryOverworldStep(int dx, int dy) {
     // Auto-explore bookkeeping is transient per-floor; size it to the current dungeon.
     autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
 
+    // Procedural ecosystem discovery is also transient per-floor; initialize it
+    // to the player's current region to avoid noisy "first-step" callouts.
+    lastEcosystem_ = EcosystemKind::None;
+    ecosystemSeenMask_ = 0u;
+    if (!atCamp()) {
+        dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+        const EcosystemKind e0 = dung.ecosystemAtCached(p.pos.x, p.pos.y);
+        lastEcosystem_ = e0;
+        if (e0 != EcosystemKind::None) {
+            ecosystemSeenMask_ |= (1u << static_cast<uint32_t>(e0));
+        }
+    }
+
     recomputeFov();
 
     // Prune the overworld cache around the new position.
@@ -2866,7 +2883,7 @@ void Game::spawnGraffiti() {
 
     // Keep graffiti sparse: it's a flavor accent, not a UI spam source.
     const bool isWilderness = atCamp() && !atHomeCamp();
-    const size_t kMaxGraffitiPerFloor = isWilderness ? 4 : 8;
+    size_t maxGraffitiPerFloor = isWilderness ? 4 : 8;
 
     // Wilderness uses a depth-like scalar derived from distance to camp so that
     // faraway chunks can surface more ominous/ancient lines and sigils.
@@ -2875,6 +2892,29 @@ void Game::spawnGraffiti() {
     // Salt sigil generation with the active material world seed so each chunk has
     // its own glyph "dialect".
     const uint32_t sigilSeed = materialWorldSeed();
+
+    // Ecosystem-aware sigils (biome "heartstones" and boundary confluences).
+    //
+    // These are intentionally RNG-isolated (hash-derived) so they don't perturb other
+    // generation steps that consume the main RNG stream.
+    bool ecoSigilsEnabled = false;
+    if (!isWilderness && branch() != DungeonBranch::Camp) {
+        // Ensure the ecosystem cache exists before we query it.
+        dung.ensureMaterials(sigilSeed, branch(), gDepth, dungeonMaxDepth());
+
+        for (const auto& es : dung.ecosystemSeedsCached()) {
+            if (es.kind != EcosystemKind::None) {
+                ecoSigilsEnabled = true;
+                break;
+            }
+        }
+
+        if (ecoSigilsEnabled) {
+            // Reserve a tiny extra engraving slot so eco-sigils don't crowd out
+            // room flavor graffiti (especially on shrine/vault floors).
+            maxGraffitiPerFloor += 1;
+        }
+    }
 
     auto addGraffiti = [&](Vec2i pos, const std::string& text) {
         if (!dung.inBounds(pos.x, pos.y)) return;
@@ -2896,7 +2936,7 @@ void Game::spawnGraffiti() {
             }
         }
 
-        if (engravings_.size() >= kMaxGraffitiPerFloor) return;
+        if (engravings_.size() >= maxGraffitiPerFloor) return;
 
         Engraving e;
         e.pos = pos;
@@ -2933,7 +2973,7 @@ void Game::spawnGraffiti() {
             }
         }
 
-        if (engravings_.size() >= kMaxGraffitiPerFloor) return;
+        if (engravings_.size() >= maxGraffitiPerFloor) return;
 
         Engraving e;
         e.pos = pos;
@@ -2987,7 +3027,7 @@ void Game::spawnGraffiti() {
 
     // Special rooms get a higher chance of graffiti.
     for (const auto& r : dung.rooms) {
-        if (engravings_.size() >= kMaxGraffitiPerFloor) break;
+        if (engravings_.size() >= maxGraffitiPerFloor) break;
 
         switch (r.type) {
             case RoomType::Shrine: {
@@ -3050,9 +3090,250 @@ void Game::spawnGraffiti() {
         }
     }
 
+    // ------------------------------------------------------------
+    // Ecosystem sigils
+    // ------------------------------------------------------------
+    // If this floor has procedural ecosystems, we occasionally place:
+    //  - A "heartstone" sigil near the core of one biome seed.
+    //  - A rarer "ecotone" sigil at a boundary between two biomes.
+    //
+    // These placements are deterministic (hash-derived) so they don't shift the
+    // main RNG stream, which keeps overall run reproducibility tighter.
+    if (ecoSigilsEnabled && engravings_.size() < maxGraffitiPerFloor) {
+        auto ecoToken = [&](EcosystemKind e) -> const char* {
+            switch (e) {
+                case EcosystemKind::FungalBloom:   return "FUNGAL";
+                case EcosystemKind::CrystalGarden: return "CRYSTAL";
+                case EcosystemKind::BoneField:     return "BONE";
+                case EcosystemKind::RustVeins:     return "RUST";
+                case EcosystemKind::AshenRidge:    return "ASH";
+                case EcosystemKind::FloodedGrotto: return "FLOOD";
+                case EcosystemKind::None:
+                default:
+                    return "";
+            }
+        };
+
+        auto goodBadForEco = [&](EcosystemKind e) -> std::pair<sigilgen::SigilKind, sigilgen::SigilKind> {
+            // "Good" is a mild utility/buff; "bad" is a hazard/chaos.
+            // Note: avoid introducing new sigil kinds here; keep it within the implemented list.
+            switch (e) {
+                case EcosystemKind::FungalBloom:   return {sigilgen::SigilKind::Regen, sigilgen::SigilKind::Venom};
+                case EcosystemKind::CrystalGarden: return {sigilgen::SigilKind::Seer,  sigilgen::SigilKind::Nexus};
+                case EcosystemKind::BoneField:     return {sigilgen::SigilKind::Aegis, sigilgen::SigilKind::Lethe};
+                case EcosystemKind::RustVeins:     return {sigilgen::SigilKind::Aegis, sigilgen::SigilKind::Rust};
+                case EcosystemKind::AshenRidge:    return {sigilgen::SigilKind::Aegis, sigilgen::SigilKind::Ember};
+                case EcosystemKind::FloodedGrotto: return {sigilgen::SigilKind::Seer,  sigilgen::SigilKind::Lethe};
+                case EcosystemKind::None:
+                default:
+                    return {sigilgen::SigilKind::Seer, sigilgen::SigilKind::Nexus};
+            }
+        };
+
+        auto canPlaceOn = [&](Vec2i p) -> bool {
+            if (!dung.inBounds(p.x, p.y)) return false;
+            if (!dung.isWalkable(p.x, p.y)) return false;
+            const TileType tt = dung.at(p.x, p.y).type;
+            if (tt != TileType::Floor) return false;
+            if (p == dung.stairsUp || p == dung.stairsDown) return false;
+            if (roomTypeAt(dung, p) == RoomType::Shop) return false;
+            if (engravingAt(p) != nullptr) return false;
+            return true;
+        };
+
+        auto placeSigil = [&](Vec2i p, sigilgen::SigilKind k, const char* flavorA, const char* flavorB, const char* flavorC) {
+            if (engravings_.size() >= maxGraffitiPerFloor) return;
+            const char* kw = sigilgen::keywordForKind(k);
+            if (!kw || kw[0] == '\0') return;
+
+            const sigilgen::SigilSpec spec = sigilgen::makeSigil(sigilSeed, gDepth, p, kw);
+            std::string insc = kw;
+            if (flavorA && flavorA[0] != '\0') {
+                insc.push_back(' ');
+                insc.append(flavorA);
+            }
+            if (flavorB && flavorB[0] != '\0') {
+                insc.push_back(' ');
+                insc.append(flavorB);
+            }
+            if (flavorC && flavorC[0] != '\0') {
+                insc.push_back(' ');
+                insc.append(flavorC);
+            }
+            if (!spec.epithet.empty()) {
+                insc.push_back(' ');
+                insc.append(spec.epithet);
+            }
+
+            addSigil(p, insc, spec.uses);
+        };
+
+        // ------------------------------------------------------------
+        // Ecotone (biome boundary) sigil
+        // ------------------------------------------------------------
+        if (gDepth >= 3 && engravings_.size() < maxGraffitiPerFloor) {
+            const uint32_t rollH = hash32(hashCombine(hashCombine(sigilSeed, "ECOTONE_SIGIL"_tag), static_cast<uint32_t>(std::max(0, gDepth))) ^ 0xEC0701u);
+            const float chance = std::clamp(0.10f + 0.015f * static_cast<float>(std::min(12, std::max(0, gDepth - 2))), 0.10f, 0.28f);
+            const float r = rand01(rollH);
+
+            if (r < chance) {
+                struct Best {
+                    bool ok = false;
+                    Vec2i pos{ -1, -1 };
+                    EcosystemKind a = EcosystemKind::None;
+                    EcosystemKind b = EcosystemKind::None;
+                    int diversity = 0;
+                    uint32_t h = 0;
+                } best;
+
+                auto consider = [&](int x, int y) {
+                    Vec2i p{x, y};
+                    if (!canPlaceOn(p)) return;
+                    const EcosystemKind e0 = dung.ecosystemAtCached(x, y);
+                    if (e0 == EcosystemKind::None) return;
+
+                    // Collect neighbor ecosystems (cardinal) and choose the most prevalent "other".
+                    EcosystemKind ns[4] = { EcosystemKind::None, EcosystemKind::None, EcosystemKind::None, EcosystemKind::None };
+                    int n = 0;
+                    const Vec2i dirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+                    for (const auto& d : dirs) {
+                        const int nx = x + d.x;
+                        const int ny = y + d.y;
+                        if (!dung.inBounds(nx, ny)) continue;
+                        if (dung.at(nx, ny).type != TileType::Floor) continue;
+                        const EcosystemKind eN = dung.ecosystemAtCached(nx, ny);
+                        if (eN == EcosystemKind::None) continue;
+                        ns[n++] = eN;
+                    }
+
+                    // Compute distinct count.
+                    EcosystemKind uniq[5] = { e0, EcosystemKind::None, EcosystemKind::None, EcosystemKind::None, EcosystemKind::None };
+                    int uniqN = 1;
+                    for (int i = 0; i < n; ++i) {
+                        const EcosystemKind e = ns[i];
+                        bool seen = false;
+                        for (int j = 0; j < uniqN; ++j) {
+                            if (uniq[j] == e) { seen = true; break; }
+                        }
+                        if (!seen) uniq[uniqN++] = e;
+                    }
+                    if (uniqN < 2) return; // not a boundary
+
+                    // Pick the best other ecosystem by frequency.
+                    EcosystemKind other = EcosystemKind::None;
+                    int bestCount = 0;
+                    for (int j = 0; j < uniqN; ++j) {
+                        const EcosystemKind e = uniq[j];
+                        if (e == e0) continue;
+                        int c = 0;
+                        for (int i = 0; i < n; ++i) if (ns[i] == e) ++c;
+                        if (c > bestCount) {
+                            bestCount = c;
+                            other = e;
+                        }
+                    }
+                    if (other == EcosystemKind::None) return;
+
+                    // Stable tiebreaker: a deterministic hash per tile.
+                    uint32_t h = hash32(hashCombine(hashCombine(sigilSeed, "ECOTONE_PICK"_tag), static_cast<uint32_t>(x * 73856093u)) ^ static_cast<uint32_t>(y * 19349663u));
+                    h = hashCombine(h, static_cast<uint32_t>(e0));
+                    h = hashCombine(h, static_cast<uint32_t>(other));
+
+                    if (!best.ok || uniqN > best.diversity || (uniqN == best.diversity && h > best.h)) {
+                        best.ok = true;
+                        best.pos = p;
+                        best.a = e0;
+                        best.b = other;
+                        best.diversity = uniqN;
+                        best.h = h;
+                    }
+                };
+
+                for (int y = 1; y < dung.height - 1; ++y) {
+                    for (int x = 1; x < dung.width - 1; ++x) {
+                        consider(x, y);
+                    }
+                }
+
+                if (best.ok && engravings_.size() < maxGraffitiPerFloor) {
+                    // Choose a sigil kind based on both ecosystems (with a bit of variety).
+                    sigilgen::SigilKind opts[6] = {
+                        sigilgen::SigilKind::Nexus,
+                        sigilgen::SigilKind::Seer,
+                        sigilgen::SigilKind::Aegis,
+                        sigilgen::SigilKind::Miasma,
+                        sigilgen::SigilKind::Lethe,
+                        sigilgen::SigilKind::Nexus,
+                    };
+                    int optN = 2; // Nexus + Seer baseline
+
+                    auto pushOpt = [&](sigilgen::SigilKind k) {
+                        if (optN >= static_cast<int>(sizeof(opts) / sizeof(opts[0]))) return;
+                        opts[optN++] = k;
+                    };
+
+                    auto addEcoOpts = [&](EcosystemKind e) {
+                        const auto gb = goodBadForEco(e);
+                        pushOpt(gb.first);
+                        pushOpt(gb.second);
+                    };
+                    addEcoOpts(best.a);
+                    addEcoOpts(best.b);
+
+                    const sigilgen::SigilKind pick = opts[static_cast<int>(best.h % static_cast<uint32_t>(std::max(1, optN)))];
+                    placeSigil(best.pos, pick, "ECOTONE", ecoToken(best.a), ecoToken(best.b));
+                }
+            }
+        }
+
+        // ------------------------------------------------------------
+        // Heartstone (biome core) sigil
+        // ------------------------------------------------------------
+        if (engravings_.size() < maxGraffitiPerFloor && gDepth >= 2) {
+            // Deterministic roll per floor.
+            const uint32_t rollH = hash32(hashCombine(hashCombine(sigilSeed, "ECO_HEARTSTONE"_tag), static_cast<uint32_t>(std::max(0, gDepth))) ^ 0xC0DEu);
+            const float chance = std::clamp(0.22f + 0.012f * static_cast<float>(std::min(12, std::max(0, gDepth - 1))), 0.22f, 0.42f);
+            if (rand01(rollH) < chance) {
+                const auto& seeds = dung.ecosystemSeedsCached();
+                if (!seeds.empty()) {
+                    // Pick a seed deterministically by hashing.
+                    size_t pickIdx = static_cast<size_t>(hash32(hashCombine(rollH, "ECO_PICK"_tag)) % static_cast<uint32_t>(seeds.size()));
+                    const EcosystemSeed es = seeds[pickIdx];
+
+                    // Search for a floor tile near the seed center that actually belongs to that biome.
+                    Vec2i spot{-1, -1};
+                    const uint32_t searchSeed = hash32(hashCombine(rollH, static_cast<uint32_t>(es.kind)) ^ 0x51EDu);
+                    RNG rr(searchSeed);
+                    for (int radius = 0; radius <= 6 && spot.x < 0; ++radius) {
+                        for (int tries = 0; tries < 80; ++tries) {
+                            const int dx = rr.range(-radius, radius);
+                            const int dy = rr.range(-radius, radius);
+                            const Vec2i cand{ es.pos.x + dx, es.pos.y + dy };
+                            if (!canPlaceOn(cand)) continue;
+                            if (dung.ecosystemAtCached(cand.x, cand.y) != es.kind) continue;
+                            spot = cand;
+                            break;
+                        }
+                    }
+
+                    if (spot.x >= 0) {
+                        const auto gb = goodBadForEco(es.kind);
+                        // Deeper floors skew slightly toward hazardous sigils.
+                        const float badChance = std::clamp(0.10f + 0.03f * static_cast<float>(std::min(10, std::max(0, gDepth - 3))), 0.10f, 0.40f);
+                        const uint32_t kH = hash32(hashCombine(rollH, static_cast<uint32_t>(spot.x * 2654435761u)) ^ static_cast<uint32_t>(spot.y * 2246822519u));
+                        const bool bad = (rand01(kH) < badChance);
+                        const sigilgen::SigilKind k = bad ? gb.second : gb.first;
+
+                        placeSigil(spot, k, ecoToken(es.kind), nullptr, nullptr);
+                    }
+                }
+            }
+        }
+    }
+
     // A few generic scribbles across the floor.
     const int extra = rng.chance(0.35f) ? rng.range(1, 3) : rng.range(0, 1);
-    for (int i = 0; i < extra && engravings_.size() < kMaxGraffitiPerFloor; ++i) {
+    for (int i = 0; i < extra && engravings_.size() < maxGraffitiPerFloor; ++i) {
         if (dung.rooms.empty()) break;
         const auto& r = dung.rooms[static_cast<size_t>(rng.range(0, static_cast<int>(dung.rooms.size()) - 1))];
         const Vec2i p = pickFloorInRoom(r);
@@ -3749,6 +4030,19 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
 
     // Auto-explore bookkeeping is transient per-floor; size it to the current dungeon.
     autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+
+    // Procedural ecosystem discovery is also transient per-floor; initialize it
+    // to the player's current region to avoid noisy "first-step" callouts.
+    lastEcosystem_ = EcosystemKind::None;
+    ecosystemSeenMask_ = 0u;
+    if (!atCamp()) {
+        dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
+        const EcosystemKind e0 = dung.ecosystemAtCached(p.pos.x, p.pos.y);
+        lastEcosystem_ = e0;
+        if (e0 != EcosystemKind::None) {
+            ecosystemSeenMask_ |= (1u << static_cast<uint32_t>(e0));
+        }
+    }
 
     // Small heal on travel.
     p.hp = std::min(p.hpMax, p.hp + 2);

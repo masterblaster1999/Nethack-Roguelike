@@ -64,6 +64,12 @@ inline HearingFieldResult buildVisibleHostileHearingField(const Game& g, int max
         Listener l;
         l.pos = e.pos;
         l.hearingDelta = entityHearingDelta(e.kind);
+
+        // Ecosystem acoustics can either mask sound (water/wind) or amplify it (echoing crystal).
+        // We model this as a delta on the listener's effective hearing.
+        const EcosystemKind eco = dung.ecosystemAtCached(e.pos.x, e.pos.y);
+        l.hearingDelta -= ecosystemFx(eco).hearingMaskDelta;
+
         ls.push_back(l);
         out.listeners.push_back(e.pos);
     }

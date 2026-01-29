@@ -216,6 +216,15 @@ const ItemDef& itemDef(ItemKind k) {
 
         // Procedural crafting byproducts (append-only)
         { ItemKind::EssenceShard, "ESSENCE SHARD", true, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 1, 45 },
+
+        // Ecosystem resource nodes (append-only)
+        // Stationary ground props spawned near biome seeds; harvest with CONFIRM.
+        { ItemKind::SporePod,      "SPORE POD",      false, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock },
+        { ItemKind::CrystalNode,   "CRYSTAL NODE",   false, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock },
+        { ItemKind::BonePile,      "BONE PILE",      false, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock },
+        { ItemKind::RustVent,      "RUST VENT",      false, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock },
+        { ItemKind::AshVent,       "ASH VENT",       false, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock },
+        { ItemKind::GrottoSpring,  "GROTTO SPRING",  false, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock },
 };
 
     static std::vector<ItemDef> defs;
@@ -378,6 +387,15 @@ std::string itemDisplayName(const Item& it) {
         if (affinity >= 0) {
             ss << " {AFF " << farmgen::farmTagByIndex(affinity) << "}";
         }
+
+    } else if (isEcosystemNodeKind(it.kind)) {
+
+        ss << d.name;
+
+        // Remaining harvest uses stored in charges (defaults to 1 if unset).
+        int taps = it.charges;
+        if (taps <= 0) taps = 1;
+        if (taps != 1) ss << " {" << taps << " TAPS}";
 
     } else if (isFarmPlantKind(it.kind)) {
 

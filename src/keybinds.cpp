@@ -452,6 +452,25 @@ KeyBinds KeyBinds::defaults() {
     add(Action::DownRight, SDLK_c);
     add(Action::DownRight, SDLK_KP_3);
 
+    // Auto-run (Shift + direction)
+    add(Action::RunUp, SDLK_UP, KMOD_SHIFT);
+    add(Action::RunUp, SDLK_KP_8, KMOD_SHIFT);
+
+    add(Action::RunDown, SDLK_DOWN, KMOD_SHIFT);
+    add(Action::RunDown, SDLK_KP_2, KMOD_SHIFT);
+
+    add(Action::RunLeft, SDLK_LEFT, KMOD_SHIFT);
+    add(Action::RunLeft, SDLK_KP_4, KMOD_SHIFT);
+
+    add(Action::RunRight, SDLK_RIGHT, KMOD_SHIFT);
+    add(Action::RunRight, SDLK_KP_6, KMOD_SHIFT);
+
+    add(Action::RunUpLeft, SDLK_KP_7, KMOD_SHIFT);
+    add(Action::RunUpRight, SDLK_KP_9, KMOD_SHIFT);
+    add(Action::RunDownLeft, SDLK_KP_1, KMOD_SHIFT);
+    add(Action::RunDownRight, SDLK_KP_3, KMOD_SHIFT);
+
+
     // Actions
     add(Action::Confirm, SDLK_RETURN);
     add(Action::Confirm, SDLK_KP_ENTER);
@@ -562,6 +581,20 @@ KeyBinds KeyBinds::defaults() {
 
     add(Action::ToggleFullscreen, SDLK_F11);
     add(Action::Screenshot, SDLK_F12);
+
+    // Replay playback controls (active only while a replay is playing).
+    // These are context-only: they won't steal keys during normal gameplay.
+    add(Action::ReplayPause, SDLK_SPACE);
+    add(Action::ReplayPause, SDLK_PAUSE);
+
+    add(Action::ReplayStep, SDLK_PERIOD);
+    add(Action::ReplayStep, SDLK_RIGHT);
+
+    add(Action::ReplaySpeedUp, SDLK_EQUALS);
+    add(Action::ReplaySpeedUp, SDLK_KP_PLUS);
+
+    add(Action::ReplaySpeedDown, SDLK_MINUS);
+    add(Action::ReplaySpeedDown, SDLK_KP_MINUS);
 
     add(Action::Save, SDLK_F5);
     add(Action::Scores, SDLK_F6);
@@ -786,6 +819,17 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
     const Uint16 nm = normalizeMods(mods);
 
     auto match = [&](Action a) -> bool {
+        if (!game.replayPlaybackActive()) {
+            switch (a) {
+                case Action::ReplayPause:
+                case Action::ReplayStep:
+                case Action::ReplaySpeedUp:
+                case Action::ReplaySpeedDown:
+                    return false; // replay-only controls
+                default:
+                    break;
+            }
+        }
         auto it = binds.find(a);
         if (it == binds.end()) return false;
         for (const auto& chord : it->second) {
@@ -825,7 +869,40 @@ Action KeyBinds::mapKey(const Game& game, SDL_Keycode key, Uint16 mods) const {
         return out;
     };
 
-    // Inventory gets priority for inventory-specific actions (users may rebind keys to overlap movement).
+    
+
+    // Replay playback: while input is driven by recorded events, only allow a small
+    // set of safe UI controls (pause/step/speed + visual-only toggles).
+    if (game.replayPlaybackActive()) {
+        static const std::vector<Action> replayOrder = {
+            Action::ReplayPause,
+            Action::ReplayStep,
+            Action::ReplaySpeedDown,
+            Action::ReplaySpeedUp,
+
+            // Stop replay playback / unlock input.
+            Action::Cancel,
+
+            // Platform/visual-only toggles are safe during replay playback.
+            Action::ToggleFullscreen,
+            Action::Screenshot,
+
+            // These are handled in main.cpp during replay playback (to avoid stopping auto-move).
+            Action::TogglePerfOverlay,
+            Action::ToggleViewMode,
+            Action::ViewTurnLeft,
+            Action::ViewTurnRight,
+            Action::ToggleVoxelSprites,
+
+            // Allow paging through the message log without affecting simulation.
+            Action::LogUp,
+            Action::LogDown,
+        };
+
+        return evalOrder(replayOrder);
+    }
+
+// Inventory gets priority for inventory-specific actions (users may rebind keys to overlap movement).
     // IMPORTANT: global UI/meta hotkeys should still work while the inventory overlay is open.
     if (game.isInventoryOpen()) {
         static const std::vector<Action> invOrder = buildOrder({

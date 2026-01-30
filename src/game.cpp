@@ -4,6 +4,8 @@
 #include "artifact_gen.hpp"
 #include "graffiti_gen.hpp"
 #include "sigil_gen.hpp"
+#include "proc_spells.hpp"
+#include "wards.hpp"
 #include "ident_gen.hpp"
 #include "victory_gen.hpp"
 #include "fishing_gen.hpp"
@@ -3342,6 +3344,290 @@ void Game::spawnGraffiti() {
             addSigil(p, sigilgen::keywordPlusEpithet(spec), spec.uses);
         } else {
             addGraffiti(p, genLine(r.type, p));
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Ancient Rune Wards (leyline setpieces)
+    // ------------------------------------------------------------
+    // On deeper dungeon floors, carve a tiny number of functional rune wards at
+    // high-intensity leyline nodes. These act like normal wards (AI hesitation /
+    // durability wear) and serve as discoverable rally points that reinforce the
+    // procedural "leyline" theme.
+    //
+    // Deterministic: driven by a hash-derived scoring pass instead of the main
+    // RNG stream, so it won't perturb other content generation.
+    if (!isWilderness && branch() != DungeonBranch::Camp && gDepth >= 3) {
+        dung.ensureMaterials(sigilSeed, branch(), gDepth, dungeonMaxDepth());
+
+        // Depth-based roll: usually 0-1, occasionally 2 on deeper floors.
+        int want = 0;
+        {
+            const uint32_t rollH = hash32(hashCombine(hashCombine(sigilSeed, "ANCIENT_RUNE_WARDS"_tag), static_cast<uint32_t>(std::max(0, gDepth))) ^ 0xA11CEu);
+            const float r = rand01(rollH);
+            const float p1 = std::clamp(0.18f + 0.025f * static_cast<float>(std::min(12, std::max(0, gDepth - 3))), 0.18f, 0.48f);
+            const float p2 = std::clamp(0.05f + 0.015f * static_cast<float>(std::min(12, std::max(0, gDepth - 8))), 0.05f, 0.22f);
+            want = (r < p2) ? 2 : ((r < p1) ? 1 : 0);
+        }
+
+        if (want > 0) {
+            struct Cand {
+                Vec2i pos{ -1, -1 };
+                uint8_t ley = 0;
+                EcosystemKind eco = EcosystemKind::None;
+                bool boundary = false;
+                int deg = 0;
+                int score = 0;
+                uint32_t h = 0;
+            };
+
+            // Placement constraints.
+            const int avoidStairsDist = (gDepth <= 4) ? 8 : 6;
+            const uint8_t baseLeyThresh = static_cast<uint8_t>((gDepth <= 4) ? 195 : 175);
+
+            auto tooCloseToStairs = [&](Vec2i p) -> bool {
+                auto md = [&](Vec2i a, Vec2i b) -> int {
+                    return std::abs(a.x - b.x) + std::abs(a.y - b.y);
+                };
+                if (dung.inBounds(dung.stairsUp.x, dung.stairsUp.y) && md(p, dung.stairsUp) < avoidStairsDist) return true;
+                if (dung.inBounds(dung.stairsDown.x, dung.stairsDown.y) && md(p, dung.stairsDown) < avoidStairsDist) return true;
+                return false;
+            };
+
+            auto passableDeg = [&](int x, int y) -> int {
+                const Vec2i dirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+                int d = 0;
+                for (const auto& v : dirs) {
+                    const int nx = x + v.x;
+                    const int ny = y + v.y;
+                    if (!dung.inBounds(nx, ny)) continue;
+                    if (dung.isPassable(nx, ny)) ++d;
+                }
+                return d;
+            };
+
+            auto isLocalMax = [&](int x, int y, uint8_t v) -> bool {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) continue;
+                        const int nx = x + dx;
+                        const int ny = y + dy;
+                        if (!dung.inBounds(nx, ny)) continue;
+                        const uint8_t nv = dung.leylineAtCached(nx, ny);
+                        if (nv > v) return false;
+                    }
+                }
+                return true;
+            };
+
+            auto isEcoBoundary = [&](int x, int y, EcosystemKind e0) -> bool {
+                if (e0 == EcosystemKind::None) return false;
+                const Vec2i dirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+                for (const auto& v : dirs) {
+                    const int nx = x + v.x;
+                    const int ny = y + v.y;
+                    if (!dung.inBounds(nx, ny)) continue;
+                    const EcosystemKind en = dung.ecosystemAtCached(nx, ny);
+                    if (en != EcosystemKind::None && en != e0) return true;
+                }
+                return false;
+            };
+
+            auto goodRuneRoom = [&](RoomType rt) -> bool {
+                // Avoid putting free "safe circles" inside high-value/structured spaces.
+                if (rt == RoomType::Shop) return false;
+                if (rt == RoomType::Vault) return false;
+                if (rt == RoomType::Secret) return false;
+                if (rt == RoomType::Shrine) return false;
+                return true;
+            };
+
+            // Candidate scan.
+            std::vector<Cand> cands;
+            cands.reserve(static_cast<size_t>(dung.width * dung.height) / 10u);
+
+            for (int y = 1; y < dung.height - 1; ++y) {
+                for (int x = 1; x < dung.width - 1; ++x) {
+                    const Tile& t = dung.at(x, y);
+                    if (t.type != TileType::Floor) continue;
+                    const Vec2i p{x, y};
+                    if (tooCloseToStairs(p)) continue;
+                    if (engravingAt(p) != nullptr) continue;
+                    const RoomType rt = roomTypeAt(dung, p);
+                    if (!goodRuneRoom(rt)) continue;
+
+                    const uint8_t ley = dung.leylineAtCached(x, y);
+                    if (ley < baseLeyThresh) continue;
+                    if (!isLocalMax(x, y, ley)) continue;
+
+                    const int deg = passableDeg(x, y);
+                    if (deg < 3) continue; // prefer junctions / open pockets
+
+                    const EcosystemKind eco = dung.ecosystemAtCached(x, y);
+                    const bool boundary = isEcoBoundary(x, y, eco);
+
+                    // Score: strong leylines + junctions + ecosystem boundaries.
+                    // Add a tiny hash jitter to break plateaus deterministically.
+                    uint32_t h = hash32(hashCombine(hashCombine(sigilSeed, "RUNEWARD_CAND"_tag), static_cast<uint32_t>(x * 73856093u)) ^ static_cast<uint32_t>(y * 19349663u));
+                    h = hashCombine(h, static_cast<uint32_t>(gDepth));
+                    h = hashCombine(h, static_cast<uint32_t>(eco));
+                    const int leyScore = static_cast<int>(ley) * static_cast<int>(ley);
+                    int score = leyScore;
+                    score += deg * 4200;
+                    if (boundary) score += 15000;
+                    score += static_cast<int>(h & 0x3FFu);
+
+                    Cand c;
+                    c.pos = p;
+                    c.ley = ley;
+                    c.eco = eco;
+                    c.boundary = boundary;
+                    c.deg = deg;
+                    c.score = score;
+                    c.h = h;
+                    cands.push_back(c);
+                }
+            }
+
+            if (!cands.empty()) {
+                std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+                    if (a.score != b.score) return a.score > b.score;
+                    return a.h > b.h;
+                });
+
+                auto pickRuneForEco = [&](EcosystemKind eco, uint8_t ley, bool boundary, uint32_t h) -> WardWord {
+                    struct Opt { WardWord w; int wgt; };
+                    auto pick = [&](std::initializer_list<Opt> opts) -> WardWord {
+                        int sum = 0;
+                        for (const auto& o : opts) sum += std::max(0, o.wgt);
+                        if (sum <= 0) return WardWord::RuneArcane;
+                        int r = static_cast<int>(h % static_cast<uint32_t>(sum));
+                        for (const auto& o : opts) {
+                            const int w = std::max(0, o.wgt);
+                            if (r < w) return o.w;
+                            r -= w;
+                        }
+                        return opts.begin()->w;
+                    };
+
+                    // Boundaries bias toward ARCANE/RADIANCE a bit.
+                    const int b = boundary ? 10 : 0;
+
+                    switch (eco) {
+                        case EcosystemKind::FungalBloom:
+                            return pick({
+                                {WardWord::RuneVenom,   42},
+                                {WardWord::RuneShadow,  22 - b/2},
+                                {WardWord::RuneBlood,   16},
+                                {WardWord::RuneArcane,  20 + b},
+                            });
+                        case EcosystemKind::CrystalGarden:
+                            return pick({
+                                {WardWord::RuneRadiance, 36 + b},
+                                {WardWord::RuneArcane,   34 + b},
+                                {WardWord::RuneFrost,    15},
+                                {WardWord::RuneShock,    15},
+                            });
+                        case EcosystemKind::BoneField:
+                            return pick({
+                                {WardWord::RuneRadiance, 40 + b},
+                                {WardWord::RuneBlood,    22},
+                                {WardWord::RuneShadow,   20 - b/2},
+                                {WardWord::RuneArcane,   18 + b},
+                            });
+                        case EcosystemKind::RustVeins:
+                            return pick({
+                                {WardWord::RuneShock,  40 + b},
+                                {WardWord::RuneArcane, 30 + b},
+                                {WardWord::RuneStone,  20},
+                                {WardWord::RuneFire,   10},
+                            });
+                        case EcosystemKind::AshenRidge:
+                            return pick({
+                                {WardWord::RuneFire,   45},
+                                {WardWord::RuneStone,  28},
+                                {WardWord::RuneWind,   15},
+                                {WardWord::RuneShadow, 12 + b/2},
+                            });
+                        case EcosystemKind::FloodedGrotto:
+                            return pick({
+                                {WardWord::RuneFrost,  40},
+                                {WardWord::RuneWind,   22},
+                                {WardWord::RuneArcane, 22 + b},
+                                {WardWord::RuneVenom,  16},
+                            });
+                        case EcosystemKind::None:
+                        default:
+                            if (ley >= 230) {
+                                return pick({
+                                    {WardWord::RuneArcane,   45 + b},
+                                    {WardWord::RuneRadiance, 25 + b},
+                                    {WardWord::RuneStone,    15},
+                                    {WardWord::RuneWind,     15},
+                                });
+                            }
+                            return pick({
+                                {WardWord::RuneArcane,   34 + b},
+                                {WardWord::RuneRadiance, 20 + b},
+                                {WardWord::RuneStone,    18},
+                                {WardWord::RuneShadow,   16 - b/2},
+                                {WardWord::RuneFire,     12},
+                            });
+                    }
+                };
+
+                constexpr size_t kMaxEngravingsPerFloor = 128;
+
+                std::vector<Vec2i> chosen;
+                chosen.reserve(static_cast<size_t>(want));
+
+                auto farFromChosen = [&](Vec2i p) -> bool {
+                    for (const Vec2i& q : chosen) {
+                        const int dx = p.x - q.x;
+                        const int dy = p.y - q.y;
+                        if (dx * dx + dy * dy < 12 * 12) return false;
+                    }
+                    return true;
+                };
+
+                for (const Cand& c : cands) {
+                    if (static_cast<int>(chosen.size()) >= want) break;
+                    if (!farFromChosen(c.pos)) continue;
+                    if (engravingAt(c.pos) != nullptr) continue;
+                    if (engravings_.size() >= kMaxEngravingsPerFloor) break;
+
+                    // Choose element/word deterministically per-tile.
+                    const uint32_t elemH = hash32(hashCombine(hashCombine(c.h, "RUNEWARD_ELEM"_tag), static_cast<uint32_t>(c.ley)));
+                    const WardWord ww = pickRuneForEco(c.eco, c.ley, c.boundary, elemH);
+
+                    // Derive a short sigil string from the proc spell generator (flavor only).
+                    const uint8_t tier = static_cast<uint8_t>(std::clamp(1 + gDepth / 5, 1, 15));
+                    const uint32_t seed28 = hash32(hashCombine(hashCombine(c.h, "RUNEWARD_SIGIL"_tag), static_cast<uint32_t>(ww))) & PROC_SPELL_SEED_MASK;
+                    const uint32_t procId = makeProcSpellId(tier, seed28);
+                    const ProcSpell ps = generateProcSpell(procId);
+
+                    std::string wardText = wardWordName(ww);
+                    wardText += ": ";
+                    wardText += ps.runeSigil;
+                    if (wardText.size() > 72) wardText.resize(72);
+
+                    int uses = 2 + std::min(3, std::max(0, gDepth) / 4);
+                    if (c.ley >= 220) uses += 2;
+                    else if (c.ley >= 195) uses += 1;
+                    if (c.boundary) uses += 1;
+                    uses = clampi(uses, 2, 10);
+
+                    Engraving e;
+                    e.pos = c.pos;
+                    e.text = wardText;
+                    e.isWard = true;
+                    e.isGraffiti = true; // procedurally generated (not player-authored)
+                    e.strength = static_cast<uint8_t>(std::clamp(uses, 1, 254));
+                    engravings_.push_back(std::move(e));
+
+                    chosen.push_back(c.pos);
+                }
+            }
         }
     }
 }

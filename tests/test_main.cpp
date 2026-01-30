@@ -11,11 +11,14 @@
 #include "graffiti_gen.hpp"
 #include "trap_salvage_gen.hpp"
 #include "sigil_gen.hpp"
+#include "wards.hpp"
 #include "ident_gen.hpp"
 #include "shop_profile_gen.hpp"
 #include "ecosystem_loot.hpp"
 #include "shrine_profile_gen.hpp"
 #include "victory_gen.hpp"
+#include <queue>
+
 
 struct GameTestAccess {
     static Dungeon& dung(Game& g) { return g.dung; }
@@ -296,7 +299,7 @@ bool test_proc_leylines_basic() {
 
     Dungeon d(60, 40);
     fillFloor(d);
-    d.ensureMaterials(seedA, DungeonBranch::Main, 7, DUNGEON_MAX_DEPTH);
+    d.ensureMaterials(seedA, DungeonBranch::Main, 7, Game::DUNGEON_MAX_DEPTH);
 
     int non0 = 0;
     int maxV = 0;
@@ -315,13 +318,13 @@ bool test_proc_leylines_basic() {
 
     // Determinism: repeated ensureMaterials calls with the same key should not change values.
     const uint8_t sample0 = d.leylineAtCached(10, 10);
-    d.ensureMaterials(seedA, DungeonBranch::Main, 7, DUNGEON_MAX_DEPTH);
+    d.ensureMaterials(seedA, DungeonBranch::Main, 7, Game::DUNGEON_MAX_DEPTH);
     CHECK(d.leylineAtCached(10, 10) == sample0);
 
     // Variation: changing the seed should change the field somewhere.
     Dungeon d2(60, 40);
     fillFloor(d2);
-    d2.ensureMaterials(seedB, DungeonBranch::Main, 7, DUNGEON_MAX_DEPTH);
+    d2.ensureMaterials(seedB, DungeonBranch::Main, 7, Game::DUNGEON_MAX_DEPTH);
 
     bool anyDiff = false;
     for (int y = 0; y < d.height && !anyDiff; ++y) {
@@ -660,6 +663,27 @@ bool test_proc_monster_codename_determinism() {
     n.procAbility2 = ProcMonsterAbility::None;
     CHECK(!procname::shouldShowCodename(n));
     CHECK(procname::codename(n).empty());
+
+    return true;
+}
+
+
+
+bool test_rune_ward_words() {
+    // Parsing should be forgiving (prefix + optional decorations) but deterministic.
+    CHECK(wardWordFromText("RUNE FIRE") == WardWord::RuneFire);
+    CHECK(wardWordFromText("rune:fire") == WardWord::RuneFire);
+    CHECK(wardWordFromText("RUNE OF RADIANCE: KAR-THO-RAI") == WardWord::RuneRadiance);
+    CHECK(wardWordFromText("RUNE SHADOW: XX") == WardWord::RuneShadow);
+    CHECK(wardWordFromText("RUNE BANANA") == WardWord::None);
+
+    // Sanity-check a few affinities.
+    CHECK(wardAffectsMonster(WardWord::RuneRadiance, EntityKind::Zombie));
+    CHECK(!wardAffectsMonster(WardWord::RuneRadiance, EntityKind::Goblin));
+
+    CHECK(wardAffectsMonster(WardWord::RuneShock, EntityKind::Goblin));
+    CHECK(wardRepelChance(WardWord::RuneShock, EntityKind::Goblin, 10) > 0.0f);
+    CHECK(wardRepelChance(WardWord::RuneShock, EntityKind::Goblin, 0) == 0.0f);
 
     return true;
 }
@@ -1239,6 +1263,41 @@ bool test_overworld_profiles() {
 
     
 
+
+
+bool test_overworld_biome_diversity() {
+    const uint32_t seed = 424242u;
+    const int maxDepth = 25;
+
+    // Sanity: across a neighborhood we should see a mix of biome identities.
+    // We keep this threshold modest so it remains robust across tuning.
+    bool seen[8] = {false,false,false,false,false,false,false,false};
+    int unique = 0;
+
+    for (int cy = -12; cy <= 12; ++cy) {
+        for (int cx = -12; cx <= 12; ++cx) {
+            const auto p = overworld::profileFor(seed, cx, cy, maxDepth);
+            const int bi = static_cast<int>(p.biome);
+            if (bi >= 0 && bi < 8 && !seen[bi]) {
+                seen[bi] = true;
+                unique++;
+            }
+        }
+    }
+
+    CHECK(unique >= 4);
+
+    // Prevailing climate wind is cardinal and never calm.
+    const Vec2i wdir = overworld::climateWindDir(seed);
+    CHECK((wdir.x == 0) || (wdir.y == 0));
+    CHECK(!((wdir.x != 0) && (wdir.y != 0)));
+    CHECK((wdir.x >= -1) && (wdir.x <= 1));
+    CHECK((wdir.y >= -1) && (wdir.y <= 1));
+    CHECK(!(wdir.x == 0 && wdir.y == 0));
+
+    return true;
+}
+
 bool test_overworld_chunk_determinism() {
     const uint32_t seed = 424242u;
     const int W = 80;
@@ -1269,6 +1328,275 @@ bool test_overworld_chunk_determinism() {
 
     return true;
 }
+
+
+
+
+bool test_overworld_trails_connectivity() {
+    const uint32_t seed = 424242u;
+    const int W = 80;
+    const int H = 50;
+
+    const int cx = 7;
+    const int cy = -3;
+
+    Dungeon d(W, H);
+    overworld::generateWildernessChunk(d, seed, cx, cy);
+
+    const overworld::ChunkGates g = overworld::gatePositions(d, seed, cx, cy);
+
+    // Gate "throat" tiles (1 step inside the chunk boundary).
+    const Vec2i startN{g.north.x, g.north.y + 1};
+    const Vec2i startS{g.south.x, g.south.y - 1};
+    const Vec2i startW{g.west.x + 1, g.west.y};
+    const Vec2i startE{g.east.x - 1, g.east.y};
+
+    auto idx = [&](Vec2i p) -> int { return p.y * d.width + p.x; };
+
+    auto bfsDist = [&](Vec2i s) -> std::vector<int> {
+        std::vector<int> dist(static_cast<size_t>(d.width * d.height), -1);
+        if (!d.inBounds(s.x, s.y)) return dist;
+        if (!d.isWalkable(s.x, s.y)) return dist;
+
+        std::queue<Vec2i> q;
+        dist[static_cast<size_t>(idx(s))] = 0;
+        q.push(s);
+
+        static const int DX[4] = { 1, -1, 0, 0 };
+        static const int DY[4] = { 0, 0, 1, -1 };
+
+        while (!q.empty()) {
+            const Vec2i p = q.front();
+            q.pop();
+            const int base = dist[static_cast<size_t>(idx(p))];
+
+            for (int k = 0; k < 4; ++k) {
+                const int nx = p.x + DX[k];
+                const int ny = p.y + DY[k];
+                if (!d.inBounds(nx, ny)) continue;
+                if (!d.isWalkable(nx, ny)) continue;
+
+                const int ni = ny * d.width + nx;
+                if (dist[static_cast<size_t>(ni)] >= 0) continue;
+
+                dist[static_cast<size_t>(ni)] = base + 1;
+                q.push({nx, ny});
+            }
+        }
+
+        return dist;
+    };
+
+    CHECK(d.isWalkable(startN.x, startN.y));
+    CHECK(d.isWalkable(startS.x, startS.y));
+    CHECK(d.isWalkable(startW.x, startW.y));
+    CHECK(d.isWalkable(startE.x, startE.y));
+
+    // All gates should be mutually reachable (the trail network is required to
+    // connect every gate back into the chunk's hub crossroads).
+    const auto dist = bfsDist(startN);
+    CHECK(dist[static_cast<size_t>(idx(startS))] >= 0);
+    CHECK(dist[static_cast<size_t>(idx(startW))] >= 0);
+    CHECK(dist[static_cast<size_t>(idx(startE))] >= 0);
+
+    return true;
+}
+
+bool test_overworld_rivers_and_banks_present() {
+    const uint32_t runSeed = 424242u;
+    const int W = 80;
+    const int H = 50;
+
+    bool foundWater = false;
+    bool foundBankAdjacency = false;
+
+    // Scan a small neighborhood of chunks and assert that we can find:
+    //  1) at least one chunk with some water, and
+    //  2) at least one chunk where bank obstacles appear adjacent to water.
+    // We intentionally don't pin exact counts so that the test remains robust
+    // across minor tuning changes.
+    for (int cy = -6; cy <= 6; ++cy) {
+        for (int cx = -6; cx <= 6; ++cx) {
+            Dungeon d(W, H);
+            overworld::generateWildernessChunk(d, runSeed, cx, cy);
+
+            int waterCount = 0;
+            int bankAdj = 0;
+
+            for (int y = 1; y < H - 1; ++y) {
+                for (int x = 1; x < W - 1; ++x) {
+                    if (d.at(x, y).type != TileType::Chasm) continue;
+                    waterCount++;
+
+                    const TileType n = d.at(x, y - 1).type;
+                    const TileType s = d.at(x, y + 1).type;
+                    const TileType w = d.at(x - 1, y).type;
+                    const TileType e = d.at(x + 1, y).type;
+
+                    auto isBank = [](TileType t) {
+                        return t == TileType::Pillar || t == TileType::Boulder;
+                    };
+
+                    bankAdj += (int)isBank(n);
+                    bankAdj += (int)isBank(s);
+                    bankAdj += (int)isBank(w);
+                    bankAdj += (int)isBank(e);
+                }
+            }
+
+            if (waterCount >= 12) foundWater = true;
+            if (bankAdj >= 4) foundBankAdjacency = true;
+
+            if (foundWater && foundBankAdjacency) {
+                CHECK(true);
+                return true;
+            }
+        }
+    }
+
+    CHECK(foundWater);
+    CHECK(foundBankAdjacency);
+    return foundWater && foundBankAdjacency;
+}
+
+
+bool test_overworld_springs_present() {
+    const uint32_t runSeed = 424242u;
+    const int W = 80;
+    const int H = 50;
+
+    bool foundSpring = false;
+
+    // Scan a neighborhood of chunks and assert that at least one chunk contains
+    // a spring (TileType::Fountain). We don't pin exact counts so that tuning
+    // remains flexible.
+    for (int cy = -6; cy <= 6; ++cy) {
+        for (int cx = -6; cx <= 6; ++cx) {
+            Dungeon d(W, H);
+            overworld::generateWildernessChunk(d, runSeed, cx, cy);
+
+            int fountains = 0;
+            for (int y = 1; y < H - 1; ++y) {
+                for (int x = 1; x < W - 1; ++x) {
+                    if (d.at(x, y).type == TileType::Fountain) ++fountains;
+                }
+            }
+
+            if (fountains > 0) {
+                foundSpring = true;
+                CHECK(true);
+                return true;
+            }
+        }
+    }
+
+    CHECK(foundSpring);
+    return foundSpring;
+}
+
+
+
+
+bool test_overworld_brooks_present() {
+    const uint32_t runSeed = 424242u;
+    const int W = 80;
+    const int H = 50;
+
+    bool foundSpringWithWater = false;
+
+    // Scan a neighborhood of chunks and assert that at least one spring has
+    // adjacent water (a spring-fed brook or terminal pond). We don't pin exact
+    // counts so tuning remains flexible.
+    for (int cy = -6; cy <= 6; ++cy) {
+        for (int cx = -6; cx <= 6; ++cx) {
+            Dungeon d(W, H);
+            overworld::generateWildernessChunk(d, runSeed, cx, cy);
+
+            for (int y = 2; y < H - 2; ++y) {
+                for (int x = 2; x < W - 2; ++x) {
+                    if (d.at(x, y).type != TileType::Fountain) continue;
+
+                    bool adjWater = false;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            if (dx == 0 && dy == 0) continue;
+                            if (d.at(x + dx, y + dy).type == TileType::Chasm) {
+                                adjWater = true;
+                                break;
+                            }
+                        }
+                        if (adjWater) break;
+                    }
+
+                    if (adjWater) {
+                        foundSpringWithWater = true;
+                        CHECK(true);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    CHECK(foundSpringWithWater);
+    return foundSpringWithWater;
+}
+
+bool test_overworld_strongholds_present() {
+    const uint32_t runSeed = 424242u;
+    const int W = 80;
+    const int H = 50;
+
+    bool foundStronghold = false;
+    bool foundCache = false;
+
+    // Strongholds are rare, so scan a slightly wider neighborhood. We avoid
+    // pinning exact counts so tuning remains flexible.
+    for (int cy = -10; cy <= 10; ++cy) {
+        for (int cx = -10; cx <= 10; ++cx) {
+            Dungeon d(W, H);
+            overworld::generateWildernessChunk(d, runSeed, cx, cy);
+
+            if (d.overworldStrongholdCount <= 0) continue;
+            foundStronghold = true;
+
+            if (!d.bonusLootSpots.empty() && d.overworldStrongholdCacheCount > 0) {
+                foundCache = true;
+            }
+
+            if (foundStronghold && foundCache) {
+                CHECK(true);
+                return true;
+            }
+        }
+    }
+
+    CHECK(foundStronghold);
+    CHECK(foundCache);
+    return foundStronghold && foundCache;
+}
+
+bool test_overworld_tectonic_ridge_field_extrema() {
+    const uint32_t runSeed = 424242u;
+
+    float mn = 1.0f;
+    float mx = 0.0f;
+
+    // Sample a broad world-space grid. The Voronoi ridge mask should produce
+    // both low "plate interior" values and high "boundary ridge" values.
+    for (int wy = -1200; wy <= 1200; wy += 60) {
+        for (int wx = -1200; wx <= 1200; wx += 60) {
+            const float r = overworld::tectonicRidge01(runSeed, wx, wy);
+            mn = std::min(mn, r);
+            mx = std::max(mx, r);
+        }
+    }
+
+    CHECK(mx > 0.70f);
+    CHECK(mn < 0.20f);
+    return true;
+}
+
 
 
 bool test_overworld_weather_determinism() {
@@ -1443,6 +1771,7 @@ int main(int argc, char** argv) {
         {"replay_record_cmd", test_extended_command_replay_record_requests},
         {"noise_localization",  test_noise_localization_determinism},
         {"proc_spells",         test_proc_spell_generation_determinism},
+        {"rune_wards",         test_rune_ward_words},
         {"proc_monster_codename", test_proc_monster_codename_determinism},
         {"crafting_procgen",  test_crafting_procedural_determinism},
         {"crafting_ecosystem_catalysts", test_crafting_ecosystem_catalyst_changes_outcome},
@@ -1450,7 +1779,14 @@ int main(int argc, char** argv) {
         {"graffiti_procgen", test_graffiti_procgen_determinism},
         {"sigil_procgen",    test_sigil_procgen_determinism},
         {"overworld_profiles", test_overworld_profiles},
+        {"overworld_biome_diversity", test_overworld_biome_diversity},
+        {"overworld_tectonics", test_overworld_tectonic_ridge_field_extrema},
         {"overworld_chunk",    test_overworld_chunk_determinism},
+        {"overworld_trails",  test_overworld_trails_connectivity},
+        {"overworld_rivers",  test_overworld_rivers_and_banks_present},
+        {"overworld_springs", test_overworld_springs_present},
+        {"overworld_brooks",  test_overworld_brooks_present},
+        {"overworld_strongholds", test_overworld_strongholds_present},
         {"overworld_weather",  test_overworld_weather_determinism},
         {"overworld_weather_time", test_overworld_weather_time_varying_fronts},
         {"overworld_atlas_discovery", test_overworld_atlas_discovery_tracking},

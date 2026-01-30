@@ -2738,6 +2738,26 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             game.pushSystemMessage(ss.str());
         }
 
+        // Overworld-only: deterministic wilderness POIs + hydrology (springs, brooks, ponds, strongholds).
+        // Only shown when present.
+        if (d.overworldSpringCount > 0 || d.overworldBrookCount > 0 || d.overworldStrongholdCount > 0) {
+            std::ostringstream ss;
+            ss << "OVERWORLD";
+            if (d.overworldSpringCount > 0) ss << " | SPRINGS " << d.overworldSpringCount;
+            if (d.overworldBrookCount > 0) {
+                ss << " | BROOKS " << d.overworldBrookCount;
+                ss << " (" << d.overworldBrookTiles << " TILES)";
+                if (d.overworldPondCount > 0) ss << " | PONDS " << d.overworldPondCount;
+            }
+            if (d.overworldStrongholdCount > 0) {
+                ss << " | STRONGHOLDS " << d.overworldStrongholdCount;
+                ss << " (" << d.overworldStrongholdBuildingCount << " BLDG";
+                if (d.overworldStrongholdCacheCount > 0) ss << ", " << d.overworldStrongholdCacheCount << " CACHE";
+                ss << ")";
+            }
+            game.pushSystemMessage(ss.str());
+        }
+
         {
             // Procedural biolum terrain stats (lichen/crystal glow): counts of tiles that can emit light.
             d.ensureMaterials(game.materialWorldSeed(), game.branch(), game.materialDepth(), game.dungeonMaxDepth());

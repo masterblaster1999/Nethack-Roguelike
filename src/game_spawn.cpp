@@ -4,6 +4,7 @@
 #include "ecosystem_loot.hpp"
 #include "proc_rd.hpp"
 #include "proc_spells.hpp"
+#include "wards.hpp"
 #include "shop_profile_gen.hpp"
 
 namespace {
@@ -3505,6 +3506,124 @@ void Game::spawnItems() {
             }
 
 
+        }
+    }
+    // ------------------------------------------------------------
+    // Leyline rune caches: if the level generator carved an *ancient rune ward*
+    // (spawnGraffiti), occasionally place a Rune Tablet nearby with a matching
+    // element.
+    //
+    // This is intentionally sparse: it's meant to be a small “follow the leyline”
+    // breadcrumb rather than a guaranteed power spike.
+    // ------------------------------------------------------------
+    if (branch_ != DungeonBranch::Camp && spawnDepth >= 3) {
+        auto runeElementForWard = [&](WardWord ww) -> ProcSpellElement {
+            switch (ww) {
+                case WardWord::RuneFire:     return ProcSpellElement::Fire;
+                case WardWord::RuneFrost:    return ProcSpellElement::Frost;
+                case WardWord::RuneShock:    return ProcSpellElement::Shock;
+                case WardWord::RuneWind:     return ProcSpellElement::Wind;
+                case WardWord::RuneStone:    return ProcSpellElement::Stone;
+                case WardWord::RuneVenom:    return ProcSpellElement::Venom;
+                case WardWord::RuneShadow:   return ProcSpellElement::Shadow;
+                case WardWord::RuneRadiance: return ProcSpellElement::Radiance;
+                case WardWord::RuneBlood:    return ProcSpellElement::Blood;
+                case WardWord::RuneArcane:   return ProcSpellElement::Arcane;
+                default: break;
+            }
+            return ProcSpellElement::Arcane;
+        };
+
+        auto isRuneWard = [&](WardWord ww) -> bool {
+            switch (ww) {
+                case WardWord::RuneFire:
+                case WardWord::RuneFrost:
+                case WardWord::RuneShock:
+                case WardWord::RuneWind:
+                case WardWord::RuneStone:
+                case WardWord::RuneVenom:
+                case WardWord::RuneShadow:
+                case WardWord::RuneRadiance:
+                case WardWord::RuneBlood:
+                case WardWord::RuneArcane:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+
+        auto findDropNear = [&](Vec2i c, RNG& rr) -> Vec2i {
+            // Try the ward tile first, then expand out.
+            for (int r = 0; r <= 2; ++r) {
+                for (int tries = 0; tries < 80; ++tries) {
+                    const int dx = rr.range(-r, r);
+                    const int dy = rr.range(-r, r);
+                    Vec2i p{c.x + dx, c.y + dy};
+                    if (!dung.inBounds(p.x, p.y)) continue;
+                    if (dung.at(p.x, p.y).type != TileType::Floor) continue;
+                    if (roomTypeAt(dung, p) == RoomType::Shop) continue;
+                    if (entityAt(p.x, p.y)) continue;
+                    if (hasGroundAt(p)) continue;
+                    return p;
+                }
+            }
+            return Vec2i{-1, -1};
+        };
+
+        // Cap the number of rune caches so we don't over-inflate early tablet counts.
+        const int maxCaches = (spawnDepth >= 10) ? 2 : 1;
+        int cachesPlaced = 0;
+
+        for (const Engraving& eg : engravings_) {
+            if (cachesPlaced >= maxCaches) break;
+
+            // Only consider procedurally generated wards.
+            if (!eg.isWard || !eg.isGraffiti) continue;
+
+            const WardWord ww = wardWordFromText(eg.text);
+            if (!isRuneWard(ww)) continue;
+
+            const uint32_t h = hash32(hashCombine(hashCombine(seed_, "RUNE_CACHE"_tag), static_cast<uint32_t>(spawnDepth)) ^ static_cast<uint32_t>(eg.pos.x * 73856093u) ^ static_cast<uint32_t>(eg.pos.y * 19349663u));
+            RNG rr(h);
+
+            float chance = 0.32f + 0.018f * static_cast<float>(std::min(12, std::max(0, spawnDepth - 3)));
+            chance = std::min(0.58f, chance);
+            if (!rr.chance(chance)) continue;
+
+            const Vec2i dropPos = findDropNear(eg.pos, rr);
+            if (!dung.inBounds(dropPos.x, dropPos.y)) continue;
+
+            // Build a proc spell id that *matches the ward element* (up to a small
+            // bounded search). This makes the cache feel connected to the ward.
+            int tier = 1 + spawnDepth / 2;
+            if (spawnDepth >= 6 && rr.chance(0.18f)) tier += 1;
+            tier = clampi(tier, 1, 15);
+
+            const ProcSpellElement wantElem = runeElementForWard(ww);
+            const uint32_t baseSeed28 = rr.nextU32() & PROC_SPELL_SEED_MASK;
+
+            uint32_t chosenId = makeProcSpellId(static_cast<uint8_t>(tier), baseSeed28);
+            for (uint32_t i = 0; i < 96; ++i) {
+                const uint32_t seed28 = (baseSeed28 + i) & PROC_SPELL_SEED_MASK;
+                const uint32_t pid = makeProcSpellId(static_cast<uint8_t>(tier), seed28);
+                if (generateProcSpell(pid).element == wantElem) { chosenId = pid; break; }
+            }
+
+            Item tab;
+            tab.id = nextItemId++;
+            tab.kind = ItemKind::RuneTablet;
+            tab.count = 1;
+            tab.enchant = 0;
+            tab.buc = 0;
+            tab.charges = 0;
+            tab.spriteSeed = chosenId;
+            tab.ego = ItemEgo::None;
+            tab.flags = 0;
+            tab.shopPrice = 0;
+            tab.shopDepth = 0;
+
+            ground.push_back(GroundItem{tab, dropPos});
+            cachesPlaced += 1;
         }
     }
 }

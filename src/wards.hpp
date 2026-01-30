@@ -21,15 +21,39 @@ enum class WardWord : uint8_t {
     Salt,
     Iron,
     Fire,
+
+    // Procedural rune-wards (typically etched by Rune Tablet "WARD" proc spells).
+    RuneFire,
+    RuneFrost,
+    RuneShock,
+    RuneVenom,
+    RuneShadow,
+    RuneRadiance,
+    RuneArcane,
+    RuneStone,
+    RuneWind,
+    RuneBlood,
 };
 
 inline const char* wardWordName(WardWord w) {
     switch (w) {
-        case WardWord::Elbereth: return "ELBERETH";
-        case WardWord::Salt:     return "SALT";
-        case WardWord::Iron:     return "IRON";
-        case WardWord::Fire:     return "FIRE";
-        default:                 return "";
+        case WardWord::Elbereth:     return "ELBERETH";
+        case WardWord::Salt:         return "SALT";
+        case WardWord::Iron:         return "IRON";
+        case WardWord::Fire:         return "FIRE";
+
+        case WardWord::RuneFire:     return "RUNE FIRE";
+        case WardWord::RuneFrost:    return "RUNE FROST";
+        case WardWord::RuneShock:    return "RUNE SHOCK";
+        case WardWord::RuneVenom:    return "RUNE VENOM";
+        case WardWord::RuneShadow:   return "RUNE SHADOW";
+        case WardWord::RuneRadiance: return "RUNE RADIANCE";
+        case WardWord::RuneArcane:   return "RUNE ARCANE";
+        case WardWord::RuneStone:    return "RUNE STONE";
+        case WardWord::RuneWind:     return "RUNE WIND";
+        case WardWord::RuneBlood:    return "RUNE BLOOD";
+
+        default:                     return "";
     }
 }
 
@@ -51,10 +75,48 @@ inline std::string wardCanon(const std::string& s) {
 
 inline WardWord wardWordFromText(const std::string& text) {
     const std::string canon = wardCanon(text);
+
+    // Classic / simple wards.
     if (canon == "ELBERETH") return WardWord::Elbereth;
     if (canon == "SALT")     return WardWord::Salt;
     if (canon == "IRON" || canon == "COLD IRON") return WardWord::Iron;
     if (canon == "FIRE" || canon == "EMBER") return WardWord::Fire;
+
+    // Rune wards:
+    //   - "RUNE FIRE"
+    //   - "RUNE:FIRE"
+    //   - "RUNE OF FIRE"
+    //   - "RUNE FIRE: KAR-THO-RAI"  (suffix allowed; only prefix is parsed)
+    //
+    // The goal is: be forgiving in parsing, while keeping the canonical name stable.
+    if (canon.rfind("RUNE", 0) == 0) {
+        size_t i = 4; // after "RUNE"
+        while (i < canon.size() && (canon[i] == ' ' || canon[i] == ':' || canon[i] == '\t')) ++i;
+
+        // Optional "OF".
+        if (i + 2 < canon.size() && canon.compare(i, 3, "OF ") == 0) i += 3;
+        while (i < canon.size() && (canon[i] == ' ' || canon[i] == ':' || canon[i] == '\t')) ++i;
+
+        // Read the element token.
+        const size_t start = i;
+        while (i < canon.size() && std::isalpha(static_cast<unsigned char>(canon[i]))) ++i;
+
+        if (i > start) {
+            const std::string elem = canon.substr(start, i - start);
+
+            if (elem == "FIRE" || elem == "EMBER") return WardWord::RuneFire;
+            if (elem == "FROST" || elem == "ICE") return WardWord::RuneFrost;
+            if (elem == "SHOCK" || elem == "STORM") return WardWord::RuneShock;
+            if (elem == "VENOM" || elem == "POISON") return WardWord::RuneVenom;
+            if (elem == "SHADOW" || elem == "DARK") return WardWord::RuneShadow;
+            if (elem == "RADIANCE" || elem == "LIGHT") return WardWord::RuneRadiance;
+            if (elem == "ARCANE" || elem == "AETHER") return WardWord::RuneArcane;
+            if (elem == "STONE" || elem == "EARTH") return WardWord::RuneStone;
+            if (elem == "WIND" || elem == "AIR") return WardWord::RuneWind;
+            if (elem == "BLOOD") return WardWord::RuneBlood;
+        }
+    }
+
     return WardWord::None;
 }
 
@@ -62,6 +124,12 @@ inline WardWord wardWordFromEngraving(const Engraving& eg) {
     if (!eg.isWard) return WardWord::None;
     return wardWordFromText(eg.text);
 }
+
+namespace {
+inline bool wardIsUndead(EntityKind k) {
+    return (k == EntityKind::SkeletonArcher || k == EntityKind::Ghost || k == EntityKind::Zombie);
+}
+} // namespace
 
 // Returns true if this ward word should have *any* effect on this monster kind.
 inline bool wardAffectsMonster(WardWord w, EntityKind k) {
@@ -99,6 +167,51 @@ inline bool wardAffectsMonster(WardWord w, EntityKind k) {
             // Primal fear of flame: slimes and spiders hesitate.
             return (k == EntityKind::Slime || k == EntityKind::Spider);
 
+        // ----------------------------
+        // Rune wards (elemental wards)
+        // ----------------------------
+
+        case WardWord::RuneRadiance:
+            // Bright runes scorch undead/ethereal minds.
+            return wardIsUndead(k) || (k == EntityKind::Wizard);
+
+        case WardWord::RuneShadow:
+            // Shadow runes unsettle the living, but do little to the undead.
+            if (wardIsUndead(k)) return false;
+            // Civilized/unyielding minds tend to ignore this.
+            if (k == EntityKind::Shopkeeper || k == EntityKind::Guard || k == EntityKind::Minotaur) return false;
+            return true;
+
+        case WardWord::RuneArcane:
+            // "Weird" creatures hate explicit arcana.
+            return (k == EntityKind::Wizard || k == EntityKind::Mimic || k == EntityKind::Leprechaun || k == EntityKind::Nymph);
+
+        case WardWord::RuneShock:
+            // Crackling lines startle small raiders.
+            return (k == EntityKind::Goblin || k == EntityKind::Orc || k == EntityKind::KoboldSlinger);
+
+        case WardWord::RuneFire:
+            return (k == EntityKind::Slime || k == EntityKind::Spider);
+
+        case WardWord::RuneFrost:
+            return (k == EntityKind::Bat || k == EntityKind::Wolf || k == EntityKind::Snake);
+
+        case WardWord::RuneStone:
+            // Heavy brutes hesitate at "weight of stone".
+            return (k == EntityKind::Ogre || k == EntityKind::Troll || k == EntityKind::Minotaur);
+
+        case WardWord::RuneWind:
+            // Air-sense wards disrupt fluttering/floating threats.
+            return (k == EntityKind::Bat || k == EntityKind::Ghost);
+
+        case WardWord::RuneVenom:
+            // Toxic runes repulse predators that rely on smell.
+            return (k == EntityKind::Wolf || k == EntityKind::Snake);
+
+        case WardWord::RuneBlood:
+            // Blood runes ward off beasts and venomous ambushers.
+            return (k == EntityKind::Wolf || k == EntityKind::Snake || k == EntityKind::Spider);
+
         default:
             return false;
     }
@@ -126,6 +239,40 @@ inline float wardResistanceFactor(WardWord w, EntityKind k) {
             // Spiders are a bit bolder than slimes.
             if (k == EntityKind::Spider) return 0.80f;
             return 1.0f;
+
+        // Rune wards: assume a generally higher "will check" across the board.
+        case WardWord::RuneShadow:
+            // Big brutes shrug off fear-magic.
+            if (k == EntityKind::Ogre || k == EntityKind::Troll) return 0.75f;
+            return 1.0f;
+
+        case WardWord::RuneRadiance:
+            // Wizards are stubborn even when it burns.
+            if (k == EntityKind::Wizard) return 0.80f;
+            return 1.0f;
+
+        case WardWord::RuneArcane:
+            if (k == EntityKind::Wizard) return 0.70f;
+            return 1.0f;
+
+        case WardWord::RuneStone:
+            if (k == EntityKind::Minotaur) return 0.70f;
+            if (k == EntityKind::Troll) return 0.80f;
+            return 1.0f;
+
+        case WardWord::RuneShock:
+            if (k == EntityKind::Orc) return 0.85f;
+            return 1.0f;
+
+        case WardWord::RuneFrost:
+        case WardWord::RuneFire:
+        case WardWord::RuneWind:
+        case WardWord::RuneVenom:
+        case WardWord::RuneBlood:
+            // Small dampening for "tough" monsters.
+            if (k == EntityKind::Ogre || k == EntityKind::Minotaur) return 0.85f;
+            return 1.0f;
+
         default:
             return 1.0f;
     }
@@ -164,6 +311,59 @@ inline float wardRepelChance(WardWord w, EntityKind k, uint8_t strength) {
             perUse = 0.07f;
             cap = 0.78f;
             break;
+
+        // Rune wards: tuned slightly lower than IRON, but competitive with classic wards.
+        case WardWord::RuneShadow:
+            base = 0.16f;
+            perUse = 0.06f;
+            cap = 0.72f;
+            break;
+        case WardWord::RuneRadiance:
+            base = 0.24f;
+            perUse = 0.08f;
+            cap = 0.82f;
+            break;
+        case WardWord::RuneArcane:
+            base = 0.22f;
+            perUse = 0.07f;
+            cap = 0.78f;
+            break;
+        case WardWord::RuneShock:
+            base = 0.21f;
+            perUse = 0.07f;
+            cap = 0.78f;
+            break;
+        case WardWord::RuneFire:
+            base = 0.19f;
+            perUse = 0.06f;
+            cap = 0.75f;
+            break;
+        case WardWord::RuneFrost:
+            base = 0.19f;
+            perUse = 0.06f;
+            cap = 0.75f;
+            break;
+        case WardWord::RuneStone:
+            base = 0.20f;
+            perUse = 0.07f;
+            cap = 0.80f;
+            break;
+        case WardWord::RuneWind:
+            base = 0.18f;
+            perUse = 0.06f;
+            cap = 0.72f;
+            break;
+        case WardWord::RuneVenom:
+            base = 0.18f;
+            perUse = 0.06f;
+            cap = 0.74f;
+            break;
+        case WardWord::RuneBlood:
+            base = 0.20f;
+            perUse = 0.07f;
+            cap = 0.78f;
+            break;
+
         default:
             break;
     }

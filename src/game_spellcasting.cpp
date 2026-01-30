@@ -2,6 +2,7 @@
 #include "combat_rules.hpp"
 #include "proc_spells.hpp"
 
+#include <algorithm>
 #include <sstream>
 
 void Game::openSpells() {
@@ -640,6 +641,76 @@ bool Game::castProcSpell(uint32_t procId) {
             break;
         }
     }
+
+
+    // Rune-ward side effect: Ward-form proc spells can etch a temporary elemental
+    // ward inscription underfoot (without overwriting player messages / sigils).
+    auto tryInscribeRuneWard = [&]() {
+        if (ps.form != ProcSpellForm::Ward) return;
+        if (!dung.inBounds(p.pos.x, p.pos.y) || !dung.isWalkable(p.pos.x, p.pos.y)) return;
+
+        Engraving* existing = nullptr;
+        for (auto& eg : engravings_) {
+            if (eg.pos == p.pos) { existing = &eg; break; }
+        }
+
+        // Avoid clobbering non-ward, non-graffiti engravings.
+        if (existing && !existing->isGraffiti && !existing->isWard) return;
+
+        std::string wardText = "RUNE ";
+        wardText += procSpellElementName(ps.element);
+        wardText += ": ";
+        wardText += ps.runeSigil;
+        if (wardText.size() > 72) wardText.resize(72);
+
+        int uses = 4 + static_cast<int>(ps.tier) / 2 + focus / 6;
+        if (hasMod(ps.mods, ProcSpellMod_Focused)) uses += 2;
+        if (hasMod(ps.mods, ProcSpellMod_Lingering)) uses += 2;
+        if (hasMod(ps.mods, ProcSpellMod_Volatile)) uses -= 1;
+        uses = clampi(uses, 1, 254);
+        const uint8_t strength = static_cast<uint8_t>(uses);
+
+        bool didInscribe = false;
+
+        if (existing) {
+            existing->text = wardText;
+            existing->isWard = true;
+            existing->isGraffiti = false;
+            existing->strength = strength;
+            didInscribe = true;
+        } else {
+            // Keep the list bounded (same cap as manual engraving).
+            constexpr size_t kMaxEngravingsPerFloor = 128;
+            if (engravings_.size() >= kMaxEngravingsPerFloor) {
+                // Prefer to drop an old graffiti entry first.
+                size_t drop = static_cast<size_t>(-1);
+                for (size_t i = 0; i < engravings_.size(); ++i) {
+                    if (engravings_[i].isGraffiti) { drop = i; break; }
+                }
+                if (drop == static_cast<size_t>(-1)) drop = 0;
+                engravings_.erase(engravings_.begin() + static_cast<std::vector<Engraving>::difference_type>(drop));
+            }
+
+            Engraving e;
+            e.pos = p.pos;
+            e.text = wardText;
+            e.isWard = true;
+            e.isGraffiti = false;
+            e.strength = strength;
+            engravings_.push_back(std::move(e));
+            didInscribe = true;
+        }
+
+        if (didInscribe) {
+            std::ostringstream ss;
+            ss << "A " << procSpellElementName(ps.element) << " RUNE WARD ETCHES ITSELF INTO THE FLOOR.";
+            pushMsg(ss.str(), MessageKind::Info, true);
+
+            // Extra visual feedback on top of the self-buff.
+            pushFxParticle(FXParticlePreset::Buff, p.pos, 10 + focus * 2, 0.28f);
+        }
+    };
+    tryInscribeRuneWard();
 
     if (ps.noise > 0) emitNoise(p.pos, ps.noise);
 

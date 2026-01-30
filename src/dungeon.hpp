@@ -597,6 +597,22 @@ mutable std::vector<uint8_t> leylineCache;
     int fluvialChasmCount = 0;      // Total tiles converted to Chasm by the pass.
     int fluvialCausewayCount = 0;   // Bridges/causeways placed to preserve connectivity.
 
+    // Not serialized: overworld wilderness POIs.
+    // Some overworld chunks place 0..N "springs" as TileType::Fountain to add
+    // deterministic, interactable points-of-interest to the surface.
+    int overworldSpringCount = 0;
+    int overworldBrookCount = 0;   // Number of spring-fed brooks carved (0..N per chunk).
+    int overworldBrookTiles = 0;   // Total tiles converted to Chasm by brooks (including terminal ponds).
+    int overworldPondCount = 0;    // Number of terminal ponds carved at local sinks.
+
+    // Not serialized: overworld wilderness setpieces.
+    // Rare "strongholds" are ruined settlements/fortifications that add multi-structure POIs
+    // (broken walls, a small keep, and a guaranteed cache chest) to the surface.
+    int overworldStrongholdCount = 0;          // Number of strongholds placed (0..1 per chunk).
+    int overworldStrongholdBuildingCount = 0;  // Total building footprints placed for the setpiece.
+    int overworldStrongholdCacheCount = 0;     // Number of bonus cache spots requested (bonusLootSpots).
+    int overworldStrongholdWallTiles = 0;      // Total wall tiles placed (debug/tuning).
+
 
 
     // Not serialized: perimeter service tunnels (inner-border maintenance corridors).

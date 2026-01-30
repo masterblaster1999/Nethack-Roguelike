@@ -1,19 +1,18 @@
 {
-  "patch_id": "round211_patch",
-  "previous_patch_id": "round210_patch",
-  "round": 211,
-  "created_utc": "2026-01-29T09:12:47Z",
-  "summary": "Procedural leylines: a deterministic per-tile arcane resonance field that forms thin energy networks; boosts mana regen + improves casting on strong currents (LOOK shows LEY), with docs and tests.",
+  "patch_id": "round220_patch",
+  "previous_patch_id": "round219_patch",
+  "round": 220,
+  "created_utc": "2026-01-30T09:45:49Z",
+  "summary": "Round 220: adds rare overworld ruin-stronghold setpieces (walled settlements with a keep, Poisson-disc outbuildings, rubble, and guaranteed loot caches) that connect back to the trail hub. Adds overworld stronghold telemetry + #mapstats display and a regression test to ensure strongholds appear.",
   "files_changed_or_added_this_round": [
-    "CHANGELOG.md",
-    "PATCH_MANIFEST.json",
-    "docs/PROCGEN_LEYLINES.md",
-    "src/dungeon.cpp",
+    "src/overworld.hpp",
     "src/dungeon.hpp",
-    "src/game_look.cpp",
-    "src/game_spawn.cpp",
-    "src/game_spellcasting.cpp",
-    "tests/test_main.cpp"
+    "src/dungeon.cpp",
+    "src/game_internal.hpp",
+    "tests/test_main.cpp",
+    "docs/PROCGEN_OVERWORLD_STRONGHOLDS.md",
+    "CHANGELOG.md",
+    "PATCH_MANIFEST.json"
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -39,11 +38,17 @@
     "docs/PROCGEN_IDENT_APPEARANCES.md",
     "docs/PROCGEN_LEYLINES.md",
     "docs/PROCGEN_OVERWORLD_ATLAS.md",
+    "docs/PROCGEN_OVERWORLD_BROOKS.md",
+    "docs/PROCGEN_OVERWORLD_CLIMATE.md",
     "docs/PROCGEN_OVERWORLD_GATES.md",
     "docs/PROCGEN_OVERWORLD_RIVERS.md",
+    "docs/PROCGEN_OVERWORLD_SPRINGS.md",
+    "docs/PROCGEN_OVERWORLD_TECTONICS.md",
+    "docs/PROCGEN_OVERWORLD_TRAILS.md",
     "docs/PROCGEN_OVERWORLD_WAYSTATIONS.md",
     "docs/PROCGEN_OVERWORLD_WEATHER.md",
     "docs/PROCGEN_RAYCAST3D_VIEW.md",
+    "docs/PROCGEN_RUNE_WARDS.md",
     "docs/PROCGEN_SHOPS.md",
     "docs/PROCGEN_SHRINES.md",
     "docs/PROCGEN_SIGILS.md",
@@ -102,6 +107,7 @@
     "src/noise_localization.hpp",
     "src/overworld.hpp",
     "src/pet_gen.hpp",
+    "src/poisson_disc.hpp",
     "src/proc_names.hpp",
     "src/proc_rd.hpp",
     "src/proc_spells.hpp",
@@ -122,24 +128,8 @@
     "src/victory_gen.hpp",
     "src/wards.hpp",
     "src/wfc.hpp",
-    "tests/test_main.cpp"
-  ],
-  "changed_files": [
-    "CHANGELOG.md",
-    "PATCH_MANIFEST.json",
-    "src/game_spawn.cpp",
     "tests/test_main.cpp",
-    "src/dungeon.hpp"
+    "docs/PROCGEN_OVERWORLD_STRONGHOLDS.md"
   ],
-  "added_files": [
-    "src/ecosystem_loot.hpp",
-    "docs/PROCGEN_ECOSYSTEM_LOOT_ECOLOGY.md"
-  ],
-  "notes": [
-    "Adds ecosystem-aware weapon ego (brand) weighting via pure helpers in src/ecosystem_loot.hpp.",
-    "Adds small themed loot caches near some ecosystem seeds using a derived RNG stream (does not perturb main loot RNG).",
-    "Refactors spawnItems() item drop helper to accept an RNG reference so derived streams can spawn items deterministically.",
-    "Adds unit test guardrails for ecosystem ego bias direction/magnitude and documentation.",
-    "Fixes a duplicate inline definition of ecosystemKindFlavor() in dungeon.hpp (compile error)."
-  ]
+  "notes_for_reviewer": "Strongholds are deterministic per chunk. The entrance is always connected to the chunk trail hub via the existing trail planner (a short spur is carved after gate-to-hub trails). Keep interiors may use DoorLocked to trigger the existing key/lockpick guarantee logic. Telemetry is exposed in #mapstats."
 }

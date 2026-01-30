@@ -1,52 +1,82 @@
 # Procedural Overworld Rivers
 
 This project treats the overworld as an *infinite* stream of deterministic “wilderness chunks”.
-Each chunk is generated from a stable chunk seed (run seed + chunk coordinate), but we also
-layer in *world-space* noise fields so that terrain features can “flow” continuously across
+Each chunk is generated from a stable chunk seed (run seed + chunk coordinates), but all large-scale
+terrain features (including rivers) are sampled in **world coordinates** so they remain seamless across
 chunk borders.
-
-This document describes the **macro river** pass: thin, continuous “water” ribbons carved
-into the surface map.
 
 ## Representation
 
-There is no dedicated `Water` tile type. Instead:
-
-- `TileType::Chasm` represents **water basins / rivers** when `Game::atCamp()` is true.
-- `TileType::Fountain` represents a small fishable water source on any floor.
-
-Fishing specifically treats `Chasm` as fishable water **only** on the overworld/surface camp.
+- **Water** is represented as `TileType::Chasm` in overworld chunks.
+- **Banks** are sparse `TileType::Pillar` (vegetation) and `TileType::Boulder` (rocks) placed along water edges.
+- **Crossings** are created by the overworld trail pass: trail carving always overwrites the *centerline* tile to
+  `Floor`, so paths can cross rivers. Each time a trail converts a `Chasm` tile to `Floor`, we increment
+  `Dungeon::fluvialCausewayCount` (useful as a debug/telemetry readout).
 
 ## Generation
 
-Macro rivers are generated in `overworld::generateWildernessChunk()` as an additional pass
-after base biome terrain (mountains, wetlands, deadwood, etc.) and before landmarks/trails.
+The overworld terrain pass first builds cached, per-tile fields:
+
+- `elevation` (FBM noise)
+- `wetness` (FBM noise)
+- `variation` (hash jitter)
+
+Those fields are reused for lakes, vegetation, rivers, landmarks, and trails.
+
+### Lakes
+
+Lakes are carved early as basins where elevation is low and wetness is high.
+
+### River channels
+
+Rivers are carved as a **domain-warped, multi-band noise field**:
+
+1. **Trunks (macro rivers)**  
+   Two low-frequency trunk fields are sampled as isovalue bands:
+   - `RIV` sampled in standard coordinates
+   - `RIV2` sampled in a rotated coordinate basis (adds variety + occasional confluences)
+
+   The distance-to-band (`abs(n - 0.5)`) is compared against a biome-tuned width threshold.
+
+2. **Domain warping**  
+   A lower-frequency warp field offsets the sampling coordinates of the trunk and tributary noises.
+   This produces more natural meanders and reduces “straight” noise contours.
+
+3. **Width modulation**  
+   The trunk width is modulated by:
+   - **wetness** (wetter regions widen)
+   - **local flatness** estimated from the elevation gradient (flat + wet areas widen further, creating a braided feel)
+
+4. **Tributaries**  
+   A higher-frequency tributary band (`RIVT`) activates only:
+   - in sufficiently wet tiles
+   - and *near* trunk valleys (within a multiple of the trunk width)
+
+   This keeps tributaries visually tied to a main channel instead of turning into “random stripes”.
+
+5. **Micro-channels (wetland texture)**  
+   In very wet biomes (swamp/coast), an even higher-frequency band adds small capillary channels.
+
+All sampling uses **world coordinates**, keeping the river field consistent across chunk boundaries.
+
+### Riparian banks
+
+After carving water, we decorate the edges:
+
+- For each water tile, examine its 4-neighbors.
+- Where a neighbor is `Floor`, place a `Pillar` or `Boulder` with a biome-tuned probability and bias
+  (more vegetation in swamps/forests; more rocks in highlands/badlands).
+- Gate “throats” (the walkable tile just inside each border gate) are kept clear to avoid ugly or annoying chokepoints.
+- Trails and landmarks run *after* banks, so they can still carve through when needed.
 
 ### Key properties
 
-- **World-space sampling:** river noise is evaluated at `(wx, wy)` where  
-  `wx = chunkX * chunkWidth + localX` and `wy = chunkY * chunkHeight + localY`.  
-  This means rivers are continuous across chunk borders.
+- **Seamlessness:** all core fields are evaluated in world space, not chunk space.
+- **Biome variation:** each biome tweaks river width, warp strength, tributary activation, and bank density.
+- **Guaranteed travel:** trails are carved after rivers, ensuring gates remain mutually reachable even when rivers cut across the chunk.
 
-- **Band carving:** we carve a river where a low-frequency noise value is close to 0.5:  
-  `abs(noise - 0.5) < bandWidth`.  
-  This produces thin, curving “ribbons” without needing to store a global river graph.
+### Inspiration / reading
 
-- **Biome parameters:** band width (and how strongly wet areas widen rivers) is tuned by biome:
-  swamps/coasts are river-heavy, deserts have rare wadis, highlands avoid carving through
-  mountain walls by default.
-
-- **Connectivity safety:** the surface generator always carves organic trails between all
-  edge gates *after* the river pass, guaranteeing the chunk remains traversable even when
-  a river slices across it.
-
-### Inspiration
-
-The “terrain from layered noise” approach (elevation + moisture fields) is a proven baseline
-for overworld biomes, and band-carving on a noise field is a simple way to create coherent
-linear features (roads/rivers) on chunked infinite maps.
-
-References:
-- https://www.redblobgames.com/maps/terrain-from-noise/
-- https://www.redblobgames.com/x/1723-procedural-river-growing/
-- https://gamedev.stackexchange.com/questions/59314/procedural-river-or-road-generation-for-infinite-terrain
+- Red Blob Games — “Making maps with noise functions”: https://www.redblobgames.com/maps/terrain-from-noise/
+- Red Blob Games — “Procedural river drainage basins”: https://www.redblobgames.com/x/1723-procedural-river-growing/
+- Domain warping overview (paper): https://arxiv.org/html/2405.07124v1

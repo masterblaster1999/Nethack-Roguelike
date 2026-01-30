@@ -1,5 +1,89 @@
 # Changelog
 
+## Round 220 - Ruin Strongholds (Overworld setpieces)
+
+- **Added rare overworld "stronghold" setpieces**: ruined, walled settlements with a central keep, scattered outbuildings, and rubble.
+  - Perimeter walls are drawn as a broken ellipse ring (walls + boulder rubble), with an explicit breach marked by an open door.
+  - Outbuildings are distributed via Poisson-disc sampling for organic-but-spaced layouts.
+  - The keep can spawn as a mini-vault with a locked door.
+- **Guaranteed loot hooks for strongholds**
+  - Strongholds request at least one chest cache via `bonusLootSpots` and may request a small extra cache.
+  - Optional fixed ambient items (gold/food) can be requested via `bonusItemSpawns`.
+- **Reachability guarantees**: the stronghold entrance is connected back to the chunk trail hub via a carved spur trail.
+- **New overworld procgen telemetry**: `overworldStronghold*` counters are tracked and surfaced in `#mapstats`.
+- **Safety/robustness**: wilderness generation now clears `bonusLootSpots`/`bonusItemSpawns` up-front so generation-only requests never persist between chunk instances.
+
+## Round 219
+
+- **Overworld tectonics (Voronoi plates + mountain chains):** wilderness chunks now apply a seam-free **Worley/Voronoi (F1/F2)** ridge field in *world space* to create coherent **plate basins** and long **mountain ranges**.
+  - Two scales (major plates + minor sub-ridges) plus deterministic **passes/gaps** to avoid infinite unbroken ridge walls.
+  - Plate interiors get a small elevation bias; ridge crests are slightly **dried** to naturally reduce vegetation.
+- **Talus aprons (foothills):** added a biome-tuned boulder apron along tectonic mountain edges, avoiding gate throats and running *before* landmarks so ruins aren't accidentally “talus-decorated”.
+- Docs: added `docs/PROCGEN_OVERWORLD_TECTONICS.md`.
+- Tests: added `overworld_tectonics` ridge-field sanity check (ensures the ridge mask has extrema and remains deterministic).
+
+## Round 218
+
+- **Overworld brooks + ponds (spring-fed micro-hydrology):** springs (`TileType::Fountain`) now “spill” downhill into narrow **brooks** carved as `TileType::Chasm`, following a deterministic local **steepest-descent (D8-ish)** walk over the cached elevation field.
+  - Brooks join existing rivers/lakes when they hit `Chasm`; otherwise they terminate in a small **pond** when trapped in a basin.
+  - A sparse **riparian bank** decorator (Pillars vs Boulders, biome-tuned) is applied around some brook/pond edges so the new water reads coherently.
+  - New telemetry: `overworldBrookCount`, `overworldBrookTiles`, `overworldPondCount` (shown by `#mapstats` under `OVERWORLD`).
+- Docs: added `docs/PROCGEN_OVERWORLD_BROOKS.md`.
+- Tests: added `overworld_brooks` sanity check (find at least one spring adjacent to water in a neighborhood).
+
+## Round 217
+
+- **Overworld climate upgrade (wind + orography):** overworld terrain now runs a lightweight **climate wetness advection** pass that couples a per-run **prevailing wind** with local **ridge shadows**.
+  - **Windward uplift:** rising slopes into the wind get slightly wetter.
+  - **Rain shadow:** lee-side basins behind strong ridges become drier.
+  - The wetness correction is applied *before* lakes/rivers/vegetation/springs are carved, so it meaningfully shapes the whole overworld.
+- **Biome picking improved:** chunk biomes now incorporate a cheap upwind lookback (rain shadow + ocean proximity) and apply an altitude lapse-rate to temperature for more coherent macro-regions.
+- Docs: added `docs/PROCGEN_OVERWORLD_CLIMATE.md`.
+- Tests: added `overworld_biome_diversity` sanity check (ensures biome variety + cardinal prevailing wind).
+
+## Round 216
+
+- **Overworld springs (blue-noise POIs):** wilderness chunks can now place 0..2 small **springs** as `TileType::Fountain`, using **Poisson-disc (blue-noise)** candidates + a wetness/flatness scoring pass to bias toward valley basins.
+  - Springs carve a small clearing and add a biome-tuned riparian ring (Pillars in wet biomes, Boulders in harsh biomes).
+  - New telemetry: `overworldSpringCount` (shown by `#mapstats` as `OVERWORLD | SPRINGS <N>` when present).
+- **Procgen refactor:** extracted Bridson Poisson-disc sampler into reusable header `src/poisson_disc.hpp`, used by the RoomsGraph generator and overworld spring placement.
+- Docs: added `docs/PROCGEN_OVERWORLD_SPRINGS.md`.
+- Tests: added `overworld_springs` sanity check (find at least one spring in a neighborhood).
+
+## Round 215
+
+- **Overworld river upgrade (domain-warped, multi-band fluvial network):** macro rivers are no longer a single noise ribbon—rivers are now generated from **two oriented trunk bands** (for long runs + occasional confluences) plus **wetness-gated tributary/capillary channels**.
+  - **Domain warping** adds natural meanders and breaks up straight contour artifacts.
+  - **Width modulation** now incorporates wetness and *local flatness* (estimated from the elevation gradient) so wet lowlands can appear more braided.
+  - New **riparian bank** decoration pass: sparse Pillars/Boulders appear along water edges (biome-tuned), while keeping gate throats clear.
+- **Trail crossings telemetry:** overworld trail carving now increments `fluvialCausewayCount` when a trail converts `Chasm` to `Floor` (useful for debugging / mapstats).
+- Docs: updated `docs/PROCGEN_OVERWORLD_RIVERS.md`.
+- Tests: added `overworld_rivers` sanity check (finds at least one chunk with water + bank adjacency in a neighborhood).
+
+## Round 214
+
+- **Overworld trail network upgrade (direction-aware A* road planner):** wilderness chunks now connect border gates to the central hub using a terrain-cost **A*** planner that prefers existing trails, avoids rivers (**Chasm**) and mountains (**Wall**), and penalizes hard turns for smoother, more readable paths.
+  - Trails now respect the heightfield: steep local elevation gradients are expensive, producing more natural “go around / gentle climb” routes instead of straight tunnels through ridges.
+  - **Terrain-preserving carving:** trail widening no longer bulldozes rivers/mountains—only the centerline is guaranteed floor; the radius expansion skips Wall/Chasm unless explicitly forced (hub clearing), preserving readable river silhouettes.
+- Docs: added `docs/PROCGEN_OVERWORLD_TRAILS.md`.
+- Tests: added `overworld_trails` connectivity regression; fixed test references to `DUNGEON_MAX_DEPTH` to use `Game::DUNGEON_MAX_DEPTH`.
+
+## Round 213
+
+- **Ancient Rune Wards (leyline setpieces):** dungeon generation can now carve a tiny number of functional **Rune Wards** at **high-intensity leyline nodes** (depth 3+), biased toward junctions/open spaces.
+  - Placement avoids obvious safe zones (kept away from stairs landings; not inside Shops/Shrines/Vaults/Secret rooms; never overwrites existing engravings).
+  - Ancient wards have **finite durability** like normal wards.
+- **Leyline rune caches:** occasionally a **matching-element Rune Tablet** spawns near an Ancient Rune Ward (bounded proc-id search to align element), creating a small "follow the leyline" exploration breadcrumb.
+- Docs: updated `docs/PROCGEN_RUNE_WARDS.md`.
+
+## Round 212
+
+- **Rune wards (proc spell synergy with the ward system):** Ward-form procedural rune spells (usually from **Rune Tablets**) now **etch an elemental ward inscription underfoot** when cast (without overwriting non-ward / non-graffiti engravings).
+  - New ward keywords: `RUNE FIRE`, `RUNE SHADOW`, `RUNE RADIANCE`, etc. Parsing is forgiving (`RUNE:FIRE`, `RUNE OF FIRE`, and optional sigil suffix like `RUNE FIRE: KAR-THO-RAI`).
+  - Elemental affinities: different rune wards repel different monster sets (undead vs raiders vs brutes, etc).
+- Docs: `docs/PROCGEN_RUNE_WARDS.md`
+- Tests: `rune_wards` parsing/affinity sanity checks.
+
 ## Round 211
 
 - **Procedural leylines (arcane resonance field):** a deterministic per-tile (0..255) "mana current" cache computed alongside terrain materials and ecosystem seeds.
@@ -711,14 +795,6 @@
 - Keybinds overlay now shows a contextual **INFO** description for the currently selected action (pulled from the same registry).
 - Fixed MSVC build errors/warnings in procedural biolum lighting + fluvial terrain: replaced an invalid hex literal suffix used for a seed salt, and removed C4456 shadowing warnings in the gully connectivity repair logic.
 - Fixed MSVC build break: replaced invalid mnemonic hex seed salts in biolum ambient particles and room-trim floor border overlays with compile-time hashed tags (`"..."_tag`).
-
-
-
-
-
-
-
-
 
 
 - Fixed MSVC build errors in inventory/butchering: use `Effects.confusionTurns`/`hallucinationTurns`, remove stale `Item.ownerId`, and respect `equippedMelee()` constness.

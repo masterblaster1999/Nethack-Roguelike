@@ -226,6 +226,11 @@ enum class ItemKind : uint8_t {
     RustVent,
     AshVent,
     GrottoSpring,
+
+    // --- Ecosystem bonus loot (append-only) ---
+    // Dropped rarely from some ecosystem nodes.
+    AlchemyCatalyst,
+    FireBomb,
 };
 
 // Item "egos" (NetHack-style brands / special properties) applied to some gear.
@@ -302,7 +307,7 @@ inline int egoValueMultiplierPct(ItemEgo e) {
 }
 
 // Keep in sync with the last enum value (append-only).
-inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::GrottoSpring) + 1; // keep in sync with last enum value
+inline constexpr int ITEM_KIND_COUNT = static_cast<int>(ItemKind::FireBomb) + 1; // keep in sync with last enum value
 
 inline bool isVtuberCollectible(ItemKind k) {
     return k == ItemKind::VtuberFigurine || k == ItemKind::VtuberHoloCard;

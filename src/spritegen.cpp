@@ -3217,6 +3217,49 @@ case ItemKind::Arrow: {
             break;
         }
         
+
+        case ItemKind::AlchemyCatalyst: {
+            // A small catalyst vial.
+            Color glass = {200,200,220,180};
+            Color fluid = {205,90,230,220};
+            Color cork  = {120,90,60,255};
+
+            outlineRect(s, 6, 4, 4, 10, mul(glass, 0.9f));
+            rect(s, 7, 8, 2, 5, fluid);
+            rect(s, 6, 3, 4, 2, cork);
+
+            // Glint.
+            if (frame % 2 == 1) {
+                setPx(s, 9, 6, {255,255,255,200});
+                setPx(s, 8, 9, {255,255,255,120});
+            }
+            break;
+        }
+
+        case ItemKind::FireBomb: {
+            // A squat bomb with a burning fuse.
+            Color shell = add({70,70,80,255}, rng.range(-8,8), rng.range(-8,8), rng.range(-8,8));
+            Color dark  = mul(shell, 0.65f);
+            Color fuse  = add({150,120,80,255}, rng.range(-6,6), rng.range(-6,6), rng.range(-6,6));
+            Color flame = {255,160,85, static_cast<uint8_t>((frame % 2 == 0) ? 220 : 160)};
+
+            // Body.
+            circle(s, 9, 12, 4, dark);
+            circle(s, 9, 11, 3, shell);
+
+            // Fuse.
+            line(s, 10, 7, 13, 5, fuse);
+            setPx(s, 13, 5, mul(fuse, 0.7f));
+
+            // Flame / spark.
+            setPx(s, 14, 4, flame);
+            setPx(s, 13, 4, mul(flame, 0.85f));
+            if (frame % 2 == 0) setPx(s, 14, 5, {255,255,255,140});
+
+            // Highlight.
+            setPx(s, 10, 10, {255,255,255,90});
+            break;
+        }
         case ItemKind::BountyContract: {
             // A parchment contract with a wax seal.
             Color paper = add({230, 220, 185, 255}, rng.range(-10,10), rng.range(-10,10), rng.range(-10,10));

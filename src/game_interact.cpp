@@ -4440,7 +4440,7 @@ bool Game::harvestEcosystemNodeAtPlayer() {
     auto pickShardTag = [&](ItemKind k, TerrainMaterial mat) -> crafttags::Tag {
         switch (k) {
             case ItemKind::SporePod: {
-                if (mat == TerrainMaterial::Moss || mat == TerrainMaterial::Dirt || mat == TerrainMaterial::Swamp) {
+                if (mat == TerrainMaterial::Moss || mat == TerrainMaterial::Dirt) {
                     return hrng.chance(0.55f) ? crafttags::Tag::Regen : crafttags::Tag::Venom;
                 }
                 return hrng.chance(0.50f) ? crafttags::Tag::Venom : crafttags::Tag::Regen;
@@ -4453,7 +4453,7 @@ bool Game::harvestEcosystemNodeAtPlayer() {
                 return hrng.chance(0.55f) ? crafttags::Tag::Clarity : crafttags::Tag::Daze;
             }
             case ItemKind::RustVent: {
-                if (mat == TerrainMaterial::Rust || mat == TerrainMaterial::Iron) return hrng.chance(0.55f) ? crafttags::Tag::Alch : crafttags::Tag::Stone;
+                if (mat == TerrainMaterial::Metal) return hrng.chance(0.55f) ? crafttags::Tag::Alch : crafttags::Tag::Stone;
                 return hrng.chance(0.45f) ? crafttags::Tag::Stone : crafttags::Tag::Alch;
             }
             case ItemKind::AshVent: {
@@ -4461,7 +4461,7 @@ bool Game::harvestEcosystemNodeAtPlayer() {
                 return hrng.chance(0.55f) ? crafttags::Tag::Stone : crafttags::Tag::Ember;
             }
             case ItemKind::GrottoSpring: {
-                if (mat == TerrainMaterial::Water) return hrng.chance(0.55f) ? crafttags::Tag::Aurora : crafttags::Tag::Regen;
+                if (mat == TerrainMaterial::Moss) return hrng.chance(0.55f) ? crafttags::Tag::Aurora : crafttags::Tag::Regen;
                 return hrng.chance(0.50f) ? crafttags::Tag::Regen : crafttags::Tag::Aurora;
             }
             default: break;

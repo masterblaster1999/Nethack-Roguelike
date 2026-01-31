@@ -14,6 +14,7 @@
 #include "wards.hpp"
 #include "ident_gen.hpp"
 #include "shop_profile_gen.hpp"
+#include "farm_gen.hpp"
 #include "ecosystem_loot.hpp"
 #include "shrine_profile_gen.hpp"
 #include "victory_gen.hpp"
@@ -1678,6 +1679,50 @@ bool test_overworld_weather_time_varying_fronts() {
 
 
 
+
+
+bool test_save_load_roundtrip_overworld_chunk() {
+    Game g;
+    g.newGame(12345u);
+
+    // Travel to a non-home overworld chunk (1, 0).
+    {
+        Entity& p = g.playerMut();
+        const Dungeon& d = g.dungeon();
+        const overworld::ChunkGates gates = overworld::gatePositions(d, g.seed(), 0, 0);
+        p.pos = gates.east;
+        CHECK(d.isWalkable(p.pos.x, p.pos.y));
+        g.handleAction(Action::Right);
+    }
+
+    CHECK(g.atCamp());
+    CHECK(!g.atHomeCamp());
+    CHECK(g.overworldX() == 1);
+    CHECK(g.overworldY() == 0);
+
+    // Ensure the current tile is explored so markers are allowed.
+    g.handleAction(Action::Wait);
+    const Vec2i pos = g.player().pos;
+    CHECK(g.setMarker(pos, MarkerKind::Note, "OW-SAVE-TEST"));
+
+    const fs::path path = testTempFile("procrogue_test_overworld_save.prs");
+    CHECK(g.saveToFile(path.string(), true));
+
+    Game g2;
+    CHECK(g2.loadFromFile(path.string(), true));
+    CHECK(g2.atCamp());
+    CHECK(!g2.atHomeCamp());
+    CHECK(g2.overworldX() == 1);
+    CHECK(g2.overworldY() == 0);
+
+    const MapMarker* m = g2.markerAt(g2.player().pos);
+    CHECK(m != nullptr);
+    CHECK(m->kind == MarkerKind::Note);
+    CHECK(m->label == "OW-SAVE-TEST");
+
+    return true;
+}
+
 bool test_overworld_atlas_discovery_tracking() {
     Game g;
     g.newGame(1337u);
@@ -1755,6 +1800,158 @@ bool test_overworld_gate_alignment() {
     return true;
 }
 
+
+
+bool test_camp_stash_has_farming_starter_kit() {
+    Game g;
+    g.newGame(12345u);
+
+    int stashIdx = -1;
+    for (int i = 0; i < (int)g.chestContainers_.size(); ++i) {
+        bool hasRod = false;
+        bool hasKit = false;
+        bool hasBounty = false;
+        for (const auto& it : g.chestContainers_[i].items) {
+            if (it.kind == ItemKind::FishingRod) hasRod = true;
+            if (it.kind == ItemKind::CraftingKit) hasKit = true;
+            if (it.kind == ItemKind::BountyContract) hasBounty = true;
+        }
+        if (hasRod && hasKit && hasBounty) {
+            stashIdx = i;
+            break;
+        }
+    }
+    CHECK(stashIdx >= 0);
+
+    bool hasHoe = false;
+    bool hasSeeds = false;
+    for (const auto& it : g.chestContainers_[stashIdx].items) {
+        if (it.kind == ItemKind::GardenHoe) hasHoe = true;
+        if (it.kind == ItemKind::Seed) hasSeeds = true;
+    }
+
+    CHECK(hasHoe);
+    CHECK(hasSeeds);
+    return true;
+}
+
+bool test_farming_till_plant_grow_harvest() {
+    Game g;
+    g.newGame(54321u);
+
+    // Find an outdoor tile at the home camp suitable for farming.
+    g.dung.ensureMaterials(g.materialWorldSeed(), g.branch_, g.materialDepth(), g.dungeonMaxDepth());
+
+    Vec2i farmPos{-1, -1};
+    for (int y = 1; y < g.dung.height - 1 && farmPos.x < 0; ++y) {
+        for (int x = 1; x < g.dung.width - 1; ++x) {
+            if (g.dung.at(x, y).type != TileType::Floor) continue;
+            const TerrainMaterial m = g.dung.materialAtCached(x, y);
+            if (m != TerrainMaterial::Dirt && m != TerrainMaterial::Moss) continue;
+
+            bool blocked = false;
+            for (const auto& gi : g.ground) {
+                if (gi.pos == Vec2i{x, y} && (itemIsStationary(gi.item) || isStationaryPropKind(gi.item.kind))) {
+                    blocked = true;
+                    break;
+                }
+            }
+            if (blocked) continue;
+
+            farmPos = Vec2i{x, y};
+            break;
+        }
+    }
+    CHECK(farmPos.x >= 0);
+
+    g.playerMut().pos = farmPos;
+
+    // Give the player a garden hoe.
+    {
+        Item hoe;
+        hoe.id = g.nextItemId++;
+        hoe.kind = ItemKind::GardenHoe;
+        hoe.count = 1;
+        hoe.spriteSeed = 0xABCDu;
+        hoe.charges = itemDef(hoe.kind).maxCharges;
+        g.inv.push_back(hoe);
+        g.invSel = (int)g.inv.size() - 1;
+    }
+
+    CHECK(g.useGardenHoeAtPlayer(g.invSel));
+
+    // Ensure tilled soil exists.
+    int soilIdx = -1;
+    for (int i = 0; i < (int)g.ground.size(); ++i) {
+        if (g.ground[i].pos == farmPos && g.ground[i].item.kind == ItemKind::TilledSoil) {
+            soilIdx = i;
+            break;
+        }
+    }
+    CHECK(soilIdx >= 0);
+
+    // Plant seeds.
+    const uint32_t cropSeed = 0xC0FFEEu;
+    const farmgen::CropSpec cs = farmgen::makeCrop(cropSeed);
+
+    Item seed;
+    seed.id = g.nextItemId++;
+    seed.kind = ItemKind::Seed;
+    seed.count = 1;
+    seed.spriteSeed = cropSeed;
+    seed.charges = static_cast<int>(cropSeed);
+    seed.enchant = packCropMetaEnchant(cs.variant, static_cast<int>(cs.rarity), cs.shiny);
+
+    CHECK(g.plantSeedAtPlayer(seed));
+
+    int cropIdx = -1;
+    for (int i = 0; i < (int)g.ground.size(); ++i) {
+        if (g.ground[i].pos == farmPos && isFarmPlantKind(g.ground[i].item.kind)) {
+            cropIdx = i;
+            break;
+        }
+    }
+    CHECK(cropIdx >= 0);
+    CHECK(g.ground[cropIdx].item.kind == ItemKind::CropSprout);
+
+    const int plantedTurn = g.ground[cropIdx].item.charges;
+
+    // Fast-forward time and refresh growth.
+    g.turnCount = static_cast<uint32_t>(plantedTurn) + 999u;
+    g.updateFarmGrowth();
+
+    cropIdx = -1;
+    for (int i = 0; i < (int)g.ground.size(); ++i) {
+        if (g.ground[i].pos == farmPos && isFarmPlantKind(g.ground[i].item.kind)) {
+            cropIdx = i;
+            break;
+        }
+    }
+    CHECK(cropIdx >= 0);
+    CHECK(g.ground[cropIdx].item.kind == ItemKind::CropMature);
+
+    CHECK(g.harvestFarmAtPlayer());
+
+    bool hasProduce = false;
+    for (const auto& it : g.inv) {
+        if (it.kind == ItemKind::CropProduce) {
+            hasProduce = true;
+            break;
+        }
+    }
+    CHECK(hasProduce);
+
+    bool hasTilledAgain = false;
+    for (const auto& gi : g.ground) {
+        if (gi.pos == farmPos && gi.item.kind == ItemKind::TilledSoil) {
+            hasTilledAgain = true;
+            break;
+        }
+    }
+    CHECK(hasTilledAgain);
+
+    return true;
+}
 int main(int argc, char** argv) {
     std::vector<TestCase> tests = {
         {"new_game_determinism", test_new_game_determinism},
@@ -1764,6 +1961,7 @@ int main(int argc, char** argv) {
         {"wfc_solver_basic",     test_wfc_solver_basic},
         {"wfc_solver_unsat",     test_wfc_solver_unsat_forced_contradiction},
         {"save_load_roundtrip",  test_save_load_roundtrip},
+        {"save_load_overworld_chunk",  test_save_load_roundtrip_overworld_chunk},
         {"save_load_sneak",      test_save_load_preserves_sneak},
         {"settings_minimap_zoom", test_settings_minimap_zoom_clamp},
         {"action_palette",  test_action_palette_executes_actions},
@@ -1794,6 +1992,8 @@ int main(int argc, char** argv) {
         {"ident_appearances", test_ident_appearance_procgen_determinism},
         {"shop_profiles",   test_proc_shop_profiles},
         {"shrine_profiles", test_proc_shrine_profiles},
+        {"camp_stash_farming_starter_kit", test_camp_stash_has_farming_starter_kit},
+        {"farming_till_plant_grow_harvest", test_farming_till_plant_grow_harvest},
         {"victory_plan",   test_victory_plan_procgen_determinism},
     };
 

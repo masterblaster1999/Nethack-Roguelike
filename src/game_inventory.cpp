@@ -1,6 +1,8 @@
 #include "game_internal.hpp"
 
 #include "fishing_gen.hpp"
+
+#include "farm_gen.hpp"
 #include "butcher_gen.hpp"
 
 #include "crafting_gen.hpp"
@@ -2412,6 +2414,20 @@ bool Game::useSelected() {
         return false;
     }
 
+    // Garden hoe: till soil at your home camp (consumes a turn on success).
+    if (it.kind == ItemKind::GardenHoe) {
+        return useGardenHoeAtPlayer(invSel);
+    }
+
+    // Seeds: plant into tilled soil at your home camp (consumes a turn on success).
+    if (it.kind == ItemKind::Seed) {
+        if (plantSeedAtPlayer(it)) {
+            consumeOneStackable();
+            return true;
+        }
+        return false;
+    }
+
     // Bounty contracts: show progress, and pay out once complete.
     if (it.kind == ItemKind::BountyContract) {
         const int rawTarget = bountyTargetKindFromCharges(it.charges);
@@ -3430,6 +3446,137 @@ bool Game::useSelected() {
         }
 
         // Hunger feedback (mirrors Food Ration/corpse).
+        const int afterState = hungerStateFor(hunger, hungerMax);
+        if (hungerEnabled_) {
+            if (beforeState >= 2 && afterState < 2) {
+                pushMsg("YOU FEEL LESS STARVED.", MessageKind::System, true);
+            } else if (beforeState >= 1 && afterState == 0) {
+                pushMsg("YOU FEEL SATIATED.", MessageKind::System, true);
+            }
+        }
+        hungerStatePrev = hungerStateFor(hunger, hungerMax);
+
+        consumeOneStackable();
+        return true;
+    }
+
+
+
+    if (it.kind == ItemKind::CropProduce) {
+        Entity& p = playerMut();
+
+        // Decode crop seed + meta.
+        uint32_t cropSeed = 0u;
+        if (it.charges != 0) {
+            cropSeed = cropSeedFromCharges(it.charges);
+        } else if (it.spriteSeed != 0u) {
+            cropSeed = it.spriteSeed;
+        } else {
+            cropSeed = hash32(static_cast<uint32_t>(it.id) ^ 0xCR0PFEEDu);
+        }
+
+        const bool hasMeta = ((it.enchant & (1 << 12)) != 0);
+        const int rarityHint  = hasMeta ? cropRarityFromEnchant(it.enchant) : -1;
+        const int variantHint = hasMeta ? cropVariantFromEnchant(it.enchant) : -1;
+        const int shinyHint   = hasMeta ? (cropIsShinyFromEnchant(it.enchant) ? 1 : 0) : -1;
+        const int quality     = hasMeta ? cropQualityFromEnchant(it.enchant) : 0;
+
+        const farmgen::CropSpec cs = farmgen::makeCrop(cropSeed, rarityHint, variantHint, shinyHint);
+        const int beforeState = hungerStateFor(hunger, hungerMax);
+
+        // Core nourishment (scale gently with quality).
+        const int heal = cs.healAmount + ((quality >= 2) ? 1 : 0) + ((quality >= 4) ? 1 : 0);
+        if (heal > 0 && p.hp < p.hpMax) {
+            p.hp = std::min(p.hpMax, p.hp + heal);
+        }
+        if (hungerEnabled_) {
+            if (hungerMax <= 0) hungerMax = 800;
+            int restore = cs.hungerRestore + quality * 5;
+            hunger = std::min(hungerMax, hunger + restore);
+        }
+
+        {
+            std::ostringstream ss;
+            ss << "YOU EAT " << cs.name;
+            if (hasMeta) ss << " [" << farmgen::qualityGradeLetter(quality) << "]";
+            ss << ".";
+            pushMsg(ss.str(), MessageKind::Loot, true);
+        }
+
+        // Bonus tag effects (mirrors fish, but with quality scaling).
+        const std::string tag = (cs.bonusTag ? std::string(cs.bonusTag) : std::string());
+        if (!tag.empty()) {
+            const int dur = clampi(10 + quality * 6 + static_cast<int>(cs.rarity) * 2, 6, 45);
+            if (tag == "REGEN") {
+                p.effects.regenTurns = std::max(p.effects.regenTurns, dur);
+                pushMsg("YOU FEEL A GENTLE VITALITY.", MessageKind::Success, true);
+            } else if (tag == "HASTE") {
+                p.effects.hasteTurns = std::max(p.effects.hasteTurns, dur);
+                pushMsg("YOUR BLOOD RUNS QUICK.", MessageKind::Success, true);
+            } else if (tag == "SHIELD") {
+                p.effects.shieldTurns = std::max(p.effects.shieldTurns, dur + 2);
+                pushMsg("YOUR SKIN FEELS HARDER.", MessageKind::Success, true);
+            } else if (tag == "AURORA") {
+                p.effects.visionTurns = std::max(p.effects.visionTurns, dur + 4);
+                if (quality >= 3) p.effects.invisTurns = std::max(p.effects.invisTurns, dur / 2);
+                pushMsg("YOUR EYES CATCH THE LIGHT.", MessageKind::Success, true);
+                recomputeFov();
+            } else if (tag == "CLARITY") {
+                const bool wasConf = (p.effects.confusionTurns > 0);
+                const bool wasHall = (p.effects.hallucinationTurns > 0);
+                p.effects.confusionTurns = 0;
+                p.effects.hallucinationTurns = 0;
+                p.effects.fearTurns = 0;
+                if (wasConf || wasHall) pushMsg("YOUR MIND CLEARS.", MessageKind::Success, true);
+                else pushMsg("YOU FEEL FOCUSED.", MessageKind::Info, true);
+            } else if (tag == "VENOM") {
+                if (quality >= 3) {
+                    p.effects.poisonTurns = 0;
+                    pushMsg("THE BITTERNESS PASSES; YOUR VEINS FEEL CLEAN.", MessageKind::Success, true);
+                } else {
+                    p.effects.poisonTurns = std::max(p.effects.poisonTurns, 4 + (dur / 8));
+                    pushMsg("UGH... YOU FEEL SICK.", MessageKind::Warning, true);
+                }
+            } else if (tag == "EMBER") {
+                if (quality >= 3) {
+                    p.effects.hasteTurns = std::max(p.effects.hasteTurns, dur / 2);
+                    pushMsg("A WARMTH SPREADS THROUGH YOU.", MessageKind::Success, true);
+                } else {
+                    p.effects.burnTurns = std::max(p.effects.burnTurns, 3 + (dur / 10));
+                    pushMsg("YOUR THROAT BURNS!", MessageKind::Warning, true);
+                }
+            } else if (tag == "THORN") {
+                p.effects.parryTurns = std::max(p.effects.parryTurns, dur);
+                pushMsg("YOUR SKIN FEELS BARBED.", MessageKind::Success, true);
+            } else if (tag == "STONE") {
+                p.effects.shieldTurns = std::max(p.effects.shieldTurns, dur + 4);
+                if (p.effects.burnTurns > 0) p.effects.burnTurns = std::max(0, p.effects.burnTurns - 2);
+                pushMsg("YOU FEEL STEADY AS ROCK.", MessageKind::Success, true);
+            } else if (tag == "LUCK") {
+                // A small, tangible boon: you sometimes find coins inside the husk.
+                const int goldCount = clampi(1 + quality * 2 + static_cast<int>(cs.rarity), 1, 20);
+
+                Item gold;
+                gold.id = nextItemId++;
+                gold.kind = ItemKind::Gold;
+                gold.count = goldCount;
+                gold.spriteSeed = rng.nextU32();
+
+                if (!tryStackItem(inv, gold)) {
+                    if (static_cast<int>(inv.size()) < 26) {
+                        inv.push_back(gold);
+                    } else {
+                        dropGroundItemItem(player().pos, gold);
+                    }
+                }
+
+                std::ostringstream ss;
+                ss << "FORTUNE SMILES: " << goldCount << " GOLD!";
+                pushMsg(ss.str(), MessageKind::Success, true);
+            }
+        }
+
+        // Hunger feedback (mirrors Fish/Food Ration).
         const int afterState = hungerStateFor(hunger, hungerMax);
         if (hungerEnabled_) {
             if (beforeState >= 2 && afterState < 2) {

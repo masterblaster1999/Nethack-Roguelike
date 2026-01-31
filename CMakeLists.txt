@@ -73,6 +73,7 @@ set(PROCROGUE_CORE_SOURCES
     src/game_automove.cpp
     src/game_look.cpp
     src/game_interact.cpp
+    src/game_farming.cpp
     src/game_world.cpp
     src/game_inventory.cpp
     src/game_spellcasting.cpp

@@ -225,6 +225,10 @@ const ItemDef& itemDef(ItemKind k) {
         { ItemKind::RustVent,      "RUST VENT",      false, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock },
         { ItemKind::AshVent,       "ASH VENT",       false, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock },
         { ItemKind::GrottoSpring,  "GROTTO SPRING",  false, false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock },
+
+        // Ecosystem bonus loot (append-only)
+        { ItemKind::AlchemyCatalyst, "ALCHEMY CATALYST", true,  false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 2, 120 },
+        { ItemKind::FireBomb,        "FIRE BOMB",        true,  false, false, EquipSlot::None, 0, 0, 0, 0, AmmoKind::None, ProjectileKind::Rock, 0, 0, 0, 4,  90 },
 };
 
     static std::vector<ItemDef> defs;

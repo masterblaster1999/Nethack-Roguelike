@@ -1,6 +1,7 @@
 #include "shop.hpp"
 
 #include "vtuber_gen.hpp"
+#include "farm_gen.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -43,6 +44,36 @@ int shopBaseValuePerUnit(const Item& it) {
     if (base <= 0) return 0;
 
     int v = base;
+
+    // Procedural farming items: derive value from crop spec instead of the static ItemDef.
+    // This makes seeds/produce meaningful to sell and keeps shops coherent.
+    if (it.kind == ItemKind::Seed || it.kind == ItemKind::CropProduce) {
+        uint32_t cropSeed = 0u;
+        if (it.charges != 0) cropSeed = cropSeedFromCharges(it.charges);
+        else if (it.spriteSeed != 0u) cropSeed = it.spriteSeed;
+        else cropSeed = hash32(static_cast<uint32_t>(it.id) ^ 0xCROP5EEDu);
+
+        const bool hasMeta = ((it.enchant & (1 << 12)) != 0);
+        const int rarityHint = hasMeta ? cropRarityFromEnchant(it.enchant) : -1;
+        const int variantHint = hasMeta ? cropVariantFromEnchant(it.enchant) : -1;
+        const int shinyHint = hasMeta ? (cropIsShinyFromEnchant(it.enchant) ? 1 : 0) : -1;
+
+        const farmgen::CropSpec cs = farmgen::makeCrop(cropSeed, rarityHint, variantHint, shinyHint);
+        int cv = std::max(1, cs.value);
+
+        if (it.kind == ItemKind::Seed) {
+            // Seeds are cheaper than the harvested food.
+            cv = std::max(1, cv / 3);
+        } else {
+            // Quality is stored on produce. Higher grades fetch better prices.
+            const int q = hasMeta ? cropQualityFromEnchant(it.enchant) : 0;
+            cv = (cv * (100 + q * 15)) / 100;
+            cv = std::max(1, cv);
+        }
+
+        v = std::max(v, cv);
+    }
+
 
     // Wands / charged tools: scale with remaining charges.
     if (d.maxCharges > 0) {

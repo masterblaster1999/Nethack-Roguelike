@@ -2293,7 +2293,7 @@ private:
     int overworldX_ = 0;
     int overworldY_ = 0;
     std::map<OverworldKey, LevelState> overworldChunks_;
-    // Lightweight visitation record for the overworld atlas (UI-only; not serialized).
+    // Lightweight visitation record for the overworld atlas (serialized, v55+).
     std::set<OverworldKey> overworldVisited_;
 
     // Monsters/companions that fell through trap doors into a deeper level.
@@ -2867,6 +2867,13 @@ private:
     void sortInventory();
     bool pickupAtPlayer();
     bool harvestEcosystemNodeAtPlayer();
+
+    // Farming (Surface Camp)
+    bool useGardenHoeAtPlayer(int invIndex);
+    bool plantSeedAtPlayer(const Item& seedItem);
+    bool harvestFarmAtPlayer();
+    bool describeFarmAtPlayer();
+    void updateFarmGrowth();
     bool dropSelected();
     bool dropSelectedAll();
     bool equipSelected();

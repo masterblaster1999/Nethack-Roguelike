@@ -2700,7 +2700,7 @@ if (optionsSel == 20) {
                     if (gi.item.kind == ItemKind::Chest) hasClosedChest = true;
                     else if (gi.item.kind == ItemKind::ChestOpen) hasOpenChest = true;
                     else if (isEcosystemNodeKind(gi.item.kind)) hasEcosystemNode = true;
-                    else hasPickableItem = true;
+                    else if (!isStationaryPropKind(gi.item.kind) && !itemIsStationary(gi.item)) hasPickableItem = true;
                 }
 
                 bool handled = false;
@@ -2720,11 +2720,25 @@ if (optionsSel == 20) {
                     handled = acted;
                 }
 
-                // If we didn't interact with a chest, allow picking up other items on the tile.
+                // Farm plots/crops (Surface Camp): harvest if ready, otherwise describe.
+                if (!handled) {
+                    acted = harvestFarmAtPlayer();
+                    handled = acted;
+                }
+
+                // If we didn't interact with a chest / node / farm, allow picking up other items on the tile.
                 if (!handled && hasPickableItem) {
                     acted = pickupAtPlayer();
-                } else if (!hasClosedChest && !hasOpenChest && !hasEcosystemNode && !hasPickableItem) {
-                    pushMsg("THERE IS NOTHING HERE.");
+                    handled = acted;
+                }
+
+                if (!handled) {
+                    if (describeFarmAtPlayer()) {
+                        handled = true;
+                        acted = false;
+                    } else if (!hasClosedChest && !hasOpenChest && !hasEcosystemNode && !hasPickableItem) {
+                        pushMsg("THERE IS NOTHING HERE.");
+                    }
                 }
             }
         } break;
@@ -3323,6 +3337,7 @@ void Game::advanceAfterPlayerAction() {
     }
 
     applyEndOfTurnEffects();
+    updateFarmGrowth();
     cleanupDead();
     if (isFinished()) {
         maybeRecordRun();

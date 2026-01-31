@@ -1231,7 +1231,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 54u; // v54: parry stance effect
+constexpr uint32_t SAVE_VERSION = 55u; // v55: serialize overworld chunks + atlas
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -1847,17 +1847,541 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     return true;
 }
 
+
+
+void writeLevelStatePayload(std::ostream& out, const LevelState& st) {
+    // Dungeon
+    int32_t w = st.dung.width;
+    int32_t h = st.dung.height;
+    writePod(out, w);
+    writePod(out, h);
+    int32_t upx = st.dung.stairsUp.x;
+    int32_t upy = st.dung.stairsUp.y;
+    int32_t dnx = st.dung.stairsDown.x;
+    int32_t dny = st.dung.stairsDown.y;
+    writePod(out, upx);
+    writePod(out, upy);
+    writePod(out, dnx);
+    writePod(out, dny);
+
+    uint32_t roomCount = static_cast<uint32_t>(st.dung.rooms.size());
+    writePod(out, roomCount);
+    for (const auto& r : st.dung.rooms) {
+        int32_t rx = r.x;
+        int32_t ry = r.y;
+        int32_t rw = r.w;
+        int32_t rh = r.h;
+        writePod(out, rx);
+        writePod(out, ry);
+        writePod(out, rw);
+        writePod(out, rh);
+        uint8_t rt = static_cast<uint8_t>(r.type);
+        writePod(out, rt);
+    }
+
+    uint32_t tileCount = static_cast<uint32_t>(st.dung.tiles.size());
+    writePod(out, tileCount);
+    for (const auto& t : st.dung.tiles) {
+        uint8_t tt = static_cast<uint8_t>(t.type);
+        uint8_t explored = t.explored ? 1 : 0;
+        writePod(out, tt);
+        writePod(out, explored);
+    }
+
+    // Monsters
+    uint32_t monCount = static_cast<uint32_t>(st.monsters.size());
+    writePod(out, monCount);
+    for (const auto& m : st.monsters) {
+        writeEntity(out, m);
+    }
+
+    // Ground items
+    uint32_t gCount = static_cast<uint32_t>(st.ground.size());
+    writePod(out, gCount);
+    for (const auto& gi : st.ground) {
+        int32_t gx = gi.pos.x;
+        int32_t gy = gi.pos.y;
+        writePod(out, gx);
+        writePod(out, gy);
+        writeItem(out, gi.item);
+    }
+
+    // Traps
+    uint32_t tCount = static_cast<uint32_t>(st.traps.size());
+    writePod(out, tCount);
+    for (const auto& tr : st.traps) {
+        uint8_t tk = static_cast<uint8_t>(tr.kind);
+        int32_t tx = tr.pos.x;
+        int32_t ty = tr.pos.y;
+        uint8_t disc = tr.discovered ? 1 : 0;
+        writePod(out, tk);
+        writePod(out, tx);
+        writePod(out, ty);
+        writePod(out, disc);
+    }
+
+    // Map markers / notes (v27+)
+    if constexpr (SAVE_VERSION >= 27u) {
+        uint32_t mCount = static_cast<uint32_t>(st.markers.size());
+        writePod(out, mCount);
+        for (const auto& m : st.markers) {
+            int32_t mx = m.pos.x;
+            int32_t my = m.pos.y;
+            uint8_t mk = static_cast<uint8_t>(m.kind);
+            writePod(out, mx);
+            writePod(out, my);
+            writePod(out, mk);
+            writeString(out, m.label);
+        }
+    }
+
+    // Floor engravings / graffiti (v34+)
+    if constexpr (SAVE_VERSION >= 34u) {
+        uint32_t eCount = static_cast<uint32_t>(st.engravings.size());
+        writePod(out, eCount);
+        for (const auto& e : st.engravings) {
+            int32_t ex = e.pos.x;
+            int32_t ey = e.pos.y;
+            uint8_t strength = e.strength;
+            uint8_t flags = 0u;
+            if (e.isWard) flags |= 0x1u;
+            if (e.isGraffiti) flags |= 0x2u;
+            writePod(out, ex);
+            writePod(out, ey);
+            writePod(out, strength);
+            writePod(out, flags);
+            writeString(out, e.text);
+        }
+    }
+
+    // Chest containers (v29+)
+    if constexpr (SAVE_VERSION >= 29u) {
+        uint32_t cCount = static_cast<uint32_t>(st.chestContainers.size());
+        writePod(out, cCount);
+        for (const auto& c : st.chestContainers) {
+            writePod(out, c.chestId);
+            uint32_t iCount = static_cast<uint32_t>(c.items.size());
+            writePod(out, iCount);
+            for (const auto& it : c.items) {
+                writeItem(out, it);
+            }
+        }
+    }
+
+    // Confusion gas field (v15+)
+    // Stored as a per-tile intensity map.
+    if constexpr (SAVE_VERSION >= 15u) {
+        const uint32_t expected = tileCount;
+        uint32_t gasCount = static_cast<uint32_t>(st.confusionGas.size());
+        if (gasCount != expected) gasCount = expected;
+        writePod(out, gasCount);
+        for (uint32_t gi = 0; gi < gasCount; ++gi) {
+            uint8_t v = 0u;
+            if (gi < st.confusionGas.size()) v = st.confusionGas[static_cast<size_t>(gi)];
+            writePod(out, v);
+        }
+    }
+
+    // Poison gas field (v36+)
+    // Stored as a per-tile intensity map.
+    if constexpr (SAVE_VERSION >= 36u) {
+        const uint32_t expected = tileCount;
+        uint32_t gasCount = static_cast<uint32_t>(st.poisonGas.size());
+        if (gasCount != expected) gasCount = expected;
+        writePod(out, gasCount);
+        for (uint32_t gi = 0; gi < gasCount; ++gi) {
+            uint8_t v = 0u;
+            if (gi < st.poisonGas.size()) v = st.poisonGas[static_cast<size_t>(gi)];
+            writePod(out, v);
+        }
+    }
+
+    // Corrosive gas field (v53+)
+    // Stored as a per-tile intensity map.
+    if constexpr (SAVE_VERSION >= 53u) {
+        const uint32_t expected = tileCount;
+        uint32_t gasCount = static_cast<uint32_t>(st.corrosiveGas.size());
+        if (gasCount != expected) gasCount = expected;
+        writePod(out, gasCount);
+        for (uint32_t gi = 0; gi < gasCount; ++gi) {
+            uint8_t v = 0u;
+            if (gi < st.corrosiveGas.size()) v = st.corrosiveGas[static_cast<size_t>(gi)];
+            writePod(out, v);
+        }
+    }
+
+    // Fire field (v22+)
+    // Stored as a per-tile intensity map.
+    if constexpr (SAVE_VERSION >= 22u) {
+        const uint32_t expected = tileCount;
+        uint32_t fireCount = static_cast<uint32_t>(st.fireField.size());
+        if (fireCount != expected) fireCount = expected;
+        writePod(out, fireCount);
+        for (uint32_t fi = 0; fi < fireCount; ++fi) {
+            uint8_t v = 0u;
+            if (fi < st.fireField.size()) v = st.fireField[static_cast<size_t>(fi)];
+            writePod(out, v);
+        }
+    }
+
+    // Scent field (v25+)
+    // Stored as a per-tile intensity map.
+    if constexpr (SAVE_VERSION >= 25u) {
+        const uint32_t expected = tileCount;
+        uint32_t scentCount = static_cast<uint32_t>(st.scentField.size());
+        if (scentCount != expected) scentCount = expected;
+        writePod(out, scentCount);
+        for (uint32_t si = 0; si < scentCount; ++si) {
+            uint8_t v = 0u;
+            if (si < st.scentField.size()) v = st.scentField[static_cast<size_t>(si)];
+            writePod(out, v);
+        }
+    }
+}
+
+bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
+    int32_t w = 0, h = 0;
+    int32_t upx = 0, upy = 0;
+    int32_t dnx = 0, dny = 0;
+
+    if (!readPod(in, w)) return false;
+    if (!readPod(in, h)) return false;
+    if (!readPod(in, upx)) return false;
+    if (!readPod(in, upy)) return false;
+    if (!readPod(in, dnx)) return false;
+    if (!readPod(in, dny)) return false;
+
+    if (w <= 0 || h <= 0 || w > 1000 || h > 1000) return false;
+
+    st.dung = Dungeon(w, h);
+    st.dung.stairsUp = { upx, upy };
+    st.dung.stairsDown = { dnx, dny };
+
+    uint32_t roomCount = 0;
+    if (!readPod(in, roomCount)) return false;
+    st.dung.rooms.clear();
+    st.dung.rooms.reserve(roomCount);
+    for (uint32_t ri = 0; ri < roomCount; ++ri) {
+        int32_t rx = 0, ry = 0, rw = 0, rh = 0;
+        uint8_t rt = 0;
+        if (!readPod(in, rx)) return false;
+        if (!readPod(in, ry)) return false;
+        if (!readPod(in, rw)) return false;
+        if (!readPod(in, rh)) return false;
+        if (!readPod(in, rt)) return false;
+        Room r;
+        r.x = rx;
+        r.y = ry;
+        r.w = rw;
+        r.h = rh;
+        r.type = static_cast<RoomType>(rt);
+        st.dung.rooms.push_back(r);
+    }
+
+    uint32_t tileCount = 0;
+    if (!readPod(in, tileCount)) return false;
+    st.dung.tiles.assign(tileCount, Tile{});
+    for (uint32_t ti = 0; ti < tileCount; ++ti) {
+        uint8_t tt = 0;
+        uint8_t explored = 0;
+        if (!readPod(in, tt)) return false;
+        if (!readPod(in, explored)) return false;
+        st.dung.tiles[ti].type = static_cast<TileType>(tt);
+        st.dung.tiles[ti].visible = false;
+        st.dung.tiles[ti].explored = explored != 0;
+    }
+
+    uint32_t monCount = 0;
+    if (!readPod(in, monCount)) return false;
+    st.monsters.clear();
+    st.monsters.reserve(monCount);
+    for (uint32_t mi = 0; mi < monCount; ++mi) {
+        Entity m;
+        if (!readEntity(in, m, ver)) return false;
+        st.monsters.push_back(m);
+    }
+
+    uint32_t gCount = 0;
+    if (!readPod(in, gCount)) return false;
+    st.ground.clear();
+    st.ground.reserve(gCount);
+    for (uint32_t gi = 0; gi < gCount; ++gi) {
+        int32_t gx = 0, gy = 0;
+        if (!readPod(in, gx)) return false;
+        if (!readPod(in, gy)) return false;
+        GroundItem gr;
+        gr.pos = { gx, gy };
+        if (!readItem(in, gr.item, ver)) return false;
+        st.ground.push_back(gr);
+    }
+
+    // Traps (v2+)
+    st.traps.clear();
+    if (ver >= 2u) {
+        uint32_t tCount = 0;
+        if (!readPod(in, tCount)) return false;
+        st.traps.reserve(tCount);
+        for (uint32_t ti = 0; ti < tCount; ++ti) {
+            uint8_t tk = 0;
+            int32_t tx = 0, ty = 0;
+            uint8_t disc = 0;
+            if (!readPod(in, tk)) return false;
+            if (!readPod(in, tx)) return false;
+            if (!readPod(in, ty)) return false;
+            if (!readPod(in, disc)) return false;
+            Trap tr;
+            tr.kind = static_cast<TrapKind>(tk);
+            tr.pos = { tx, ty };
+            tr.discovered = disc != 0;
+            st.traps.push_back(tr);
+        }
+    }
+
+    // Map markers / notes (v27+)
+    st.markers.clear();
+    if (ver >= 27u) {
+        uint32_t mCount = 0;
+        if (!readPod(in, mCount)) return false;
+        // Defensive clamp to prevent pathological allocations.
+        if (mCount > 5000u) mCount = 5000u;
+        st.markers.reserve(mCount);
+
+        for (uint32_t mi = 0; mi < mCount; ++mi) {
+            int32_t mx = 0, my = 0;
+            uint8_t mk = 0;
+            std::string label;
+            if (!readPod(in, mx)) return false;
+            if (!readPod(in, my)) return false;
+            if (!readPod(in, mk)) return false;
+            if (!readString(in, label)) return false;
+
+            // Validate basics (skip invalid entries rather than failing the whole load).
+            if (label.empty()) continue;
+            if (!st.dung.inBounds(mx, my)) continue;
+
+            // Clamp unknown marker kinds to NOTE for forward/backward compatibility.
+            if (mk > static_cast<uint8_t>(MarkerKind::Loot)) mk = 0;
+
+            MapMarker m;
+            m.pos = { mx, my };
+            m.kind = static_cast<MarkerKind>(mk);
+            // Clamp label to keep UI tidy.
+            if (label.size() > 64) label.resize(64);
+            m.label = std::move(label);
+
+            // De-dup markers on the same tile (first wins).
+            bool dup = false;
+            for (const auto& ex : st.markers) {
+                if (ex.pos.x == m.pos.x && ex.pos.y == m.pos.y) { dup = true; break; }
+            }
+            if (dup) continue;
+
+            st.markers.push_back(std::move(m));
+        }
+    }
+
+    // Floor engravings / graffiti (v34+)
+    st.engravings.clear();
+    if (ver >= 34u) {
+        uint32_t eCount = 0;
+        if (!readPod(in, eCount)) return false;
+        if (eCount > 5000u) eCount = 5000u;
+        st.engravings.reserve(eCount);
+
+        for (uint32_t ei = 0; ei < eCount; ++ei) {
+            int32_t ex = 0, ey = 0;
+            uint8_t strength = 0;
+            uint8_t flags = 0;
+            std::string text;
+
+            if (!readPod(in, ex)) return false;
+            if (!readPod(in, ey)) return false;
+            if (!readPod(in, strength)) return false;
+            if (!readPod(in, flags)) return false;
+            if (!readString(in, text)) return false;
+
+            if (text.empty()) continue;
+            if (text.size() > 72) text.resize(72);
+            if (!st.dung.inBounds(ex, ey)) continue;
+
+            // Avoid duplicate engravings on the same tile (first wins).
+            bool dup = false;
+            for (const auto& exi : st.engravings) {
+                if (exi.pos.x == ex && exi.pos.y == ey) { dup = true; break; }
+            }
+            if (dup) continue;
+
+            Engraving eg;
+            eg.pos = { ex, ey };
+            eg.strength = strength;
+            eg.isWard = (flags & 0x1u) != 0;
+            eg.isGraffiti = (flags & 0x2u) != 0;
+            eg.text = std::move(text);
+            st.engravings.push_back(std::move(eg));
+        }
+    }
+
+    // Chest containers (v29+)
+    st.chestContainers.clear();
+    if (ver >= 29u) {
+        uint32_t cCount = 0;
+        if (!readPod(in, cCount)) return false;
+        if (cCount > 4096u) cCount = 4096u;
+        st.chestContainers.reserve(cCount);
+
+        for (uint32_t ci = 0; ci < cCount; ++ci) {
+            ChestContainer c;
+            if (!readPod(in, c.chestId)) return false;
+
+            uint32_t iCount = 0;
+            if (!readPod(in, iCount)) return false;
+            if (iCount > 8192u) iCount = 8192u;
+            c.items.reserve(iCount);
+
+            for (uint32_t ii = 0; ii < iCount; ++ii) {
+                Item it;
+                if (!readItem(in, it, ver)) return false;
+                c.items.push_back(it);
+            }
+
+            st.chestContainers.push_back(std::move(c));
+        }
+    }
+
+    // Confusion gas field (v15+)
+    st.confusionGas.clear();
+    if (ver >= 15u) {
+        uint32_t gasCount = 0;
+        if (!readPod(in, gasCount)) return false;
+
+        std::vector<uint8_t> gasTmp;
+        gasTmp.assign(gasCount, 0u);
+        for (uint32_t gi = 0; gi < gasCount; ++gi) {
+            uint8_t gv = 0;
+            if (!readPod(in, gv)) return false;
+            gasTmp[gi] = gv;
+        }
+
+        // Normalize size to the dungeon tile count when possible (defensive against older/partial saves).
+        if (tileCount > 0) {
+            st.confusionGas.assign(tileCount, 0u);
+            const uint32_t copyN = std::min(gasCount, tileCount);
+            for (uint32_t i = 0; i < copyN; ++i) {
+                st.confusionGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
+            }
+        } else {
+            st.confusionGas = std::move(gasTmp);
+        }
+    }
+
+    // Poison gas field (v36+)
+    st.poisonGas.clear();
+    if (ver >= 36u) {
+        uint32_t gasCount = 0;
+        if (!readPod(in, gasCount)) return false;
+
+        std::vector<uint8_t> gasTmp;
+        gasTmp.assign(gasCount, 0u);
+        for (uint32_t gi = 0; gi < gasCount; ++gi) {
+            uint8_t gv = 0;
+            if (!readPod(in, gv)) return false;
+            gasTmp[gi] = gv;
+        }
+
+        // Normalize size to the dungeon tile count when possible.
+        if (tileCount > 0) {
+            st.poisonGas.assign(tileCount, 0u);
+            const uint32_t copyN = std::min(gasCount, tileCount);
+            for (uint32_t i = 0; i < copyN; ++i) {
+                st.poisonGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
+            }
+        } else {
+            st.poisonGas = std::move(gasTmp);
+        }
+    }
+
+    // Corrosive gas field (v53+)
+    st.corrosiveGas.clear();
+    if (ver >= 53u) {
+        uint32_t gasCount = 0;
+        if (!readPod(in, gasCount)) return false;
+        std::vector<uint8_t> gasTmp;
+        gasTmp.assign(gasCount, 0u);
+        for (uint32_t gi = 0; gi < gasCount; ++gi) {
+            uint8_t v = 0u;
+            if (!readPod(in, v)) return false;
+            gasTmp[gi] = v;
+        }
+
+        // Normalize size to the dungeon tile count when possible.
+        if (tileCount > 0) {
+            st.corrosiveGas.assign(tileCount, 0u);
+            const uint32_t copyN = std::min(gasCount, tileCount);
+            for (uint32_t i = 0; i < copyN; ++i) {
+                st.corrosiveGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
+            }
+        } else {
+            st.corrosiveGas = std::move(gasTmp);
+        }
+    }
+
+    // Fire field (v22+)
+    st.fireField.clear();
+    if (ver >= 22u) {
+        uint32_t fireCount = 0;
+        if (!readPod(in, fireCount)) return false;
+
+        std::vector<uint8_t> fireTmp;
+        fireTmp.assign(fireCount, 0u);
+        for (uint32_t fi = 0; fi < fireCount; ++fi) {
+            uint8_t fv = 0;
+            if (!readPod(in, fv)) return false;
+            fireTmp[fi] = fv;
+        }
+
+        if (tileCount > 0) {
+            st.fireField.assign(tileCount, 0u);
+            const uint32_t copyN = std::min(fireCount, tileCount);
+            for (uint32_t i = 0; i < copyN; ++i) {
+                st.fireField[static_cast<size_t>(i)] = fireTmp[static_cast<size_t>(i)];
+            }
+        } else {
+            st.fireField = std::move(fireTmp);
+        }
+    }
+
+    // Scent field (v25+)
+    st.scentField.clear();
+    if (ver >= 25u) {
+        uint32_t scentCount = 0;
+        if (!readPod(in, scentCount)) return false;
+
+        std::vector<uint8_t> scentTmp;
+        scentTmp.assign(scentCount, 0u);
+        for (uint32_t si = 0; si < scentCount; ++si) {
+            uint8_t sv = 0;
+            if (!readPod(in, sv)) return false;
+            scentTmp[si] = sv;
+        }
+
+        // Normalize size to the dungeon tile count when possible (defensive against older/partial saves).
+        if (tileCount > 0) {
+            st.scentField.assign(tileCount, 0u);
+            const uint32_t copyN = std::min(scentCount, tileCount);
+            for (uint32_t i = 0; i < copyN; ++i) {
+                st.scentField[static_cast<size_t>(i)] = scentTmp[static_cast<size_t>(i)];
+            }
+        } else {
+            st.scentField = std::move(scentTmp);
+        }
+    }
+
+    return true;
+}
+
 } // namespace
 
 bool Game::saveToFile(const std::string& path, bool quiet) {
-    // Overworld chunks (Camp depth 0 outside the hub) are not yet serialized.
-    // Prevent saving there so loading cannot strand the player on an untracked chunk.
-    if (atCamp() && !atHomeCamp()) {
-        if (!quiet) {
-            pushMsg("YOU CANNOT SAVE WHILE LOST IN THE WILDERNESS.", MessageKind::Warning, true);
-        }
-        return false;
-    }
 
     // Ensure the currently-loaded level is persisted into `levels`.
     storeCurrentLevel();
@@ -2118,190 +2642,8 @@ bool Game::saveToFile(const std::string& path, bool quiet) {
         int32_t d32 = id.depth;
         writePod(mem, d32);
 
-        // Dungeon
-        int32_t w = st.dung.width;
-        int32_t h = st.dung.height;
-        writePod(mem, w);
-        writePod(mem, h);
-        int32_t upx = st.dung.stairsUp.x;
-        int32_t upy = st.dung.stairsUp.y;
-        int32_t dnx = st.dung.stairsDown.x;
-        int32_t dny = st.dung.stairsDown.y;
-        writePod(mem, upx);
-        writePod(mem, upy);
-        writePod(mem, dnx);
-        writePod(mem, dny);
+        writeLevelStatePayload(mem, st);
 
-        uint32_t roomCount = static_cast<uint32_t>(st.dung.rooms.size());
-        writePod(mem, roomCount);
-        for (const auto& r : st.dung.rooms) {
-            int32_t rx = r.x, ry = r.y, rw = r.w, rh = r.h;
-            writePod(mem, rx);
-            writePod(mem, ry);
-            writePod(mem, rw);
-            writePod(mem, rh);
-            uint8_t rt = static_cast<uint8_t>(r.type);
-            writePod(mem, rt);
-        }
-
-        uint32_t tileCount = static_cast<uint32_t>(st.dung.tiles.size());
-        writePod(mem, tileCount);
-        for (const auto& t : st.dung.tiles) {
-            uint8_t tt = static_cast<uint8_t>(t.type);
-            uint8_t explored = t.explored ? 1 : 0;
-            writePod(mem, tt);
-            writePod(mem, explored);
-        }
-
-        // Monsters
-        uint32_t monCount = static_cast<uint32_t>(st.monsters.size());
-        writePod(mem, monCount);
-        for (const auto& m : st.monsters) {
-            writeEntity(mem, m);
-        }
-
-        // Ground items
-        uint32_t gCount = static_cast<uint32_t>(st.ground.size());
-        writePod(mem, gCount);
-        for (const auto& gi : st.ground) {
-            int32_t gx = gi.pos.x;
-            int32_t gy = gi.pos.y;
-            writePod(mem, gx);
-            writePod(mem, gy);
-            writeItem(mem, gi.item);
-        }
-
-        // Traps
-        uint32_t tCount = static_cast<uint32_t>(st.traps.size());
-        writePod(mem, tCount);
-        for (const auto& tr : st.traps) {
-            uint8_t tk = static_cast<uint8_t>(tr.kind);
-            int32_t tx = tr.pos.x;
-            int32_t ty = tr.pos.y;
-            uint8_t disc = tr.discovered ? 1 : 0;
-            writePod(mem, tk);
-            writePod(mem, tx);
-            writePod(mem, ty);
-            writePod(mem, disc);
-        }
-
-        // Map markers / notes (v27+)
-        if constexpr (SAVE_VERSION >= 27u) {
-            uint32_t mCount = static_cast<uint32_t>(st.markers.size());
-            writePod(mem, mCount);
-            for (const auto& m : st.markers) {
-                int32_t mx = m.pos.x;
-                int32_t my = m.pos.y;
-                uint8_t mk = static_cast<uint8_t>(m.kind);
-                writePod(mem, mx);
-                writePod(mem, my);
-                writePod(mem, mk);
-                writeString(mem, m.label);
-            }
-        }
-
-        // Floor engravings / graffiti (v34+)
-        if constexpr (SAVE_VERSION >= 34u) {
-            uint32_t eCount = static_cast<uint32_t>(st.engravings.size());
-            writePod(mem, eCount);
-            for (const auto& e : st.engravings) {
-                int32_t ex = e.pos.x;
-                int32_t ey = e.pos.y;
-                uint8_t strength = e.strength;
-                uint8_t flags = 0u;
-                if (e.isWard) flags |= 0x1u;
-                if (e.isGraffiti) flags |= 0x2u;
-                writePod(mem, ex);
-                writePod(mem, ey);
-                writePod(mem, strength);
-                writePod(mem, flags);
-                writeString(mem, e.text);
-            }
-        }
-
-        // Chest containers (v29+)
-        if constexpr (SAVE_VERSION >= 29u) {
-            uint32_t cCount = static_cast<uint32_t>(st.chestContainers.size());
-            writePod(mem, cCount);
-            for (const auto& c : st.chestContainers) {
-                writePod(mem, c.chestId);
-                uint32_t iCount = static_cast<uint32_t>(c.items.size());
-                writePod(mem, iCount);
-                for (const auto& it : c.items) {
-                    writeItem(mem, it);
-                }
-            }
-        }
-
-        // Confusion gas field (v15+)
-        // Stored as a per-tile intensity map.
-        if constexpr (SAVE_VERSION >= 15u) {
-            const uint32_t expected = tileCount;
-            uint32_t gasCount = static_cast<uint32_t>(st.confusionGas.size());
-            if (gasCount != expected) gasCount = expected;
-            writePod(mem, gasCount);
-            for (uint32_t gi = 0; gi < gasCount; ++gi) {
-                uint8_t v = 0u;
-                if (gi < st.confusionGas.size()) v = st.confusionGas[static_cast<size_t>(gi)];
-                writePod(mem, v);
-            }
-        }
-
-        // Poison gas field (v36+)
-        // Stored as a per-tile intensity map.
-        if constexpr (SAVE_VERSION >= 36u) {
-            const uint32_t expected = tileCount;
-            uint32_t gasCount = static_cast<uint32_t>(st.poisonGas.size());
-            if (gasCount != expected) gasCount = expected;
-            writePod(mem, gasCount);
-            for (uint32_t gi = 0; gi < gasCount; ++gi) {
-                uint8_t v = 0u;
-                if (gi < st.poisonGas.size()) v = st.poisonGas[static_cast<size_t>(gi)];
-                writePod(mem, v);
-            }
-        }
-
-        // Corrosive gas field (v53+)
-        // Stored as a per-tile intensity map.
-        if constexpr (SAVE_VERSION >= 53u) {
-            const uint32_t expected = tileCount;
-            uint32_t gasCount = static_cast<uint32_t>(st.corrosiveGas.size());
-            if (gasCount != expected) gasCount = expected;
-            writePod(mem, gasCount);
-            for (uint32_t gi = 0; gi < gasCount; ++gi) {
-                uint8_t v = 0u;
-                if (gi < st.corrosiveGas.size()) v = st.corrosiveGas[static_cast<size_t>(gi)];
-                writePod(mem, v);
-            }
-        }
-
-        // Fire field (v22+)
-        // Stored as a per-tile intensity map.
-        if constexpr (SAVE_VERSION >= 22u) {
-            const uint32_t expected = tileCount;
-            uint32_t fireCount = static_cast<uint32_t>(st.fireField.size());
-            if (fireCount != expected) fireCount = expected;
-            writePod(mem, fireCount);
-            for (uint32_t fi = 0; fi < fireCount; ++fi) {
-                uint8_t v = 0u;
-                if (fi < st.fireField.size()) v = st.fireField[static_cast<size_t>(fi)];
-                writePod(mem, v);
-            }
-        }
-
-        // Scent field (v25+)
-        // Stored as a per-tile intensity map.
-        if constexpr (SAVE_VERSION >= 25u) {
-            const uint32_t expected = tileCount;
-            uint32_t scentCount = static_cast<uint32_t>(st.scentField.size());
-            if (scentCount != expected) scentCount = expected;
-            writePod(mem, scentCount);
-            for (uint32_t si = 0; si < scentCount; ++si) {
-                uint8_t v = 0u;
-                if (si < st.scentField.size()) v = st.scentField[static_cast<size_t>(si)];
-                writePod(mem, v);
-            }
-        }
 
     }
 
@@ -2333,6 +2675,34 @@ if constexpr (SAVE_VERSION >= 33u) {
     }
 }
 
+
+
+    // v55+: overworld chunk coords + cached chunks + atlas discovery
+    if constexpr (SAVE_VERSION >= 55u) {
+        const int32_t owx = static_cast<int32_t>(overworldX_);
+        const int32_t owy = static_cast<int32_t>(overworldY_);
+        writePod(mem, owx);
+        writePod(mem, owy);
+
+        uint32_t chunkCount = static_cast<uint32_t>(overworldChunks_.size());
+        writePod(mem, chunkCount);
+        for (const auto& kv : overworldChunks_) {
+            const int32_t cx = static_cast<int32_t>(kv.first.x);
+            const int32_t cy = static_cast<int32_t>(kv.first.y);
+            writePod(mem, cx);
+            writePod(mem, cy);
+            writeLevelStatePayload(mem, kv.second);
+        }
+
+        uint32_t visCount = static_cast<uint32_t>(overworldVisited_.size());
+        writePod(mem, visCount);
+        for (const auto& k : overworldVisited_) {
+            const int32_t vx = static_cast<int32_t>(k.x);
+            const int32_t vy = static_cast<int32_t>(k.y);
+            writePod(mem, vx);
+            writePod(mem, vy);
+        }
+    }
 
     // v51+: endless / infinite world options (persisted in the save so reload matches the run).
     if constexpr (SAVE_VERSION >= 51u) {
@@ -2866,347 +3236,20 @@ bool Game::loadFromFile(const std::string& path, bool reportErrors) {
             const DungeonBranch lvlBranch = static_cast<DungeonBranch>(lvlBranchU8);
             const LevelId lvlId{lvlBranch, static_cast<int>(d32)};
 
-            int32_t w = 0, h = 0;
-            int32_t upx = 0, upy = 0, dnx = 0, dny = 0;
-            if (!readPod(in, w)) return fail();
-            if (!readPod(in, h)) return fail();
-            if (!readPod(in, upx)) return fail();
-            if (!readPod(in, upy)) return fail();
-            if (!readPod(in, dnx)) return fail();
-            if (!readPod(in, dny)) return fail();
-
             LevelState st;
             st.branch = lvlBranch;
             st.depth = d32;
-            st.dung = Dungeon(w, h);
-            st.dung.stairsUp = { upx, upy };
-            st.dung.stairsDown = { dnx, dny };
-
-            uint32_t roomCount = 0;
-            if (!readPod(in, roomCount)) return fail();
-            st.dung.rooms.clear();
-            st.dung.rooms.reserve(roomCount);
-            for (uint32_t ri = 0; ri < roomCount; ++ri) {
-                int32_t rx = 0, ry = 0, rw = 0, rh = 0;
-                uint8_t rt = 0;
-                if (!readPod(in, rx)) return fail();
-                if (!readPod(in, ry)) return fail();
-                if (!readPod(in, rw)) return fail();
-                if (!readPod(in, rh)) return fail();
-                if (!readPod(in, rt)) return fail();
-                Room r;
-                r.x = rx;
-                r.y = ry;
-                r.w = rw;
-                r.h = rh;
-                r.type = static_cast<RoomType>(rt);
-                st.dung.rooms.push_back(r);
-            }
-
-            uint32_t tileCount = 0;
-            if (!readPod(in, tileCount)) return fail();
-            st.dung.tiles.assign(tileCount, Tile{});
-            for (uint32_t ti = 0; ti < tileCount; ++ti) {
-                uint8_t tt = 0;
-                uint8_t explored = 0;
-                if (!readPod(in, tt)) return fail();
-                if (!readPod(in, explored)) return fail();
-                st.dung.tiles[ti].type = static_cast<TileType>(tt);
-                st.dung.tiles[ti].visible = false;
-                st.dung.tiles[ti].explored = explored != 0;
-            }
-
-            uint32_t monCount = 0;
-            if (!readPod(in, monCount)) return fail();
-            st.monsters.clear();
-            st.monsters.reserve(monCount);
-            for (uint32_t mi = 0; mi < monCount; ++mi) {
-                Entity m;
-                if (!readEntity(in, m, ver)) return fail();
-                st.monsters.push_back(m);
-            }
-
-            uint32_t gCount = 0;
-            if (!readPod(in, gCount)) return fail();
-            st.ground.clear();
-            st.ground.reserve(gCount);
-            for (uint32_t gi = 0; gi < gCount; ++gi) {
-                int32_t gx = 0, gy = 0;
-                if (!readPod(in, gx)) return fail();
-                if (!readPod(in, gy)) return fail();
-                GroundItem gr;
-                gr.pos = { gx, gy };
-                if (!readItem(in, gr.item, ver)) return fail();
-                st.ground.push_back(gr);
-            }
-
-            // Traps (v2+)
-            st.traps.clear();
-            if (ver >= 2u) {
-                uint32_t tCount = 0;
-                if (!readPod(in, tCount)) return fail();
-                st.traps.reserve(tCount);
-                for (uint32_t ti = 0; ti < tCount; ++ti) {
-                    uint8_t tk = 0;
-                    int32_t tx = 0, ty = 0;
-                    uint8_t disc = 0;
-                    if (!readPod(in, tk)) return fail();
-                    if (!readPod(in, tx)) return fail();
-                    if (!readPod(in, ty)) return fail();
-                    if (!readPod(in, disc)) return fail();
-                    Trap tr;
-                    tr.kind = static_cast<TrapKind>(tk);
-                    tr.pos = { tx, ty };
-                    tr.discovered = disc != 0;
-                    st.traps.push_back(tr);
-                }
-            }
-
-            // Map markers / notes (v27+)
-            st.markers.clear();
-            if (ver >= 27u) {
-                uint32_t mCount = 0;
-                if (!readPod(in, mCount)) return fail();
-                // Defensive clamp to prevent pathological allocations.
-                if (mCount > 5000u) mCount = 5000u;
-                st.markers.reserve(mCount);
-
-                for (uint32_t mi = 0; mi < mCount; ++mi) {
-                    int32_t mx = 0, my = 0;
-                    uint8_t mk = 0;
-                    std::string label;
-                    if (!readPod(in, mx)) return fail();
-                    if (!readPod(in, my)) return fail();
-                    if (!readPod(in, mk)) return fail();
-                    if (!readString(in, label)) return fail();
-
-                    // Validate basics (skip invalid entries rather than failing the whole load).
-                    if (label.empty()) continue;
-                    if (!st.dung.inBounds(mx, my)) continue;
-
-                    // Clamp unknown marker kinds to NOTE for forward/backward compatibility.
-                    if (mk > static_cast<uint8_t>(MarkerKind::Loot)) mk = 0;
-
-                    MapMarker m;
-                    m.pos = { mx, my };
-                    m.kind = static_cast<MarkerKind>(mk);
-                    // Clamp label to keep UI tidy.
-                    if (label.size() > 64) label.resize(64);
-                    m.label = std::move(label);
-
-                    // De-dup markers on the same tile (first wins).
-                    bool dup = false;
-                    for (const auto& ex : st.markers) {
-                        if (ex.pos.x == m.pos.x && ex.pos.y == m.pos.y) { dup = true; break; }
-                    }
-                    if (dup) continue;
-
-                    st.markers.push_back(std::move(m));
-                }
-            }
-
-            // Floor engravings / graffiti (v34+)
-            st.engravings.clear();
-            if (ver >= 34u) {
-                uint32_t eCount = 0;
-                if (!readPod(in, eCount)) return fail();
-                if (eCount > 5000u) eCount = 5000u;
-                st.engravings.reserve(eCount);
-
-                for (uint32_t ei = 0; ei < eCount; ++ei) {
-                    int32_t ex = 0, ey = 0;
-                    uint8_t strength = 0;
-                    uint8_t flags = 0;
-                    std::string text;
-
-                    if (!readPod(in, ex)) return fail();
-                    if (!readPod(in, ey)) return fail();
-                    if (!readPod(in, strength)) return fail();
-                    if (!readPod(in, flags)) return fail();
-                    if (!readString(in, text)) return fail();
-
-                    if (text.empty()) continue;
-                    if (text.size() > 72) text.resize(72);
-                    if (!st.dung.inBounds(ex, ey)) continue;
-
-                    // Avoid duplicate engravings on the same tile (first wins).
-                    bool dup = false;
-                    for (const auto& exi : st.engravings) {
-                        if (exi.pos.x == ex && exi.pos.y == ey) { dup = true; break; }
-                    }
-                    if (dup) continue;
-
-                    Engraving eg;
-                    eg.pos = { ex, ey };
-                    eg.strength = strength;
-                    eg.isWard = (flags & 0x1u) != 0;
-                    eg.isGraffiti = (flags & 0x2u) != 0;
-                    eg.text = std::move(text);
-                    st.engravings.push_back(std::move(eg));
-                }
-            }
-
-            // Chest containers (v29+)
-            st.chestContainers.clear();
-            if (ver >= 29u) {
-                uint32_t cCount = 0;
-                if (!readPod(in, cCount)) return fail();
-                if (cCount > 4096u) cCount = 4096u;
-                st.chestContainers.reserve(cCount);
-
-                for (uint32_t ci = 0; ci < cCount; ++ci) {
-                    ChestContainer c;
-                    if (!readPod(in, c.chestId)) return fail();
-
-                    uint32_t iCount = 0;
-                    if (!readPod(in, iCount)) return fail();
-                    if (iCount > 8192u) iCount = 8192u;
-                    c.items.reserve(iCount);
-
-                    for (uint32_t ii = 0; ii < iCount; ++ii) {
-                        Item it;
-                        if (!readItem(in, it, ver)) return fail();
-                        c.items.push_back(it);
-                    }
-
-                    st.chestContainers.push_back(std::move(c));
-                }
-            }
-
-            // Confusion gas field (v15+)
-            st.confusionGas.clear();
-            if (ver >= 15u) {
-                uint32_t gasCount = 0;
-                if (!readPod(in, gasCount)) return fail();
-
-                std::vector<uint8_t> gasTmp;
-                gasTmp.assign(gasCount, 0u);
-                for (uint32_t gi = 0; gi < gasCount; ++gi) {
-                    uint8_t gv = 0;
-                    if (!readPod(in, gv)) return fail();
-                    gasTmp[gi] = gv;
-                }
-
-                // Normalize size to the dungeon tile count when possible (defensive against older/partial saves).
-                if (tileCount > 0) {
-                    st.confusionGas.assign(tileCount, 0u);
-                    const uint32_t copyN = std::min(gasCount, tileCount);
-                    for (uint32_t i = 0; i < copyN; ++i) {
-                        st.confusionGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
-                    }
-                } else {
-                    st.confusionGas = std::move(gasTmp);
-                }
-            }
-
-            // Poison gas field (v36+)
-            st.poisonGas.clear();
-            if (ver >= 36u) {
-                uint32_t gasCount = 0;
-                if (!readPod(in, gasCount)) return fail();
-
-                std::vector<uint8_t> gasTmp;
-                gasTmp.assign(gasCount, 0u);
-                for (uint32_t gi = 0; gi < gasCount; ++gi) {
-                    uint8_t gv = 0;
-                    if (!readPod(in, gv)) return fail();
-                    gasTmp[gi] = gv;
-                }
-
-                // Normalize size to the dungeon tile count when possible.
-                if (tileCount > 0) {
-                    st.poisonGas.assign(tileCount, 0u);
-                    const uint32_t copyN = std::min(gasCount, tileCount);
-                    for (uint32_t i = 0; i < copyN; ++i) {
-                        st.poisonGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
-                    }
-                } else {
-                    st.poisonGas = std::move(gasTmp);
-                }
-            }
-
-            // Corrosive gas field (v53+)
-            st.corrosiveGas.clear();
-            if (ver >= 53u) {
-                uint32_t gasCount = 0;
-                if (!readPod(in, gasCount)) return fail();
-                std::vector<uint8_t> gasTmp;
-                gasTmp.assign(gasCount, 0u);
-                for (uint32_t gi = 0; gi < gasCount; ++gi) {
-                    uint8_t v = 0u;
-                    if (!readPod(in, v)) return fail();
-                    gasTmp[gi] = v;
-                }
-
-                // Normalize size to the dungeon tile count when possible.
-                if (tileCount > 0) {
-                    st.corrosiveGas.assign(tileCount, 0u);
-                    const uint32_t copyN = std::min(gasCount, tileCount);
-                    for (uint32_t i = 0; i < copyN; ++i) {
-                        st.corrosiveGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
-                    }
-                } else {
-                    st.corrosiveGas = std::move(gasTmp);
-                }
-            }
-
-            // Fire field (v22+)
-            st.fireField.clear();
-            if (ver >= 22u) {
-                uint32_t fireCount = 0;
-                if (!readPod(in, fireCount)) return fail();
-
-                std::vector<uint8_t> fireTmp;
-                fireTmp.assign(fireCount, 0u);
-                for (uint32_t fi = 0; fi < fireCount; ++fi) {
-                    uint8_t fv = 0;
-                    if (!readPod(in, fv)) return fail();
-                    fireTmp[fi] = fv;
-                }
-
-                if (tileCount > 0) {
-                    st.fireField.assign(tileCount, 0u);
-                    const uint32_t copyN = std::min(fireCount, tileCount);
-                    for (uint32_t i = 0; i < copyN; ++i) {
-                        st.fireField[static_cast<size_t>(i)] = fireTmp[static_cast<size_t>(i)];
-                    }
-                } else {
-                    st.fireField = std::move(fireTmp);
-                }
-            }
-
-            // Scent field (v25+)
-            st.scentField.clear();
-            if (ver >= 25u) {
-                uint32_t scentCount = 0;
-                if (!readPod(in, scentCount)) return fail();
-
-                std::vector<uint8_t> scentTmp;
-                scentTmp.assign(scentCount, 0u);
-                for (uint32_t si = 0; si < scentCount; ++si) {
-                    uint8_t sv = 0;
-                    if (!readPod(in, sv)) return fail();
-                    scentTmp[si] = sv;
-                }
-
-                // Normalize size to the dungeon tile count when possible (defensive against older/partial saves).
-                if (tileCount > 0) {
-                    st.scentField.assign(tileCount, 0u);
-                    const uint32_t copyN = std::min(scentCount, tileCount);
-                    for (uint32_t i = 0; i < copyN; ++i) {
-                        st.scentField[static_cast<size_t>(i)] = scentTmp[static_cast<size_t>(i)];
-                    }
-                } else {
-                    st.scentField = std::move(scentTmp);
-                }
-            }
-
-
+            if (!readLevelStatePayload(in, ver, st)) return fail();
             levelsTmp[lvlId] = std::move(st);
         }
 
 // v33+: pending trapdoor fallers (creatures that fell to deeper levels but aren't placed yet).
 std::map<LevelId, std::vector<Entity>> trapdoorFallersTmp;
+int32_t overworldXTmp = 0;
+int32_t overworldYTmp = 0;
+std::map<OverworldKey, LevelState> overworldChunksTmp;
+std::set<OverworldKey> overworldVisitedTmp;
+
 
 if (ver >= 33u) {
     uint32_t entryCount = 0;
@@ -3259,7 +3302,43 @@ if (ver >= 33u) {
     }
 }
 
-        // v51+: endless / infinite world options
+        
+        // v55+: overworld chunk coords + cached chunks + atlas discovery
+        if (ver >= 55u) {
+            if (!readPod(in, overworldXTmp)) return fail();
+            if (!readPod(in, overworldYTmp)) return fail();
+
+            uint32_t chunkCount = 0;
+            if (!readPod(in, chunkCount)) return fail();
+            if (chunkCount > 1024u) return fail();
+
+            overworldChunksTmp.clear();
+            for (uint32_t ci = 0; ci < chunkCount; ++ci) {
+                int32_t cx = 0, cy = 0;
+                if (!readPod(in, cx)) return fail();
+                if (!readPod(in, cy)) return fail();
+
+                LevelState st;
+                st.branch = DungeonBranch::Camp;
+                st.depth = 0;
+                if (!readLevelStatePayload(in, ver, st)) return fail();
+                overworldChunksTmp[OverworldKey{cx, cy}] = std::move(st);
+            }
+
+            uint32_t visCount = 0;
+            if (!readPod(in, visCount)) return fail();
+            if (visCount > 4096u) return fail();
+
+            overworldVisitedTmp.clear();
+            for (uint32_t vi = 0; vi < visCount; ++vi) {
+                int32_t vx = 0, vy = 0;
+                if (!readPod(in, vx)) return fail();
+                if (!readPod(in, vy)) return fail();
+                overworldVisitedTmp.insert(OverworldKey{vx, vy});
+            }
+        }
+
+// v51+: endless / infinite world options
         uint8_t endlessEnabledTmp = infiniteWorldEnabled_ ? 1u : 0u;
         int32_t endlessKeepWindowTmp = static_cast<int32_t>(infiniteKeepWindow_);
         if (ver >= 51u) {
@@ -3595,12 +3674,21 @@ if (ver >= 33u) {
             }
         }
 
-        // Overworld chunk state is currently session-only (not serialized).
-        overworldX_ = 0;
-        overworldY_ = 0;
-        overworldChunks_.clear();
+        // v55+: restore overworld position + chunk cache (Camp depth 0 outside the hub).
+        overworldX_ = overworldXTmp;
+        overworldY_ = overworldYTmp;
+        overworldChunks_ = std::move(overworldChunksTmp);
+        overworldVisited_ = std::move(overworldVisitedTmp);
 
-        restoreLevel(LevelId{branch_, depth_});
+        // Defensive: always remember home and current chunk in the atlas.
+        markOverworldDiscovered(0, 0);
+        markOverworldDiscovered(overworldX_, overworldY_);
+
+        if (branch_ == DungeonBranch::Camp && depth_ == 0) {
+            restoreOverworldChunk(overworldX_, overworldY_);
+        } else {
+            restoreLevel(LevelId{branch_, depth_});
+        }
 
         // Auto-explore bookkeeping is transient per-floor; size it to this dungeon.
         autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);

@@ -49,6 +49,9 @@ struct RNG {
         return x;
     }
 
+    // Back-compat shorthand used by some older procedural generators.
+    uint32_t u32() { return nextU32(); }
+
     int range(int lo, int hiInclusive) {
         if (hiInclusive <= lo) return lo;
         uint32_t span = static_cast<uint32_t>(hiInclusive - lo + 1);
@@ -78,6 +81,21 @@ inline uint32_t hash32(uint32_t x) {
 
 inline uint32_t hashCombine(uint32_t a, uint32_t b) {
     return hash32(a ^ (b + 0x9e3779b9u + (a << 6) + (a >> 2)));
+}
+
+// Variadic hash combine convenience helpers.
+//
+// Several procedural systems want to combine more than two values. Keep the
+// implementation header-only and deterministic.
+inline uint32_t hashCombine(uint32_t a, uint32_t b, uint32_t c) {
+    return hashCombine(hashCombine(a, b), c);
+}
+
+template <typename... Rest>
+inline uint32_t hashCombine(uint32_t a, uint32_t b, uint32_t c, Rest... rest) {
+    uint32_t h = hashCombine(a, b, c);
+    ((h = hashCombine(h, static_cast<uint32_t>(rest))), ...);
+    return h;
 }
 
 // Convert a 32-bit integer hash into a stable float in [0, 1).

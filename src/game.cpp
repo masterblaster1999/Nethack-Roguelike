@@ -9,6 +9,7 @@
 #include "ident_gen.hpp"
 #include "victory_gen.hpp"
 #include "fishing_gen.hpp"
+#include "farm_gen.hpp"
 #include <cstring>
 #include <cmath>
 #include <sstream>
@@ -3699,23 +3700,60 @@ void Game::setupSurfaceCampInstallations() {
                 cont->items.push_back(kit);
             }
 
-// Ensure a bounty contract exists (one-time).
-bool haveBounty = false;
-for (const auto& it : cont->items) {
-    if (it.kind == ItemKind::BountyContract) { haveBounty = true; break; }
-}
-if (!haveBounty) {
-    Item bc;
-    bc.id = nextItemId++;
-    bc.kind = ItemKind::BountyContract;
-    bc.count = 1;
-    bc.spriteSeed = rng.nextU32();
-    const int depthHint = std::max(1, maxDepthReached());
-    bc.charges = bountygen::makeCharges(bc.spriteSeed, depthHint);
-    bc.enchant = withBountyProgress(bc.enchant, 0);
-    cont->items.push_back(bc);
-}
+            // Ensure a bounty contract exists (one-time).
+            bool haveBounty = false;
+            for (const auto& it : cont->items) {
+                if (it.kind == ItemKind::BountyContract) { haveBounty = true; break; }
+            }
+            if (!haveBounty) {
+                Item bc;
+                bc.id = nextItemId++;
+                bc.kind = ItemKind::BountyContract;
+                bc.count = 1;
+                bc.spriteSeed = rng.nextU32();
+                const int depthHint = std::max(1, maxDepthReached());
+                bc.charges = bountygen::makeCharges(bc.spriteSeed, depthHint);
+                bc.enchant = withBountyProgress(bc.enchant, 0);
+                cont->items.push_back(bc);
+            }
 
+            // Ensure a garden hoe exists (one-time).
+            bool haveHoe = false;
+            for (const auto& it : cont->items) {
+                if (it.kind == ItemKind::GardenHoe) { haveHoe = true; break; }
+            }
+            if (!haveHoe) {
+                Item hoe;
+                hoe.id = nextItemId++;
+                hoe.kind = ItemKind::GardenHoe;
+                hoe.count = 1;
+                hoe.spriteSeed = rng.nextU32();
+                hoe.charges = itemDef(hoe.kind).maxCharges;
+                cont->items.push_back(hoe);
+            }
+
+            // Ensure some seeds exist (one-time).
+            bool haveSeeds = false;
+            for (const auto& it : cont->items) {
+                if (it.kind == ItemKind::Seed) { haveSeeds = true; break; }
+            }
+            if (!haveSeeds) {
+                constexpr int kSeedStacks = 3;
+                constexpr int kSeedsPerStack = 5;
+                for (int i = 0; i < kSeedStacks; ++i) {
+                    uint32_t cropSeed = rng.nextU32();
+                    if (cropSeed == 0u) cropSeed = 1u;
+                    const farmgen::CropSpec cs = farmgen::makeCrop(cropSeed);
+                    Item seed;
+                    seed.id = nextItemId++;
+                    seed.kind = ItemKind::Seed;
+                    seed.count = kSeedsPerStack;
+                    seed.spriteSeed = cropSeed;
+                    seed.charges = static_cast<int>(cropSeed);
+                    seed.enchant = packCropMetaEnchant(cs.variant, static_cast<int>(cs.rarity), cs.shiny);
+                    cont->items.push_back(seed);
+                }
+            }
             return;
         }
     }
@@ -3785,6 +3823,37 @@ if (!haveBounty) {
         cc.items.push_back(rod);
         cc.items.push_back(kit);
         cc.items.push_back(bc);
+
+        {
+            Item hoe;
+            hoe.id = nextItemId++;
+            hoe.kind = ItemKind::GardenHoe;
+            hoe.count = 1;
+            hoe.spriteSeed = rng.nextU32();
+            hoe.charges = itemDef(hoe.kind).maxCharges;
+            cc.items.push_back(hoe);
+        }
+
+        // A few starter seeds (one-time, since the chest persists).
+        {
+            constexpr int kSeedStacks = 3;
+            constexpr int kSeedsPerStack = 5;
+            for (int i = 0; i < kSeedStacks; ++i) {
+                uint32_t cropSeed = rng.nextU32();
+                if (cropSeed == 0u) cropSeed = 1u;
+                const farmgen::CropSpec cs = farmgen::makeCrop(cropSeed);
+
+                Item seed;
+                seed.id = nextItemId++;
+                seed.kind = ItemKind::Seed;
+                seed.count = kSeedsPerStack;
+                seed.spriteSeed = cropSeed;
+                seed.charges = static_cast<int>(cropSeed);
+                seed.enchant = packCropMetaEnchant(cs.variant, static_cast<int>(cs.rarity), cs.shiny);
+                cc.items.push_back(seed);
+            }
+        }
+
         chestContainers_.push_back(cc);
     }
 
@@ -4399,6 +4468,8 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
             }
         }
     }
+
+    updateFarmGrowth();
 
     recomputeFov();
 

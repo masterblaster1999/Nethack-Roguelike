@@ -39,6 +39,31 @@ struct GameTestAccess {
         p.eco = cc.ecosystem;
         return p;
     }
+
+static void discoverOverworldChunk(Game& g, int x, int y) {
+    g.markOverworldDiscovered(x, y);
+}
+
+static void setOverworldChunkFeatureFlags(Game& g, int x, int y, uint8_t flags) {
+    const Game::OverworldKey k{x, y};
+    g.overworldVisited_.insert(k);
+    g.overworldFeatureFlags_[k] = flags;
+}
+
+static void setOverworldChunkTerrainSummary(Game& g, int x, int y, int chasm, int boulder, int pillar) {
+    const Game::OverworldKey k{x, y};
+    g.overworldVisited_.insert(k);
+    Game::OverworldTerrainSummary s;
+    s.chasmTiles = chasm;
+    s.boulderTiles = boulder;
+    s.pillarTiles = pillar;
+    g.overworldTerrainSummary_[k] = s;
+}
+
+
+static void clearOverworldChunkCache(Game& g) {
+    g.overworldChunks_.clear();
+}
 };
 
 #include <cctype>
@@ -1561,6 +1586,17 @@ bool test_overworld_strongholds_present() {
             if (d.overworldStrongholdCount <= 0) continue;
             foundStronghold = true;
 
+            // Strongholds mark their keep footprint as a Vault room (used for UI detection).
+            bool hasVault = false;
+            for (const auto& r : d.rooms) {
+                if (r.type == RoomType::Vault) {
+                    hasVault = true;
+                    break;
+                }
+            }
+            CHECK(hasVault);
+
+
             if (!d.bonusLootSpots.empty() && d.overworldStrongholdCacheCount > 0) {
                 foundCache = true;
             }
@@ -1723,6 +1759,38 @@ bool test_save_load_roundtrip_overworld_chunk() {
     return true;
 }
 
+bool test_save_load_roundtrip_home_camp() {
+    Game g;
+    g.newGame(424242u);
+
+    CHECK(g.atCamp());
+    CHECK(g.atHomeCamp());
+    CHECK(g.overworldX() == 0);
+    CHECK(g.overworldY() == 0);
+
+    const fs::path path = testTempFile("procrogue_test_home_camp_save.prs");
+    const bool saved = g.saveToFile(path.string(), true);
+    CHECK(saved);
+    if (!saved) return false;
+
+    Game g2;
+    const bool loaded = g2.loadFromFile(path.string(), true);
+    CHECK(loaded);
+    if (!loaded) return false;
+
+    CHECK(g2.atCamp());
+    CHECK(g2.atHomeCamp());
+    CHECK(g2.overworldX() == 0);
+    CHECK(g2.overworldY() == 0);
+
+    // Regression check: home camp should restore via the normal level store and not leave an empty dungeon.
+    CHECK(g2.dungeon().width > 0);
+    CHECK(g2.dungeon().height > 0);
+    CHECK(!g2.dungeon().tiles.empty());
+
+    return true;
+}
+
 bool test_overworld_atlas_discovery_tracking() {
     Game g;
     g.newGame(1337u);
@@ -1751,6 +1819,320 @@ bool test_overworld_atlas_discovery_tracking() {
 
     return true;
 }
+
+
+bool test_overworld_atlas_feature_flags_save_load() {
+    Game g;
+    g.newGame(12345u);
+
+    const int cx = 7;
+    const int cy = -4;
+    const uint8_t flags = static_cast<uint8_t>(Game::OW_FEATURE_WAYSTATION | Game::OW_FEATURE_STRONGHOLD);
+
+    GameTestAccess::discoverOverworldChunk(g, cx, cy);
+    GameTestAccess::setOverworldChunkFeatureFlags(g, cx, cy, flags);
+
+    const fs::path path = testTempFile("procrogue_test_atlas_feature_flags_v56.prs");
+    const bool saved = g.saveToFile(path.string(), true);
+    CHECK(saved);
+    if (!saved) return false;
+
+    Game g2;
+    const bool loaded = g2.loadFromFile(path.string(), false);
+    CHECK(loaded);
+    if (!loaded) return false;
+
+    CHECK(g2.overworldChunkFeatureFlags(cx, cy) == flags);
+    CHECK(g2.overworldChunkHasWaystation(cx, cy));
+    CHECK(g2.overworldChunkHasStronghold(cx, cy));
+
+    // Ensure the atlas flags still work even if the chunk snapshot is evicted.
+    GameTestAccess::clearOverworldChunkCache(g2);
+    CHECK(g2.overworldChunkHasStronghold(cx, cy));
+
+    return true;
+}
+
+
+
+bool test_overworld_atlas_terrain_save_load() {
+    Game g;
+    g.newGame(54321u);
+
+    const int cx = -3;
+    const int cy = 9;
+
+    // Fake-but-stable counts: we only validate persistence here, not generation.
+    const int chasm = 17;
+    const int boulder = 23;
+    const int pillar = 5;
+
+    GameTestAccess::discoverOverworldChunk(g, cx, cy);
+    GameTestAccess::setOverworldChunkTerrainSummary(g, cx, cy, chasm, boulder, pillar);
+
+    const fs::path path = testTempFile("procrogue_test_atlas_terrain_v57.prs");
+    const bool saved = g.saveToFile(path.string(), true);
+    CHECK(saved);
+    if (!saved) return false;
+
+    Game g2;
+    const bool loaded = g2.loadFromFile(path.string(), false);
+    CHECK(loaded);
+    if (!loaded) return false;
+
+    Game::OverworldTerrainSummary ts;
+    CHECK(g2.overworldChunkTerrainSummary(cx, cy, ts));
+    CHECK(ts.chasmTiles == chasm);
+    CHECK(ts.boulderTiles == boulder);
+    CHECK(ts.pillarTiles == pillar);
+
+    // Ensure the terrain summary still works even if the chunk snapshot is evicted.
+    GameTestAccess::clearOverworldChunkCache(g2);
+    Game::OverworldTerrainSummary ts2;
+    CHECK(g2.overworldChunkTerrainSummary(cx, cy, ts2));
+    CHECK(ts2.chasmTiles == chasm);
+    CHECK(ts2.boulderTiles == boulder);
+    CHECK(ts2.pillarTiles == pillar);
+
+    return true;
+}
+
+
+
+
+
+
+bool test_overworld_atlas_waypoint_save_load() {
+    Game g;
+    g.newGame(24680u);
+
+    // Waypoint can be anywhere in chunk-space (even undiscovered).
+    const Vec2i wp{12, -7};
+    g.setOverworldWaypoint(wp);
+
+    const fs::path path = testTempFile("procrogue_test_atlas_waypoint_v58.prs");
+    const bool saved = g.saveToFile(path.string(), true);
+    CHECK(saved);
+    if (!saved) return false;
+
+    Game g2;
+    const bool loaded = g2.loadFromFile(path.string(), false);
+    CHECK(loaded);
+    if (!loaded) return false;
+
+    CHECK(g2.overworldWaypointIsSet());
+    CHECK(g2.overworldWaypoint().x == wp.x);
+    CHECK(g2.overworldWaypoint().y == wp.y);
+
+    // Clear + re-roundtrip should keep it cleared.
+    g2.clearOverworldWaypoint();
+
+    const fs::path path2 = testTempFile("procrogue_test_atlas_waypoint_clear_v58.prs");
+    const bool saved2 = g2.saveToFile(path2.string(), true);
+    CHECK(saved2);
+    if (!saved2) return false;
+
+    Game g3;
+    const bool loaded2 = g3.loadFromFile(path2.string(), false);
+    CHECK(loaded2);
+    if (!loaded2) return false;
+
+    CHECK(!g3.overworldWaypointIsSet());
+    return true;
+}
+
+bool test_overworld_atlas_route_preview() {
+    Game g;
+    g.newGame(424242u);
+
+    // Build a small discovered graph:
+    // (0,0) -> (1,0) -> (2,0) -> (2,1)
+    GameTestAccess::discoverOverworldChunk(g, 1, 0);
+    GameTestAccess::discoverOverworldChunk(g, 2, 0);
+    GameTestAccess::discoverOverworldChunk(g, 2, 1);
+
+    std::vector<Vec2i> path;
+    CHECK(g.overworldRouteDiscoveredChunks(Vec2i{0, 0}, Vec2i{2, 1}, path));
+    CHECK(static_cast<int>(path.size()) == 4);
+
+    // Endpoints should match.
+    CHECK(path.front().x == 0);
+    CHECK(path.front().y == 0);
+    CHECK(path.back().x == 2);
+    CHECK(path.back().y == 1);
+
+    // Undiscovered goal should fail.
+    path.clear();
+    CHECK(!g.overworldRouteDiscoveredChunks(Vec2i{0, 0}, Vec2i{9, 9}, path));
+    CHECK(path.empty());
+
+    // Disconnected discovery should also fail.
+    GameTestAccess::discoverOverworldChunk(g, 10, 10);
+    path.clear();
+    CHECK(!g.overworldRouteDiscoveredChunks(Vec2i{0, 0}, Vec2i{10, 10}, path));
+
+    return true;
+}
+
+bool test_overworld_atlas_nearest_landmark() {
+    Game g;
+    g.newGame(424242u);
+
+    // Build a small discovered graph:
+    // (0,0) -> (1,0) -> (2,0) -> (2,1)
+    GameTestAccess::discoverOverworldChunk(g, 1, 0);
+    GameTestAccess::discoverOverworldChunk(g, 2, 0);
+    GameTestAccess::discoverOverworldChunk(g, 2, 1);
+
+    GameTestAccess::setOverworldChunkFeatureFlags(g, 2, 1, static_cast<uint8_t>(Game::OW_FEATURE_WAYSTATION));
+    GameTestAccess::setOverworldChunkFeatureFlags(g, 1, 0, static_cast<uint8_t>(Game::OW_FEATURE_STRONGHOLD));
+
+    Vec2i nearest;
+    int legs = 0;
+
+    CHECK(g.overworldNearestLandmark(Game::OW_FEATURE_STRONGHOLD, nearest, &legs));
+    CHECK(nearest.x == 1);
+    CHECK(nearest.y == 0);
+    CHECK(legs == 1);
+
+    legs = 0;
+    CHECK(g.overworldNearestLandmark(Game::OW_FEATURE_WAYSTATION, nearest, &legs));
+    CHECK(nearest.x == 2);
+    CHECK(nearest.y == 1);
+    CHECK(legs == 3);
+
+    // Union mask should return the nearest matching type (stronghold at 1,0).
+    legs = 0;
+    CHECK(g.overworldNearestLandmark(static_cast<uint8_t>(Game::OW_FEATURE_WAYSTATION | Game::OW_FEATURE_STRONGHOLD), nearest, &legs));
+    CHECK(nearest.x == 1);
+    CHECK(nearest.y == 0);
+    CHECK(legs == 1);
+
+    // Disconnected discovery should not be considered reachable.
+    Game g2;
+    g2.newGame(1337u);
+    GameTestAccess::discoverOverworldChunk(g2, 10, 10);
+    GameTestAccess::setOverworldChunkFeatureFlags(g2, 10, 10, static_cast<uint8_t>(Game::OW_FEATURE_WAYSTATION));
+    CHECK(!g2.overworldNearestLandmark(Game::OW_FEATURE_WAYSTATION, nearest, nullptr));
+
+    return true;
+}
+
+bool test_overworld_auto_travel_pauses_and_resumes_in_ui() {
+    Game g;
+    g.newGame(9999u);
+
+    // Discover a simple adjacent chunk and set it as a waypoint.
+    GameTestAccess::discoverOverworldChunk(g, 1, 0);
+    g.setOverworldWaypoint(Vec2i{1, 0});
+
+    // Make the current camp level fully explored and walkable so the gate leg can be planned.
+    Dungeon& d = GameTestAccess::dung(g);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Floor;
+            d.at(x, y).explored = true;
+        }
+    }
+
+    // Start overworld auto-travel. This should arm the multi-leg state and start the first in-chunk leg.
+    g.requestOverworldAutoTravelToWaypoint();
+    CHECK(g.overworldAutoTravelActive());
+    CHECK(g.isAutoTraveling());
+
+    // Open a UI overlay *without* going through handleAction() (simulates UI appearing mid-leg).
+    // update() should stop in-chunk auto-move, but keep overworld auto-travel armed.
+    g.openInventory();
+    g.update(0.0f);
+    CHECK(g.overworldAutoTravelActive());
+    CHECK(!g.isAutoActive());
+
+    // Close the overlay: overworld auto-travel should resume by replanning the leg.
+    g.closeInventory();
+    g.update(0.0f);
+    CHECK(g.overworldAutoTravelActive());
+    CHECK(g.isAutoTraveling());
+
+    return true;
+}
+
+bool test_overworld_auto_travel_manual_pause() {
+    Game g;
+    g.newGame(424242u);
+
+    // Discover a simple adjacent chunk and set it as a waypoint.
+    GameTestAccess::discoverOverworldChunk(g, 1, 0);
+    g.setOverworldWaypoint(Vec2i{1, 0});
+
+    // Make the current camp level fully explored and walkable so the gate leg can be planned.
+    Dungeon& d = GameTestAccess::dung(g);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Floor;
+            d.at(x, y).explored = true;
+        }
+    }
+
+    // Start overworld auto-travel.
+    CHECK(g.requestOverworldAutoTravelToWaypoint());
+    CHECK(g.overworldAutoTravelActive());
+    CHECK(g.isAutoTraveling());
+    CHECK(std::string(g.overworldAutoTravelLabel()) == "WAYPOINT");
+
+
+    // Pause it via the new action: should stop in-chunk auto-walk but keep overworld travel armed.
+    g.handleAction(Action::OverworldAutoTravelTogglePause);
+    CHECK(g.overworldAutoTravelActive());
+    CHECK(g.overworldAutoTravelPaused());
+    CHECK(!g.isAutoActive());
+
+    // update() should not resume while paused.
+    g.update(0.0f);
+    CHECK(g.overworldAutoTravelActive());
+    CHECK(g.overworldAutoTravelPaused());
+    CHECK(!g.isAutoActive());
+
+    // Resume it: should re-kick the leg (or at least arm it so update continues).
+    g.handleAction(Action::OverworldAutoTravelTogglePause);
+    CHECK(g.overworldAutoTravelActive());
+    CHECK(!g.overworldAutoTravelPaused());
+
+    g.update(0.0f);
+    CHECK(g.overworldAutoTravelActive());
+    CHECK(g.isAutoTraveling());
+
+    return true;
+}
+
+bool test_overworld_auto_travel_label() {
+    Game g;
+    g.newGame(777777u);
+
+    // Discover a simple adjacent chunk.
+    GameTestAccess::discoverOverworldChunk(g, 1, 0);
+
+    // Make the current camp level fully explored and walkable so the gate leg can be planned.
+    Dungeon& d = GameTestAccess::dung(g);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            d.at(x, y).type = TileType::Floor;
+            d.at(x, y).explored = true;
+        }
+    }
+
+    // Start travel to an explicit destination label.
+    CHECK(g.requestOverworldAutoTravelToChunk(Vec2i{1, 0}, "CURSOR"));
+    CHECK(g.overworldAutoTravelActive());
+    CHECK(std::string(g.overworldAutoTravelLabel()) == "CURSOR");
+
+    // Cancel should reset label back to the default.
+    g.cancelOverworldAutoTravel(true);
+    CHECK(!g.overworldAutoTravelActive());
+    CHECK(std::string(g.overworldAutoTravelLabel()) == "DESTINATION");
+
+    return true;
+}
+
 
 
 bool test_overworld_gate_alignment() {
@@ -1962,6 +2344,7 @@ int main(int argc, char** argv) {
         {"wfc_solver_unsat",     test_wfc_solver_unsat_forced_contradiction},
         {"save_load_roundtrip",  test_save_load_roundtrip},
         {"save_load_overworld_chunk",  test_save_load_roundtrip_overworld_chunk},
+        {"save_load_home_camp",      test_save_load_roundtrip_home_camp},
         {"save_load_sneak",      test_save_load_preserves_sneak},
         {"settings_minimap_zoom", test_settings_minimap_zoom_clamp},
         {"action_palette",  test_action_palette_executes_actions},
@@ -1988,6 +2371,14 @@ int main(int argc, char** argv) {
         {"overworld_weather",  test_overworld_weather_determinism},
         {"overworld_weather_time", test_overworld_weather_time_varying_fronts},
         {"overworld_atlas_discovery", test_overworld_atlas_discovery_tracking},
+        {"overworld_atlas_features_save_load", test_overworld_atlas_feature_flags_save_load},
+        {"overworld_atlas_terrain_save_load", test_overworld_atlas_terrain_save_load},
+        {"overworld_atlas_waypoint_save_load", test_overworld_atlas_waypoint_save_load},
+        {"overworld_atlas_route_preview", test_overworld_atlas_route_preview},
+        {"overworld_atlas_nearest_landmark", test_overworld_atlas_nearest_landmark},
+        {"overworld_auto_travel_pause_resume", test_overworld_auto_travel_pauses_and_resumes_in_ui},
+        {"overworld_auto_travel_manual_pause", test_overworld_auto_travel_manual_pause},
+        {"overworld_auto_travel_label", test_overworld_auto_travel_label},
         {"overworld_gate_alignment", test_overworld_gate_alignment},
         {"ident_appearances", test_ident_appearance_procgen_determinism},
         {"shop_profiles",   test_proc_shop_profiles},

@@ -1231,7 +1231,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 55u; // v55: serialize overworld chunks + atlas
+constexpr uint32_t SAVE_VERSION = 58u; // v58: overworld waypoint
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -2674,37 +2674,79 @@ if constexpr (SAVE_VERSION >= 33u) {
         }
     }
 }
+// v55+: overworld chunk coords + cached chunks + atlas discovery
+if constexpr (SAVE_VERSION >= 55u) {
+    const int32_t owx = static_cast<int32_t>(overworldX_);
+    const int32_t owy = static_cast<int32_t>(overworldY_);
+    writePod(mem, owx);
+    writePod(mem, owy);
 
+    uint32_t chunkCount = static_cast<uint32_t>(overworldChunks_.size());
+    writePod(mem, chunkCount);
+    for (const auto& kv : overworldChunks_) {
+        const int32_t cx = static_cast<int32_t>(kv.first.x);
+        const int32_t cy = static_cast<int32_t>(kv.first.y);
+        writePod(mem, cx);
+        writePod(mem, cy);
+        writeLevelStatePayload(mem, kv.second);
+    }
 
+    uint32_t visCount = static_cast<uint32_t>(overworldVisited_.size());
+    writePod(mem, visCount);
+    for (const auto& k : overworldVisited_) {
+        const int32_t vx = static_cast<int32_t>(k.x);
+        const int32_t vy = static_cast<int32_t>(k.y);
+        writePod(mem, vx);
+        writePod(mem, vy);
+    }
 
-    // v55+: overworld chunk coords + cached chunks + atlas discovery
-    if constexpr (SAVE_VERSION >= 55u) {
-        const int32_t owx = static_cast<int32_t>(overworldX_);
-        const int32_t owy = static_cast<int32_t>(overworldY_);
-        writePod(mem, owx);
-        writePod(mem, owy);
-
-        uint32_t chunkCount = static_cast<uint32_t>(overworldChunks_.size());
-        writePod(mem, chunkCount);
-        for (const auto& kv : overworldChunks_) {
-            const int32_t cx = static_cast<int32_t>(kv.first.x);
-            const int32_t cy = static_cast<int32_t>(kv.first.y);
-            writePod(mem, cx);
-            writePod(mem, cy);
-            writeLevelStatePayload(mem, kv.second);
-        }
-
-        uint32_t visCount = static_cast<uint32_t>(overworldVisited_.size());
-        writePod(mem, visCount);
-        for (const auto& k : overworldVisited_) {
-            const int32_t vx = static_cast<int32_t>(k.x);
-            const int32_t vy = static_cast<int32_t>(k.y);
-            writePod(mem, vx);
-            writePod(mem, vy);
+    // v56+: per-chunk atlas feature flags (waystations/strongholds/etc.)
+    if constexpr (SAVE_VERSION >= 56u) {
+        uint32_t featCount = static_cast<uint32_t>(overworldFeatureFlags_.size());
+        writePod(mem, featCount);
+        for (const auto& kv : overworldFeatureFlags_) {
+            const int32_t fx = static_cast<int32_t>(kv.first.x);
+            const int32_t fy = static_cast<int32_t>(kv.first.y);
+            writePod(mem, fx);
+            writePod(mem, fy);
+            const uint8_t flags = kv.second;
+            writePod(mem, flags);
         }
     }
 
-    // v51+: endless / infinite world options (persisted in the save so reload matches the run).
+    // v57+: per-chunk atlas terrain summaries (chasm/boulders/pillars tile counts)
+    if constexpr (SAVE_VERSION >= 57u) {
+        uint32_t tCount = static_cast<uint32_t>(overworldTerrainSummary_.size());
+        writePod(mem, tCount);
+        for (const auto& kv : overworldTerrainSummary_) {
+            const int32_t tx = static_cast<int32_t>(kv.first.x);
+            const int32_t ty = static_cast<int32_t>(kv.first.y);
+            writePod(mem, tx);
+            writePod(mem, ty);
+
+            const int32_t chasm = static_cast<int32_t>(kv.second.chasmTiles);
+            const int32_t boulder = static_cast<int32_t>(kv.second.boulderTiles);
+            const int32_t pillar = static_cast<int32_t>(kv.second.pillarTiles);
+            writePod(mem, chasm);
+            writePod(mem, boulder);
+            writePod(mem, pillar);
+        }
+    }
+
+    // v58+: overworld waypoint (player-set navigation marker)
+    if constexpr (SAVE_VERSION >= 58u) {
+        const uint8_t wpSet = overworldWaypointSet_ ? 1u : 0u;
+        writePod(mem, wpSet);
+        const int32_t wx = static_cast<int32_t>(overworldWaypoint_.x);
+        const int32_t wy = static_cast<int32_t>(overworldWaypoint_.y);
+        writePod(mem, wx);
+        writePod(mem, wy);
+    }
+
+
+}
+
+// v51+: endless / infinite world options (persisted in the save so reload matches the run).
     if constexpr (SAVE_VERSION >= 51u) {
         uint8_t endlessEnabledTmp = infiniteWorldEnabled_ ? 1u : 0u;
         int32_t endlessKeepWindowTmp = static_cast<int32_t>(infiniteKeepWindow_);
@@ -3249,6 +3291,11 @@ int32_t overworldXTmp = 0;
 int32_t overworldYTmp = 0;
 std::map<OverworldKey, LevelState> overworldChunksTmp;
 std::set<OverworldKey> overworldVisitedTmp;
+std::map<OverworldKey, uint8_t> overworldFeatureFlagsTmp;
+std::map<OverworldKey, OverworldTerrainSummary> overworldTerrainSummaryTmp;
+uint8_t overworldWaypointSetTmp = 0u;
+int32_t overworldWaypointXTmp = 0;
+int32_t overworldWaypointYTmp = 0;
 
 
 if (ver >= 33u) {
@@ -3303,40 +3350,113 @@ if (ver >= 33u) {
 }
 
         
-        // v55+: overworld chunk coords + cached chunks + atlas discovery
-        if (ver >= 55u) {
-            if (!readPod(in, overworldXTmp)) return fail();
-            if (!readPod(in, overworldYTmp)) return fail();
+// v55+: overworld chunk coords + cached chunks + atlas discovery
+if (ver >= 55u) {
+    if (!readPod(in, overworldXTmp)) return fail();
+    if (!readPod(in, overworldYTmp)) return fail();
 
-            uint32_t chunkCount = 0;
-            if (!readPod(in, chunkCount)) return fail();
-            if (chunkCount > 1024u) return fail();
+    uint32_t chunkCount = 0;
+    if (!readPod(in, chunkCount)) return fail();
+    if (chunkCount > 1024u) return fail();
 
-            overworldChunksTmp.clear();
-            for (uint32_t ci = 0; ci < chunkCount; ++ci) {
-                int32_t cx = 0, cy = 0;
-                if (!readPod(in, cx)) return fail();
-                if (!readPod(in, cy)) return fail();
+    overworldChunksTmp.clear();
+    for (uint32_t ci = 0; ci < chunkCount; ++ci) {
+        int32_t cx = 0, cy = 0;
+        if (!readPod(in, cx)) return fail();
+        if (!readPod(in, cy)) return fail();
 
-                LevelState st;
-                st.branch = DungeonBranch::Camp;
-                st.depth = 0;
-                if (!readLevelStatePayload(in, ver, st)) return fail();
-                overworldChunksTmp[OverworldKey{cx, cy}] = std::move(st);
-            }
+        LevelState st;
+        st.branch = DungeonBranch::Camp;
+        st.depth = 0;
+        if (!readLevelStatePayload(in, ver, st)) return fail();
+        overworldChunksTmp[OverworldKey{cx, cy}] = std::move(st);
+    }
 
-            uint32_t visCount = 0;
-            if (!readPod(in, visCount)) return fail();
-            if (visCount > 4096u) return fail();
+    uint32_t visCount = 0;
+    if (!readPod(in, visCount)) return fail();
+    if (visCount > 4096u) return fail();
 
-            overworldVisitedTmp.clear();
-            for (uint32_t vi = 0; vi < visCount; ++vi) {
-                int32_t vx = 0, vy = 0;
-                if (!readPod(in, vx)) return fail();
-                if (!readPod(in, vy)) return fail();
-                overworldVisitedTmp.insert(OverworldKey{vx, vy});
-            }
+    overworldVisitedTmp.clear();
+    for (uint32_t vi = 0; vi < visCount; ++vi) {
+        int32_t vx = 0, vy = 0;
+        if (!readPod(in, vx)) return fail();
+        if (!readPod(in, vy)) return fail();
+        overworldVisitedTmp.insert(OverworldKey{vx, vy});
+    }
+
+    // v56+: per-chunk atlas feature flags (waystations/strongholds/etc.)
+    if (ver >= 56u) {
+        uint32_t featCount = 0;
+        if (!readPod(in, featCount)) return fail();
+        if (featCount > 4096u) return fail();
+
+        overworldFeatureFlagsTmp.clear();
+        for (uint32_t fi = 0; fi < featCount; ++fi) {
+            int32_t fx = 0, fy = 0;
+            uint8_t flags = 0;
+            if (!readPod(in, fx)) return fail();
+            if (!readPod(in, fy)) return fail();
+            if (!readPod(in, flags)) return fail();
+            overworldFeatureFlagsTmp[OverworldKey{fx, fy}] = flags;
         }
+    } else {
+        // Migration for v55 saves: infer feature flags for any cached chunks so the atlas can
+        // show landmarks even after chunks are evicted.
+        overworldFeatureFlagsTmp.clear();
+        for (const auto& kv : overworldChunksTmp) {
+            uint8_t flags = 0u;
+            for (const auto& r : kv.second.dung.rooms) {
+                if (r.type == RoomType::Shop) flags |= OW_FEATURE_WAYSTATION;
+                if (r.type == RoomType::Vault) flags |= OW_FEATURE_STRONGHOLD;
+            }
+            overworldFeatureFlagsTmp[kv.first] = flags;
+        }
+    }
+
+    // v57+: per-chunk atlas terrain summaries (chasm/boulders/pillars tile counts).
+    if (ver >= 57u) {
+        uint32_t tCount = 0;
+        if (!readPod(in, tCount)) return fail();
+        if (tCount > 4096u) return fail();
+
+        overworldTerrainSummaryTmp.clear();
+        for (uint32_t ti = 0; ti < tCount; ++ti) {
+            int32_t tx = 0, ty = 0;
+            int32_t chasm = 0, boulder = 0, pillar = 0;
+            if (!readPod(in, tx)) return fail();
+            if (!readPod(in, ty)) return fail();
+            if (!readPod(in, chasm)) return fail();
+            if (!readPod(in, boulder)) return fail();
+            if (!readPod(in, pillar)) return fail();
+
+            OverworldTerrainSummary s;
+            s.chasmTiles = chasm;
+            s.boulderTiles = boulder;
+            s.pillarTiles = pillar;
+            overworldTerrainSummaryTmp[OverworldKey{tx, ty}] = s;
+        }
+    } else {
+        // Migration for v55/v56 saves: infer terrain summaries for any cached chunks from their tiles.
+        overworldTerrainSummaryTmp.clear();
+        for (const auto& kv : overworldChunksTmp) {
+            overworldTerrainSummaryTmp[kv.first] = computeOverworldTerrainSummaryFromDungeon(kv.second.dung);
+        }
+    }
+
+    // v58+: overworld waypoint (player-set navigation marker)
+    if (ver >= 58u) {
+        if (!readPod(in, overworldWaypointSetTmp)) return fail();
+        if (!readPod(in, overworldWaypointXTmp)) return fail();
+        if (!readPod(in, overworldWaypointYTmp)) return fail();
+        if (overworldWaypointSetTmp > 1u) overworldWaypointSetTmp = 1u;
+    } else {
+        overworldWaypointSetTmp = 0u;
+        overworldWaypointXTmp = 0;
+        overworldWaypointYTmp = 0;
+    }
+
+
+}
 
 // v51+: endless / infinite world options
         uint8_t endlessEnabledTmp = infiniteWorldEnabled_ ? 1u : 0u;
@@ -3679,13 +3799,23 @@ if (ver >= 33u) {
         overworldY_ = overworldYTmp;
         overworldChunks_ = std::move(overworldChunksTmp);
         overworldVisited_ = std::move(overworldVisitedTmp);
+        overworldFeatureFlags_ = std::move(overworldFeatureFlagsTmp);
+        overworldTerrainSummary_ = std::move(overworldTerrainSummaryTmp);
+
+        overworldWaypointSet_ = (overworldWaypointSetTmp != 0u);
+        overworldWaypoint_ = Vec2i{static_cast<int>(overworldWaypointXTmp), static_cast<int>(overworldWaypointYTmp)};
 
         // Defensive: always remember home and current chunk in the atlas.
         markOverworldDiscovered(0, 0);
         markOverworldDiscovered(overworldX_, overworldY_);
 
         if (branch_ == DungeonBranch::Camp && depth_ == 0) {
-            restoreOverworldChunk(overworldX_, overworldY_);
+            // Home camp lives in the normal level store (Camp/0); wilderness chunks live in overworldChunks_.
+            if (overworldX_ == 0 && overworldY_ == 0) {
+                restoreLevel(LevelId{DungeonBranch::Camp, 0});
+            } else {
+                restoreOverworldChunk(overworldX_, overworldY_);
+            }
         } else {
             restoreLevel(LevelId{branch_, depth_});
         }

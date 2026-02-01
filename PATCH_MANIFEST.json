@@ -1,18 +1,17 @@
 {
-  "patch_id": "round220_patch",
-  "previous_patch_id": "round219_patch",
-  "round": 220,
-  "created_utc": "2026-01-30T09:45:49Z",
-  "summary": "Round 220: adds rare overworld ruin-stronghold setpieces (walled settlements with a keep, Poisson-disc outbuildings, rubble, and guaranteed loot caches) that connect back to the trail hub. Adds overworld stronghold telemetry + #mapstats display and a regression test to ensure strongholds appear.",
+  "patch_id": "round232_patch",
+  "previous_patch_id": "round231_patch",
+  "round": 232,
+  "created_utc": "2026-02-01T09:12:02Z",
+  "summary": "Overworld Atlas route preview now also draws the active overworld auto-travel route (green) and shows an AUTO status line; overworld auto-travel stores a UI-only destination label; added/registered tests.",
   "files_changed_or_added_this_round": [
-    "src/overworld.hpp",
-    "src/dungeon.hpp",
-    "src/dungeon.cpp",
-    "src/game_internal.hpp",
-    "tests/test_main.cpp",
-    "docs/PROCGEN_OVERWORLD_STRONGHOLDS.md",
     "CHANGELOG.md",
-    "PATCH_MANIFEST.json"
+    "PATCH_MANIFEST.json",
+    "docs/PROCGEN_OVERWORLD_ATLAS.md",
+    "src/game.cpp",
+    "src/game.hpp",
+    "src/render.cpp",
+    "tests/test_main.cpp"
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
@@ -43,6 +42,7 @@
     "docs/PROCGEN_OVERWORLD_GATES.md",
     "docs/PROCGEN_OVERWORLD_RIVERS.md",
     "docs/PROCGEN_OVERWORLD_SPRINGS.md",
+    "docs/PROCGEN_OVERWORLD_STRONGHOLDS.md",
     "docs/PROCGEN_OVERWORLD_TECTONICS.md",
     "docs/PROCGEN_OVERWORLD_TRAILS.md",
     "docs/PROCGEN_OVERWORLD_WAYSTATIONS.md",
@@ -128,8 +128,12 @@
     "src/victory_gen.hpp",
     "src/wards.hpp",
     "src/wfc.hpp",
-    "tests/test_main.cpp",
-    "docs/PROCGEN_OVERWORLD_STRONGHOLDS.md"
+    "tests/CMakeLists.txt",
+    "tests/test_main.cpp"
   ],
-  "notes_for_reviewer": "Strongholds are deterministic per chunk. The entrance is always connected to the chunk trail hub via the existing trail planner (a short spur is carved after gate-to-hub trails). Keep interiors may use DoorLocked to trigger the existing key/lockpick guarantee logic. Telemetry is exposed in #mapstats."
+  "notes_for_reviewer": [
+    "Overworld auto-travel is now resilient to UI overlays: it pauses when menus are open and resumes when they close.",
+    "If a leg is interrupted before reaching its planned exit gate, the gate goal is cleared and the leg is replanned instead of canceling.",
+    "ESC cancels overworld auto-travel only when no other UI overlay is open (otherwise it simply closes that overlay)."
+  ]
 }

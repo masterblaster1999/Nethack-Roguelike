@@ -598,6 +598,31 @@ enum class Action : uint8_t {
     RunUpRight,
     RunDownLeft,
     RunDownRight,
+
+    // Overworld atlas helpers (UI-only; append-only).
+    OverworldMapNextLandmark,
+    OverworldMapPrevLandmark,
+    OverworldMapCycleLandmarkFilter,
+    OverworldMapToggleRoute,
+
+    // Overworld atlas waypoint helpers (UI-only; append-only).
+    OverworldMapSetWaypoint,
+    OverworldMapClearWaypoint,
+
+    // Overworld travel (append-only).
+    // Chunk-to-chunk auto-travel to the current waypoint (surface only).
+    OverworldAutoTravelToWaypoint,
+
+    // Overworld atlas: auto-travel to the atlas cursor destination (surface only).
+    // This does NOT modify the persistent waypoint.
+    OverworldMapTravelToCursor,
+
+    // Overworld: auto-travel to nearest discovered landmark types (surface only).
+    OverworldAutoTravelNearestWaystation,
+    OverworldAutoTravelNearestStronghold,
+
+    // Overworld: pause/resume current auto-travel without losing the route (surface-only).
+    OverworldAutoTravelTogglePause,
 };
 
 
@@ -1392,6 +1417,33 @@ WindShotAdjust windAdjustShot(Vec2i src, Vec2i aim, int range, ProjectileKind pr
     // nullptr if the chunk was never visited (or has been evicted from memory).
     const Dungeon* overworldChunkDungeon(int x, int y) const;
 
+    // Overworld atlas feature discovery (persisted in saves, v56+).
+    // These are "map intelligence" flags for chunks the player has visited.
+    // They are used by the Overworld Atlas overlay even when a chunk has been
+    // evicted from the in-memory overworld cache.
+    static constexpr uint8_t OW_FEATURE_WAYSTATION = 1u << 0; // '$'
+    static constexpr uint8_t OW_FEATURE_STRONGHOLD = 1u << 1; // '!'
+
+    // Returns a bitmask of OW_FEATURE_* flags for the given chunk.
+    uint8_t overworldChunkFeatureFlags(int x, int y) const;
+    bool overworldChunkHasWaystation(int x, int y) const;
+    bool overworldChunkHasStronghold(int x, int y) const;
+
+    // Lightweight, persistent overworld terrain summary for the atlas details panel.
+    // Counts are computed from the chunk's tile grid (not generation telemetry),
+    // so they remain meaningful across save/load and chunk eviction.
+    struct OverworldTerrainSummary {
+        int chasmTiles = 0;
+        int boulderTiles = 0;
+        int pillarTiles = 0;
+    };
+
+    // Returns true and fills 'out' if a terrain summary is available for the chunk.
+    // This is true when:
+    //  - The chunk is currently loaded, or
+    //  - The chunk was previously visited and its summary was cached (serialized, v57+).
+    bool overworldChunkTerrainSummary(int x, int y, OverworldTerrainSummary& out) const;
+
     int dungeonMaxDepth() const { return DUNGEON_MAX_DEPTH; }
 
 // Deterministic parameters for the per-floor "substrate material" cache.
@@ -1835,6 +1887,83 @@ bool clearItemCallLabel(ItemKind k);
     int overworldMapZoom() const { return overworldMapZoom_; }
     void setOverworldMapZoom(int z) { overworldMapZoom_ = std::clamp(z, -3, 3); }
 
+    // Overworld atlas landmark navigation (UI-only).
+    // Filter mask selects which landmark types to cycle with the atlas FIND keys.
+    uint8_t overworldMapLandmarkFilterMask() const { return overworldMapLandmarkMask_; }
+    const char* overworldMapLandmarkFilterName() const {
+        const uint8_t all = OW_FEATURE_WAYSTATION | OW_FEATURE_STRONGHOLD;
+        if (overworldMapLandmarkMask_ == all) return "ALL";
+        if (overworldMapLandmarkMask_ == OW_FEATURE_WAYSTATION) return "WAYSTATIONS";
+        if (overworldMapLandmarkMask_ == OW_FEATURE_STRONGHOLD) return "STRONGHOLDS";
+        return "CUSTOM";
+    }
+    int overworldLandmarkCount(uint8_t mask) const;
+
+    // Finds the nearest discovered overworld chunk that matches the given landmark feature mask
+    // (e.g., OW_FEATURE_WAYSTATION). Search is a BFS over the discovered chunk graph.
+    // Returns true and writes the destination chunk coordinate and (optionally) the number of legs.
+    bool overworldNearestLandmark(uint8_t mask, Vec2i& outChunk, int* outLegs = nullptr) const;
+
+    // Overworld atlas: route preview (UI-only).
+    // When enabled, the atlas can draw a highlighted route from your current chunk to the cursor,
+    // but only through chunks that have been discovered (visited).
+    bool overworldMapShowRoute() const { return overworldMapShowRoute_; }
+    void toggleOverworldMapShowRoute() { overworldMapShowRoute_ = !overworldMapShowRoute_; }
+
+    // Overworld waypoint (persistent, serialized v58+): a player-set navigation marker in overworld chunk coordinates.
+    bool overworldWaypointIsSet() const { return overworldWaypointSet_; }
+    Vec2i overworldWaypoint() const { return overworldWaypoint_; }
+    void setOverworldWaypoint(Vec2i c) { overworldWaypoint_ = c; overworldWaypointSet_ = true; }
+    void clearOverworldWaypoint() { overworldWaypointSet_ = false; }
+
+    // Overworld auto-travel to waypoint (surface-only; not serialized).
+    // This is a chunk-to-chunk travel helper that walks to the appropriate edge gate,
+    // steps to the adjacent chunk, and repeats until the waypoint chunk is reached
+    // (requires a route through *discovered* chunks).
+    bool overworldAutoTravelActive() const { return overworldAutoTravelActive_; }
+    bool overworldAutoTravelPaused() const { return overworldAutoTravelPaused_; }
+    const char* overworldAutoTravelLabel() const {
+        if (overworldAutoTravelLabel_.empty()) return "DESTINATION";
+        return overworldAutoTravelLabel_.c_str();
+    }
+    bool requestOverworldAutoTravelToWaypoint();
+    // Overworld auto-travel to an explicit chunk destination (surface-only; not serialized).
+    // 'label' is used for user-facing messages and UI labels (e.g., "WAYPOINT", "DESTINATION").
+    bool requestOverworldAutoTravelToChunk(Vec2i goal, const char* label = "DESTINATION");
+    // Overworld auto-travel to the nearest discovered landmark types (surface-only; not serialized).
+    // Nearest is computed over the discovered chunk graph (4-neighbor), not simple manhattan distance.
+    bool requestOverworldAutoTravelToNearestWaystation();
+    bool requestOverworldAutoTravelToNearestStronghold();
+    void cancelOverworldAutoTravel(bool silent);
+
+    // Auto-travel introspection (HUD/UI helpers).
+    Vec2i overworldAutoTravelGoalChunk() const {
+        if (!overworldAutoTravelActive_ || overworldAutoTravelRoute_.empty()) return Vec2i{overworldX_, overworldY_};
+        return overworldAutoTravelRoute_.back();
+    }
+    int overworldAutoTravelTotalLegs() const {
+        if (!overworldAutoTravelActive_ || overworldAutoTravelRoute_.size() < 2) return 0;
+        return static_cast<int>(overworldAutoTravelRoute_.size() - 1);
+    }
+    int overworldAutoTravelRemainingLegs() const {
+        if (!overworldAutoTravelActive_ || overworldAutoTravelRoute_.size() < 2) return 0;
+        if (overworldAutoTravelRouteIndex_ >= overworldAutoTravelRoute_.size()) return 0;
+        const size_t rem = (overworldAutoTravelRoute_.size() - 1) - overworldAutoTravelRouteIndex_;
+        return static_cast<int>(rem);
+    }
+    Vec2i overworldAutoTravelNextChunk() const {
+        if (!overworldAutoTravelActive_) return Vec2i{overworldX_, overworldY_};
+        const size_t i = overworldAutoTravelRouteIndex_;
+        if (i + 1 >= overworldAutoTravelRoute_.size()) return Vec2i{overworldX_, overworldY_};
+        return overworldAutoTravelRoute_[i + 1];
+    }
+
+    // Computes the shortest 4-neighbor route from 'from' to 'to' across discovered overworld chunks.
+    // Returns true and fills 'outPath' (including both endpoints) when a route exists.
+    // Returns false if either endpoint is undiscovered, or if the discovered chunk graph is disconnected.
+    bool overworldRouteDiscoveredChunks(const Vec2i& from, const Vec2i& to, std::vector<Vec2i>& outPath) const;
+
+
     // Minimap cursor (UI-only): used for minimap keyboard/mouse navigation.
     bool minimapCursorActive() const { return minimapCursorActive_; }
     Vec2i minimapCursor() const { return minimapCursorPos_; }
@@ -2187,8 +2316,12 @@ private:
     bool winConditionsSatisfied(std::vector<std::string>* missing = nullptr) const;
 
     // Internal: remember that the player has discovered/visited an overworld chunk.
-    // Used by the overworld atlas overlay (UI-only; not serialized).
+    // Used by the overworld atlas overlay (serialized, v55+; capped).
     void markOverworldDiscovered(int x, int y);
+    void recordOverworldChunkFeatureFlags(int x, int y, const Dungeon& d);
+
+    void recordOverworldChunkTerrainSummary(int x, int y, const Dungeon& d);
+    static OverworldTerrainSummary computeOverworldTerrainSummaryFromDungeon(const Dungeon& d);
 
     // Drop an item on the ground, merging into an existing stack when possible.
     // This reduces clutter for stackable items (ammo, gold, potions, scrolls, etc.).
@@ -2277,10 +2410,12 @@ private:
     // Persistent visited levels (monsters + items + explored tiles)
     std::map<LevelId, LevelState> levels;
 
-    // Infinite overworld chunk cache (Camp depth 0).
+    // Overworld chunk cache (Camp depth 0).
     //
     // The hub camp is always at (0,0) and is stored in `levels[{Camp,0}]` like before.
-    // Wilderness chunks are stored here and are currently treated as ephemeral (not serialized).
+    // Wilderness chunks are cached here while traveling (serialized in saves, v55+),
+    // but the cache is still pruned to a bounded window around the current chunk to
+    // keep memory/save size under control.
     struct OverworldKey {
         int x = 0;
         int y = 0;
@@ -2293,8 +2428,26 @@ private:
     int overworldX_ = 0;
     int overworldY_ = 0;
     std::map<OverworldKey, LevelState> overworldChunks_;
-    // Lightweight visitation record for the overworld atlas (serialized, v55+).
+    // Lightweight visitation record for the overworld atlas (serialized, v55+; capped).
     std::set<OverworldKey> overworldVisited_;
+    // Per-chunk feature flags for the atlas (serialized, v56+; capped alongside overworldVisited_).
+    std::map<OverworldKey, uint8_t> overworldFeatureFlags_;
+    // Per-chunk terrain summary for the atlas details panel (serialized, v57+; capped alongside overworldVisited_).
+    std::map<OverworldKey, OverworldTerrainSummary> overworldTerrainSummary_;
+
+    // Player-set overworld waypoint (serialized, v58+).
+    bool overworldWaypointSet_ = false;
+    Vec2i overworldWaypoint_{0, 0};
+
+    // Overworld auto-travel (surface-only; not serialized).
+    // Uses a discovered-chunk route + tile-level auto-travel to gates for convenience backtracking.
+    bool overworldAutoTravelActive_ = false;
+    bool overworldAutoTravelPaused_ = false;
+    std::string overworldAutoTravelLabel_ = "DESTINATION";
+    std::vector<Vec2i> overworldAutoTravelRoute_;
+    size_t overworldAutoTravelRouteIndex_ = 0;
+    bool overworldAutoTravelHasGateGoal_ = false;
+    Vec2i overworldAutoTravelGateGoal_{-1, -1};
 
     // Monsters/companions that fell through trap doors into a deeper level.
     // These are queued by destination depth and spawned when that level is entered.
@@ -2520,6 +2673,8 @@ private:
     Vec2i overworldMapCursorPos_{0, 0};
     bool overworldMapCursorActive_ = false;
     int overworldMapZoom_ = 0; // -3..3 (affects chunk view radius)
+    uint8_t overworldMapLandmarkMask_ = OW_FEATURE_WAYSTATION | OW_FEATURE_STRONGHOLD;
+    bool overworldMapShowRoute_ = true;
 
     // Minimap cursor (UI-only). Allows clicking/keyboard navigation in the minimap.
     Vec2i minimapCursorPos_{0,0};
@@ -2689,6 +2844,10 @@ private:
 
     // Auto-travel: one-time warning throttle when hostiles are visible but still far away.
     bool autoTravelCautionAnnounced = false;
+
+    // Auto-travel: suppress the usual "AUTO-TRAVEL COMPLETE" message.
+    // Used internally for multi-leg travel (e.g., overworld chunk travel).
+    bool autoTravelSuppressCompleteMsg_ = false;
 
     // Procedural ecosystem discovery (UI-only; not serialized).
     // Tracks which biome regions the player has already stepped into on the current floor
@@ -2943,6 +3102,14 @@ private:
     // Overworld chunk travel (Camp depth 0).
     // Triggered when the player attempts to step out-of-bounds through an edge gate.
     bool tryOverworldStep(int dx, int dy);
+
+    // Overworld auto-travel: multi-leg surface travel to the current waypoint.
+    // Implementation notes:
+    //  * Route planning uses the discovered chunk graph (4-neighbor).
+    //  * Each leg auto-travels within the current chunk to the exit gate, then calls tryOverworldStep().
+    void continueOverworldAutoTravel();
+    Vec2i overworldExitGateForDelta(int dx, int dy) const;
+
     bool restoreOverworldChunk(int x, int y);
     void pruneOverworldChunks();
     void changeLevel(int newDepth, bool goingDown);

@@ -1793,7 +1793,12 @@ void Game::newGame(uint32_t seed) {
     overworldY_ = 0;
     overworldChunks_.clear();
     overworldVisited_.clear();
+    overworldFeatureFlags_.clear();
+    overworldTerrainSummary_.clear();
+    overworldWaypointSet_ = false;
+    overworldWaypoint_ = Vec2i{0, 0};
     overworldVisited_.insert(OverworldKey{0, 0});
+    overworldFeatureFlags_[OverworldKey{0, 0}] = 0u;
 
     ents.clear();
     ground.clear();
@@ -2328,6 +2333,9 @@ void Game::storeCurrentLevel() {
         st.monsters.push_back(e);
     }
     if (atCamp() && !atHomeCamp()) {
+        // Refresh overworld atlas caches before stashing the chunk snapshot.
+        recordOverworldChunkFeatureFlags(overworldX_, overworldY_, dung);
+        recordOverworldChunkTerrainSummary(overworldX_, overworldY_, dung);
         overworldChunks_[OverworldKey{overworldX_, overworldY_}] = std::move(st);
     } else {
         levels[{branch_, depth_}] = std::move(st);
@@ -2453,6 +2461,11 @@ bool Game::restoreOverworldChunk(int x, int y) {
     // Overworld chunks always have edge gates.
     overworld::ensureBorderGates(dung, seed_, x, y);
 
+    // Record atlas feature flags for out-of-memory display.
+    recordOverworldChunkFeatureFlags(x, y, dung);
+    // Record terrain summary so atlas details remain informative after eviction/save-load.
+    recordOverworldChunkTerrainSummary(x, y, dung);
+
     return true;
 }
 
@@ -2486,18 +2499,603 @@ const Dungeon* Game::overworldChunkDungeon(int x, int y) const {
 }
 
 
+uint8_t Game::overworldChunkFeatureFlags(int x, int y) const {
+    if (!overworldChunkDiscovered(x, y)) return 0u;
+
+    const OverworldKey key{x, y};
+    auto it = overworldFeatureFlags_.find(key);
+    if (it != overworldFeatureFlags_.end()) return it->second;
+
+    // Fallback: if the chunk is currently loaded, derive flags from its room list.
+    const Dungeon* d = overworldChunkDungeon(x, y);
+    if (!d) return 0u;
+
+    uint8_t flags = 0u;
+    for (const auto& r : d->rooms) {
+        if (r.type == RoomType::Shop) flags |= OW_FEATURE_WAYSTATION;
+        if (r.type == RoomType::Vault) flags |= OW_FEATURE_STRONGHOLD;
+    }
+    return flags;
+}
+
+bool Game::overworldChunkHasWaystation(int x, int y) const {
+    return (overworldChunkFeatureFlags(x, y) & OW_FEATURE_WAYSTATION) != 0u;
+}
+
+bool Game::overworldChunkHasStronghold(int x, int y) const {
+    return (overworldChunkFeatureFlags(x, y) & OW_FEATURE_STRONGHOLD) != 0u;
+}
+
+int Game::overworldLandmarkCount(uint8_t mask) const {
+    if (mask == 0u) return 0;
+    int count = 0;
+    for (const auto& kv : overworldFeatureFlags_) {
+        if ((kv.second & mask) != 0u) ++count;
+    }
+    return count;
+}
+
+bool Game::overworldNearestLandmark(uint8_t mask, Vec2i& outChunk, int* outLegs) const {
+    if (outLegs) *outLegs = 0;
+    if (mask == 0u) return false;
+
+    // Nearest landmarks are only meaningful on the surface overworld grid.
+    if (!atCamp()) return false;
+
+    const Vec2i from{overworldX_, overworldY_};
+    if (!overworldChunkDiscovered(from.x, from.y)) return false;
+
+    const OverworldKey start{from.x, from.y};
+
+    std::deque<std::pair<OverworldKey, int>> q;
+    std::set<OverworldKey> seen;
+
+    q.push_back({start, 0});
+    seen.insert(start);
+
+    while (!q.empty()) {
+        const auto cur = q.front();
+        q.pop_front();
+
+        const OverworldKey k = cur.first;
+        const int dist = cur.second;
+
+        // Skip the start chunk; "nearest" should point somewhere else.
+        if (dist > 0) {
+            if ((overworldChunkFeatureFlags(k.x, k.y) & mask) != 0u) {
+                outChunk = Vec2i{k.x, k.y};
+                if (outLegs) *outLegs = dist;
+                return true;
+            }
+        }
+
+        const int nx[4] = {k.x + 1, k.x - 1, k.x, k.x};
+        const int ny[4] = {k.y, k.y, k.y + 1, k.y - 1};
+
+        for (int i = 0; i < 4; ++i) {
+            const int x = nx[i];
+            const int y = ny[i];
+            if (!overworldChunkDiscovered(x, y)) continue;
+
+            const OverworldKey nxt{x, y};
+            if (seen.find(nxt) != seen.end()) continue;
+
+            seen.insert(nxt);
+            q.push_back({nxt, dist + 1});
+        }
+    }
+
+    return false;
+}
+
+bool Game::overworldRouteDiscoveredChunks(const Vec2i& from, const Vec2i& to, std::vector<Vec2i>& outPath) const {
+    outPath.clear();
+
+    if (from.x == to.x && from.y == to.y) {
+        outPath.push_back(from);
+        return true;
+    }
+
+    if (!overworldChunkDiscovered(from.x, from.y)) return false;
+    if (!overworldChunkDiscovered(to.x, to.y)) return false;
+
+    const OverworldKey start{from.x, from.y};
+    const OverworldKey goal{to.x, to.y};
+
+    std::deque<OverworldKey> q;
+    std::set<OverworldKey> seen;
+    std::map<OverworldKey, OverworldKey> prev;
+
+    q.push_back(start);
+    seen.insert(start);
+
+    bool found = false;
+    while (!q.empty()) {
+        const OverworldKey cur = q.front();
+        q.pop_front();
+
+        if (cur.x == goal.x && cur.y == goal.y) {
+            found = true;
+            break;
+        }
+
+        const int nx[4] = {cur.x + 1, cur.x - 1, cur.x, cur.x};
+        const int ny[4] = {cur.y, cur.y, cur.y + 1, cur.y - 1};
+
+        for (int i = 0; i < 4; ++i) {
+            const int x = nx[i];
+            const int y = ny[i];
+            if (!overworldChunkDiscovered(x, y)) continue;
+
+            const OverworldKey nxt{x, y};
+            if (seen.find(nxt) != seen.end()) continue;
+
+            seen.insert(nxt);
+            prev[nxt] = cur;
+            q.push_back(nxt);
+        }
+    }
+
+    if (!found) return false;
+
+    // Reconstruct (goal -> start).
+    std::vector<OverworldKey> rev;
+    rev.reserve(prev.size() + 2);
+    OverworldKey cur = goal;
+    rev.push_back(cur);
+
+    while (!(cur.x == start.x && cur.y == start.y)) {
+        auto it = prev.find(cur);
+        if (it == prev.end()) {
+            // Should not happen, but avoid infinite loops if data is inconsistent.
+            return false;
+        }
+        cur = it->second;
+        rev.push_back(cur);
+    }
+
+    std::reverse(rev.begin(), rev.end());
+    outPath.reserve(rev.size());
+    for (const auto& k : rev) outPath.push_back(Vec2i{k.x, k.y});
+    return true;
+}
+
+
+// -----------------------------------------------------------------------------
+// Overworld auto-travel (surface chunk-to-chunk)
+// -----------------------------------------------------------------------------
+
+Vec2i Game::overworldExitGateForDelta(int dx, int dy) const {
+    const overworld::ChunkGates g = overworld::gatePositions(dung, seed_, overworldX_, overworldY_);
+    if (dx == 1) return g.east;
+    if (dx == -1) return g.west;
+    if (dy == 1) return g.south;
+    return g.north;
+}
+
+void Game::cancelOverworldAutoTravel(bool silent) {
+    if (!overworldAutoTravelActive_) {
+        overworldAutoTravelPaused_ = false;
+        overworldAutoTravelLabel_ = "DESTINATION";
+        return;
+    }
+
+    overworldAutoTravelActive_ = false;
+    overworldAutoTravelPaused_ = false;
+    overworldAutoTravelLabel_ = "DESTINATION";
+    overworldAutoTravelRoute_.clear();
+    overworldAutoTravelRouteIndex_ = 0;
+    overworldAutoTravelHasGateGoal_ = false;
+    overworldAutoTravelGateGoal_ = Vec2i{-1, -1};
+
+    // Stop any in-chunk leg travel (walking to a gate).
+    stopAutoMove(true);
+
+    if (!silent) {
+        pushMsg("OVERWORLD AUTO-TRAVEL: OFF.", MessageKind::System);
+    }
+}
+
+bool Game::requestOverworldAutoTravelToWaypoint() {
+    if (isFinished()) return false;
+
+    if (!atCamp()) {
+        pushMsg("CANNOT OVERWORLD-TRAVEL: NOT ON SURFACE.", MessageKind::System);
+        return false;
+    }
+
+    if (!overworldWaypointSet_) {
+        pushMsg("NO WAYPOINT SET (OPEN ATLAS: SHIFT+M, THEN CTRL+W).", MessageKind::System);
+        return false;
+    }
+
+    const Vec2i goal = overworldWaypoint_;
+
+    if (goal.x == overworldX_ && goal.y == overworldY_) {
+        pushMsg("YOU ARE ALREADY AT YOUR WAYPOINT.", MessageKind::System);
+        return false;
+    }
+
+    if (!overworldChunkDiscovered(goal.x, goal.y)) {
+        pushMsg("WAYPOINT IS UNDISCOVERED (VISIT IT FIRST).", MessageKind::System);
+        return false;
+    }
+
+    std::vector<Vec2i> route;
+    if (!overworldRouteDiscoveredChunks(Vec2i{overworldX_, overworldY_}, goal, route) || route.size() < 2) {
+        pushMsg("NO ROUTE THROUGH DISCOVERED CHUNKS.", MessageKind::Warning);
+        return false;
+    }
+
+    // Close overlays so you can see the walk.
+    invOpen = false;
+    closeChestOverlay();
+    spellsOpen = false;
+    targeting = false;
+    kicking = false;
+    digging = false;
+    looking = false;
+    helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
+    overworldMapOpen = false;
+    msgHistoryOpen = false;
+    codexOpen = false;
+    discoveriesOpen = false;
+    scoresOpen = false;
+    commandOpen = false;
+    keybindsOpen = false;
+    optionsOpen = false;
+    msgScroll = 0;
+
+    // Restart state.
+    cancelOverworldAutoTravel(true);
+    stopAutoMove(true);
+
+    overworldAutoTravelActive_ = true;
+    overworldAutoTravelPaused_ = false;
+    overworldAutoTravelLabel_ = "WAYPOINT";
+    overworldAutoTravelRoute_ = std::move(route);
+    overworldAutoTravelRouteIndex_ = 0;
+    overworldAutoTravelHasGateGoal_ = false;
+    overworldAutoTravelGateGoal_ = Vec2i{-1, -1};
+
+    {
+        const int legs = static_cast<int>(overworldAutoTravelRoute_.size()) - 1;
+        std::stringstream ss;
+        ss << "OVERWORLD AUTO-TRAVEL: ON (TO WAYPOINT (" << goal.x << "," << goal.y << "), "
+           << legs << " LEG" << (legs == 1 ? "" : "S") << ", ESC TO CANCEL).";
+        pushMsg(ss.str().c_str(), MessageKind::System);
+    }
+
+    // Kickstart the first leg immediately (planning only; walking is stepped in update()).
+    continueOverworldAutoTravel();
+    return true;
+}
+
+bool Game::requestOverworldAutoTravelToChunk(Vec2i goal, const char* label) {
+    if (isFinished()) return false;
+
+    if (!atCamp()) {
+        pushMsg("CANNOT OVERWORLD-TRAVEL: NOT ON SURFACE.", MessageKind::System);
+        return false;
+    }
+
+    if (label == nullptr || label[0] == '\0') label = "DESTINATION";
+
+    if (goal.x == overworldX_ && goal.y == overworldY_) {
+        std::stringstream ss;
+        ss << "YOU ARE ALREADY AT YOUR " << label << ".";
+        pushMsg(ss.str().c_str(), MessageKind::System);
+        return false;
+    }
+
+    if (!overworldChunkDiscovered(goal.x, goal.y)) {
+        std::stringstream ss;
+        ss << label << " IS UNDISCOVERED (VISIT IT FIRST).";
+        pushMsg(ss.str().c_str(), MessageKind::System);
+        return false;
+    }
+
+    std::vector<Vec2i> route;
+    if (!overworldRouteDiscoveredChunks(Vec2i{overworldX_, overworldY_}, goal, route) || route.size() < 2) {
+        pushMsg("NO ROUTE THROUGH DISCOVERED CHUNKS.", MessageKind::Warning);
+        return false;
+    }
+
+    // Close overlays so you can see the walk.
+    invOpen = false;
+    closeChestOverlay();
+    spellsOpen = false;
+    targeting = false;
+    kicking = false;
+    digging = false;
+    looking = false;
+    helpOpen = false;
+    minimapOpen = false;
+    statsOpen = false;
+    overworldMapOpen = false;
+    msgHistoryOpen = false;
+    codexOpen = false;
+    discoveriesOpen = false;
+    scoresOpen = false;
+    commandOpen = false;
+    keybindsOpen = false;
+    optionsOpen = false;
+    msgScroll = 0;
+
+    // Clear cursor focus so the next atlas open recenters on the player.
+    overworldMapCursorActive_ = false;
+    minimapCursorActive_ = false;
+
+    // Restart state.
+    cancelOverworldAutoTravel(true);
+    stopAutoMove(true);
+
+    overworldAutoTravelActive_ = true;
+    overworldAutoTravelPaused_ = false;
+    overworldAutoTravelLabel_ = label;
+    overworldAutoTravelRoute_ = std::move(route);
+    overworldAutoTravelRouteIndex_ = 0;
+    overworldAutoTravelHasGateGoal_ = false;
+    overworldAutoTravelGateGoal_ = Vec2i{-1, -1};
+
+    {
+        const int legs = static_cast<int>(overworldAutoTravelRoute_.size()) - 1;
+        std::stringstream ss;
+        ss << "OVERWORLD AUTO-TRAVEL: ON (TO " << label
+           << " (" << goal.x << "," << goal.y << "), "
+           << legs << " LEG" << (legs == 1 ? "" : "S") << ", ESC TO CANCEL).";
+        pushMsg(ss.str().c_str(), MessageKind::System);
+    }
+
+    // Kickstart the first leg immediately (planning only; walking is stepped in update()).
+    continueOverworldAutoTravel();
+    return true;
+}
+
+bool Game::requestOverworldAutoTravelToNearestWaystation() {
+    if (isFinished()) return false;
+
+    if (!atCamp()) {
+        pushMsg("CANNOT OVERWORLD-TRAVEL: NOT ON SURFACE.", MessageKind::System);
+        return false;
+    }
+
+    if (overworldChunkHasWaystation(overworldX_, overworldY_)) {
+        pushMsg("YOU ARE ALREADY AT A WAYSTATION.", MessageKind::System);
+        return false;
+    }
+
+    Vec2i goal;
+    if (!overworldNearestLandmark(OW_FEATURE_WAYSTATION, goal, nullptr)) {
+        pushMsg("NO DISCOVERED WAYSTATIONS.", MessageKind::System);
+        return false;
+    }
+
+    return requestOverworldAutoTravelToChunk(goal, "NEAREST WAYSTATION");
+}
+
+bool Game::requestOverworldAutoTravelToNearestStronghold() {
+    if (isFinished()) return false;
+
+    if (!atCamp()) {
+        pushMsg("CANNOT OVERWORLD-TRAVEL: NOT ON SURFACE.", MessageKind::System);
+        return false;
+    }
+
+    if (overworldChunkHasStronghold(overworldX_, overworldY_)) {
+        pushMsg("YOU ARE ALREADY AT A STRONGHOLD.", MessageKind::System);
+        return false;
+    }
+
+    Vec2i goal;
+    if (!overworldNearestLandmark(OW_FEATURE_STRONGHOLD, goal, nullptr)) {
+        pushMsg("NO DISCOVERED STRONGHOLDS.", MessageKind::System);
+        return false;
+    }
+
+    return requestOverworldAutoTravelToChunk(goal, "NEAREST STRONGHOLD");
+}
+
+void Game::continueOverworldAutoTravel() {
+    if (!overworldAutoTravelActive_) return;
+    if (overworldAutoTravelPaused_) return;
+
+    if (isFinished() || !atCamp()) {
+        cancelOverworldAutoTravel(true);
+        return;
+    }
+
+    if (autoMode != AutoMoveMode::None) {
+        // We're currently walking within a chunk (to a gate); update() will call us again when the leg ends.
+        return;
+    }
+
+    if (overworldAutoTravelRoute_.empty()) {
+        cancelOverworldAutoTravel(true);
+        return;
+    }
+
+    const Vec2i curChunk{overworldX_, overworldY_};
+
+    // If the previous leg ended early and we never reached the expected gate, clear the gate goal and replan.
+    // This makes overworld auto-travel resilient to temporary interruptions (e.g., a UI overlay pausing auto-move).
+    if (overworldAutoTravelHasGateGoal_ && player().pos != overworldAutoTravelGateGoal_) {
+        overworldAutoTravelHasGateGoal_ = false;
+        overworldAutoTravelGateGoal_ = Vec2i{-1, -1};
+    }
+
+    // Resync route index if needed (e.g., if something changed during travel).
+    if (overworldAutoTravelRouteIndex_ >= overworldAutoTravelRoute_.size() ||
+        overworldAutoTravelRoute_[overworldAutoTravelRouteIndex_] != curChunk) {
+        size_t found = overworldAutoTravelRoute_.size();
+        for (size_t i = 0; i < overworldAutoTravelRoute_.size(); ++i) {
+            if (overworldAutoTravelRoute_[i] == curChunk) {
+                found = i;
+                break;
+            }
+        }
+        if (found >= overworldAutoTravelRoute_.size()) {
+            pushMsg("OVERWORLD AUTO-TRAVEL STOPPED (LEFT ROUTE).", MessageKind::Warning);
+            cancelOverworldAutoTravel(true);
+            return;
+        }
+        overworldAutoTravelRouteIndex_ = found;
+    }
+
+    // Finished?
+    if (overworldAutoTravelRouteIndex_ + 1 >= overworldAutoTravelRoute_.size()) {
+        pushMsg("OVERWORLD AUTO-TRAVEL COMPLETE.", MessageKind::System);
+        cancelOverworldAutoTravel(true);
+        return;
+    }
+
+    const Vec2i nextChunk = overworldAutoTravelRoute_[overworldAutoTravelRouteIndex_ + 1];
+    const int dx = nextChunk.x - curChunk.x;
+    const int dy = nextChunk.y - curChunk.y;
+
+    if ((dx == 0 && dy == 0) || (dx != 0 && dy != 0) || dx < -1 || dx > 1 || dy < -1 || dy > 1) {
+        pushMsg("OVERWORLD AUTO-TRAVEL STOPPED (BAD ROUTE).", MessageKind::Warning);
+        cancelOverworldAutoTravel(true);
+        return;
+    }
+
+    const Vec2i gate = overworldExitGateForDelta(dx, dy);
+    overworldAutoTravelHasGateGoal_ = true;
+    overworldAutoTravelGateGoal_ = gate;
+
+    // If we're already standing on the exit gate, step immediately.
+    if (player().pos == gate) {
+        if (!tryOverworldStep(dx, dy)) {
+            pushMsg("OVERWORLD AUTO-TRAVEL STOPPED (GATE BLOCKED).", MessageKind::Warning);
+            cancelOverworldAutoTravel(true);
+            return;
+        }
+
+        // We successfully entered the next chunk.
+        overworldAutoTravelRouteIndex_ += 1;
+        overworldAutoTravelHasGateGoal_ = false;
+        overworldAutoTravelGateGoal_ = Vec2i{-1, -1};
+
+        // If we arrived, finish; otherwise, plan the next leg.
+        if (overworldAutoTravelRouteIndex_ + 1 >= overworldAutoTravelRoute_.size()) {
+            pushMsg("OVERWORLD AUTO-TRAVEL COMPLETE.", MessageKind::System);
+            cancelOverworldAutoTravel(true);
+            return;
+        }
+
+        continueOverworldAutoTravel();
+        return;
+    }
+
+    // Plan an in-chunk leg to the exit gate.
+    if (!dung.inBounds(gate.x, gate.y)) {
+        pushMsg("OVERWORLD AUTO-TRAVEL STOPPED (BAD GATE).", MessageKind::Warning);
+        cancelOverworldAutoTravel(true);
+        return;
+    }
+
+    if (!dung.at(gate.x, gate.y).explored) {
+        pushMsg("OVERWORLD AUTO-TRAVEL STOPPED (EXIT GATE UNEXPLORED).", MessageKind::System);
+        cancelOverworldAutoTravel(true);
+        return;
+    }
+
+    if (!dung.isWalkable(gate.x, gate.y)) {
+        pushMsg("OVERWORLD AUTO-TRAVEL STOPPED (EXIT GATE BLOCKED).", MessageKind::Warning);
+        cancelOverworldAutoTravel(true);
+        return;
+    }
+
+    // Try a conservative path first (avoid known traps). If that fails, allow stepping through known
+    // traps rather than giving up immediately (mirrors requestAutoTravel()).
+    bool ok = buildAutoTravelPath(gate, /*requireExplored*/true, /*allowKnownTraps*/false);
+    if (!ok) ok = buildAutoTravelPath(gate, /*requireExplored*/true, /*allowKnownTraps*/true);
+
+    if (!ok) {
+        pushMsg("OVERWORLD AUTO-TRAVEL STOPPED (NO PATH TO EXIT GATE).", MessageKind::Warning);
+        cancelOverworldAutoTravel(true);
+        return;
+    }
+
+    autoMode = AutoMoveMode::Travel;
+    autoTravelCautionAnnounced = false;
+    autoTravelSuppressCompleteMsg_ = true;
+}
+
+
+void Game::recordOverworldChunkFeatureFlags(int x, int y, const Dungeon& d) {
+    // Only store flags for chunks we've actually discovered.
+    if (!overworldChunkDiscovered(x, y)) return;
+
+    uint8_t flags = 0u;
+    for (const auto& r : d.rooms) {
+        if (r.type == RoomType::Shop) flags |= OW_FEATURE_WAYSTATION;
+        if (r.type == RoomType::Vault) flags |= OW_FEATURE_STRONGHOLD;
+    }
+
+    overworldFeatureFlags_[OverworldKey{x, y}] = flags;
+}
+
+
+Game::OverworldTerrainSummary Game::computeOverworldTerrainSummaryFromDungeon(const Dungeon& d) {
+    OverworldTerrainSummary s;
+    // Count key obstruction/flow tiles that matter for surface travel.
+    for (const auto& t : d.tiles) {
+        switch (t.type) {
+            case TileType::Chasm:   ++s.chasmTiles;   break;
+            case TileType::Boulder: ++s.boulderTiles; break;
+            case TileType::Pillar:  ++s.pillarTiles;  break;
+            default: break;
+        }
+    }
+    return s;
+}
+
+void Game::recordOverworldChunkTerrainSummary(int x, int y, const Dungeon& d) {
+    if (!overworldChunkDiscovered(x, y)) return;
+    overworldTerrainSummary_[OverworldKey{x, y}] = computeOverworldTerrainSummaryFromDungeon(d);
+}
+
+bool Game::overworldChunkTerrainSummary(int x, int y, OverworldTerrainSummary& out) const {
+    if (!overworldChunkDiscovered(x, y)) return false;
+
+    const OverworldKey key{x, y};
+    auto it = overworldTerrainSummary_.find(key);
+    if (it != overworldTerrainSummary_.end()) {
+        out = it->second;
+        return true;
+    }
+
+    // Fallback: if the chunk is currently loaded, compute the summary from its tiles.
+    const Dungeon* d = overworldChunkDungeon(x, y);
+    if (!d) return false;
+
+    out = computeOverworldTerrainSummaryFromDungeon(*d);
+    return true;
+}
+
+
 
 void Game::markOverworldDiscovered(int x, int y) {
     // Always remember the home camp chunk.
     if (x == 0 && y == 0) {
         overworldVisited_.insert(OverworldKey{0, 0});
+        // Home is a special marker; keep its feature flags stable (usually 0).
+        overworldFeatureFlags_.emplace(OverworldKey{0, 0}, 0u);
         return;
     }
 
-    overworldVisited_.insert(OverworldKey{x, y});
+    const OverworldKey k{x, y};
+    overworldVisited_.insert(k);
+    // Ensure the feature map has an entry; the real flags are recorded once the chunk is loaded.
+    if (overworldFeatureFlags_.find(k) == overworldFeatureFlags_.end()) {
+        overworldFeatureFlags_[k] = 0u;
+    }
 
     // Safety cap: keep the atlas visitation set bounded so a pathological run
-    // cannot grow unbounded in RAM (UI-only; not serialized).
+    // cannot grow unbounded in RAM or saves (serialized, v55+).
     constexpr size_t kMaxVisited = 2048;
     if (overworldVisited_.size() <= kMaxVisited) return;
 
@@ -2525,7 +3123,10 @@ void Game::markOverworldDiscovered(int x, int y) {
 
         // If we couldn't find a removable entry, break.
         if (best < 0) break;
+        const OverworldKey doomed = *itFarthest;
         overworldVisited_.erase(itFarthest);
+        overworldFeatureFlags_.erase(doomed);
+        overworldTerrainSummary_.erase(doomed);
     }
 }
 
@@ -2690,6 +3291,10 @@ bool Game::tryOverworldStep(int dx, int dy) {
     if (atCamp()) {
         overworld::ensureBorderGates(dung, seed_, overworldX_, overworldY_);
     }
+
+    // Update the atlas feature cache for the destination chunk.
+    recordOverworldChunkFeatureFlags(overworldX_, overworldY_, dung);
+    recordOverworldChunkTerrainSummary(overworldX_, overworldY_, dung);
 
     // Place player at the arrival gate; if blocked, step aside.
     {

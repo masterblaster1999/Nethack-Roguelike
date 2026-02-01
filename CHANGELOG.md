@@ -1,5 +1,114 @@
 # Changelog
 
+
+## Round 232 - Atlas Auto-Travel Route Overlay
+
+- Overworld Atlas route preview (Ctrl+R) now also draws the active overworld auto-travel route in **green** (to your current travel goal), alongside the existing cursor route in **blue**.
+- Overworld auto-travel now stores a lightweight **destination label** (UI-only) so overlays can display what you are traveling to (WAYPOINT / CURSOR / NEAREST WAYSTATION / etc.).
+- Atlas details panel now shows an **AUTO:** status line (paused/direction + remaining legs + label + goal chunk).
+- Tests: registered the missing manual pause test and added a label regression test.
+
+## Round 231 - Overworld Auto-Travel Manual Pause
+
+- Added **manual pause/resume** for overworld auto-travel (**Ctrl+O** by default). This keeps your planned route armed without canceling travel.
+- HUD now shows **AUTO:PAUSED** while overworld auto-travel is paused.
+- Overworld Atlas footer + docs updated to include the pause hotkey.
+- New unit test for pause/resume toggle behavior.
+
+
+## Round 230 - Overworld Auto-Travel Pause/Resume
+
+- **Pause/resume:** overworld auto-travel no longer cancels just because you opened a UI overlay (inventory/help/atlas/etc.). It now **pauses** while menus are open and **resumes** when you close them.
+- **Robust legs:** if an in-chunk leg is interrupted before reaching its exit gate (e.g., an overlay appears mid-walk), the system now **replans** instead of hard-canceling the whole trip.
+- **Cancel semantics:** **Esc** cancels overworld auto-travel only when you are *not* already inside another UI mode. (If you are, Esc closes that overlay and travel remains armed.)
+- Added a regression test covering the new pause/resume behavior.
+
+
+## Round 229 - Overworld Travel: Nearest Landmarks
+
+- **Overworld travel shortcuts (surface-only):**
+  - **Ctrl+Y** — auto-travel to the **nearest discovered Waystation** (`$`).
+  - **Ctrl+U** — auto-travel to the **nearest discovered Stronghold** (`!`).
+  - Nearest is computed using a **BFS over the discovered chunk graph**, so it respects actual reachable paths (not just manhattan distance).
+- **UX:** overworld auto-travel start messages now include the planned **leg count** (waypoint, cursor, and other destinations).
+- Atlas overlay: control hints updated to show the new nearest-landmark travel keys.
+
+## Round 228 - Overworld Auto-Travel To Cursor
+
+- **Overworld atlas: auto-travel to cursor destination:** added **Ctrl+Shift+G** while the atlas is open to auto-travel directly to the selected chunk.
+  - This does **not** change your persistent waypoint.
+- **Implementation:** fully implemented `requestOverworldAutoTravelToChunk` and wired it into the atlas cursor travel action.
+- **HUD:** when on the surface, the main HUD now shows auto-travel progress (next direction + remaining legs + destination), even if no waypoint is set.
+
+
+
+## Round 227 - Overworld Auto-Travel To Waypoint
+
+- **Overworld auto-travel to waypoint:** added chunk-to-chunk surface auto-travel that walks to the next edge gate and steps into adjacent discovered chunks until reaching your waypoint.
+  - **Ctrl+G** toggles auto-travel on/off (works from both gameplay and the atlas).
+  - Routing is restricted to **discovered (visited)** chunks, and each in-chunk leg requires an **explored** path to the exit gate (no free scouting).
+  - Uses existing auto-travel safety rules (known-trap avoidance, hazard checks, etc.). If a leg is interrupted (blocked), the overall travel cancels cleanly.
+- **Auto-travel UX:** internal multi-leg travel can suppress the per-leg "AUTO-TRAVEL COMPLETE" spam so overworld travel stays quiet and readable.
+
+
+
+## Round 226 - Overworld Atlas Waypoint
+
+- **Overworld Atlas waypoint:** add a player-set waypoint marker (`X`) in overworld chunk-space.
+  - **Ctrl+W** sets/moves the waypoint to the current atlas cursor position.
+  - **Ctrl+Shift+W** clears the waypoint.
+  - Waypoint is shown in the atlas grid (subtle highlight + `X` marker), in the atlas details panel, and as a compact `WP:` tag on the main HUD while on the surface.
+- **Save format bump (v58):** waypoint state is serialized so it persists across sessions.
+- **Fix:** `Ctrl+R` route preview toggle is now handled while the **atlas is open** (it previously only worked from the minimap overlay).
+- **Fix:** removed a stray `ss` / brace fragment in the atlas renderer that could break compilation.
+
+
+
+
+## Round 225 - Overworld Atlas Route Preview
+
+- **Overworld Atlas route preview:** added an optional route overlay that highlights the **shortest discovered-chunk path** from your current chunk to the atlas cursor.
+  - **Ctrl+R** toggles the route preview **ON/OFF** while the atlas is open.
+  - The route only uses **discovered (visited)** chunks; if discovery has gaps, the atlas will report the route as **UNREACHABLE**.
+- Atlas details panel: shows a `ROUTE:` line with status + step count (discovered-route length).
+
+
+## Round 224 - Overworld Atlas Landmark Finder
+
+- **Overworld Atlas landmark navigation:** added a UI-only *FIND* control to jump between discovered overworld landmarks.
+  - **Ctrl+F**: next landmark
+  - **Ctrl+Shift+F**: previous landmark
+  - **Ctrl+L**: cycle landmark filter (**ALL → WAYSTATIONS → STRONGHOLDS → ALL**)
+- Atlas details: shows cursor **delta/distance** from your current chunk plus the active landmark filter + count.
+- Keybinds/settings: new bind actions `overworld_next_landmark`, `overworld_prev_landmark`, and `overworld_landmark_filter` (with defaults and documentation).
+
+
+## Round 223 - Overworld Atlas Persistent Terrain Summary
+
+- **Overworld Atlas terrain stats now persist out-of-memory:** the details panel shows a cached per-chunk terrain summary (**CHASM/BOULDERS/PILLARS**) even when the chunk snapshot is not currently loaded.
+- **Save format bump (v57):** overworld terrain summaries are serialized; v55/v56 saves migrate by inferring summaries from any cached overworld chunk snapshots present in the save.
+- **Bugfix:** loading a save made at the **home camp** now correctly restores the `Camp/0` level (instead of attempting to restore it from the overworld chunk cache).
+- Docs: updated `docs/PROCGEN_OVERWORLD_ATLAS.md` to reflect persistent terrain summaries.
+- Tests: added `overworld_atlas_terrain_save_load` to validate terrain summary persistence across save/load (and after overworld cache eviction).
+
+
+## Round 222 - Overworld Atlas Persistent Landmarks
+
+- **Overworld Atlas landmarks now persist out-of-memory:** discovered waystations (`$`) and strongholds (`!`) are now displayed even when the chunk snapshot is not currently loaded, by caching lightweight per-chunk feature flags on discovery.
+- **Save format bump (v56):** overworld atlas feature flags are serialized; v55 saves migrate by inferring flags from any cached overworld chunks in the save.
+- Atlas details: the right-hand info panel shows **FEATURE: WAYSTATION/STRONGHOLD** regardless of loaded state; terrain stats (water/boulders/pillars) still require an in-memory snapshot.
+- Docs: updated `docs/PROCGEN_OVERWORLD_ATLAS.md` and `docs/PROCGEN_OVERWORLD_STRONGHOLDS.md`.
+- Tests: added `overworld_atlas_features_save_load` to validate feature-flag persistence across save/load (and after cache eviction).
+- Tests build: GCC/Clang now compile `procrogue_tests` with `-fno-access-control` so the test suite can intentionally inspect internal game state.
+
+## Round 221 - Overworld Atlas Stronghold Marker
+
+- **Overworld Atlas landmark marker for strongholds:** the atlas grid now renders `!` for discovered chunks that contain a stronghold (when the chunk snapshot is loaded / in memory).
+  - Stronghold presence is detected via the keep’s `RoomType::Vault` footprint, so the marker survives save/load even though procgen telemetry counters are generation-only.
+- Docs: updated `docs/PROCGEN_OVERWORLD_ATLAS.md` and `docs/PROCGEN_OVERWORLD_STRONGHOLDS.md` to reflect the new marker and v55+ serialization notes.
+- Tests: strengthened `overworld_strongholds` sanity check by asserting stronghold chunks contain a vault room.
+- Code hygiene: updated outdated comments about overworld chunk/atlas serialization.
+
 ## Round 220 - Ruin Strongholds (Overworld setpieces)
 
 - **Added rare overworld "stronghold" setpieces**: ruined, walled settlements with a central keep, scattered outbuildings, and rubble.

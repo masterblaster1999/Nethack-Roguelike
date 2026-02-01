@@ -1240,6 +1240,9 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
     // Note: SHIFT+M is reserved for the overworld map, so message history defaults to F3 only.
     ok &= updateIniKey(settingsPath, "bind_message_history", "f3");
     ok &= updateIniKey(settingsPath, "bind_overworld_map", "shift+m");
+    ok &= updateIniKey(settingsPath, "bind_overworld_next_landmark", "ctrl+f");
+    ok &= updateIniKey(settingsPath, "bind_overworld_prev_landmark", "ctrl+shift+f");
+    ok &= updateIniKey(settingsPath, "bind_overworld_landmark_filter", "ctrl+l");
     // Extended command prompt: allow classic # plus editor-style palettes.
     ok &= updateIniKey(settingsPath, "bind_command", "shift+3, ctrl+p, shift+ctrl+p, shift+cmd+p");
     // Options: add common desktop shortcuts (Ctrl/Cmd+,).

@@ -1,4 +1,5 @@
 #include "game_internal.hpp"
+#include <sstream>
 
 #include "shrine_profile_gen.hpp"
 
@@ -62,8 +63,13 @@ void Game::update(float dt) {
     // while still providing smooth-ish movement.
     if (autoMode != AutoMoveMode::None) {
         // If the player opened an overlay, stop (don't keep walking while in menus).
+        // Note: overworld auto-travel is *paused*, not canceled; it will replan/resume when overlays close.
         if (invOpen || chestOpen || spellsOpen || targeting || kicking || digging || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || scoresOpen || codexOpen || discoveriesOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen || isFinished()) {
             stopAutoMove(true);
+            // If the run is over, clear the overworld travel state as cleanup.
+            if (isFinished() && overworldAutoTravelActive_) {
+                cancelOverworldAutoTravel(true);
+            }
             return;
         }
 
@@ -85,6 +91,28 @@ void Game::update(float dt) {
             }
         }
     }
+
+    // Overworld auto-travel (chunk-to-chunk): piggyback on tile auto-travel to edge gates.
+    // When active, this keeps planning/advancing legs while the game is otherwise idle.
+    if (!inputLock && autoMode == AutoMoveMode::None && overworldAutoTravelActive_) {
+        // If we're no longer on the surface, cancel (overworld travel is surface-only).
+        if (!atCamp() || isFinished()) {
+            cancelOverworldAutoTravel(true);
+            return;
+        }
+
+        if (overworldAutoTravelPaused_) {
+            return;
+        }
+
+        // If any overlay is open, pause (do not cancel) so the player can safely browse menus.
+        if (invOpen || chestOpen || spellsOpen || targeting || kicking || digging || helpOpen || looking || minimapOpen || statsOpen || msgHistoryOpen || scoresOpen || codexOpen || discoveriesOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen) {
+            return;
+        }
+
+        continueOverworldAutoTravel();
+    }
+
 }
 
 void Game::handleAction(Action a) {
@@ -93,6 +121,131 @@ void Game::handleAction(Action a) {
     // Any manual action stops auto-move (except log scrolling).
     if (autoMode != AutoMoveMode::None && a != Action::LogUp && a != Action::LogDown) {
         stopAutoMove(true);
+    }
+
+    // Overworld auto-travel toggle (surface waypoint).
+    // When the overworld atlas is open, its handler closes it and then toggles travel.
+    if (a == Action::OverworldAutoTravelToWaypoint && !overworldMapOpen) {
+        if (overworldAutoTravelActive_) {
+            cancelOverworldAutoTravel(false);
+        } else {
+            requestOverworldAutoTravelToWaypoint();
+        }
+        return;
+    }
+
+    // Overworld auto-travel to nearest discovered landmarks (surface-only).
+    if ((a == Action::OverworldAutoTravelNearestWaystation || a == Action::OverworldAutoTravelNearestStronghold) && !overworldMapOpen) {
+        if (overworldAutoTravelActive_) {
+            cancelOverworldAutoTravel(false);
+        } else {
+            if (a == Action::OverworldAutoTravelNearestWaystation) {
+                requestOverworldAutoTravelToNearestWaystation();
+            } else {
+                requestOverworldAutoTravelToNearestStronghold();
+            }
+        }
+        return;
+    }
+
+    // Overworld auto-travel pause/resume (keeps the planned route armed).
+    // Note: UI overlays already *pause* travel implicitly; this toggle lets you keep it paused even after closing overlays.
+    if (a == Action::OverworldAutoTravelTogglePause) {
+        if (!overworldAutoTravelActive_) {
+            pushMsg("NO OVERWORLD AUTO-TRAVEL ACTIVE.", MessageKind::Info);
+            return;
+        }
+
+        overworldAutoTravelPaused_ = !overworldAutoTravelPaused_;
+        if (overworldAutoTravelPaused_) {
+            stopAutoMove(true);
+            pushMsg("OVERWORLD AUTO-TRAVEL: PAUSED (CTRL+O TO RESUME).", MessageKind::System);
+            return;
+        }
+
+        pushMsg("OVERWORLD AUTO-TRAVEL: RESUMED.", MessageKind::System);
+
+        // If no blocking overlays are open, kickstart the next leg immediately.
+        if (autoMode == AutoMoveMode::None) {
+            const bool anyOverlay = invOpen || chestOpen || spellsOpen || targeting || kicking || digging || helpOpen || looking ||
+                                    minimapOpen || statsOpen || overworldMapOpen || msgHistoryOpen || scoresOpen || codexOpen ||
+                                    discoveriesOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen;
+            if (!anyOverlay) {
+                continueOverworldAutoTravel();
+            }
+        }
+        return;
+    }
+
+
+    // Overworld atlas cursor travel is only meaningful while the atlas is open.
+    if (a == Action::OverworldMapTravelToCursor && !overworldMapOpen) {
+        pushMsg("OPEN ATLAS (SHIFT+M), MOVE THE CURSOR, THEN PRESS CTRL+SHIFT+G.", MessageKind::Info);
+        return;
+    }
+
+    // Overworld auto-travel cancellation policy:
+    // - While UI overlays are open, overworld auto-travel is *paused* and should not be canceled by UI navigation input.
+    // - When no overlays are open, most gameplay actions cancel overworld auto-travel (so manual control takes over).
+    if (overworldAutoTravelActive_) {
+        auto anyOverlayOpen = [&]() -> bool {
+            return invOpen || chestOpen || spellsOpen || targeting || kicking || digging || helpOpen || looking ||
+                   minimapOpen || statsOpen || overworldMapOpen || msgHistoryOpen || scoresOpen || codexOpen ||
+                   discoveriesOpen || levelUpOpen || optionsOpen || keybindsOpen || commandOpen;
+        };
+
+        auto uiOnly = [&](Action x) -> bool {
+            switch (x) {
+                case Action::LogUp:
+                case Action::LogDown:
+                case Action::Help:
+                case Action::Inventory:
+                case Action::Spells:
+                case Action::MessageHistory:
+                case Action::Codex:
+                case Action::Discoveries:
+                case Action::Scores:
+                case Action::Options:
+                case Action::Command:
+                case Action::ToggleMinimap:
+                case Action::ToggleStats:
+                case Action::ToggleOverworldMap:
+                case Action::MinimapZoomIn:
+                case Action::MinimapZoomOut:
+                case Action::Look:
+                case Action::ToggleSoundPreview:
+                case Action::ToggleThreatPreview:
+                case Action::ToggleHearingPreview:
+                case Action::ToggleScentPreview:
+                case Action::TogglePerfOverlay:
+                case Action::ToggleViewMode:
+                case Action::ToggleVoxelSprites:
+                case Action::ViewTurnLeft:
+                case Action::ViewTurnRight:
+                case Action::ReplayPause:
+                case Action::ReplayStep:
+                case Action::ReplaySpeedUp:
+                case Action::ReplaySpeedDown:
+                case Action::ToggleFullscreen:
+                case Action::Screenshot:
+                case Action::Save:
+                case Action::Load:
+                case Action::LoadAuto:
+                case Action::OverworldAutoTravelTogglePause:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+
+        if (a == Action::Cancel) {
+            if (!anyOverlayOpen()) {
+                cancelOverworldAutoTravel(false);
+                return;
+            }
+        } else if (!anyOverlayOpen() && !uiOnly(a)) {
+            cancelOverworldAutoTravel(false);
+        }
     }
 
     // Keybinds overlay (interactive editor): consumes all actions (including LogUp/LogDown).
@@ -1719,6 +1872,99 @@ if (optionsSel == 20) {
             return;
         }
 
+        // Route preview toggle (UI-only).
+        if (a == Action::OverworldMapToggleRoute) {
+            toggleOverworldMapShowRoute();
+            if (overworldMapShowRoute()) {
+                pushMsg("ATLAS ROUTE: ON.", MessageKind::System, true);
+            } else {
+                pushMsg("ATLAS ROUTE: OFF.", MessageKind::System, true);
+            }
+            return;
+        }
+
+        // Waypoint helpers (UI-only).
+        if (a == Action::OverworldMapSetWaypoint) {
+            setOverworldWaypoint(overworldMapCursorPos_);
+            {
+                std::stringstream ss;
+                ss << "WAYPOINT SET: (" << overworldMapCursorPos_.x << "," << overworldMapCursorPos_.y << ").";
+                pushMsg(ss.str().c_str(), MessageKind::System, true);
+            }
+            return;
+        }
+
+        if (a == Action::OverworldMapClearWaypoint) {
+            if (overworldWaypointIsSet()) {
+                clearOverworldWaypoint();
+                pushMsg("WAYPOINT CLEARED.", MessageKind::System, true);
+            } else {
+                pushMsg("NO WAYPOINT SET.", MessageKind::Info, true);
+            }
+            return;
+        }
+
+        // Auto-travel to waypoint (starts walking; closes the atlas).
+        if (a == Action::OverworldAutoTravelToWaypoint) {
+            overworldMapOpen = false;
+            overworldMapCursorActive_ = false;
+
+            if (overworldAutoTravelActive_) {
+                cancelOverworldAutoTravel(false);
+            } else {
+                requestOverworldAutoTravelToWaypoint();
+            }
+            return;
+        }
+
+        // Auto-travel to atlas cursor (starts walking; closes the atlas).
+        // This does NOT modify the persistent waypoint.
+        if (a == Action::OverworldMapTravelToCursor) {
+            overworldMapOpen = false;
+            overworldMapCursorActive_ = false;
+            requestOverworldAutoTravelToChunk(overworldMapCursorPos_);
+            return;
+        }
+
+        // Auto-travel to nearest discovered waystation / stronghold (closes the atlas).
+        if (a == Action::OverworldAutoTravelNearestWaystation || a == Action::OverworldAutoTravelNearestStronghold) {
+            overworldMapOpen = false;
+            overworldMapCursorActive_ = false;
+
+            if (overworldAutoTravelActive_) {
+                cancelOverworldAutoTravel(false);
+            } else {
+                if (a == Action::OverworldAutoTravelNearestWaystation) {
+                    requestOverworldAutoTravelToNearestWaystation();
+                } else {
+                    requestOverworldAutoTravelToNearestStronghold();
+                }
+            }
+            return;
+        }
+
+
+        // Landmark filter (UI-only).
+        if (a == Action::OverworldMapCycleLandmarkFilter) {
+            const uint8_t all = OW_FEATURE_WAYSTATION | OW_FEATURE_STRONGHOLD;
+            if (overworldMapLandmarkMask_ == all) {
+                overworldMapLandmarkMask_ = OW_FEATURE_WAYSTATION;
+                pushMsg("ATLAS FILTER: WAYSTATIONS ($).", MessageKind::System, true);
+            } else if (overworldMapLandmarkMask_ == OW_FEATURE_WAYSTATION) {
+                overworldMapLandmarkMask_ = OW_FEATURE_STRONGHOLD;
+                pushMsg("ATLAS FILTER: STRONGHOLDS (!).", MessageKind::System, true);
+            } else {
+                overworldMapLandmarkMask_ = all;
+                pushMsg("ATLAS FILTER: ALL LANDMARKS ($/!).", MessageKind::System, true);
+            }
+
+            // Gentle UX hint if the selected filter is empty.
+            if (overworldLandmarkCount(overworldMapLandmarkMask_) <= 0) {
+                pushMsg("(NONE DISCOVERED YET.)", MessageKind::Info, true);
+            }
+            return;
+        }
+
         // Navigation (supports diagonals)
         int dx = 0;
         int dy = 0;
@@ -1741,6 +1987,76 @@ if (optionsSel == 20) {
         if (dx != 0 || dy != 0) {
             overworldMapCursorPos_.x = clampi(overworldMapCursorPos_.x + dx, -9999, 9999);
             overworldMapCursorPos_.y = clampi(overworldMapCursorPos_.y + dy, -9999, 9999);
+            return;
+        }
+
+        // FIND: jump between discovered landmarks (waystations / strongholds).
+        if (a == Action::OverworldMapNextLandmark || a == Action::OverworldMapPrevLandmark) {
+            const uint8_t mask = overworldMapLandmarkMask_;
+
+            std::vector<OverworldKey> landmarks;
+            landmarks.reserve(overworldFeatureFlags_.size());
+
+            for (const auto& kv : overworldFeatureFlags_) {
+                if ((kv.second & mask) == 0u) continue;
+                landmarks.push_back(kv.first);
+            }
+
+            if (landmarks.empty()) {
+                pushMsg("NO LANDMARKS DISCOVERED YET.", MessageKind::Info, true);
+                return;
+            }
+
+            const int ox = overworldX_;
+            const int oy = overworldY_;
+            auto distToPlayer = [&](const OverworldKey& k) -> int {
+                return std::abs(k.x - ox) + std::abs(k.y - oy);
+            };
+
+            std::sort(landmarks.begin(), landmarks.end(), [&](const OverworldKey& a, const OverworldKey& b) {
+                const int da = distToPlayer(a);
+                const int db = distToPlayer(b);
+                if (da != db) return da < db;
+                if (a.x != b.x) return a.x < b.x;
+                return a.y < b.y;
+            });
+
+            const int n = static_cast<int>(landmarks.size());
+            int curIndex = -1;
+            for (int i = 0; i < n; ++i) {
+                if (landmarks[static_cast<size_t>(i)].x == overworldMapCursorPos_.x &&
+                    landmarks[static_cast<size_t>(i)].y == overworldMapCursorPos_.y) {
+                    curIndex = i;
+                    break;
+                }
+            }
+
+            int targetIndex = 0;
+            if (curIndex >= 0) {
+                if (a == Action::OverworldMapNextLandmark) {
+                    targetIndex = (curIndex + 1) % n;
+                } else {
+                    targetIndex = (curIndex - 1 + n) % n;
+                }
+            } else {
+                // If the cursor is not currently on a landmark, jump to the nearest
+                // landmark to the cursor (tie-break: nearest to player ordering).
+                int bestD = 1 << 30;
+                int bestI = 0;
+                for (int i = 0; i < n; ++i) {
+                    const OverworldKey& k = landmarks[static_cast<size_t>(i)];
+                    const int d = std::abs(k.x - overworldMapCursorPos_.x) + std::abs(k.y - overworldMapCursorPos_.y);
+                    if (d < bestD) {
+                        bestD = d;
+                        bestI = i;
+                    }
+                }
+                targetIndex = bestI;
+            }
+
+            const OverworldKey& dst = landmarks[static_cast<size_t>(targetIndex)];
+            overworldMapCursorPos_ = Vec2i{dst.x, dst.y};
+            overworldMapCursorActive_ = true;
             return;
         }
 

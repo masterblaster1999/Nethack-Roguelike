@@ -54,6 +54,7 @@ void Game::stopAutoMove(bool silent) {
     autoExploreSearchTurnsLeft = 0;
     autoExploreSearchAnnounced = false;
     autoTravelCautionAnnounced = false;
+    autoTravelSuppressCompleteMsg_ = false;
 
     if (!silent) {
         pushMsg("AUTO-MOVE: OFF.", MessageKind::System);
@@ -531,7 +532,9 @@ bool Game::stepAutoMove() {
     // If we're out of path, rebuild (explore) or finish (travel).
     if (autoPathIndex >= autoPathTiles.size()) {
         if (autoMode == AutoMoveMode::Travel) {
-            pushMsg("AUTO-TRAVEL COMPLETE.", MessageKind::System);
+            if (!autoTravelSuppressCompleteMsg_) {
+                pushMsg("AUTO-TRAVEL COMPLETE.", MessageKind::System);
+            }
             stopAutoMove(true);
             return false;
         }
@@ -723,7 +726,9 @@ bool Game::stepAutoMove() {
 
     // If travel completed after this step, finish.
     if (autoMode == AutoMoveMode::Travel && autoPathIndex >= autoPathTiles.size()) {
-        pushMsg("AUTO-TRAVEL COMPLETE.", MessageKind::System);
+        if (!autoTravelSuppressCompleteMsg_) {
+            pushMsg("AUTO-TRAVEL COMPLETE.", MessageKind::System);
+        }
         stopAutoMove(true);
         return false;
     }

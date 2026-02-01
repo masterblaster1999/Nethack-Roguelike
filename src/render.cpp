@@ -9477,11 +9477,74 @@ void Renderer::drawHud(const Game& game) {
     if (rocks > 0)  ss << " | ROCKS: " << rocks;
     if (game.atHomeCamp()) {
         ss << " | DEPTH: CAMP";
+
+        if (game.overworldWaypointIsSet()) {
+            const Vec2i wp = game.overworldWaypoint();
+            const int dx = wp.x - game.overworldX();
+            const int dy = wp.y - game.overworldY();
+            const int man = std::abs(dx) + std::abs(dy);
+            ss << " | WP: (" << wp.x << "," << wp.y << ") d" << man;
+        }
+
+        if (game.overworldAutoTravelActive()) {
+            const Vec2i goal = game.overworldAutoTravelGoalChunk();
+            const int rem = game.overworldAutoTravelRemainingLegs();
+            const int tot = game.overworldAutoTravelTotalLegs();
+
+            if (game.overworldAutoTravelPaused()) {
+                ss << " | AUTO:PAUSED " << rem << "/" << tot
+                   << "->(" << goal.x << "," << goal.y << ")";
+            } else {
+                const Vec2i next = game.overworldAutoTravelNextChunk();
+                const int dx = next.x - game.overworldX();
+                const int dy = next.y - game.overworldY();
+                char dir = '?';
+                if (dx == 1 && dy == 0) dir = 'E';
+                else if (dx == -1 && dy == 0) dir = 'W';
+                else if (dx == 0 && dy == 1) dir = 'S';
+                else if (dx == 0 && dy == -1) dir = 'N';
+
+                ss << " | AUTO:" << dir << " " << rem << "/" << tot
+                   << "->(" << goal.x << "," << goal.y << ")";
+            }
+        }
+
     } else if (game.atCamp()) {
         const overworld::ChunkProfile prof = overworld::profileFor(game.seed(), game.overworldX(), game.overworldY(), game.dungeonMaxDepth());
         ss << " | SURFACE: " << overworld::chunkNameFor(prof)
            << " (" << game.overworldX() << "," << game.overworldY() << ")"
            << " [" << overworld::biomeName(prof.biome) << " D" << prof.dangerDepth << "]";
+
+        if (game.overworldWaypointIsSet()) {
+            const Vec2i wp = game.overworldWaypoint();
+            const int dx = wp.x - game.overworldX();
+            const int dy = wp.y - game.overworldY();
+            const int man = std::abs(dx) + std::abs(dy);
+            ss << " | WP: (" << wp.x << "," << wp.y << ") d" << man;
+        }
+
+        if (game.overworldAutoTravelActive()) {
+            const Vec2i goal = game.overworldAutoTravelGoalChunk();
+            const int rem = game.overworldAutoTravelRemainingLegs();
+            const int tot = game.overworldAutoTravelTotalLegs();
+
+            if (game.overworldAutoTravelPaused()) {
+                ss << " | AUTO:PAUSED " << rem << "/" << tot
+                   << "->(" << goal.x << "," << goal.y << ")";
+            } else {
+                const Vec2i next = game.overworldAutoTravelNextChunk();
+                const int dx = next.x - game.overworldX();
+                const int dy = next.y - game.overworldY();
+                char dir = '?';
+                if (dx == 1 && dy == 0) dir = 'E';
+                else if (dx == -1 && dy == 0) dir = 'W';
+                else if (dx == 0 && dy == 1) dir = 'S';
+                else if (dx == 0 && dy == -1) dir = 'N';
+
+                ss << " | AUTO:" << dir << " " << rem << "/" << tot
+                   << "->(" << goal.x << "," << goal.y << ")";
+            }
+        }
 
         const overworld::WeatherProfile wx = overworld::weatherFor(game.seed(), game.overworldX(), game.overworldY(), prof.biome, game.turns());
         ss << " WX:" << overworld::weatherName(wx.kind);
@@ -11903,6 +11966,9 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
         cursorChunk = game.overworldMapCursorPos();
     }
 
+    const bool wpSet = game.overworldWaypointIsSet();
+    const Vec2i wpChunk = wpSet ? game.overworldWaypoint() : Vec2i{0, 0};
+
     // View radius (chunks); zoom steps add/subtract 2 chunks of radius.
     const int baseRadius = 8; // 17x17
     int radius = baseRadius + game.overworldMapZoom() * 2;
@@ -11923,6 +11989,44 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
     const int gridWpx = dim * cellW;
     const int detailsX0 = gridX0 + gridWpx + 18;
     const int detailsW = (x0 + panelW - pad) - detailsX0;
+
+    // Optional route preview: shortest route through discovered chunks.
+    // (UI-only; does not affect gameplay and does not consume a turn.)
+    std::vector<Vec2i> route;
+    bool routeOk = false;
+    std::unordered_set<uint64_t> routeSet;
+
+    auto packXY = [](int x, int y) -> uint64_t {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32) |
+               static_cast<uint64_t>(static_cast<uint32_t>(y));
+    };
+
+    if (game.overworldMapShowRoute() && game.overworldChunkDiscovered(cursorChunk.x, cursorChunk.y)) {
+        routeOk = game.overworldRouteDiscoveredChunks(curChunk, cursorChunk, route);
+        if (routeOk) {
+            routeSet.reserve(route.size() * 2 + 8);
+            for (const auto& p : route) routeSet.insert(packXY(p.x, p.y));
+        }
+    }
+
+    // If overworld auto-travel is active, we can also visualize the route to its goal chunk.
+    // This uses the same Ctrl+R route toggle (purely UI-only).
+    const bool autoActive = game.overworldAutoTravelActive();
+    const bool autoPaused = game.overworldAutoTravelPaused();
+    const Vec2i autoGoalChunk = autoActive ? game.overworldAutoTravelGoalChunk() : Vec2i{0, 0};
+
+    std::vector<Vec2i> autoRoute;
+    bool autoRouteOk = false;
+    std::unordered_set<uint64_t> autoRouteSet;
+
+    if (game.overworldMapShowRoute() && autoActive && game.overworldChunkDiscovered(autoGoalChunk.x, autoGoalChunk.y)) {
+        autoRouteOk = game.overworldRouteDiscoveredChunks(curChunk, autoGoalChunk, autoRoute);
+        if (autoRouteOk) {
+            autoRouteSet.reserve(autoRoute.size() * 2 + 8);
+            for (const auto& p : autoRoute) autoRouteSet.insert(packXY(p.x, p.y));
+        }
+    }
+
 
 	    auto biomeLetter = [](overworld::Biome b) -> char {
         switch (b) {
@@ -11952,15 +12056,6 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
         return gray;
     };
 
-    auto chunkHasShopRoom = [&](int cx, int cy) -> bool {
-        const Dungeon* d = game.overworldChunkDungeon(cx, cy);
-        if (!d) return false;
-        for (const auto& r : d->rooms) {
-            if (r.type == RoomType::Shop) return true;
-        }
-        return false;
-    };
-
     // Draw grid cells
     for (int row = 0; row < dim; ++row) {
         const int cy = cursorChunk.y - radius + row;
@@ -11970,6 +12065,7 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
             const bool discovered = game.overworldChunkDiscovered(cx, cy);
             const bool isCurrent = (cx == curChunk.x && cy == curChunk.y);
             const bool isCursor  = (cx == cursorChunk.x && cy == cursorChunk.y);
+            const bool isWaypoint = wpSet && (cx == wpChunk.x && cy == wpChunk.y);
 
             Color colr = gray;
             std::string cell = "??";
@@ -11981,12 +12077,18 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
                 char mark = '.';
                 if (isCurrent) mark = '@';
                 else if (cx == 0 && cy == 0) mark = '*';
-                else if (chunkHasShopRoom(cx, cy)) mark = '$';
+                else if (isWaypoint) mark = 'X';
+                else if (game.overworldChunkHasStronghold(cx, cy)) mark = '!';
+                else if (game.overworldChunkHasWaystation(cx, cy)) mark = '$';
 
                 cell[0] = b;
                 cell[1] = mark;
 
                 colr = biomeColor(prof.biome);
+            }
+
+            if (!discovered && isWaypoint) {
+                cell[1] = 'X';
             }
 
             // Cursor highlight overrides palette.
@@ -11995,6 +12097,35 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
 
             const int px = gridX0 + col * cellW;
             const int py = gridY0 + row * cellH;
+
+            // Route highlights (UI-only):
+            // - Auto-travel route (green): your current overworld auto-travel destination (if active).
+            // - Cursor route preview (blue): shortest discovered-chunk route from you -> cursor.
+            const bool onAutoRoute = autoRouteOk && (autoRouteSet.find(packXY(cx, cy)) != autoRouteSet.end());
+            const bool isAutoGoal = autoActive && (cx == autoGoalChunk.x && cy == autoGoalChunk.y);
+            if (onAutoRoute && !isCursor && !isCurrent) {
+                SDL_Rect bg{ px - 2, py - 2, charW * 2 + 4, charH + 4 };
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                if (isAutoGoal) SDL_SetRenderDrawColor(renderer, 60, 220, 150, 90);
+                else SDL_SetRenderDrawColor(renderer, 80, 200, 140, 60);
+                SDL_RenderFillRect(renderer, &bg);
+            }
+
+            const bool onRoute = routeOk && (routeSet.find(packXY(cx, cy)) != routeSet.end());
+            if (onRoute && !isCursor && !isCurrent) {
+                SDL_Rect bg{ px - 2, py - 2, charW * 2 + 4, charH + 4 };
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 80, 140, 200, 70);
+                SDL_RenderFillRect(renderer, &bg);
+            }
+
+            // Waypoint highlight.
+            if (isWaypoint && !isCursor && !isCurrent) {
+                SDL_Rect bg{ px - 2, py - 2, charW * 2 + 4, charH + 4 };
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 200, 160, 80, 70);
+                SDL_RenderFillRect(renderer, &bg);
+            }
 
             // Subtle selection bg for the cursor.
             if (isCursor) {
@@ -12021,6 +12152,83 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
         std::stringstream ss;
         ss << "CURSOR: (" << cursorChunk.x << "," << cursorChunk.y << ")";
         drawLine(white, ss.str());
+    }
+
+    {
+        const int dx = cursorChunk.x - curChunk.x;
+        const int dy = cursorChunk.y - curChunk.y;
+        const int man = std::abs(dx) + std::abs(dy);
+
+        std::stringstream ss;
+        ss << "FROM YOU: dx " << (dx >= 0 ? "+" : "") << dx
+           << "  dy " << (dy >= 0 ? "+" : "") << dy
+           << "  dist " << man;
+        drawLine(gray, ss.str());
+    }
+
+    // Waypoint (persistent marker).
+    if (!wpSet) {
+        drawLine(gray, "WAYPOINT: (NONE) (CTRL+W)");
+    } else {
+        const int dx = wpChunk.x - curChunk.x;
+        const int dy = wpChunk.y - curChunk.y;
+        const int man = std::abs(dx) + std::abs(dy);
+
+        std::stringstream ss;
+        ss << "WAYPOINT: (" << wpChunk.x << "," << wpChunk.y << ")"
+           << "  dx " << (dx >= 0 ? "+" : "") << dx
+           << "  dy " << (dy >= 0 ? "+" : "") << dy
+           << "  dist " << man;
+        drawLine(gray, ss.str());
+    }
+
+    // Route preview (discovered chunks only).
+    if (!game.overworldMapShowRoute()) {
+        drawLine(gray, "ROUTE: OFF (CTRL+R)");
+    } else if (!game.overworldChunkDiscovered(cursorChunk.x, cursorChunk.y)) {
+        drawLine(gray, "ROUTE: UNKNOWN (UNDISCOVERED)");
+    } else if (routeOk) {
+        const int steps = static_cast<int>(route.size()) - 1;
+        std::stringstream ss;
+        ss << "ROUTE: " << steps << " steps (DISCOVERED)";
+        drawLine(gray, ss.str());
+    } else {
+        drawLine(gray, "ROUTE: UNREACHABLE (GAPS)");
+    }
+
+    // Overworld auto-travel status (surface-only).
+    if (!autoActive) {
+        drawLine(gray, "AUTO: OFF");
+    } else {
+        const Vec2i goal = autoGoalChunk;
+        const int rem = game.overworldAutoTravelRemainingLegs();
+        const int tot = game.overworldAutoTravelTotalLegs();
+        std::stringstream ss;
+        if (autoPaused) {
+            ss << "AUTO: PAUSED " << rem << "/" << tot
+               << "->" << game.overworldAutoTravelLabel()
+               << " (" << goal.x << "," << goal.y << ")";
+        } else {
+            const Vec2i next = game.overworldAutoTravelNextChunk();
+            const int dx = next.x - curChunk.x;
+            const int dy = next.y - curChunk.y;
+            char dir = '?';
+            if (dx == 1 && dy == 0) dir = 'E';
+            else if (dx == -1 && dy == 0) dir = 'W';
+            else if (dx == 0 && dy == 1) dir = 'S';
+            else if (dx == 0 && dy == -1) dir = 'N';
+            ss << "AUTO: " << dir << " " << rem << "/" << tot
+               << "->" << game.overworldAutoTravelLabel()
+               << " (" << goal.x << "," << goal.y << ")";
+        }
+        drawLine(gray, ss.str());
+    }
+
+    {
+        std::stringstream ss;
+        ss << "LANDMARKS: " << game.overworldLandmarkCount(game.overworldMapLandmarkFilterMask())
+           << "  FILTER: " << game.overworldMapLandmarkFilterName();
+        drawLine(gray, ss.str());
     }
 
     if (!game.overworldChunkDiscovered(cursorChunk.x, cursorChunk.y)) {
@@ -12060,33 +12268,58 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
                 drawLine(white, ss.str());
             }
 
+            const bool waystation = game.overworldChunkHasWaystation(cursorChunk.x, cursorChunk.y);
+            const bool stronghold = game.overworldChunkHasStronghold(cursorChunk.x, cursorChunk.y);
+
             const Dungeon* d = game.overworldChunkDungeon(cursorChunk.x, cursorChunk.y);
             if (!d) {
                 drawLine(gray, "STATE: NOT IN MEMORY");
             } else {
                 drawLine(green, "STATE: LOADED");
+            }
 
-                const bool shop = chunkHasShopRoom(cursorChunk.x, cursorChunk.y);
-                if (shop && !(cursorChunk.x == 0 && cursorChunk.y == 0)) {
-                    drawLine(yellow, "FEATURE: WAYSTATION ($)");
-                }
+            if (waystation) {
+                drawLine(yellow, "FEATURE: WAYSTATION ($)");
+            }
+            if (stronghold) {
+                drawLine(yellow, "FEATURE: STRONGHOLD (!)");
+            }
 
-                // Lightweight terrain stats (helps players reason about travel).
-                {
-                    std::stringstream ss;
-                    ss << "WATER: " << d->fluvialChasmCount
-                       << "  BOULDERS: " << d->heightfieldScreeBoulderCount
-                       << "  PILLARS: " << d->heightfieldRidgePillarCount;
-                    drawLine(gray, ss.str());
-                }
+            // Lightweight terrain stats (helps players reason about travel).
+            // Prefer the cached per-chunk summary (available even if the chunk snapshot has been
+            // evicted), with a fallback to computing from the in-memory dungeon.
+            Game::OverworldTerrainSummary ts;
+            if (game.overworldChunkTerrainSummary(cursorChunk.x, cursorChunk.y, ts)) {
+                std::stringstream ss;
+                ss << "CHASM: " << ts.chasmTiles
+                   << "  BOULDERS: " << ts.boulderTiles
+                   << "  PILLARS: " << ts.pillarTiles;
+                drawLine(gray, ss.str());
+            } else {
+                drawLine(gray, "TERRAIN: UNKNOWN");
             }
         }
     }
 
     // Controls (bottom)
     {
-        const int by = y0 + panelH - pad - 16;
-        drawText5x7(renderer, x0 + pad, by, 2, gray, "MOVE: PAN   +/-: ZOOM   ENTER: RECENTER   ESC: CLOSE");
+        const int by2 = y0 + panelH - pad - 48;
+        const int by1 = y0 + panelH - pad - 32;
+        const int by0 = y0 + panelH - pad - 16;
+
+        drawText5x7(renderer, x0 + pad, by2, 2, gray, "MOVE: PAN   +/-: ZOOM   ENTER: RECENTER   ESC: CLOSE");
+
+        {
+            std::stringstream ss;
+            ss << "CTRL+F: NEXT  CTRL+SHIFT+F: PREV  CTRL+L: FILTER ("
+               << game.overworldMapLandmarkFilterName() << ")"
+               << "  CTRL+R: ROUTE (" << (game.overworldMapShowRoute() ? "ON" : "OFF") << ")"
+               << "  CTRL+O: PAUSE";
+            drawText5x7(renderer, x0 + pad, by1, 2, gray, ss.str());
+        }
+
+        drawText5x7(renderer, x0 + pad, by0, 2, gray,
+                    "CTRL+W: WP SET  CTRL+SHIFT+W: WP CLEAR  CTRL+G: TRAVEL WP  CTRL+SHIFT+G: TRAVEL CURSOR  CTRL+Y: $  CTRL+U: !");
     }
 }
 

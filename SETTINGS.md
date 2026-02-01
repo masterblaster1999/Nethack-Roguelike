@@ -288,7 +288,7 @@ Available actions:
 **UI / Meta**
 - `help`, `options`, `command`
 - `message_history`, `codex`, `discoveries`, `scores`
-- `toggle_minimap`, `overworld_map`, `minimap_zoom_in`, `minimap_zoom_out`
+- `toggle_minimap`, `overworld_map`, `overworld_next_landmark`, `overworld_prev_landmark`, `overworld_landmark_filter`, `overworld_toggle_route`, `overworld_set_waypoint`, `overworld_clear_waypoint`, `overworld_travel_waypoint`, `overworld_travel_cursor`, `overworld_travel_nearest_waystation`, `overworld_travel_nearest_stronghold`, `overworld_travel_pause`, `minimap_zoom_in`, `minimap_zoom_out`
 - `toggle_stats`, `toggle_perf_overlay`, `toggle_view_mode`, `toggle_voxel_sprites`
 - `sound_preview`, `threat_preview`, `hearing_preview`, `scent_preview` (LOOK lenses: sound propagation, threat ETA, audibility, scent trail heatmaps)
 - `fullscreen`, `screenshot`

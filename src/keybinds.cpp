@@ -547,6 +547,18 @@ KeyBinds KeyBinds::defaults() {
 
     add(Action::ToggleMinimap, SDLK_m);
     add(Action::ToggleOverworldMap, SDLK_m, KMOD_SHIFT);
+    // Overworld atlas helpers (UI-only).
+    add(Action::OverworldMapNextLandmark, SDLK_f, KMOD_CTRL);
+    add(Action::OverworldMapPrevLandmark, SDLK_f, KMOD_CTRL | KMOD_SHIFT);
+    add(Action::OverworldMapCycleLandmarkFilter, SDLK_l, KMOD_CTRL);
+    add(Action::OverworldMapToggleRoute, SDLK_r, KMOD_CTRL);
+    add(Action::OverworldMapSetWaypoint, SDLK_w, KMOD_CTRL);
+    add(Action::OverworldMapClearWaypoint, SDLK_w, KMOD_CTRL | KMOD_SHIFT);
+    add(Action::OverworldAutoTravelToWaypoint, SDLK_g, KMOD_CTRL);
+    add(Action::OverworldMapTravelToCursor, SDLK_g, KMOD_CTRL | KMOD_SHIFT);
+    add(Action::OverworldAutoTravelNearestWaystation, SDLK_y, KMOD_CTRL);
+    add(Action::OverworldAutoTravelNearestStronghold, SDLK_u, KMOD_CTRL);
+    add(Action::OverworldAutoTravelTogglePause, SDLK_o, KMOD_CTRL);
     add(Action::MinimapZoomOut, SDLK_LEFTBRACKET);
     add(Action::MinimapZoomIn, SDLK_RIGHTBRACKET);
     add(Action::MessageHistory, SDLK_F3);

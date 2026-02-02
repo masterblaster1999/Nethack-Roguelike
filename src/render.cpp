@@ -4742,8 +4742,8 @@ void Renderer::drawRaycast3DView(const Game& game, uint32_t styleSeed, uint32_t 
     const float posY = static_cast<float>(pl.pos.y) + 0.5f;
 
     // Build a cheap room-type cache so themed floors still work in 3D.
-    std::vector<uint8_t> roomTypeCache;
-    roomTypeCache.assign(static_cast<size_t>(d.width) * static_cast<size_t>(d.height), static_cast<uint8_t>(RoomType::Normal));
+    std::vector<uint8_t> roomTypeCacheLocal;
+    roomTypeCacheLocal.assign(static_cast<size_t>(d.width) * static_cast<size_t>(d.height), static_cast<uint8_t>(RoomType::Normal));
     for (const Room& room : d.rooms) {
         const int x1 = std::max(0, room.x);
         const int y1 = std::max(0, room.y);
@@ -4751,7 +4751,7 @@ void Renderer::drawRaycast3DView(const Game& game, uint32_t styleSeed, uint32_t 
         const int y2 = std::min(d.height, room.y2());
         for (int yy = y1; yy < y2; ++yy) {
             for (int xx = x1; xx < x2; ++xx) {
-                roomTypeCache[static_cast<size_t>(yy * d.width + xx)] = static_cast<uint8_t>(room.type);
+                roomTypeCacheLocal[static_cast<size_t>(yy * d.width + xx)] = static_cast<uint8_t>(room.type);
             }
         }
     }
@@ -4775,8 +4775,8 @@ void Renderer::drawRaycast3DView(const Game& game, uint32_t styleSeed, uint32_t 
     auto floorStyleAt = [&](int tx, int ty) -> int {
         if (!d.inBounds(tx, ty)) return 0;
         const size_t ii = static_cast<size_t>(ty * d.width + tx);
-        if (ii < roomTypeCache.size()) {
-            const int s = styleForRoomType(roomTypeCache[ii]);
+        if (ii < roomTypeCacheLocal.size()) {
+            const int s = styleForRoomType(roomTypeCacheLocal[ii]);
             if (s != 0) return s;
         }
 
@@ -4788,8 +4788,8 @@ void Renderer::drawRaycast3DView(const Game& game, uint32_t styleSeed, uint32_t 
             const int ny = ty + dy[k];
             if (!d.inBounds(nx, ny)) continue;
             const size_t jj = static_cast<size_t>(ny * d.width + nx);
-            if (jj < roomTypeCache.size()) {
-                const int s2 = styleForRoomType(roomTypeCache[jj]);
+            if (jj < roomTypeCacheLocal.size()) {
+                const int s2 = styleForRoomType(roomTypeCacheLocal[jj]);
                 if (s2 != 0) return s2;
             }
         }
@@ -5116,8 +5116,8 @@ void Renderer::drawRaycast3DView(const Game& game, uint32_t styleSeed, uint32_t 
                     const float seed = static_cast<float>(bestPos.x * 17 + bestPos.y * 31);
                     const float w1 = std::sin(time + seed);
                     const float w2 = std::sin(time * 2.13f + seed * 0.7f);
-                    const float w = (w1 * 0.6f + w2 * 0.4f);
-                    const float f = std::clamp(1.0f + best * 0.05f * w, 0.90f, 1.10f);
+                    const float wave = (w1 * 0.6f + w2 * 0.4f);
+                    const float f = std::clamp(1.0f + best * 0.05f * wave, 0.90f, 1.10f);
                     torchFlickerCache[idxTile(x, y)] = f;
                 }
             }
@@ -8770,18 +8770,19 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
         if (w > 0 && h > 0) {
             // Occupancy map so we don't spawn phantoms on top of real entities/items.
             std::vector<uint8_t> occ;
-            occ.assign(static_cast<size_t>(w * h), 0u);
+            occ.assign(static_cast<size_t>(w * h), uint8_t{0});
             auto idx = [&](int x, int y) -> size_t {
                 return static_cast<size_t>(y * w + x);
             };
 
             for (const auto& e : game.entities()) {
                 if (!d.inBounds(e.pos.x, e.pos.y)) continue;
-                occ[idx(e.pos.x, e.pos.y)] = 1u;
+                occ[idx(e.pos.x, e.pos.y)] = uint8_t{1};
             }
             for (const auto& gi : game.groundItems()) {
                 if (!d.inBounds(gi.pos.x, gi.pos.y)) continue;
-                occ[idx(gi.pos.x, gi.pos.y)] |= 2u;
+                const size_t oi = idx(gi.pos.x, gi.pos.y);
+                occ[oi] = static_cast<uint8_t>(occ[oi] | uint8_t{2});
             }
 
             struct Phantom {
@@ -12159,12 +12160,12 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
 
     {
         const int dx = cursorChunk.x - curChunk.x;
-        const int dy = cursorChunk.y - curChunk.y;
-        const int man = std::abs(dx) + std::abs(dy);
+        const int deltaY = cursorChunk.y - curChunk.y;
+        const int man = std::abs(dx) + std::abs(deltaY);
 
         std::stringstream ss;
         ss << "FROM YOU: dx " << (dx >= 0 ? "+" : "") << dx
-           << "  dy " << (dy >= 0 ? "+" : "") << dy
+           << "  dy " << (deltaY >= 0 ? "+" : "") << deltaY
            << "  dist " << man;
         drawLine(gray, ss.str());
     }
@@ -12174,13 +12175,13 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
         drawLine(gray, "WAYPOINT: (NONE) (CTRL+W)");
     } else {
         const int dx = wpChunk.x - curChunk.x;
-        const int dy = wpChunk.y - curChunk.y;
-        const int man = std::abs(dx) + std::abs(dy);
+        const int deltaY = wpChunk.y - curChunk.y;
+        const int man = std::abs(dx) + std::abs(deltaY);
 
         std::stringstream ss;
         ss << "WAYPOINT: (" << wpChunk.x << "," << wpChunk.y << ")"
            << "  dx " << (dx >= 0 ? "+" : "") << dx
-           << "  dy " << (dy >= 0 ? "+" : "") << dy
+           << "  dy " << (deltaY >= 0 ? "+" : "") << deltaY
            << "  dist " << man;
         drawLine(gray, ss.str());
     }
@@ -12214,12 +12215,12 @@ void Renderer::drawOverworldMapOverlay(const Game& game) {
         } else {
             const Vec2i next = game.overworldAutoTravelNextChunk();
             const int dx = next.x - curChunk.x;
-            const int dy = next.y - curChunk.y;
+            const int deltaY = next.y - curChunk.y;
             char dir = '?';
-            if (dx == 1 && dy == 0) dir = 'E';
-            else if (dx == -1 && dy == 0) dir = 'W';
-            else if (dx == 0 && dy == 1) dir = 'S';
-            else if (dx == 0 && dy == -1) dir = 'N';
+            if (dx == 1 && deltaY == 0) dir = 'E';
+            else if (dx == -1 && deltaY == 0) dir = 'W';
+            else if (dx == 0 && deltaY == 1) dir = 'S';
+            else if (dx == 0 && deltaY == -1) dir = 'N';
             ss << "AUTO: " << dir << " " << rem << "/" << tot
                << "->" << game.overworldAutoTravelLabel()
                << " (" << goal.x << "," << goal.y << ")";

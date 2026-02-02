@@ -1217,7 +1217,7 @@ int main(int argc, char** argv) {
                                     if (game.viewMode() != ViewMode::TopDown) {
                                         game.setViewMode(ViewMode::TopDown);
                                     } else {
-                                        game.setViewMode(ViewMode::Iso);
+                                        game.setViewMode(ViewMode::Isometric);
                                     }
                                     game.markSettingsDirty();
                                     game.pushSystemMessage(std::string("VIEW: ") + game.viewModeDisplayName() + ".");

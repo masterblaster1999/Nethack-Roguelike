@@ -4,6 +4,7 @@
 #include "terrain_sculpt.hpp"
 #include "pathfinding.hpp"
 #include "wfc.hpp"
+#include "vault_prefab_catalog.hpp"
 #include "proc_rd.hpp"
 #include "poisson_disc.hpp"
 #include "spatial_hash.hpp"
@@ -11598,14 +11599,8 @@ bool maybeCarveDeadEndClosets(Dungeon& d, RNG& rng, int depth, GenKind g) {
 // classic roguelikes, but kept strictly optional so they never gate the
 // main stairs-to-stairs critical path.
 // ------------------------------------------------------------
-struct PrefabDef {
-    const char* name = nullptr;
-    int w = 0;
-    int h = 0;
-    const char* const* rows = nullptr;
-    int minDepth = 1;
-    int weight = 1;
-};
+// Prefab definition data lives in vault_prefab_catalog.* (shared with unit tests).
+using PrefabDef = VaultPrefabDef;
 
 struct PrefabVariant {
     const PrefabDef* def = nullptr;
@@ -12684,91 +12679,33 @@ bool maybePlaceVaultPrefabs(Dungeon& d, RNG& rng, int depth, GenKind g) {
     if (depth >= 9 && rng.chance(0.35f)) want += 1;
     want = std::clamp(want, 1, 3);
 
-    // Prefab library (single-entrance, border-walled).
-    static const char* const kSecretCache5[] = {
-        "#####",
-        "#...#",
-        "#.T.#",
-        "#...#",
-        "##s##",
-    };
-
-    static const char* const kPillarShrine7[] = {
-        "#######",
-        "#..P..#",
-        "#.P.P.#",
-        "#..T..#",
-        "#.P.P.#",
-        "#..P..#",
-        "###s###",
-    };
-
-    static const char* const kLockedVault7[] = {
-        "#######",
-        "#..P..#",
-        "#.#.#.#",
-        "#..T..#",
-        "#.#.#.#",
-        "#.....#",
-        "###L###",
-    };
-
-    static const char* const kBoulderBridge9x7[] = {
-        "#########",
-        "#...T...#",
-        "#.......#",
-        "#CCCCCCC#",
-        "#..O....#",
-        "#.......#",
-        "####+####",
-    };
-
-    // A 2-step micro-puzzle: the key is reachable immediately, but the treasure is
-    // behind an *internal* locked door. This creates a tiny "lock-and-key" beat
-    // without requiring the player to scour the entire floor.
-    static const char* const kKeyedInnerVault9x7[] = {
-        "#########",
-        "#..P.T.P#",
-        "#.......#",
-        "####L####",
-        "#..K....#",
-        "#.......#",
-        "####+####",
-    };
-
-    // Secret door tool cache (teaches searching; rewards with lockpicks).
-    static const char* const kSecretTools5[] = {
-        "#####",
-        "#...#",
-        "#.R.#",
-        "#.T.#",
-        "##s##",
-    };
-
-    static const PrefabDef kPrefabs[] = {
-        { "Secret cache (tiny)",           5, 5, kSecretCache5,        1, 4 },
-        { "Secret tool cache",             5, 5, kSecretTools5,        1, 2 },
-        { "Secret pillar shrine",          7, 7, kPillarShrine7,       2, 3 },
-        { "Keyed inner vault",             9, 7, kKeyedInnerVault9x7,  2, 3 },
-        { "Boulder-bridge loot room",      9, 7, kBoulderBridge9x7,    3, 2 },
-        { "Locked micro-vault",            7, 7, kLockedVault7,        4, 3 },
-    };
+        // Prefab library (single-entrance, border-walled).
+    size_t prefabCount = 0;
+    const PrefabDef* prefabs = vaultprefabs::catalog(prefabCount);
 
     auto pickWeightedPrefab = [&]() -> const PrefabDef* {
         int total = 0;
-        for (const auto& p : kPrefabs) {
+        for (size_t i = 0; i < prefabCount; ++i) {
+            const PrefabDef& p = prefabs[i];
             if (depth < p.minDepth) continue;
             total += std::max(1, p.weight);
         }
         if (total <= 0) return nullptr;
 
         int r = rng.range(1, total);
-        for (const auto& p : kPrefabs) {
+        for (size_t i = 0; i < prefabCount; ++i) {
+            const PrefabDef& p = prefabs[i];
             if (depth < p.minDepth) continue;
             r -= std::max(1, p.weight);
             if (r <= 0) return &p;
         }
-        return &kPrefabs[0];
+
+        // Fallback (should be unreachable).
+        for (size_t i = 0; i < prefabCount; ++i) {
+            const PrefabDef& p = prefabs[i];
+            if (depth >= p.minDepth) return &p;
+        }
+        return nullptr;
     };
 
     // Mix in *procedural* micro-vaults for extra variety (still rare):

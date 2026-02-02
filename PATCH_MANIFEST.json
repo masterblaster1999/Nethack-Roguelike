@@ -1,20 +1,21 @@
 {
-  "patch_id": "round232_patch",
-  "previous_patch_id": "round231_patch",
-  "round": 232,
-  "created_utc": "2026-02-01T09:12:02Z",
-  "summary": "Overworld Atlas route preview now also draws the active overworld auto-travel route (green) and shows an AUTO status line; overworld auto-travel stores a UI-only destination label; added/registered tests.",
+  "patch_id": "round235_patch",
+  "previous_patch_id": "round234_patch",
+  "round": 235,
+  "created_utc": "2026-02-01T12:52:31Z",
+  "summary": "Expanded vault prefab variety via shared catalog + added catalog validation test.",
   "files_changed_or_added_this_round": [
+    "CMakeLists.txt",
+    "src/dungeon.cpp",
+    "src/vault_prefab_catalog.hpp",
+    "src/vault_prefab_catalog.cpp",
+    "tests/test_main.cpp",
     "CHANGELOG.md",
-    "PATCH_MANIFEST.json",
-    "docs/PROCGEN_OVERWORLD_ATLAS.md",
-    "src/game.cpp",
-    "src/game.hpp",
-    "src/render.cpp",
-    "tests/test_main.cpp"
+    "PATCH_MANIFEST.json"
   ],
   "files_in_patch_zip": [
     "CHANGELOG.md",
+    "CMakeLists.txt",
     "PATCH_MANIFEST.json",
     "README.md",
     "SETTINGS.md",
@@ -97,6 +98,7 @@
     "src/game_targeting.cpp",
     "src/game_world.cpp",
     "src/graffiti_gen.hpp",
+    "src/grid_utils.hpp",
     "src/hearing_field.hpp",
     "src/ident_gen.hpp",
     "src/items.cpp",
@@ -125,6 +127,8 @@
     "src/spritegen.hpp",
     "src/spritegen3d.cpp",
     "src/trap_salvage_gen.hpp",
+    "src/vault_prefab_catalog.cpp",
+    "src/vault_prefab_catalog.hpp",
     "src/victory_gen.hpp",
     "src/wards.hpp",
     "src/wfc.hpp",
@@ -132,8 +136,8 @@
     "tests/test_main.cpp"
   ],
   "notes_for_reviewer": [
-    "Overworld auto-travel is now resilient to UI overlays: it pauses when menus are open and resumes when they close.",
-    "If a leg is interrupted before reaching its planned exit gate, the gate goal is cleared and the leg is replanned instead of canceling.",
-    "ESC cancels overworld auto-travel only when no other UI overlay is open (otherwise it simply closes that overlay)."
+    "Added a shared vault prefab catalog (262 entries) and wired dungeon generation to pull from it.",
+    "Registered the new catalog translation unit in the core CMake source list.",
+    "Added a unit test to validate prefab catalog structure (dimensions + single entrance door on boundary)."
   ]
 }

@@ -993,11 +993,15 @@ Vec2i Game::findNearestExploreFrontier() const {
     auto isFrontier = [&](int x, int y) -> bool {
         if (!dung.inBounds(x, y)) return false;
         if (!dung.at(x, y).explored) return false;
-        if (!dung.isPassable(x, y)) return false;
+
+        // Allow frontier candidates that are only reachable while levitating (chasms).
+        const TileType ttHere = dung.at(x, y).type;
+        const bool passableHere = dung.isPassable(x, y) || (levitating && ttHere == TileType::Chasm);
+        if (!passableHere) return false;
+
         if (fireAt(x, y) > 0u) return false;
         if (confusionGasAt(x, y) > 0u) return false;
         if (poisonGasAt(x, y) > 0u) return false;
-        if (corrosiveGasAt(x, y) > 0u) return false;
         if (corrosiveGasAt(x, y) > 0u) return false;
 
         for (int dir = 0; dir < 8; ++dir) {
@@ -1016,10 +1020,11 @@ Vec2i Game::findNearestExploreFrontier() const {
         if (confusionGasAt(x, y) > 0u) return false;
         if (poisonGasAt(x, y) > 0u) return false;
         if (corrosiveGasAt(x, y) > 0u) return false;
-        if (corrosiveGasAt(x, y) > 0u) return false;
 
         const TileType tt = dung.at(x, y).type;
-        const bool passable = dung.isPassable(x, y) || (canUnlockDoors && tt == TileType::DoorLocked);
+        const bool passable = dung.isPassable(x, y) ||
+                              (canUnlockDoors && tt == TileType::DoorLocked) ||
+                              (levitating && tt == TileType::Chasm);
         if (!passable) return false;
 
         if (const Entity* occ = entityAt(x, y)) {
@@ -1051,7 +1056,7 @@ Vec2i Game::findNearestExploreFrontier() const {
                 if (visited[nIdx]) continue;
                 if (!passableForSearch(nx, ny)) continue;
 
-                if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
+                if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy, levitating)) continue;
 
                 // We don't traverse known traps in pass 1, but if a known trap tile is itself a frontier,
                 // we return it as the goal (auto-explore will stop before stepping onto it).
@@ -1095,7 +1100,7 @@ Vec2i Game::findNearestExploreFrontier() const {
                 if (visited[nIdx]) continue;
                 if (!passableForSearch(nx, ny)) continue;
 
-                if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
+                if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy, levitating)) continue;
 
                 const int curIdx = idxOf(cur.x, cur.y);
                 int ft = firstTrapIdx[curIdx];
@@ -1156,7 +1161,7 @@ Vec2i Game::findNearestExploreFrontier() const {
                     if (visited[nIdx]) continue;
                     if (!passableForSearch(nx, ny)) continue;
 
-                    if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
+                    if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy, levitating)) continue;
 
                     if (isKnownTrap(nx, ny)) continue;
 
@@ -1195,7 +1200,7 @@ Vec2i Game::findNearestExploreFrontier() const {
                     if (visited[nIdx]) continue;
                     if (!passableForSearch(nx, ny)) continue;
 
-                    if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy)) continue;
+                    if (dx != 0 && dy != 0 && !diagonalPassable(dung, cur, dx, dy, levitating)) continue;
 
                     const int curIdx = idxOf(cur.x, cur.y);
                     int ft = firstTrapIdx[curIdx];
@@ -1235,9 +1240,13 @@ Vec2i Game::findNearestExploreSearchSpot() const {
         if (!dung.inBounds(x, y)) return false;
         if (!dung.at(x, y).explored) return false;
 
-        // Treat locked doors as passable if we can actually unlock them.
+        // Treat some normally-impassable tiles as passable if the player can safely traverse them.
+        // (The actual unlock/open or chasm safety is enforced by tryMove.)
         if (!dung.isPassable(x, y)) {
-            if (!(canUnlockDoors && dung.at(x, y).type == TileType::DoorLocked)) return false;
+            const TileType tt = dung.at(x, y).type;
+            const bool okLocked = (canUnlockDoors && tt == TileType::DoorLocked);
+            const bool okChasm = (levitating && tt == TileType::Chasm);
+            if (!okLocked && !okChasm) return false;
         }
 
         if (isKnownTrap(x, y)) return false;
@@ -1336,7 +1345,7 @@ Vec2i Game::findNearestExploreSearchSpot() const {
 
             if (!dung.inBounds(nx, ny)) continue;
             if (!passable(nx, ny)) continue;
-            if (!diagonalPassable(dung, cur, dx, dy)) continue;
+            if (!diagonalPassable(dung, cur, dx, dy, levitating)) continue;
 
             const int ii = idxOf(nx, ny);
             if (visited[ii]) continue;
@@ -1527,7 +1536,7 @@ std::vector<Vec2i> Game::findPathBfs(Vec2i start, Vec2i goal, bool requireExplor
     };
 
     auto diagOk = [&](int fromX, int fromY, int dx, int dy) -> bool {
-        return diagonalPassable(dung, {fromX, fromY}, dx, dy);
+        return diagonalPassable(dung, {fromX, fromY}, dx, dy, levitating);
     };
 
     return dijkstraPath(W, H, start, goal, passable, stepCost, diagOk);
@@ -1710,7 +1719,7 @@ bool Game::evadeStep() {
         if (!dung.inBounds(nx, ny)) continue;
 
         // Mirror tryMove() corner-cutting rules.
-        if (!phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, start, dx, dy)) {
+        if (!phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, start, dx, dy, levitating)) {
             continue;
         }
 

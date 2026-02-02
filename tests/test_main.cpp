@@ -4,6 +4,7 @@
 #include "settings.hpp"
 #include "scent_field.hpp"
 #include "wfc.hpp"
+#include "vault_prefab_catalog.hpp"
 #include "noise_localization.hpp"
 #include "proc_spells.hpp"
 #include "proc_names.hpp"
@@ -2135,6 +2136,174 @@ bool test_overworld_auto_travel_label() {
 
 
 
+
+
+bool test_auto_explore_frontier_levitation_crosses_chasm() {
+    Game g;
+    g.newGame(123456u);
+
+    // Keep only the player entity so incidental procgen spawns can't interfere with pathing checks.
+    const Entity p = g.player();
+    g.ents.clear();
+    g.ents.push_back(p);
+    g.playerId_ = p.id;
+
+    g.ground.clear();
+    g.trapsCur.clear();
+
+    for (auto& v : g.confusionGas_) v = 0u;
+    for (auto& v : g.poisonGas_) v = 0u;
+    for (auto& v : g.corrosiveGas_) v = 0u;
+    for (auto& v : g.fireField_) v = 0u;
+
+    Dungeon& d = GameTestAccess::dung(g);
+
+    // Make the whole map a stable, explored wall field so only our constructed corridor matters.
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            Tile& t = d.at(x, y);
+            t.type = TileType::Wall;
+            t.explored = true;
+            t.visible = false;
+        }
+    }
+
+    // Construct a minimal explored corridor where the ONLY way to reach the frontier is by crossing a chasm.
+    const Vec2i start{5, 5};
+    const Vec2i chasm{6, 5};
+    const Vec2i frontier{7, 5};
+    const Vec2i unknown{8, 5};
+
+    d.at(start.x, start.y).type = TileType::Floor;
+    d.at(chasm.x, chasm.y).type = TileType::Chasm;
+    d.at(frontier.x, frontier.y).type = TileType::Floor;
+
+    // Unexplored tile adjacent to the frontier (makes frontier a valid explore target).
+    d.at(unknown.x, unknown.y).type = TileType::Floor;
+    d.at(unknown.x, unknown.y).explored = false;
+
+    // Ensure the corridor itself is explored so auto-explore considers it.
+    d.at(start.x, start.y).explored = true;
+    d.at(chasm.x, chasm.y).explored = true;
+    d.at(frontier.x, frontier.y).explored = true;
+
+    g.playerMut().pos = start;
+
+    // Without levitation: frontier is unreachable (only path crosses chasm).
+    g.playerMut().effects.levitationTurns = 0;
+    const Vec2i f0 = g.findNearestExploreFrontier();
+    CHECK(f0.x == -1 && f0.y == -1);
+
+    // With levitation: chasm becomes traversable; frontier should be discovered.
+    g.playerMut().effects.levitationTurns = 10;
+    const Vec2i f1 = g.findNearestExploreFrontier();
+    CHECK(f1.x == frontier.x);
+    CHECK(f1.y == frontier.y);
+
+    return true;
+}
+
+
+
+bool test_auto_explore_frontier_levitation_diagonal_chasm_corner() {
+    Game g;
+    g.newGame(123456u);
+
+    // Keep only the player entity so incidental procgen spawns can't interfere with pathing checks.
+    const Entity p0 = g.player();
+    g.ents.clear();
+    g.ents.push_back(p0);
+    g.playerId_ = p0.id;
+
+    g.ground.clear();
+    g.trapsCur.clear();
+
+    for (auto& v : g.confusionGas_) v = 0u;
+    for (auto& v : g.poisonGas_) v = 0u;
+    for (auto& v : g.corrosiveGas_) v = 0u;
+    for (auto& v : g.fireField_) v = 0u;
+
+    Dungeon& d = GameTestAccess::dung(g);
+
+    // Make the whole map a stable, explored wall field so only our constructed corridor matters.
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            Tile& t = d.at(x, y);
+            t.type = TileType::Wall;
+            t.explored = true;
+            t.visible = false;
+        }
+    }
+
+    // Construct a minimal explored layout where the ONLY way to reach the frontier is a diagonal step
+    // whose adjacent orthogonals are chasms. Those chasm tiles are marked as hazardous so the search
+    // cannot step onto them (forcing the diagonal edge to be considered).
+    const Vec2i start{5, 5};
+    const Vec2i ch1{6, 5};
+    const Vec2i ch2{5, 6};
+    const Vec2i frontier{6, 6};
+    const Vec2i unknown{7, 6};
+
+    d.at(start.x, start.y).type = TileType::Floor;
+    d.at(ch1.x, ch1.y).type = TileType::Chasm;
+    d.at(ch2.x, ch2.y).type = TileType::Chasm;
+    d.at(frontier.x, frontier.y).type = TileType::Floor;
+
+    // Unexplored tile adjacent to the frontier (makes frontier a valid explore target).
+    d.at(unknown.x, unknown.y).type = TileType::Floor;
+    d.at(unknown.x, unknown.y).explored = false;
+
+    // Ensure the relevant tiles are explored.
+    d.at(start.x, start.y).explored = true;
+    d.at(ch1.x, ch1.y).explored = true;
+    d.at(ch2.x, ch2.y).explored = true;
+    d.at(frontier.x, frontier.y).explored = true;
+
+    // Block stepping onto the chasm orthogonals so the frontier is only reachable via the diagonal edge.
+    const int W = d.width;
+    const int i1 = ch1.x + ch1.y * W;
+    const int i2 = ch2.x + ch2.y * W;
+    if (i1 >= 0 && static_cast<size_t>(i1) < g.fireField_.size()) g.fireField_[static_cast<size_t>(i1)] = 10u;
+    if (i2 >= 0 && static_cast<size_t>(i2) < g.fireField_.size()) g.fireField_[static_cast<size_t>(i2)] = 10u;
+
+    g.playerMut().pos = start;
+
+    // Without levitation: frontier is unreachable.
+    g.playerMut().effects.levitationTurns = 0;
+    const Vec2i f0 = g.findNearestExploreFrontier();
+    CHECK(f0.x == -1 && f0.y == -1);
+
+    // With levitation: chasm-adjacent diagonal should be allowed, making the frontier reachable.
+    g.playerMut().effects.levitationTurns = 10;
+    const Vec2i f1 = g.findNearestExploreFrontier();
+    CHECK(f1.x == frontier.x);
+    CHECK(f1.y == frontier.y);
+
+    // And tryMove should allow the diagonal step across the chasm corner while levitating.
+    const bool moved = g.tryMove(g.playerMut(), 1, 1);
+    CHECK(moved);
+    CHECK(g.player().pos.x == frontier.x);
+    CHECK(g.player().pos.y == frontier.y);
+
+    return true;
+}
+
+
+
+bool test_vault_prefab_catalog_valid() {
+    size_t n = 0;
+    const VaultPrefabDef* defs = vaultprefabs::catalog(n);
+    CHECK(defs != nullptr);
+    CHECK(n > 0);
+
+    for (size_t i = 0; i < n; ++i) {
+        std::string err;
+        CHECK(vaultprefabs::validate(defs[i], err));
+    }
+
+    return true;
+}
+
 bool test_overworld_gate_alignment() {
     const uint32_t seed = 0xC0FFEEu;
 
@@ -2379,6 +2548,8 @@ int main(int argc, char** argv) {
         {"overworld_auto_travel_pause_resume", test_overworld_auto_travel_pauses_and_resumes_in_ui},
         {"overworld_auto_travel_manual_pause", test_overworld_auto_travel_manual_pause},
         {"overworld_auto_travel_label", test_overworld_auto_travel_label},
+        {"auto_explore_levitation_chasm", test_auto_explore_frontier_levitation_crosses_chasm},
+        {"auto_explore_levitation_chasm_diagonal", test_auto_explore_frontier_levitation_diagonal_chasm_corner},
         {"overworld_gate_alignment", test_overworld_gate_alignment},
         {"ident_appearances", test_ident_appearance_procgen_determinism},
         {"shop_profiles",   test_proc_shop_profiles},

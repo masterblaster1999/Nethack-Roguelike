@@ -136,7 +136,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     }
 
     // Prevent diagonal corner-cutting (no slipping between two blocking tiles).
-    if (!phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, e.pos, dx, dy)) {
+    if (!phasing && dx != 0 && dy != 0 && !diagonalPassable(dung, e.pos, dx, dy, levitating)) {
         if (e.kind == EntityKind::Player) pushMsg("YOU CAN'T SQUEEZE THROUGH.");
         return false;
     }
@@ -2360,7 +2360,7 @@ bool Game::kickInDirection(int dx, int dy) {
     }
 
     // Prevent kicking diagonally "through" a blocked corner.
-    if (dx != 0 && dy != 0 && !diagonalPassable(dung, p.pos, dx, dy)) {
+    if (dx != 0 && dy != 0 && !diagonalPassable(dung, p.pos, dx, dy, (p.effects.levitationTurns > 0))) {
         pushMsg("YOU CAN'T REACH AROUND THE CORNER.", MessageKind::Info, true);
         return false;
     }
@@ -3857,7 +3857,7 @@ bool Game::digInDirection(int dx, int dy) {
     }
 
     // Prevent digging diagonally "through" a blocked corner.
-    if (dx != 0 && dy != 0 && !diagonalPassable(dung, src, dx, dy)) {
+    if (dx != 0 && dy != 0 && !diagonalPassable(dung, src, dx, dy, (player().effects.levitationTurns > 0))) {
         pushMsg("YOU CAN'T REACH AROUND THE CORNER.", MessageKind::Info, true);
         return false;
     }

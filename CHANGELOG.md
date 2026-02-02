@@ -1,5 +1,22 @@
 # Changelog
 
+## Round 235
+- Dungeon generation: added a large shared vault prefab catalog (260+ micro-vault pockets) to diversify corridor side rooms.
+- Added catalog validation helpers + unit test to ensure prefab dimensions and entrance rules stay correct.
+- Build: registered the new catalog .cpp in CMake sources.
+
+
+## Round 234
+- Levitation: diagonal corner-cutting treats adjacent chasm tiles as clear (movement + auto-pathing).
+- Added a regression test for levitation-enabled diagonal frontier reachability across chasm corners.
+
+## Round 233 - Auto-Explore Levitation & Cursor Label
+
+- Auto-explore now treats **chasms as traversable while levitating**, so it can select frontiers/search spots across sinkholes/void when the player is safely hovering.
+- Overworld Atlas cursor travel now sets the destination label to **CURSOR** (so overlays/HUD show a concrete goal label rather than the generic default).
+- Docs: refreshed the Overworld Atlas doc to reflect persistence, waypoint/travel controls, and route overlays.
+- Tests: added a regression test ensuring levitation enables frontier selection across a chasm barrier.
+
 
 ## Round 232 - Atlas Auto-Travel Route Overlay
 

@@ -1922,7 +1922,7 @@ if (optionsSel == 20) {
         if (a == Action::OverworldMapTravelToCursor) {
             overworldMapOpen = false;
             overworldMapCursorActive_ = false;
-            requestOverworldAutoTravelToChunk(overworldMapCursorPos_);
+            requestOverworldAutoTravelToChunk(overworldMapCursorPos_, "CURSOR");
             return;
         }
 

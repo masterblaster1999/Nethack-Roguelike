@@ -51,7 +51,7 @@ int shopBaseValuePerUnit(const Item& it) {
         uint32_t cropSeed = 0u;
         if (it.charges != 0) cropSeed = cropSeedFromCharges(it.charges);
         else if (it.spriteSeed != 0u) cropSeed = it.spriteSeed;
-        else cropSeed = hash32(static_cast<uint32_t>(it.id) ^ 0xCROP5EEDu);
+        else cropSeed = hash32(static_cast<uint32_t>(it.id) ^ "CROP5EED"_tag);
 
         const bool hasMeta = ((it.enchant & (1 << 12)) != 0);
         const int rarityHint = hasMeta ? cropRarityFromEnchant(it.enchant) : -1;

@@ -1,15 +1,17 @@
 {
-  "patch_id": "round235_patch",
-  "previous_patch_id": "round234_patch",
-  "round": 235,
-  "created_utc": "2026-02-01T12:52:31Z",
-  "summary": "Expanded vault prefab variety via shared catalog + added catalog validation test.",
+  "patch_id": "round236_patch",
+  "previous_patch_id": "round235_patch",
+  "round": 236,
+  "created_utc": "2026-02-02T09:45:35Z",
+  "summary": "Fixed MSVC compile errors in farming/inventory and cleaned a few shadowing warnings.",
   "files_changed_or_added_this_round": [
-    "CMakeLists.txt",
-    "src/dungeon.cpp",
-    "src/vault_prefab_catalog.hpp",
-    "src/vault_prefab_catalog.cpp",
-    "tests/test_main.cpp",
+    "src/game_farming.cpp",
+    "src/shop.cpp",
+    "src/game_inventory.cpp",
+    "src/farm_gen.hpp",
+    "src/game_save.cpp",
+    "src/game_look.cpp",
+    "src/game_internal.hpp",
     "CHANGELOG.md",
     "PATCH_MANIFEST.json"
   ],
@@ -133,11 +135,14 @@
     "src/wards.hpp",
     "src/wfc.hpp",
     "tests/CMakeLists.txt",
-    "tests/test_main.cpp"
+    "tests/test_main.cpp",
+    "src/game_farming.cpp",
+    "src/shop.cpp"
   ],
   "notes_for_reviewer": [
-    "Added a shared vault prefab catalog (262 entries) and wired dungeon generation to pull from it.",
-    "Registered the new catalog translation unit in the core CMake source list.",
-    "Added a unit test to validate prefab catalog structure (dimensions + single entrance door on boundary)."
+    "Replaced invalid hex-like salt literals (e.g., 0xCROP5EEDu) with stable tag hashes (\"...\"_tag) so MSVC parses them correctly.",
+    "Farming helper functions now use Game::dungeon() instead of accessing the private Game::dung member.",
+    "Added farmgen::qualityGradeLetter (0..15 -> C/B/A/S/SS) for crop produce UI display.",
+    "Renamed a few locals (fx/line/pct) to avoid MSVC shadowing warnings."
   ]
 }

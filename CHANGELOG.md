@@ -1,5 +1,10 @@
 # Changelog
 
+## Round 236
+- Build (MSVC): fixed farming/crop compile errors (tag salts, dungeon accessor, clamp).
+- Farming UI: added quality grade label helper for crop produce.
+- Cleanup: renamed a few locals to avoid shadowing warnings.
+
 ## Round 235
 - Dungeon generation: added a large shared vault prefab catalog (260+ micro-vault pockets) to diversify corridor side rooms.
 - Added catalog validation helpers + unit test to ensure prefab dimensions and entrance rules stay correct.

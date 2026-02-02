@@ -3472,7 +3472,7 @@ bool Game::useSelected() {
         } else if (it.spriteSeed != 0u) {
             cropSeed = it.spriteSeed;
         } else {
-            cropSeed = hash32(static_cast<uint32_t>(it.id) ^ 0xCR0PFEEDu);
+            cropSeed = hash32(static_cast<uint32_t>(it.id) ^ "CR0PFEED"_tag);
         }
 
         const bool hasMeta = ((it.enchant & (1 << 12)) != 0);

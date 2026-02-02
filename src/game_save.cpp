@@ -2705,10 +2705,10 @@ if constexpr (SAVE_VERSION >= 55u) {
         uint32_t featCount = static_cast<uint32_t>(overworldFeatureFlags_.size());
         writePod(mem, featCount);
         for (const auto& kv : overworldFeatureFlags_) {
-            const int32_t fx = static_cast<int32_t>(kv.first.x);
-            const int32_t fy = static_cast<int32_t>(kv.first.y);
-            writePod(mem, fx);
-            writePod(mem, fy);
+            const int32_t featX = static_cast<int32_t>(kv.first.x);
+            const int32_t featY = static_cast<int32_t>(kv.first.y);
+            writePod(mem, featX);
+            writePod(mem, featY);
             const uint8_t flags = kv.second;
             writePod(mem, flags);
         }

@@ -668,9 +668,9 @@ if (!hallu && branch_ != DungeonBranch::Camp) {
             ss << " | ECO: " << ecosystemKindLabel(eco);
 
             // Microclimate hint: some ecosystems slightly alter visibility.
-            const EcosystemFx fx = ecosystemFx(eco);
-            if (fx.fovDelta != 0) {
-                ss << " | VIS:" << (fx.fovDelta > 0 ? "+" : "") << fx.fovDelta;
+            const EcosystemFx ecoFx = ecosystemFx(eco);
+            if (ecoFx.fovDelta != 0) {
+                ss << " | VIS:" << (ecoFx.fovDelta > 0 ? "+" : "") << ecoFx.fovDelta;
             }
         }
 

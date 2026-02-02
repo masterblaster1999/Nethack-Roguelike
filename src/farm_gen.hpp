@@ -17,6 +17,7 @@
 
 #include <array>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -368,6 +369,19 @@ inline int qualityGradeIndex(int fertility, CropRarity rarity, bool shiny) {
     if (score >= 72) return 2;
     if (score >= 52) return 1;
     return 0;
+}
+
+
+// A compact grade label for a 0..15 produce-quality value.
+// Quality is stored with 4 bits (0..15) on CropProduce items, where higher is better.
+// This maps the fine-grained scale onto the familiar C/B/A/S/SS labels used by the UI.
+inline const char* qualityGradeLetter(int quality) {
+    const int q = clampi(quality, 0, 15);
+    if (q >= 12) return "SS";
+    if (q >= 9) return "S";
+    if (q >= 6) return "A";
+    if (q >= 3) return "B";
+    return "C";
 }
 
 inline const char* qualityGradeName(int idx) {

@@ -1350,12 +1350,12 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             }
 
             if (!sug.empty()) {
-                std::string line = "DID YOU MEAN: ";
+                std::string suggestLine = "DID YOU MEAN: ";
                 for (size_t i = 0; i < sug.size(); ++i) {
-                    if (i) line += ", ";
-                    line += sug[i];
+                    if (i) suggestLine += ", ";
+                    suggestLine += sug[i];
                 }
-                game.pushSystemMessage(line);
+                game.pushSystemMessage(suggestLine);
             }
 
             game.pushSystemMessage("TIP: press TAB after '@' for completion, or use #binds to list keybind tokens.");
@@ -2886,8 +2886,8 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
     for (const auto& e : top) {
         if (e.idx == static_cast<int>(EcosystemKind::None)) continue;
         if (e.count <= 0 || ecoTotal <= 0) break;
-        const int pct = static_cast<int>(std::round(100.0 * static_cast<double>(e.count) / static_cast<double>(ecoTotal)));
-        ss << " | " << ecosystemKindName(static_cast<EcosystemKind>(e.idx)) << " " << pct << "%";
+        const int pctPercent = static_cast<int>(std::round(100.0 * static_cast<double>(e.count) / static_cast<double>(ecoTotal)));
+        ss << " | " << ecosystemKindName(static_cast<EcosystemKind>(e.idx)) << " " << pctPercent << "%";
         if (++shown >= 3) break;
     }
 

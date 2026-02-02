@@ -22,7 +22,7 @@ bool cropHasMeta(const Item& it) {
 }
 
 bool isIrrigationWaterTile(const Game& g, int x, int y) {
-    const TileType t = g.dung.at(x, y).type;
+    const TileType t = g.dungeon().at(x, y).type;
     if (t == TileType::Fountain) return true;
 
     // The Surface Camp uses Chasm features as the river moat; count them as irrigation water.
@@ -37,8 +37,9 @@ int farmWaterTierAt(const Game& g, Vec2i p) {
     static constexpr int maxR = 8;
     int best = maxR + 1;
 
-    const int w = g.dung.width;
-    const int h = g.dung.height;
+    const Dungeon& dung = g.dungeon();
+    const int w = dung.width;
+    const int h = dung.height;
 
     const int minX = std::max(0, p.x - maxR);
     const int maxX = std::min(w - 1, p.x + maxR);
@@ -102,7 +103,7 @@ bool Game::useGardenHoeAtPlayer(int invIndex) {
     // Can't place a plot on top of other stationary props.
     for (const auto& gi : ground) {
         if (gi.pos != ppos) continue;
-        if (gi.item.kind == ItemKind::Chest || gi.item.kind == ItemKind::ChestOpen || gi.item.kind == ItemKind::EcosystemNode) {
+        if (gi.item.kind == ItemKind::Chest || gi.item.kind == ItemKind::ChestOpen || isEcosystemNodeKind(gi.item.kind)) {
             pushMsg("SOMETHING IS IN THE WAY.", MessageKind::Bad, true);
             return false;
         }
@@ -118,7 +119,7 @@ bool Game::useGardenHoeAtPlayer(int invIndex) {
 
     // Deterministic soil properties per tile.
     const uint32_t levelSeed = levelGenSeed(LevelId{branch_, depth_});
-    const uint32_t soilSeed = farmgen::soilSeedAt(hashCombine(levelSeed, 0xFARM5011u), ppos);
+    const uint32_t soilSeed = farmgen::soilSeedAt(hashCombine(levelSeed, "FARM5011"_tag), ppos);
     const farmgen::SoilSpec ss = farmgen::makeSoil(soilSeed);
 
     const int affinityIdx = farmgen::farmTagIndex(ss.affinityTag);
@@ -194,7 +195,7 @@ bool Game::plantSeedAtPlayer(const Item& seedItem) {
     const int affIdx = tilledSoilAffinityFromEnchant(soilIt.enchant);
 
     // Decode crop seed + meta.
-    uint32_t cropSeed = cropSeedFromAny(seedItem, 0xCROP5EEDu);
+    uint32_t cropSeed = cropSeedFromAny(seedItem, "CROP5EED"_tag);
     if (cropSeed == 0u) cropSeed = 1u;
 
     const bool hasMeta = cropHasMeta(seedItem);
@@ -259,7 +260,7 @@ bool Game::harvestFarmAtPlayer() {
     const Item plantIt = ground[static_cast<size_t>(plantIdx)].item;
 
     uint32_t cropSeed = plantIt.spriteSeed;
-    if (cropSeed == 0u) cropSeed = hash32(static_cast<uint32_t>(plantIt.id) ^ 0xCROPPL4NTu);
+    if (cropSeed == 0u) cropSeed = hash32(static_cast<uint32_t>(plantIt.id) ^ "CROPPL4NT"_tag);
 
     const bool hasMeta = cropHasMeta(plantIt);
     const int rarityHint  = hasMeta ? cropRarityFromEnchant(plantIt.enchant) : -1;
@@ -286,7 +287,7 @@ bool Game::harvestFarmAtPlayer() {
     // Deterministic yield per planted crop.
     uint32_t harvestSeed = hashCombine(seed_, cropSeed);
     harvestSeed = hashCombine(harvestSeed, static_cast<uint32_t>(plantIt.charges));
-    harvestSeed = hashCombine(harvestSeed, 0xFARMH4RVu);
+    harvestSeed = hashCombine(harvestSeed, "FARMH4RV"_tag);
 
     int count = farmgen::harvestYieldCount(cs, fert, harvestSeed);
     count = std::max(1, count);
@@ -310,7 +311,7 @@ bool Game::harvestFarmAtPlayer() {
     int seedsBack = 0;
     {
         RNG lrng(hash32(harvestSeed ^ 0x5EEDBACCu));
-        const float p = clampf(0.15f + 0.10f * static_cast<float>(quality), 0.10f, 0.75f);
+        const float p = std::clamp(0.15f + 0.10f * static_cast<float>(quality), 0.10f, 0.75f);
         if (lrng.next01() < p) seedsBack += 1;
         if (quality >= 3 && lrng.next01() < 0.25f) seedsBack += 1;
         if (quality >= 4 && lrng.next01() < 0.15f) seedsBack += 1;
@@ -384,7 +385,7 @@ bool Game::describeFarmAtPlayer() {
 
         // Compute a rough remaining time.
         uint32_t cropSeed = gi.item.spriteSeed;
-        if (cropSeed == 0u) cropSeed = hash32(static_cast<uint32_t>(gi.item.id) ^ 0xCROPPL4NTu);
+        if (cropSeed == 0u) cropSeed = hash32(static_cast<uint32_t>(gi.item.id) ^ "CROPPL4NT"_tag);
 
         const bool hasMeta = cropHasMeta(gi.item);
         const int rarityHint  = hasMeta ? cropRarityFromEnchant(gi.item.enchant) : -1;
@@ -446,7 +447,7 @@ void Game::updateFarmGrowth() {
         if (!isFarmPlantKind(gi.item.kind)) continue;
 
         uint32_t cropSeed = gi.item.spriteSeed;
-        if (cropSeed == 0u) cropSeed = hash32(static_cast<uint32_t>(gi.item.id) ^ 0xCROPPL4NTu);
+        if (cropSeed == 0u) cropSeed = hash32(static_cast<uint32_t>(gi.item.id) ^ "CROPPL4NT"_tag);
 
         const bool hasMeta = cropHasMeta(gi.item);
         const int rarityHint  = hasMeta ? cropRarityFromEnchant(gi.item.enchant) : -1;

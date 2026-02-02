@@ -1,5 +1,10 @@
 # Changelog
 
+
+## Round 238
+- Build (MSVC): fixed main.cpp/render.cpp compile errors by ensuring patched sources apply to the nested zip folder layout.
+- Render: corrected material overlay argument ordering (seed/material/frame/pxSize) and updated UI theme switch to current UITheme enum values.
+
 ## Round 236
 - Build (MSVC): fixed farming/crop compile errors (tag salts, dungeon accessor, clamp).
 - Farming UI: added quality grade label helper for crop produce.

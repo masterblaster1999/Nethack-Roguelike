@@ -667,11 +667,10 @@ int main(int argc, char** argv) {
             game.setAutoPickupMode(settings.autoPickup);
             game.setAutoExploreSearchEnabled(settings.autoExploreSearch);
         }
-        }
 
         if (replayMode) {
             game.pushSystemMessage("REPLAY MODE: " + replayPathFs.string());
-        game.pushSystemMessage("REPLAY CONTROLS: Space=pause, .=step, +/-=speed, Esc=stop (tokens: replay_pause/replay_step/replay_speed_up/replay_speed_down).");
+            game.pushSystemMessage("REPLAY CONTROLS: Space=pause, .=step, +/-=speed, Esc=stop (tokens: replay_pause/replay_step/replay_speed_up/replay_speed_down).");
             if (!replayFile.meta.gameVersion.empty() && replayFile.meta.gameVersion != PROCROGUE_VERSION) {
                 game.pushSystemMessage("WARNING: REPLAY VERSION MISMATCH (" + replayFile.meta.gameVersion + " != " + std::string(PROCROGUE_VERSION) + ")");
             }

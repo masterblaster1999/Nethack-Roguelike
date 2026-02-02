@@ -4545,7 +4545,7 @@ void Renderer::ensureRaycast3DAssets(uint32_t styleSeed, uint32_t lvlSeed) {
                     hashCombine(static_cast<uint32_t>(style), hashCombine(static_cast<uint32_t>(mi), static_cast<uint32_t>(v)))));
 
                 SpritePixels base = generateThemedFloorTile(bSeed, 0, style, texPx);
-                SpritePixels over = generateFloorMaterialOverlay(oSeed, 0, mat, texPx);
+                SpritePixels over = generateFloorMaterialOverlay(oSeed, mat, 0, texPx);
 
                 // Blend material detail over the base.
                 const size_t n = std::min(base.px.size(), over.px.size());
@@ -4617,7 +4617,7 @@ void Renderer::ensureRaycast3DAssets(uint32_t styleSeed, uint32_t lvlSeed) {
                     hashCombine(static_cast<uint32_t>(style), hashCombine(static_cast<uint32_t>(mi), static_cast<uint32_t>(v)))));
 
                 SpritePixels base = generateThemedFloorTile(bSeed, 0, style, texPx);
-                SpritePixels over = generateFloorMaterialOverlay(oSeed, 0, mat, texPx);
+                SpritePixels over = generateFloorMaterialOverlay(oSeed, mat, 0, texPx);
 
                 const size_t n = std::min(base.px.size(), over.px.size());
                 for (size_t i = 0; i < n; ++i) {
@@ -4643,7 +4643,7 @@ void Renderer::ensureRaycast3DAssets(uint32_t styleSeed, uint32_t lvlSeed) {
             const uint32_t oSeed = hashCombine(lvlSeed,  hashCombine(overWallTag, hashCombine(static_cast<uint32_t>(mi), static_cast<uint32_t>(v))));
 
             SpritePixels base = generateWallTile(bSeed, 0, texPx);
-            SpritePixels over = generateWallMaterialOverlay(oSeed, 0, mat, texPx);
+            SpritePixels over = generateWallMaterialOverlay(oSeed, mat, 0, texPx);
 
             const size_t n = std::min(base.px.size(), over.px.size());
             for (size_t i = 0; i < n; ++i) {
@@ -5017,21 +5017,23 @@ void Renderer::drawRaycast3DView(const Game& game, uint32_t styleSeed, uint32_t 
         Color coolB{195, 214, 232, 255};
         Color neutralA{245, 245, 245, 255};
         Color neutralB{210, 210, 210, 255};
+        Color arcA{245, 238, 255, 255};
+        Color arcB{210, 190, 235, 255};
 
         Color a = neutralA;
         Color b = neutralB;
-        switch (game.uiTheme) {
-            case UITheme::Classic:
+        switch (game.uiTheme()) {
+            case UITheme::Parchment:
                 a = warmA;
                 b = warmB;
                 break;
-            case UITheme::Dim:
+            case UITheme::DarkStone:
                 a = coolA;
                 b = coolB;
                 break;
-            case UITheme::Hicon:
-                a = neutralA;
-                b = neutralB;
+            case UITheme::Arcane:
+                a = arcA;
+                b = arcB;
                 break;
         }
 
@@ -5073,13 +5075,14 @@ void Renderer::drawRaycast3DView(const Game& game, uint32_t styleSeed, uint32_t 
         }
         // Monster torches.
         for (const auto& e : game.entities()) {
+            if (e.hp <= 0) continue;
             if (e.id == game.player().id) continue;
-            for (const auto& it : e.pocket.consumables) {
-                if (it.kind == ItemKind::TorchLit && it.charges > 0) {
-                    torches.push_back(TorchSrc{e.pos, 7, 0.85f});
-                    break;
-                }
-            }
+
+            const Item& pc = e.pocketConsumable;
+            if (pc.id == 0 || pc.count <= 0) continue;
+            if (pc.kind != ItemKind::TorchLit || pc.charges <= 0) continue;
+
+            torches.push_back(TorchSrc{e.pos, 7, 0.85f});
         }
     }
 

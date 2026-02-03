@@ -92,7 +92,7 @@ void Game::recomputeLightMap() {
 
     // Always keep caches sized correctly (even when lighting is "off") so the renderer
     // can safely query light color without special-casing.
-    lightMap_.assign(n, 255);
+    lightMap_.assign(n, uint8_t{255});
     lightColorMap_.assign(n, Color{ 255, 255, 255, 255 });
 
     if (!darknessActive()) {
@@ -102,7 +102,7 @@ void Game::recomputeLightMap() {
 
     // Darkness mode: build a per-tile brightness map (for gameplay) + a per-tile RGB light
     // modulation map (for rendering).
-    lightMap_.assign(n, 0);
+    lightMap_.assign(n, uint8_t{0});
     lightColorMap_.assign(n, Color{ 0, 0, 0, 255 });
 
     auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * dung.width + x); };
@@ -506,7 +506,7 @@ void Game::recomputeLightMap() {
     // If a tile has brightness but ended up with no RGB tint (should be rare),
     // fall back to grayscale to avoid a "black light" edge case.
     for (size_t i = 0; i < lightMap_.size() && i < lightColorMap_.size(); ++i) {
-        if (lightMap_[i] == 0) continue;
+        if (lightMap_[i] == uint8_t{0}) continue;
         Color& c = lightColorMap_[i];
         if (c.r == 0 && c.g == 0 && c.b == 0) {
             c.r = lightMap_[i];
@@ -582,37 +582,37 @@ void Game::recomputeFov() {
         if (!dung.at(e.pos.x, e.pos.y).visible) continue;
         const size_t idx = static_cast<size_t>(e.kind);
         if (idx < codexSeen_.size()) {
-            codexSeen_[idx] = 1;
+            codexSeen_[idx] = uint8_t{1};
         }
     }
 }
 
 uint8_t Game::confusionGasAt(int x, int y) const {
-    if (!dung.inBounds(x, y)) return 0u;
+    if (!dung.inBounds(x, y)) return uint8_t{0};
     const size_t i = static_cast<size_t>(y * dung.width + x);
-    if (i >= confusionGas_.size()) return 0u;
+    if (i >= confusionGas_.size()) return uint8_t{0};
     return confusionGas_[i];
 }
 
 uint8_t Game::poisonGasAt(int x, int y) const {
-    if (!dung.inBounds(x, y)) return 0u;
+    if (!dung.inBounds(x, y)) return uint8_t{0};
     const size_t i = static_cast<size_t>(y * dung.width + x);
-    if (i >= poisonGas_.size()) return 0u;
+    if (i >= poisonGas_.size()) return uint8_t{0};
     return poisonGas_[i];
 }
 
 uint8_t Game::corrosiveGasAt(int x, int y) const {
-    if (!dung.inBounds(x, y)) return 0u;
+    if (!dung.inBounds(x, y)) return uint8_t{0};
     const size_t i = static_cast<size_t>(y * dung.width + x);
-    if (i >= corrosiveGas_.size()) return 0u;
+    if (i >= corrosiveGas_.size()) return uint8_t{0};
     return corrosiveGas_[i];
 }
 
 
 uint8_t Game::fireAt(int x, int y) const {
-    if (!dung.inBounds(x, y)) return 0u;
+    if (!dung.inBounds(x, y)) return uint8_t{0};
     const size_t i = static_cast<size_t>(y * dung.width + x);
-    if (i >= fireField_.size()) return 0u;
+    if (i >= fireField_.size()) return uint8_t{0};
     return fireField_[i];
 }
 void Game::updateScentMap() {
@@ -629,7 +629,7 @@ void Game::updateScentMap() {
     // smell-capable monsters have a harder time tracking you around corners.
     // Heavy armor / heavy burden reduce the benefit.
     const Entity& p = player();
-    uint8_t deposit = 255u;
+    uint8_t deposit = uint8_t{255};
 
     if (isSneaking()) {
         // Base sneaking deposit: ~200 down to ~80 with high agility.
@@ -688,8 +688,8 @@ void Game::updateScentMap() {
 }
 
 uint8_t Game::scentAt(int x, int y) const {
-    if (!dung.inBounds(x, y)) return 0u;
+    if (!dung.inBounds(x, y)) return uint8_t{0};
     const size_t i = static_cast<size_t>(y * dung.width + x);
-    if (i >= scentField_.size()) return 0u;
+    if (i >= scentField_.size()) return uint8_t{0};
     return scentField_[i];
 }

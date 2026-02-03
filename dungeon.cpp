@@ -817,7 +817,7 @@ void placeStrategicCorridorDoors(Dungeon& d, RNG& rng, const std::vector<uint8_t
     const int maxDoors = std::max(4, (d.width * d.height) / 300);
     int placed = 0;
 
-    std::vector<uint8_t> visited(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> visited(static_cast<size_t>(d.width * d.height), uint8_t{0});
 
     auto tryPlaceOnSegment = [&](const std::vector<Vec2i>& seg) {
         if (placed >= maxDoors) return;
@@ -1231,7 +1231,7 @@ bool carveCorridorAStar(Dungeon& d, RNG& rng, Vec2i start, Vec2i goal, const std
 
     std::vector<int> gCost(static_cast<size_t>(S), INF);
     std::vector<int> parent(static_cast<size_t>(S), -1);
-    std::vector<uint8_t> closed(static_cast<size_t>(S), 0);
+    std::vector<uint8_t> closed(static_cast<size_t>(S), uint8_t{0});
 
     const int startState = stateOf(start.x, start.y, DIR_NONE);
     gCost[static_cast<size_t>(startState)] = 0;
@@ -1684,7 +1684,7 @@ bool maybeCarveCorridorHubsAndHalls(Dungeon& d, RNG& rng, int depth, bool eligib
     auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * d.width + x); };
 
     // Room footprint mask: includes all tiles inside room rectangles (even if later shaped).
-    std::vector<uint8_t> roomMask(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> roomMask(static_cast<size_t>(d.width * d.height), uint8_t{0});
     for (const Room& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -1749,7 +1749,7 @@ bool maybeCarveCorridorHubsAndHalls(Dungeon& d, RNG& rng, int depth, bool eligib
     };
 
     // Spacing mask so we don't cluster hubs/halls.
-    std::vector<uint8_t> blocked(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> blocked(static_cast<size_t>(d.width * d.height), uint8_t{0});
     auto isBlocked = [&](int x, int y) -> bool {
         if (!d.inBounds(x, y)) return true;
         return blocked[idx(x, y)] != 0;
@@ -2092,7 +2092,7 @@ bool maybeCarveSinkholes(Dungeon& d, RNG& rng, int depth, bool eligible) {
     want = std::clamp(want, 1, 4);
 
     // Build in-room mask so we can preferentially carve sinkholes in corridors/tunnels.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), uint8_t{0});
     for (const auto& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -2103,7 +2103,7 @@ bool maybeCarveSinkholes(Dungeon& d, RNG& rng, int depth, bool eligible) {
     }
 
     // Protect a shortest path between stairs so sinkholes never block progression.
-    std::vector<uint8_t> protectedTile(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> protectedTile(static_cast<size_t>(d.width * d.height), uint8_t{0});
     auto markProtect = [&](int x, int y) {
         if (!d.inBounds(x, y)) return;
         protectedTile[static_cast<size_t>(y * d.width + x)] = 1;
@@ -3371,7 +3371,7 @@ static void buildRoomDoorInfo(const Dungeon& d, const Room& r,
 }
 
 static void buildRoomKeepMask(const Dungeon& d, const std::vector<Vec2i>& pts, std::vector<uint8_t>& keep) {
-    keep.assign(static_cast<size_t>(d.width * d.height), 0);
+    keep.assign(static_cast<size_t>(d.width * d.height), uint8_t{0});
     for (const Vec2i& p : pts) {
         if (!d.inBounds(p.x, p.y)) continue;
         keep[static_cast<size_t>(p.y * d.width + p.x)] = 1;
@@ -3399,7 +3399,7 @@ static void buildRoomKeepMask(const Dungeon& d, const std::vector<Vec2i>& pts, s
 static bool roomInteriorConnectedSingleComponent(const Dungeon& d, const Room& r, const std::vector<Vec2i>& doorInside) {
     auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * d.width + x); };
 
-    std::vector<uint8_t> visited(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> visited(static_cast<size_t>(d.width * d.height), uint8_t{0});
     std::queue<Vec2i> q;
 
     auto seed = [&](Vec2i p) {
@@ -4462,7 +4462,7 @@ bool placeChasmCauseway(Dungeon& d, RNG& rng, std::vector<TileChange>& changes,
     std::vector<Vec2i> starts;
     starts.reserve(static_cast<size_t>((W * H) / 16));
 
-    std::vector<uint8_t> isGoal(static_cast<size_t>(W * H), 0);
+    std::vector<uint8_t> isGoal(static_cast<size_t>(W * H), uint8_t{0});
 
     static const int dirs4[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
 
@@ -4991,7 +4991,7 @@ bool maybeCarveDeadEndClosets(Dungeon& d, RNG& rng, int depth, GenKind g) {
     if (W <= 4 || H <= 4) return false;
 
     // Build an "in room" mask so we only consider corridor/tunnel dead-ends.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), 0u);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), uint8_t{0});
     for (const auto& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -5942,7 +5942,7 @@ void generateBspRooms(Dungeon& d, RNG& rng) {
 
     // Precompute which tiles are inside rooms. Used both for smarter corridor routing
     // (avoid tunneling through other rooms) and for later branch/door placement passes.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), uint8_t{0});
     for (const auto& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -6296,7 +6296,7 @@ void generateRoomsGraph(Dungeon& d, RNG& rng, int depth) {
     }
 
     // Precompute which tiles are inside rooms for corridor routing + later passes.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), uint8_t{0});
     for (const Room& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -6332,7 +6332,7 @@ void generateRoomsGraph(Dungeon& d, RNG& rng, int depth) {
 
     // Connect rooms with an MST (guaranteed global connectivity).
     DSU dsu(n);
-    std::vector<uint8_t> usedEdge(edges.size(), 0);
+    std::vector<uint8_t> usedEdge(edges.size(), uint8_t{0});
 
     int used = 0;
     for (size_t ei = 0; ei < edges.size() && used < n - 1; ++ei) {
@@ -6533,7 +6533,7 @@ void generateMines(Dungeon& d, RNG& rng, int depth) {
     }
 
     // Mark chamber footprint so tunnel carving avoids cutting through rooms.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), uint8_t{0});
     for (const Room& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -6590,7 +6590,7 @@ void generateMines(Dungeon& d, RNG& rng, int depth) {
 
     // Connect chambers with a minimum spanning tree so the level is always fully navigable.
     DSU dsu(n);
-    std::vector<uint8_t> usedEdge(edges.size(), 0);
+    std::vector<uint8_t> usedEdge(edges.size(), uint8_t{0});
 
     int used = 0;
     for (size_t ei = 0; ei < edges.size() && used < n - 1; ++ei) {
@@ -6913,7 +6913,7 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
     };
     auto cidx = [&](int cx, int cy) { return static_cast<size_t>(cy * cellW + cx); };
 
-    std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), 0);
+    std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), uint8_t{0});
     std::vector<Vec2i> stack;
     stack.reserve(static_cast<size_t>(cellW * cellH));
 
@@ -7018,7 +7018,7 @@ void generateMaze(Dungeon& d, RNG& rng, int depth) {
     if (!d.inBounds(d.stairsDown.x, d.stairsDown.y)) d.stairsDown = {d.width - 2, d.height - 2};
 
     // Sprinkle some closed doors in corridor chokepoints to make LOS + combat more interesting.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), uint8_t{0});
     for (const auto& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -7281,7 +7281,7 @@ void generateWarrens(Dungeon& d, RNG& rng, int depth) {
     }
 
     // Sparse corridor doors: warrens should feel claustrophobic, but still benefit from LOS breaks.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), uint8_t{0});
     for (const auto& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -7394,7 +7394,7 @@ void generateCatacombs(Dungeon& d, RNG& rng, int depth) {
     }
 
     // 2) Mark room footprint so corridor carving can avoid slicing through rooms.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), uint8_t{0});
     for (const Room& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -7405,8 +7405,8 @@ void generateCatacombs(Dungeon& d, RNG& rng, int depth) {
     }
 
     // Track which cell-to-cell walls have been opened so we can add loops later.
-    std::vector<uint8_t> openE(static_cast<size_t>(cols * rows), 0);
-    std::vector<uint8_t> openS(static_cast<size_t>(cols * rows), 0);
+    std::vector<uint8_t> openE(static_cast<size_t>(cols * rows), uint8_t{0});
+    std::vector<uint8_t> openS(static_cast<size_t>(cols * rows), uint8_t{0});
 
     auto markOpen = [&](int ax, int ay, int bx, int by) {
         if (bx == ax + 1 && by == ay) openE[static_cast<size_t>(cidx(ax, ay))] = 1;
@@ -7516,7 +7516,7 @@ void generateCatacombs(Dungeon& d, RNG& rng, int depth) {
     };
 
     // 3) Build a maze over the cell grid (recursive backtracker) so all rooms are reachable.
-    std::vector<uint8_t> visited(static_cast<size_t>(cols * rows), 0);
+    std::vector<uint8_t> visited(static_cast<size_t>(cols * rows), uint8_t{0});
     std::vector<Vec2i> stack;
     stack.reserve(static_cast<size_t>(cols * rows));
 
@@ -7652,7 +7652,7 @@ void generateLabyrinth(Dungeon& d, RNG& rng, int depth) {
     };
     auto cidx = [&](int cx, int cy) { return static_cast<size_t>(cy * cellW + cx); };
 
-    std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), 0);
+    std::vector<uint8_t> vis(static_cast<size_t>(cellW * cellH), uint8_t{0});
     std::vector<Vec2i> stack;
     stack.reserve(static_cast<size_t>(cellW * cellH));
 
@@ -7874,7 +7874,7 @@ void generateLabyrinth(Dungeon& d, RNG& rng, int depth) {
     d.rooms.push_back({wallX + 1, wallY + 1, wallW - 2, wallH - 2, RoomType::Treasure});
 
     // Sprinkle some doors in corridor chokepoints.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), 0);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(d.width * d.height), uint8_t{0});
     for (const auto& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {
@@ -9063,7 +9063,7 @@ void Dungeon::computeFov(int px, int py, int radius, bool markExplored) {
 
 
 void Dungeon::computeFovMask(int px, int py, int radius, std::vector<uint8_t>& outMask) const {
-    outMask.assign(static_cast<size_t>(width * height), 0);
+    outMask.assign(static_cast<size_t>(width * height), uint8_t{0});
     if (!inBounds(px, py)) return;
 
     auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * width + x); };
@@ -9076,7 +9076,7 @@ void Dungeon::computeFovMask(int px, int py, int radius, std::vector<uint8_t>& o
 
     auto markVis = [&](int x, int y) {
         if (!inBounds(x, y)) return;
-        outMask[idx(x, y)] = 1;
+        outMask[idx(x, y)] = uint8_t{1};
     };
 
     // Always see your own tile

@@ -129,19 +129,37 @@ void Game::beginCrafting() {
     invCraftFirstId_ = 0;
     invCraftPreviewLines_.clear();
 
-    // Move selection to a sensible first ingredient (skip the kit itself).
+    // Move selection to a sensible first ingredient.
+    // Note: a single stackable item can count as 2 ingredients (two units from the same stack).
+    auto isEquippedId = [&](int id) -> bool {
+        return id != 0 && (id == equipMeleeId || id == equipRangedId || id == equipArmorId || id == equipRing1Id || id == equipRing2Id);
+    };
+
     int first = -1;
-    int eligible = 0;
+    int firstFallback = -1;
+    int eligibleUnits = 0;
     for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
-        if (!isCraftIngredientKind(inv[static_cast<size_t>(i)].kind)) continue;
-        ++eligible;
-        if (first < 0) first = i;
+        const Item& it = inv[static_cast<size_t>(i)];
+        if (!isCraftIngredientKind(it.kind)) continue;
+
+        if (firstFallback < 0) firstFallback = i;
+
+        const bool locked = (isEquippedId(it.id) && it.buc < 0);
+        if (first < 0 && !locked) first = i;
+
+        // Don't count locked (cursed equipped) items toward the "two ingredients" requirement.
+        if (locked) continue;
+
+        int units = 1;
+        if (isStackable(it.kind)) units = std::min(3, std::max(0, it.count));
+        eligibleUnits = std::min(3, eligibleUnits + units);
     }
+    if (first < 0) first = firstFallback;
     if (first >= 0) invSel = first;
     invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
 
-    if (eligible < 2) {
-        pushMsg("YOU NEED TWO INGREDIENTS TO CRAFT.", MessageKind::Info, true);
+    if (eligibleUnits < 2) {
+        pushMsg("YOU NEED TWO USABLE INGREDIENTS TO CRAFT.", MessageKind::Info, true);
     }
 
     pushMsg("CRAFTING: SELECT INGREDIENT 1 (ENTER). ESC TO EXIT.", MessageKind::System, true);
@@ -183,21 +201,32 @@ Game::CraftComputed Game::computeCraftComputed(const Item& a0, const Item& b0) c
     const EcosystemKind eco = dung.ecosystemAtCached(player().pos.x, player().pos.y);
     cc.ecosystem = eco;
 
-    uint32_t envSalt = 0u;
-    switch (rt) {
-        case RoomType::Armory:     envSalt = 0xA11C0B1Du; break;
-        case RoomType::Library:    envSalt = 0x0B00B1E5u; break;
-        case RoomType::Laboratory: envSalt = 0x1AB0B0A5u; break;
-        case RoomType::Shrine:     envSalt = 0x5A1B1E01u; break;
-        case RoomType::Camp:       envSalt = 0xCA9F0001u; break;
-        default: break;
+    // Shard refinement (two matching Essence Shards) is a pure upgrade mechanic.
+    // Keep it location-invariant so workstations/biomes don't change the result.
+    bool shardRefinement = false;
+    if (a0.kind == ItemKind::EssenceShard && b0.kind == ItemKind::EssenceShard) {
+        const craftgen::Essence ea = craftgen::essenceFor(a0);
+        const craftgen::Essence eb = craftgen::essenceFor(b0);
+        if (!ea.tag.empty() && ea.tag == eb.tag) shardRefinement = true;
     }
 
-    // Mix branch so Camp crafting doesn't accidentally mirror dungeon crafting exactly.
-    envSalt ^= static_cast<uint32_t>(branch_) * 0x9E3779B9u;
+    uint32_t envSalt = 0u;
+    if (!shardRefinement) {
+        switch (rt) {
+            case RoomType::Armory:     envSalt = 0xA11C0B1Du; break;
+            case RoomType::Library:    envSalt = 0x0B00B1E5u; break;
+            case RoomType::Laboratory: envSalt = 0x1AB0B0A5u; break;
+            case RoomType::Shrine:     envSalt = 0x5A1B1E01u; break;
+            case RoomType::Camp:       envSalt = 0xCA9F0001u; break;
+            default: break;
+        }
 
-    // Mix ecosystem so crafting in different biomes yields distinct sigils and outcomes.
-    envSalt ^= ecosystemCraftSalt(eco);
+        // Mix branch so Camp crafting doesn't accidentally mirror dungeon crafting exactly.
+        envSalt ^= static_cast<uint32_t>(branch_) * 0x9E3779B9u;
+
+        // Mix ecosystem so crafting in different biomes yields distinct sigils and outcomes.
+        envSalt ^= ecosystemCraftSalt(eco);
+    }
 
     const uint32_t craftSeed = seed_ ^ hash32(envSalt);
 
@@ -211,6 +240,10 @@ Game::CraftComputed Game::computeCraftComputed(const Item& a0, const Item& b0) c
     cc.byproduct = o.byproduct;
 
     Item& out = cc.out;
+
+    if (shardRefinement) {
+        return cc;
+    }
 
     // Workstation flavor: slight quality nudges by room type (deterministic).
     auto qualityRoll = [&](uint32_t salt, int pct) -> bool {
@@ -307,6 +340,65 @@ Game::CraftComputed Game::computeCraftComputed(const Item& a0, const Item& b0) c
     return cc;
 }
 
+
+Game::CraftUIHint Game::craftingUiHint(const Item& ing1, const Item& ing2) const {
+    CraftUIHint h;
+
+    if (!isCraftIngredientKind(ing1.kind) || !isCraftIngredientKind(ing2.kind)) return h;
+
+    auto isLocked = [&](const Item& it) -> bool {
+        return it.buc < 0 && isEquipped(it.id);
+    };
+
+    if (isLocked(ing1) || isLocked(ing2)) {
+        h.locked = true;
+        return h;
+    }
+
+    // Same stack requires at least 2 units.
+    if (ing1.id != 0 && ing1.id == ing2.id) {
+        if (!isStackable(ing1.kind) || ing1.count < 2) {
+            return h;
+        }
+    }
+
+    const CraftComputed cc = computeCraftComputed(ing1, ing2);
+
+    h.valid = true;
+    h.tier = cc.tier;
+    h.sig = cc.out.spriteSeed;
+    h.outKind = cc.out.kind;
+    h.outEnchant = cc.out.enchant;
+    h.outCharges = cc.out.charges;
+
+    // Shard refinement (two matching shards -> higher-tier shard).
+    if (ing1.kind == ItemKind::EssenceShard && ing2.kind == ItemKind::EssenceShard && cc.out.kind == ItemKind::EssenceShard) {
+        const craftgen::Essence ea = craftgen::essenceFor(ing1);
+        const craftgen::Essence eb = craftgen::essenceFor(ing2);
+        if (!ea.tag.empty() && ea.tag == eb.tag) h.shardRefinement = true;
+    }
+
+    // Shard infusion (shard + wearable gear -> upgraded gear).
+    const bool shardInfusion = ((ing1.kind == ItemKind::EssenceShard && isWearableGear(ing2.kind)) ||
+                               (ing2.kind == ItemKind::EssenceShard && isWearableGear(ing1.kind)));
+    if (shardInfusion) {
+        const Item& gearIn = (ing1.kind == ItemKind::EssenceShard) ? ing2 : ing1;
+        if (cc.out.kind == gearIn.kind) h.shardInfusion = true;
+    }
+
+    // Known recipe (per-run journal).
+    if (h.sig != 0u) {
+        for (const auto& r : craftRecipeBook_) {
+            if (r.sig == h.sig) {
+                h.known = true;
+                break;
+            }
+        }
+    }
+
+    return h;
+}
+
 void Game::recordCraftRecipe(const CraftComputed& cc) {
     const uint32_t sig = cc.out.spriteSeed;
     if (sig == 0u) return;
@@ -355,6 +447,7 @@ void Game::showCraftRecipes() {
         pushSystemMessage("NO CRAFT RECIPES LEARNED YET.");
         pushSystemMessage("TIP: USE A CRAFTING KIT (#CRAFT) AND COMBINE TWO INGREDIENTS.");
         pushSystemMessage("TIP: TRY CRAFTING IN DIFFERENT ROOMS (WORKSTATIONS) AND BIOMES (CATALYSTS).");
+        pushSystemMessage("TIP: TWO MATCHING ESSENCE SHARDS REFINE INTO A HIGHER-TIER SHARD.");
         return;
     }
 
@@ -417,6 +510,28 @@ void Game::rebuildCraftingPreview() {
         }
     };
 
+    auto isEquippedId = [&](int id) -> bool {
+        return id != 0 && (id == equipMeleeId || id == equipRangedId || id == equipArmorId || id == equipRing1Id || id == equipRing2Id);
+    };
+
+    auto isCursedEquipped = [&](const Item& it) -> bool {
+        return isEquippedId(it.id) && it.buc < 0;
+    };
+
+    auto pushLegend = [&]() {
+        invCraftPreviewLines_.push_back("LEGEND: * INGREDIENT  1=ING1  !=LOCKED  BADGES: NEW/K/REF/INF/NEED2  ICON: RESULT");
+    };
+
+    auto pushStep1Controls = [&]() {
+        invCraftPreviewLines_.push_back("ENTER: SET ING1   ESC: EXIT");
+        invCraftPreviewLines_.push_back("F/U/LEFT/RIGHT: CYCLE INGREDIENTS   SHIFT+S: SORT   X: DROP   SHIFT+X: DROP ALL");
+    };
+
+    auto pushStep2Controls = [&]() {
+        invCraftPreviewLines_.push_back("ENTER: CRAFT (KEEPS STACKED ING1)   ESC: CLEAR ING1");
+        invCraftPreviewLines_.push_back("F/U/LEFT/RIGHT: CYCLE SUGGESTIONS   SHIFT+S: SORT   X: DROP   SHIFT+X: DROP ALL");
+    };
+
     const RoomType rt = roomTypeAt(dung, player().pos);
     {
         std::ostringstream ss;
@@ -439,6 +554,8 @@ void Game::rebuildCraftingPreview() {
 
     if (inv.empty() || invSel < 0 || invSel >= static_cast<int>(inv.size())) {
         invCraftPreviewLines_.push_back("NO ITEMS.");
+        pushLegend();
+        pushStep1Controls();
         return;
     }
 
@@ -470,45 +587,197 @@ void Game::rebuildCraftingPreview() {
         invCraftPreviewLines_.push_back("STEP 1/2: PICK INGREDIENT 1");
         if (!isCraftIngredientKind(selIt.kind)) {
             invCraftPreviewLines_.push_back("SELECTED ITEM IS NOT AN INGREDIENT.");
+            invCraftPreviewLines_.push_back("PICK AN ITEM MARKED '*'.");
+            pushLegend();
+            pushStep1Controls();
             return;
         }
+        if (isCursedEquipped(selIt)) {
+            invCraftPreviewLines_.push_back("LOCKED: CURSED EQUIPPED ITEM.");
+            invCraftPreviewLines_.push_back("PICK A DIFFERENT INGREDIENT.");
+            pushLegend();
+            pushStep1Controls();
+            return;
+        }
+
+        // Show how many interesting combinations this ING1 can produce with the current inventory.
+        // (Helps pick a good first ingredient quickly.)
+        int newCount = 0;
+        int refCount = 0;
+        int infCount = 0;
+        for (const auto& it2 : inv) {
+            if (!isCraftIngredientKind(it2.kind)) continue;
+            if (isCursedEquipped(it2)) continue;
+
+            const auto h = craftingUiHint(selIt, it2);
+            if (!h.valid) continue;
+            if (h.shardRefinement) refCount += 1;
+            else if (h.shardInfusion) infCount += 1;
+            else if (!h.known) newCount += 1;
+        }
+
         invCraftPreviewLines_.push_back("ING1: " + singleName(selIt));
         invCraftPreviewLines_.push_back(essenceLine(selIt));
-        invCraftPreviewLines_.push_back("ENTER: SET ING1");
+        {
+            std::ostringstream pot;
+            pot << "POTENTIAL: NEW:" << newCount << " REF:" << refCount << " INF:" << infCount;
+            invCraftPreviewLines_.push_back(pot.str());
+        }
+
+        // Show a few of the most interesting results this ING1 can make with your current inventory.
+        // This helps pick ING1 quickly without trial-setting/clearing.
+        struct CraftExample {
+            int score = 0;
+            int tier = 0;
+            std::string line;
+        };
+
+        std::vector<CraftExample> ex;
+        ex.reserve(inv.size());
+
+        for (const auto& it2 : inv) {
+            if (!isCraftIngredientKind(it2.kind)) continue;
+            if (isCursedEquipped(it2)) continue;
+
+            // Same stack requires at least 2 units.
+            if (it2.id != 0 && it2.id == selIt.id) {
+                if (!isStackable(it2.kind) || it2.count < 2) continue;
+            }
+
+            const CraftComputed cc = computeCraftComputed(selIt, it2);
+
+            bool isRef = false;
+            if (selIt.kind == ItemKind::EssenceShard && it2.kind == ItemKind::EssenceShard && cc.out.kind == ItemKind::EssenceShard) {
+                const craftgen::Essence ea = craftgen::essenceFor(selIt);
+                const craftgen::Essence eb = craftgen::essenceFor(it2);
+                if (!ea.tag.empty() && ea.tag == eb.tag) isRef = true;
+            }
+
+            bool isInf = false;
+            const bool shardInf = ((selIt.kind == ItemKind::EssenceShard && isWearableGear(it2.kind)) ||
+                                   (it2.kind == ItemKind::EssenceShard && isWearableGear(selIt.kind)));
+            if (shardInf) {
+                const Item& gearIn = (selIt.kind == ItemKind::EssenceShard) ? it2 : selIt;
+                if (cc.out.kind == gearIn.kind) isInf = true;
+            }
+
+            const bool isNew = (knownTimesForSig(cc.out.spriteSeed) <= 0) && !isRef && !isInf;
+            if (!isNew && !isRef && !isInf) continue;
+
+            const int base = isRef ? 3000 : (isInf ? 2600 : 2200);
+            const int score = base + cc.tier * 10;
+
+            Item outNamed = cc.out;
+            outNamed.id = 0;
+
+            std::string badge;
+            if (isRef) badge = "REF T" + std::to_string(cc.tier);
+            else if (isInf) badge = "INF T" + std::to_string(cc.tier);
+            else badge = "NEW T" + std::to_string(cc.tier);
+
+            std::string line = badge + ": " + singleName(it2) + " -> " + displayItemName(outNamed);
+            ex.push_back({score, cc.tier, std::move(line)});
+        }
+
+        if (!ex.empty()) {
+            std::sort(ex.begin(), ex.end(), [](const CraftExample& a, const CraftExample& b) {
+                if (a.score != b.score) return a.score > b.score;
+                if (a.tier != b.tier) return a.tier > b.tier;
+                return a.line < b.line;
+            });
+
+            invCraftPreviewLines_.push_back("EXAMPLES:");
+            const int take = std::min(3, static_cast<int>(ex.size()));
+            for (int i = 0; i < take; ++i) {
+                invCraftPreviewLines_.push_back("EX: " + ex[static_cast<size_t>(i)].line);
+            }
+        }
+        pushLegend();
+        pushStep1Controls();
         return;
     }
 
-    int idxA = findItemIndexById(inv, invCraftFirstId_);
+    const int idxA = findItemIndexById(inv, invCraftFirstId_);
     if (idxA < 0) {
         invCraftFirstId_ = 0;
         invCraftPreviewLines_.push_back("ING1 LOST. PICK A NEW INGREDIENT.");
-        invCraftPreviewLines_.push_back("ENTER: SET ING1");
+        pushLegend();
+        pushStep1Controls();
         return;
     }
 
     const Item& a0 = inv[static_cast<size_t>(idxA)];
+    if (isCursedEquipped(a0)) {
+        invCraftPreviewLines_.push_back("LOCKED: ING1 IS CURSED AND STUCK.");
+        invCraftPreviewLines_.push_back("ESC: CLEAR ING1");
+        pushLegend();
+        invCraftPreviewLines_.push_back("SHIFT+S: SORT   X: DROP   SHIFT+X: DROP ALL");
+        return;
+    }
+
     invCraftPreviewLines_.push_back("ING1: " + singleName(a0));
     invCraftPreviewLines_.push_back(essenceLine(a0));
     invCraftPreviewLines_.push_back("STEP 2/2: PICK INGREDIENT 2");
 
+    bool ing2Ok = true;
     if (!isCraftIngredientKind(selIt.kind)) {
         invCraftPreviewLines_.push_back("SELECTED ITEM IS NOT AN INGREDIENT.");
-        return;
-    }
-
-    // Same stack requires at least 2 units.
-    if (selIt.id == invCraftFirstId_) {
+        invCraftPreviewLines_.push_back("PICK AN ITEM MARKED '*'.");
+        ing2Ok = false;
+    } else if (isCursedEquipped(selIt)) {
+        invCraftPreviewLines_.push_back("LOCKED: CURSED EQUIPPED ITEM.");
+        invCraftPreviewLines_.push_back("PICK A DIFFERENT INGREDIENT.");
+        ing2Ok = false;
+    } else if (selIt.id == invCraftFirstId_) {
+        // Same stack requires at least 2 units.
         if (!isStackable(selIt.kind) || selIt.count < 2) {
             invCraftPreviewLines_.push_back("NEED TWO UNITS TO USE THE SAME STACK TWICE.");
-            return;
+            ing2Ok = false;
         }
+    }
+
+    if (!ing2Ok) {
+        pushLegend();
+        pushStep2Controls();
+        return;
     }
 
     const Item& b0 = selIt;
     invCraftPreviewLines_.push_back("ING2: " + singleName(b0));
     invCraftPreviewLines_.push_back(essenceLine(b0));
 
+    if (b0.id != 0 && b0.id == invCraftFirstId_ && isStackable(b0.kind) && b0.count >= 2) {
+        invCraftPreviewLines_.push_back("NOTE: SAME STACK (CONSUMES 2 UNITS).");
+    }
+
     const CraftComputed cc = computeCraftComputed(a0, b0);
+
+    // Hint: Essence Shard + Essence Shard with matching tag refines into a higher-tier shard.
+    if (a0.kind == ItemKind::EssenceShard && b0.kind == ItemKind::EssenceShard && cc.out.kind == ItemKind::EssenceShard) {
+        const craftgen::Essence ea = craftgen::essenceFor(a0);
+        const craftgen::Essence eb = craftgen::essenceFor(b0);
+        if (!ea.tag.empty() && ea.tag == eb.tag) {
+            invCraftPreviewLines_.push_back("MODE: SHARD REFINEMENT (+1 TIER)");
+        }
+    }
+
+    // Hint: Essence Shard + wearable gear upgrades that gear instead of rerolling a new item.
+    const bool shardInfusion = ((a0.kind == ItemKind::EssenceShard && isWearableGear(b0.kind)) ||
+                               (b0.kind == ItemKind::EssenceShard && isWearableGear(a0.kind)));
+    if (shardInfusion) {
+        const Item& gearIn = (a0.kind == ItemKind::EssenceShard) ? b0 : a0;
+        if (cc.out.kind == gearIn.kind) {
+            invCraftPreviewLines_.push_back("MODE: SHARD INFUSION (UPGRADE GEAR)");
+            if (isWandKind(gearIn.kind)) {
+                const int maxC = std::max(1, itemDef(gearIn.kind).maxCharges);
+                const int c0 = clampi(gearIn.charges, 0, maxC);
+                const int c1 = clampi(cc.out.charges, 0, maxC);
+                invCraftPreviewLines_.push_back("CHARGES: " + std::to_string(c0) + " -> " + std::to_string(c1));
+            } else {
+                invCraftPreviewLines_.push_back("ENCHANT: " + std::to_string(gearIn.enchant) + " -> " + std::to_string(cc.out.enchant));
+            }
+        }
+    }
 
     invCraftPreviewLines_.push_back("SIGIL: " + craftgen::sigilName(cc.out.spriteSeed));
 
@@ -528,7 +797,6 @@ void Game::rebuildCraftingPreview() {
         byp.id = 0;
         invCraftPreviewLines_.push_back("BYPRODUCT: " + displayItemName(byp));
     }
-
 
     // Extra outcome details for procedural crafting/forging.
     if (outNamed.kind == ItemKind::RuneTablet) {
@@ -558,10 +826,11 @@ void Game::rebuildCraftingPreview() {
         }
     }
 
-
     std::ostringstream tierLine;
     tierLine << "TIER: " << cc.tier;
     invCraftPreviewLines_.push_back(tierLine.str());
+    pushLegend();
+    pushStep2Controls();
 }
 
 bool Game::craftCombineById(int itemAId, int itemBId) {
@@ -601,6 +870,32 @@ bool Game::craftCombineById(int itemAId, int itemBId) {
         }
     }
 
+    // Can't consume cursed equipped gear (same rules as dropping/stashing).
+    auto cannotUseCursedEquipped = [&](const Item& it) -> bool {
+        if (it.buc >= 0) return false;
+        if (it.id == equipMeleeId) {
+            pushMsg("YOUR WEAPON IS CURSED AND WELDED TO YOUR HAND!", MessageKind::Warning, true);
+            return true;
+        }
+        if (it.id == equipRangedId) {
+            pushMsg("YOUR RANGED WEAPON IS CURSED AND WON'T LET GO!", MessageKind::Warning, true);
+            return true;
+        }
+        if (it.id == equipArmorId) {
+            pushMsg("YOUR ARMOR IS CURSED AND WON'T COME OFF!", MessageKind::Warning, true);
+            return true;
+        }
+        if (it.id == equipRing1Id || it.id == equipRing2Id) {
+            pushMsg("YOUR RING IS CURSED AND STUCK TO YOUR FINGER!", MessageKind::Warning, true);
+            return true;
+        }
+        return false;
+    };
+
+    if (cannotUseCursedEquipped(a0) || cannotUseCursedEquipped(b0)) {
+        return false;
+    }
+
     const CraftComputed cc0 = computeCraftComputed(a0, b0);
 
     Item out = cc0.out;
@@ -633,6 +928,34 @@ bool Game::craftCombineById(int itemAId, int itemBId) {
             shopDebtLedger_[sd] += it.shopPrice * units;
         }
     };
+
+    // Auto-unequip any consumed gear (non-cursed already validated above).
+    auto autoUnequipIfNeeded = [&](const Item& it) {
+        if (it.id == 0) return;
+        if (it.id == equipMeleeId) {
+            equipMeleeId = 0;
+            pushMsg("YOU UNWIELD " + displayItemName(it) + ".", MessageKind::System, true);
+        }
+        if (it.id == equipRangedId) {
+            equipRangedId = 0;
+            pushMsg("YOU UNEQUIP " + displayItemName(it) + ".", MessageKind::System, true);
+        }
+        if (it.id == equipArmorId) {
+            equipArmorId = 0;
+            pushMsg("YOU REMOVE " + displayItemName(it) + ".", MessageKind::System, true);
+        }
+        if (it.id == equipRing1Id) {
+            equipRing1Id = 0;
+            pushMsg("YOU REMOVE " + displayItemName(it) + ".", MessageKind::System, true);
+        }
+        if (it.id == equipRing2Id) {
+            equipRing2Id = 0;
+            pushMsg("YOU REMOVE " + displayItemName(it) + ".", MessageKind::System, true);
+        }
+    };
+
+    autoUnequipIfNeeded(a0);
+    if (itemBId != itemAId) autoUnequipIfNeeded(b0);
 
     // Consume ingredients (1 unit each; 2 units if same stack).
     if (itemAId == itemBId) {
@@ -713,8 +1036,31 @@ bool Game::craftCombineById(int itemAId, int itemBId) {
 
     // Message (include the abstract "essence tags" when present).
     {
+        const bool shardRefinement = (a0.kind == ItemKind::EssenceShard && b0.kind == ItemKind::EssenceShard && cc0.out.kind == ItemKind::EssenceShard);
+        bool shardRefineMatch = false;
+        if (shardRefinement) {
+            const craftgen::Essence ea = craftgen::essenceFor(a0);
+            const craftgen::Essence eb = craftgen::essenceFor(b0);
+            shardRefineMatch = (!ea.tag.empty() && ea.tag == eb.tag);
+        }
+
+        const bool shardInfusion = ((a0.kind == ItemKind::EssenceShard && isWearableGear(b0.kind)) ||
+                                   (b0.kind == ItemKind::EssenceShard && isWearableGear(a0.kind))) &&
+                                  (cc0.out.kind == ((a0.kind == ItemKind::EssenceShard) ? b0.kind : a0.kind));
+
         std::ostringstream ss;
-        ss << "YOU CRAFT " << displayItemName(out) << " FROM " << aName << " + " << bName << ".";
+        if (shardRefineMatch) {
+            ss << "YOU REFINE YOUR ESSENCE SHARDS INTO " << displayItemName(out) << ".";
+        } else if (shardInfusion) {
+            const Item& shardIt = (a0.kind == ItemKind::EssenceShard) ? a0 : b0;
+            const craftgen::Essence es = craftgen::essenceFor(shardIt);
+            const std::string tag = es.tag.empty() ? std::string("MUNDANE") : es.tag;
+            const std::string& gearName = (a0.kind == ItemKind::EssenceShard) ? bName : aName;
+            ss << "YOU INFUSE " << gearName << " WITH " << tag << " ESSENCE INTO " << displayItemName(out) << ".";
+        } else {
+            ss << "YOU CRAFT " << displayItemName(out) << " FROM " << aName << " + " << bName << ".";
+        }
+
         pushMsg(ss.str(), MessageKind::Success, true);
     }
 

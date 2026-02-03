@@ -202,7 +202,7 @@ bool Game::checkSpellFailure(SpellKind k, Vec2i intendedTarget, bool hasTarget) 
 
             // Also seed a tiny fire field around the caster.
             const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+            if (fireField_.size() != expect) fireField_.assign(expect, uint8_t{0});
             constexpr int r = 1;
             std::vector<uint8_t> mask;
             dung.computeFovMask(p.pos.x, p.pos.y, r, mask);
@@ -231,7 +231,7 @@ bool Game::checkSpellFailure(SpellKind k, Vec2i intendedTarget, bool hasTarget) 
 
             // Also seed a small poison puff at the caster.
             const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+            if (poisonGas_.size() != expect) poisonGas_.assign(expect, uint8_t{0});
             constexpr int r = 1;
             std::vector<uint8_t> mask;
             dung.computeFovMask(p.pos.x, p.pos.y, r, mask);
@@ -488,7 +488,7 @@ bool Game::castSpellAt(SpellKind k, Vec2i target) {
             mana_ = std::max(0, mana_ - sd.manaCost);
 
             const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+            if (poisonGas_.size() != expect) poisonGas_.assign(expect, uint8_t{0});
 
             const int focus = std::max(0, playerFocus());
             const uint8_t baseStrength = static_cast<uint8_t>(clampi(10 + focus / 2, 8, 18));
@@ -883,7 +883,7 @@ bool Game::castProcSpellAt(uint32_t procId, Vec2i target) {
             }
 
             const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (field->size() != expect) field->assign(expect, 0u);
+            if (field->size() != expect) field->assign(expect, uint8_t{0});
 
             int radius = std::max(1, ps.aoeRadius);
             radius = clampi(radius, 1, 4);

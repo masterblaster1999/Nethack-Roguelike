@@ -326,7 +326,7 @@ inline bool solve(int w, int h,
         };
 
         if (dfs(dfs, 0)) {
-            outTiles.assign(N, 0);
+            outTiles.assign(N, uint8_t{0});
             for (size_t i = 0; i < N; ++i) {
                 const uint32_t m = dom[i];
                 const int t = ctz32(m);

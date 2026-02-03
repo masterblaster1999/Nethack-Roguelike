@@ -355,7 +355,7 @@ bool Game::stepAutoMove() {
 
         // Lazily size the per-tile search budget grid (not serialized; purely transient).
         if (autoExploreSearchTriedTurns.size() != expect) {
-            autoExploreSearchTriedTurns.assign(expect, 0u);
+            autoExploreSearchTriedTurns.assign(expect, uint8_t{0});
         }
 
         constexpr int kMaxSearchTurnsPerSpot = 4;
@@ -821,7 +821,7 @@ bool Game::buildAutoRunPath(Vec2i dir) {
     const int H = std::max(1, dung.height);
     const int maxSteps = W * H;
 
-    std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
+    std::vector<uint8_t> visited(static_cast<size_t>(W * H), uint8_t{0});
     auto vidx = [&](Vec2i p) -> size_t {
         return static_cast<size_t>(p.y * W + p.x);
     };
@@ -1036,7 +1036,7 @@ Vec2i Game::findNearestExploreFrontier() const {
     // Pass 1: BFS that does NOT traverse known traps (but can still return a trap tile if it's a frontier).
     {
         std::deque<Vec2i> q;
-        std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
+        std::vector<uint8_t> visited(static_cast<size_t>(W * H), uint8_t{0});
         visited[idxOf(start.x, start.y)] = 1;
         q.push_back(start);
 
@@ -1075,7 +1075,7 @@ Vec2i Game::findNearestExploreFrontier() const {
     // known trap tile along the shortest path to it (so the player can deal with the blocker).
     {
         std::deque<Vec2i> q;
-        std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
+        std::vector<uint8_t> visited(static_cast<size_t>(W * H), uint8_t{0});
         std::vector<int> firstTrapIdx(static_cast<size_t>(W * H), -1);
         visited[idxOf(start.x, start.y)] = 1;
         q.push_back(start);
@@ -1141,7 +1141,7 @@ Vec2i Game::findNearestExploreFrontier() const {
         // Pass 3a: BFS that does NOT traverse known traps.
         {
             std::deque<Vec2i> q;
-            std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
+            std::vector<uint8_t> visited(static_cast<size_t>(W * H), uint8_t{0});
             visited[idxOf(start.x, start.y)] = 1;
             q.push_back(start);
 
@@ -1175,7 +1175,7 @@ Vec2i Game::findNearestExploreFrontier() const {
         // return the FIRST known trap tile along the shortest path to it.
         {
             std::deque<Vec2i> q;
-            std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
+            std::vector<uint8_t> visited(static_cast<size_t>(W * H), uint8_t{0});
             std::vector<int> firstTrapIdx(static_cast<size_t>(W * H), -1);
             visited[idxOf(start.x, start.y)] = 1;
             q.push_back(start);
@@ -1313,7 +1313,7 @@ Vec2i Game::findNearestExploreSearchSpot() const {
         return false;
     };
 
-    std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0);
+    std::vector<uint8_t> visited(static_cast<size_t>(W * H), uint8_t{0});
     std::deque<Vec2i> q;
     visited[idxOf(start.x, start.y)] = 1;
     q.push_back(start);

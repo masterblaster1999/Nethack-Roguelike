@@ -17,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <unordered_map>
 #include <filesystem>
 #include <ctime>
 #include <iomanip>
@@ -6372,9 +6373,9 @@ d.ensureMaterials(game.materialWorldSeed(), game.branch(), game.materialDepth(),
             }
 
             // Avoid very dark tints; lighting is applied after this.
-            deep.r = std::max<uint8_t>(deep.r, 205u);
-            deep.g = std::max<uint8_t>(deep.g, 205u);
-            deep.b = std::max<uint8_t>(deep.b, 205u);
+            deep.r = std::max<uint8_t>(deep.r, uint8_t{205});
+            deep.g = std::max<uint8_t>(deep.g, uint8_t{205});
+            deep.b = std::max<uint8_t>(deep.b, uint8_t{205});
         }
 
         return { lerpU8(warm.r, deep.r, t),
@@ -10012,18 +10013,28 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     const Color gray{160,160,160,255};
     const Color yellow{255,230,120,255};
     const Color cyan{140,220,255,255};
+    const Color dim{120,120,120,255};
 
     const int scale = 2;
     const int pad = 16;
 
     int x = bg.x + pad;
     int y = bg.y + pad;
+    const int headerY = y;
 
     const bool invCraft = game.isInventoryCraftMode();
+    const int craftFirstId = invCraft ? game.inventoryCraftFirstId() : 0;
     drawText5x7(renderer, x, y, scale, yellow, invCraft ? "INVENTORY (CRAFTING)" : "INVENTORY");
-    drawText5x7(renderer, x + 160, y, scale, gray,
-        invCraft ? "(ENTER: pick ingredient, ESC: clear/exit, D: drop)"
-                 : "(ENTER: use/equip, D: drop, ESC: close)");
+
+    std::string hint;
+    if (invCraft) {
+        hint = (craftFirstId == 0)
+            ? "(ENTER: set, ESC: exit, F/U/LEFT/RIGHT: cycle, X: drop (Shift=all), Shift+S: sort, #recipes)"
+            : "(ENTER: craft, ESC: clear ing1, F/U/LEFT/RIGHT: cycle, X: drop (Shift=all), Shift+S: sort, #recipes)";
+    } else {
+        hint = "(ENTER: use/equip, X: drop (Shift=all), ESC: close)";
+    }
+    drawText5x7(renderer, x + 160, y, scale, gray, hint);
     if (game.encumbranceEnabled()) {
         std::stringstream ws;
         ws << "WT: " << game.inventoryWeight() << "/" << game.carryCapacity();
@@ -10037,6 +10048,16 @@ void Renderer::drawInventoryOverlay(const Game& game) {
 
     const auto& inv = game.inventory();
     const int sel = game.inventorySelection();
+
+    const Item* craftIng1 = nullptr;
+
+    // Crafting UI caches (per-frame): avoid recomputing expensive craft-hint logic
+    // multiple times while rendering the inventory overlay.
+    std::vector<Game::CraftUIHint> craftHintByIndex;
+    std::vector<uint8_t> craftHintHave;
+
+    struct CraftPotCounts { int nNew = 0; int nRef = 0; int nInf = 0; };
+    std::unordered_map<int, CraftPotCounts> craftPotCache;
 
     // Precompute current stats + equipped items once (used for quick-compare badges and preview).
     const Entity& p = game.player();
@@ -10052,6 +10073,161 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     auto bucScalar = [](const Item& it) -> int {
         return (it.buc < 0 ? -1 : (it.buc > 0 ? 1 : 0));
     };
+
+
+    // Resolve ING1 pointer (if set) and build per-index craft-hint cache for this frame.
+    // This keeps crafting-mode UI responsive even with larger inventories.
+    if (invCraft && craftFirstId != 0 && !inv.empty()) {
+        for (const auto& it : inv) {
+            if (it.id == craftFirstId) { craftIng1 = &it; break; }
+        }
+
+        if (craftIng1) {
+            craftHintByIndex.resize(inv.size());
+            craftHintHave.assign(inv.size(), uint8_t{0});
+
+            for (size_t i = 0; i < inv.size(); ++i) {
+                const Item& it = inv[i];
+                if (!isCraftIngredientKind(it.kind)) continue;
+
+                const bool locked = (it.buc < 0) && !game.equippedTag(it.id).empty();
+                if (locked) continue;
+
+                const auto h = game.craftingUiHint(*craftIng1, it);
+                if (h.valid && !h.locked) {
+                    craftHintByIndex[i] = h;
+                    craftHintHave[i] = uint8_t{1};
+                }
+            }
+        }
+    }
+
+    // Crafting step 2/2: show a compact suggestion strip above the list.
+    // Visualizing a few high-value outcomes reduces scrolling and helps you discover new recipes faster.
+    if (invCraft && craftFirstId != 0 && craftIng1 && !inv.empty()) {
+        struct CraftSugg {
+            int idx = -1;
+            Game::CraftUIHint h{};
+            int score = 0;
+        };
+
+        std::vector<CraftSugg> sug;
+        sug.reserve(inv.size());
+
+        for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
+            if (i < 0 || i >= static_cast<int>(craftHintHave.size())) continue;
+            if (!craftHintHave[static_cast<size_t>(i)]) continue;
+
+            const auto& h = craftHintByIndex[static_cast<size_t>(i)];
+            const bool interesting = h.shardRefinement || h.shardInfusion || !h.known;
+            if (!interesting) continue;
+
+            int s = (h.shardRefinement ? 3000 : (h.shardInfusion ? 2800 : 2000));
+            s += h.tier * 10;
+            if (!h.known) s += 50;
+            sug.push_back({i, h, s});
+        }
+
+        if (!sug.empty()) {
+            std::sort(sug.begin(), sug.end(), [](const CraftSugg& a, const CraftSugg& b) {
+                if (a.score != b.score) return a.score > b.score;
+                if (a.h.tier != b.h.tier) return a.h.tier > b.h.tier;
+                return a.idx < b.idx;
+            });
+
+            const int charW = scale * 6;
+            const int labelW = 9 * charW; // "SUGGEST:" ~ 8 chars + padding
+            drawText5x7(renderer, x, y, scale, gray, "SUGGEST:");
+
+            const int iconSz = 18;
+            const int iconGap = 6;
+            const int arrowGap = 2;
+            const int perW = iconSz + arrowGap + charW + arrowGap + iconSz + iconGap;
+
+            int mx = x + labelW;
+            const int right = bg.x + bg.w - pad;
+            int maxFit = (right > mx) ? ((right - mx) / std::max(1, perW)) : 0;
+            maxFit = std::clamp(maxFit, 0, std::min(6, static_cast<int>(sug.size())));
+
+            auto drawMiniIcon = [&](Item src, int dx, int dy, int sz, int seedOff) {
+                SDL_Rect dst{ dx, dy, sz, sz };
+
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 55);
+                SDL_RenderFillRect(renderer, &dst);
+
+                Item vis = src;
+                if (isHallucinating(game)) {
+                    vis.kind = hallucinatedItemKind(game, src);
+                }
+                applyIdentificationVisuals(game, vis);
+
+                SDL_Texture* t = itemTexture(vis, lastFrame + seedOff);
+                if (t) SDL_RenderCopy(renderer, t, nullptr, &dst);
+
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+            };
+
+            const int topY = y + 2;
+            const int txtY = y + (iconSz - 14) / 2;
+
+            for (int j = 0; j < maxFit; ++j) {
+                const auto& s = sug[static_cast<size_t>(j)];
+                const Item& ing2 = inv[static_cast<size_t>(s.idx)];
+
+                // Highlight the suggestion if it matches the currently selected row.
+                const bool isSelSugg = (s.idx == sel);
+                if (isSelSugg) {
+                    const int blockW = iconSz + arrowGap + charW + arrowGap + iconSz;
+                    SDL_Rect hl{ mx - 2, topY - 2, blockW + 4, iconSz + 4 };
+                    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                    SDL_SetRenderDrawColor(renderer, cyan.r, cyan.g, cyan.b, 20);
+                    SDL_RenderFillRect(renderer, &hl);
+                    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+                }
+
+                Item a = ing2; a.count = 1;
+                drawMiniIcon(a, mx, topY, iconSz, ing2.id + 701);
+
+                mx += iconSz + arrowGap;
+                drawText5x7(renderer, mx, txtY, scale, gray, ">");
+                mx += charW + arrowGap;
+
+                Item out{};
+                out.kind = s.h.outKind;
+                out.spriteSeed = s.h.sig;
+                out.enchant = s.h.outEnchant;
+                out.charges = s.h.outCharges;
+                out.count = 1;
+                out.id = 0;
+
+                drawMiniIcon(out, mx, topY, iconSz, 9000 + s.idx);
+
+                // Tiny mode tag (R/I/N) over the output icon.
+                const int miniScale = 1;
+                if (s.h.shardRefinement) {
+                    drawText5x7(renderer, mx + 1, topY + 1, miniScale, cyan, "R");
+                } else if (s.h.shardInfusion) {
+                    drawText5x7(renderer, mx + 1, topY + 1, miniScale, cyan, "I");
+                } else if (!s.h.known) {
+                    drawText5x7(renderer, mx + 1, topY + 1, miniScale, cyan, "N");
+                }
+
+                // Tier tag at the bottom of the output icon (helps scanning at a glance).
+                {
+                    const std::string tlabel = "T" + std::to_string(std::max(0, s.h.tier));
+                    const int tw = (int)tlabel.size() * 6 * miniScale;
+                    const int tx = mx + std::max(0, (iconSz - tw) / 2);
+                    const int ty = topY + iconSz - 8;
+                    drawText5x7(renderer, tx, ty, miniScale, cyan, tlabel);
+                }
+
+                mx += iconSz + iconGap;
+            }
+
+            y += iconSz + 12;
+        }
+    }
 
 
     // Layout: list (left) + preview/info (right)
@@ -10083,6 +10259,80 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         if (maxChars <= 1) return s.substr(0, 1);
         return s.substr(0, static_cast<size_t>(std::max(0, maxChars - 3))) + "...";
     };
+
+    // Extra craft header line (step + current ING1).
+    if (invCraft) {
+        const int charW = scale * 6;
+        const int headerMaxChars = std::max(10, (bg.w - 2 * pad) / charW);
+        const int craftY = headerY + (game.encumbranceEnabled() ? 28 : 14);
+
+        const int recipeCount = game.craftingKnownRecipeCount();
+
+        // Summaries for quick scanning.
+        int ingTotal = 0;
+        int ingLocked = 0;
+        int ingUsable = 0;
+
+        for (const auto& it : inv) {
+            if (!isCraftIngredientKind(it.kind)) continue;
+            ingTotal += 1;
+            const bool locked = (it.buc < 0) && !game.equippedTag(it.id).empty();
+            if (locked) ingLocked += 1;
+            else ingUsable += 1;
+        }
+
+        std::string craftLine;
+        if (craftFirstId == 0) {
+            craftLine = "CRAFT 1/2: PICK ING1";
+            craftLine += "  ING: " + std::to_string(ingUsable) + "/" + std::to_string(ingTotal);
+            if (ingLocked > 0) craftLine += " (LOCK " + std::to_string(ingLocked) + ")";
+            craftLine += "  RECIPES: " + std::to_string(recipeCount);
+        } else {
+            std::string ing1Name = "(missing)";
+            if (craftIng1) {
+                Item t = *craftIng1;
+                t.count = 1;
+                ing1Name = game.displayItemName(t);
+            }
+
+            int newCount = 0;
+            int refCount = 0;
+            int infCount = 0;
+
+            if (craftIng1 && !craftHintHave.empty()) {
+                for (size_t i = 0; i < inv.size() && i < craftHintHave.size(); ++i) {
+                    if (!craftHintHave[i]) continue;
+                    const auto& h = craftHintByIndex[i];
+                    if (h.shardRefinement) refCount += 1;
+                    else if (h.shardInfusion) infCount += 1;
+                    else if (!h.known) newCount += 1;
+                }
+            } else if (craftIng1) {
+                // Fallback (should be rare): compute directly if the cache isn't available.
+                for (const auto& it : inv) {
+                    if (!isCraftIngredientKind(it.kind)) continue;
+                    const bool locked = (it.buc < 0) && !game.equippedTag(it.id).empty();
+                    if (locked) continue;
+
+                    const auto h = game.craftingUiHint(*craftIng1, it);
+                    if (!h.valid || h.locked) continue;
+                    if (h.shardRefinement) refCount += 1;
+                    else if (h.shardInfusion) infCount += 1;
+                    else if (!h.known) newCount += 1;
+                }
+            }
+
+            craftLine = "CRAFT 2/2: PICK ING2";
+            craftLine += "  NEW:" + std::to_string(newCount);
+            craftLine += " REF:" + std::to_string(refCount);
+            craftLine += " INF:" + std::to_string(infCount);
+            craftLine += "  RECIPES:" + std::to_string(recipeCount);
+            craftLine += "  ING1: " + ing1Name;
+        }
+
+        drawText5x7(renderer, x, craftY, scale, gray, fitToChars(craftLine, headerMaxChars));
+    }
+
 
     auto itemEffectDesc = [&](const Item& it, bool identified) -> std::string {
         const ItemDef& def = itemDef(it.kind);
@@ -10274,10 +10524,11 @@ void Renderer::drawInventoryOverlay(const Game& game) {
     int yy = listRect.y;
 
     const int icon = 16;
-    const int arrowW = scale * 6 * 2; // "> " column
+    const int charW = scale * 6;
+    const int arrowW = charW * 2; // "> " column
     const int iconX = listRect.x + arrowW;
     const int textX = iconX + icon + 6;
-    const int maxChars = std::max(10, (listRect.w - (textX - listRect.x)) / (scale * 6));
+    const int maxChars = std::max(10, (listRect.w - (textX - listRect.x)) / charW);
 
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
@@ -10285,11 +10536,73 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         const Item& it = inv[static_cast<size_t>(i)];
         const std::string tag = game.equippedTag(it.id); // "" or "M"/"R"/"A"/...
 
-        Color c = (i == sel) ? white : gray;
-        if (i != sel && itemIsArtifact(it)) c = yellow;
+        const bool ingredient = isCraftIngredientKind(it.kind);
+        const bool locked = invCraft && ingredient && (it.buc < 0) && !tag.empty();
 
-        // Selection arrow
-        drawText5x7(renderer, listRect.x, yy, scale, c, (i == sel) ? ">" : " ");
+        Game::CraftUIHint craftHint;
+        bool haveCraftHint = false;
+        if (invCraft && craftFirstId != 0 && craftIng1 && ingredient && !locked) {
+            if (i >= 0 && i < static_cast<int>(craftHintHave.size()) && craftHintHave[static_cast<size_t>(i)]) {
+                craftHint = craftHintByIndex[static_cast<size_t>(i)];
+                haveCraftHint = true;
+            } else {
+                // Fallback (should be rare): compute directly if the cache doesn't cover this row.
+                craftHint = game.craftingUiHint(*craftIng1, it);
+                haveCraftHint = craftHint.valid && !craftHint.locked;
+            }
+        }
+
+        // Background highlight: makes "new" and special craft combos easy to scan.
+        if (invCraft) {
+            const bool interesting = haveCraftHint && (craftHint.shardRefinement || craftHint.shardInfusion || !craftHint.known);
+            if (locked || (craftFirstId != 0 && it.id == craftFirstId) || interesting) {
+                SDL_Rect rowBg{ listRect.x - 6, yy - 2, listRect.w + 12, lineH };
+                if (locked) {
+                    SDL_SetRenderDrawColor(renderer, yellow.r, yellow.g, yellow.b, 18);
+                } else if (craftFirstId != 0 && it.id == craftFirstId) {
+                    SDL_SetRenderDrawColor(renderer, cyan.r, cyan.g, cyan.b, 18);
+                } else {
+                    SDL_SetRenderDrawColor(renderer, cyan.r, cyan.g, cyan.b, 10);
+                }
+                SDL_RenderFillRect(renderer, &rowBg);
+            }
+        }
+
+        Color c = (i == sel) ? white : gray;
+        if (i != sel) {
+            if (invCraft) {
+                if (!ingredient) c = dim;
+                else if (craftFirstId != 0 && it.id == craftFirstId) c = cyan;
+                else if (locked) c = yellow;
+                else if (haveCraftHint && (!craftHint.known || craftHint.shardRefinement || craftHint.shardInfusion)) c = cyan;
+                else if (itemIsArtifact(it)) c = yellow;
+            } else {
+                if (itemIsArtifact(it)) c = yellow;
+            }
+        }
+
+        // Selection arrow + crafting marker
+        char m1 = (i == sel) ? '>' : ' ';
+        char m2 = ' ';
+        Color mc = c;
+
+        if (invCraft) {
+            if (craftFirstId != 0 && it.id == craftFirstId) {
+                m2 = '1';
+                mc = cyan;
+            } else if (locked) {
+                m2 = '!';
+                mc = yellow;
+            } else if (ingredient) {
+                m2 = '*';
+                mc = (i == sel) ? white : gray;
+            }
+        }
+
+        std::string marker;
+        marker += m1;
+        marker += m2;
+        drawText5x7(renderer, listRect.x, yy, scale, mc, marker);
 
         // Icon background (subtle), then sprite
         SDL_Rect iconDst{ iconX, yy + (lineH - icon) / 2, icon, icon };
@@ -10317,25 +10630,163 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         }
         row += game.displayItemName(it);
 
-        const auto badgeInfo = quickBadge(it, tag);
-        const std::string& badge = badgeInfo.first;
-        const int badgePol = badgeInfo.second;
+        std::string badge;
+        Color bc = gray;
+        bool haveBadge = false;
 
-        // Reserve space for the badge on the right (1 char gap).
+        // In craft step 2/2, show a per-row badge indicating whether combining ING1 with this item
+        // would yield a NEW recipe (or a special shard refinement/infusion).
+        if (invCraft && craftFirstId != 0 && craftIng1 && ingredient && !locked) {
+            if (craftHint.valid) {
+                if (craftHint.shardRefinement) {
+                    badge = "REF T" + std::to_string(craftHint.tier);
+                    bc = cyan;
+                    haveBadge = true;
+                } else if (craftHint.shardInfusion) {
+                    badge = "INF T" + std::to_string(craftHint.tier);
+                    bc = cyan;
+                    haveBadge = true;
+                } else {
+                    badge = std::string(craftHint.known ? "K" : "NEW") + " T" + std::to_string(craftHint.tier);
+                    bc = craftHint.known ? gray : cyan;
+                    haveBadge = true;
+                }
+            }
+        }
+
+        // If ING1 is selected as ING2, the combo requires two units from the same stack.
+        // When that's not possible, surface it directly in the list to prevent "wasted" ENTER presses.
+        if (!haveBadge && invCraft && craftFirstId != 0 && craftIng1 && ingredient && !locked &&
+            it.id == craftFirstId && (!isStackable(it.kind) || it.count < 2)) {
+            badge = "NEED2";
+            bc = yellow;
+            haveBadge = true;
+        }
+
+        int badgePol = 0;
+        if (!haveBadge) {
+            // In craft step 1/2, show a per-row potential badge indicating how many interesting
+            // combinations this ingredient can yield with the current inventory.
+            if (invCraft && craftFirstId == 0 && ingredient && !locked) {
+                int nNew = 0;
+                int nRef = 0;
+                int nInf = 0;
+
+                auto pcIt = craftPotCache.find(it.id);
+                if (pcIt != craftPotCache.end()) {
+                    nNew = pcIt->second.nNew;
+                    nRef = pcIt->second.nRef;
+                    nInf = pcIt->second.nInf;
+                } else {
+                    CraftPotCounts c{};
+                    for (const auto& it2 : inv) {
+                        if (!isCraftIngredientKind(it2.kind)) continue;
+                        const bool locked2 = (it2.buc < 0) && !game.equippedTag(it2.id).empty();
+                        if (locked2) continue;
+                
+                        const auto h = game.craftingUiHint(it, it2);
+                        if (!h.valid || h.locked) continue;
+                        if (h.shardRefinement) c.nRef += 1;
+                        else if (h.shardInfusion) c.nInf += 1;
+                        else if (!h.known) c.nNew += 1;
+                    }
+                
+                    nNew = c.nNew;
+                    nRef = c.nRef;
+                    nInf = c.nInf;
+                    craftPotCache.emplace(it.id, c);
+                }
+
+                const int total = nNew + nRef + nInf;
+                if (total > 0) {
+                    badge = "P" + std::to_string(total);
+                    if (nRef > 0) badge += "R";
+                    if (nInf > 0) badge += "I";
+                    bc = cyan;
+                    haveBadge = true;
+                }
+            }
+
+            if (!haveBadge) {
+                const auto badgeInfo = quickBadge(it, tag);
+                badge = badgeInfo.first;
+                badgePol = badgeInfo.second;
+                haveBadge = !badge.empty();
+
+                if (badgePol > 0) bc = cyan;
+                else if (badgePol < 0) bc = yellow;
+                else bc = gray;
+            }
+        }
+
+        // In craft step 2/2, also show a small *outcome icon* on the right so
+        // scanning candidates is about what you will make, not just what you hover.
+        bool showOutcomeIcon = (invCraft && craftFirstId != 0 && craftIng1 && ingredient && !locked && haveCraftHint);
+        Item outcome{};
+        if (showOutcomeIcon) {
+            outcome.kind = craftHint.outKind;
+            outcome.spriteSeed = craftHint.sig;
+            outcome.enchant = craftHint.outEnchant;
+            outcome.charges = craftHint.outCharges;
+            outcome.count = 1;
+            outcome.id = 0;
+        }
+
+        const int outSize = 16;
+        const int gapPx = 6;
+
+        const int rightEdge = listRect.x + listRect.w;
+        int rightMarginPx = (haveBadge || showOutcomeIcon) ? charW : 0;
+        int rightX = rightEdge - rightMarginPx;
+
+        int outX = rightX - outSize;
+        if (showOutcomeIcon && outX <= textX + charW) {
+            showOutcomeIcon = false;
+        }
+
+        // Recompute after potential icon suppression.
+        rightMarginPx = (haveBadge || showOutcomeIcon) ? charW : 0;
+        rightX = rightEdge - rightMarginPx;
+        if (showOutcomeIcon) outX = rightX - outSize;
+
+        // Reserve space for right-side widgets (badge + outcome icon).
+        int reservedPx = rightMarginPx;
+        if (showOutcomeIcon) reservedPx += outSize + gapPx;
+        if (haveBadge) reservedPx += (int)badge.size() * charW + charW; // badge + 1 char gap
+
         int nameChars = maxChars;
-        if (!badge.empty()) {
-            nameChars = std::max(1, maxChars - (int)badge.size() - 1);
+        if (reservedPx > 0) {
+            const int basePx = listRect.w - (textX - listRect.x);
+            const int availPx = basePx - reservedPx;
+            nameChars = std::max(1, availPx / charW);
         }
 
         drawText5x7(renderer, textX, yy, scale, c, fitToChars(row, nameChars));
 
-        if (!badge.empty()) {
-            const int charW = scale * 6;
-            const int badgeX = listRect.x + listRect.w - charW - (int)badge.size() * charW;
+        // Draw outcome icon (if any).
+        if (showOutcomeIcon) {
+            SDL_Rect outDst{ outX, yy + (lineH - outSize) / 2, outSize, outSize };
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, (i == sel) ? 70 : 45);
+            SDL_RenderFillRect(renderer, &outDst);
+
+            Item visOut = outcome;
+            if (isHallucinating(game)) {
+                visOut.kind = hallucinatedItemKind(game, outcome);
+            }
+            applyIdentificationVisuals(game, visOut);
+
+            SDL_Texture* otex = itemTexture(visOut, lastFrame + 9000 + i);
+            if (otex) {
+                SDL_RenderCopy(renderer, otex, nullptr, &outDst);
+            }
+        }
+
+        // Draw badge (if any), leaving room for the outcome icon.
+        if (haveBadge) {
+            const int badgeWidthPx = (int)badge.size() * charW;
+            const int badgeRight = showOutcomeIcon ? (outX - gapPx) : rightX;
+            const int badgeX = badgeRight - badgeWidthPx;
             if (badgeX > textX + charW) {
-                Color bc = gray;
-                if (badgePol > 0) bc = cyan;
-                else if (badgePol < 0) bc = yellow;
                 drawText5x7(renderer, badgeX, yy, scale, bc, badge);
             }
         }
@@ -10349,7 +10800,43 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         drawText5x7(renderer, listRect.x, listRect.y, scale, gray, "(EMPTY)");
     } else if (sel >= 0 && sel < (int)inv.size()) {
         // Draw preview / info panel
-        const Item& it = inv[static_cast<size_t>(sel)];
+        const Item& selIt = inv[static_cast<size_t>(sel)];
+
+        // Crafting UI QoL: when choosing ingredient 2 (ING1 already set), preview the
+        // predicted craft OUTPUT in the right panel (icon + stats) so scanning candidates
+        // is about what you will make, not just what you're hovering.
+        bool showCraftResult = false;
+        Game::CraftComputed craftCC{};
+        Item craftOut{};
+        Game::CraftUIHint craftOutHint{};
+        bool haveCraftOutHint = false;
+
+        const Item* ing1 = craftIng1;
+
+        if (ing1 && isCraftIngredientKind(selIt.kind)) {
+            const std::string selTag = game.equippedTag(selIt.id);
+            const bool lockedSel = (selIt.buc < 0) && !selTag.empty();
+            if (!lockedSel) {
+                Game::CraftUIHint h{};
+                if (invCraft && craftFirstId != 0 && sel >= 0 && sel < static_cast<int>(craftHintHave.size()) &&
+                    craftHintHave[static_cast<size_t>(sel)]) {
+                    h = craftHintByIndex[static_cast<size_t>(sel)];
+                } else {
+                    h = game.craftingUiHint(*ing1, selIt);
+                }
+
+                if (h.valid && !h.locked) {
+                    showCraftResult = true;
+                    craftOutHint = h;
+                    haveCraftOutHint = true;
+                    craftCC = game.computeCraftComputed(*ing1, selIt);
+                    craftOut = craftCC.out;
+                    craftOut.id = 0;
+                }
+            }
+        }
+
+        const Item& it = showCraftResult ? craftOut : selIt;
         const ItemDef& def = itemDef(it.kind);
 
         bool identified = (game.displayItemNameSingle(it.kind) == itemDisplayNameSingle(it.kind));
@@ -10358,8 +10845,90 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         int iy = infoRect.y;
 
         // Name (top)
-        drawText5x7(renderer, ix, iy, scale, cyan, fitToChars(game.displayItemName(it), 30));
+        const int infoChars = std::max(10, infoRect.w / (scale * 6));
+        const std::string title = showCraftResult ? ("RESULT: " + game.displayItemName(it)) : game.displayItemName(it);
+        drawText5x7(renderer, ix, iy, scale, cyan, fitToChars(title, infoChars));
         iy += 22;
+
+        if (showCraftResult && ing1) {
+            Item a = *ing1; a.count = 1;
+            Item b = selIt; b.count = 1;
+            const std::string from = "FROM: " + game.displayItemName(a) + " + " + game.displayItemName(b);
+            drawText5x7(renderer, ix, iy, scale, gray, fitToChars(from, infoChars));
+            iy += 18;
+
+            const bool sameStack = (ing1->id != 0 && selIt.id != 0 && ing1->id == selIt.id);
+            if (sameStack && isStackable(selIt.kind) && selIt.count >= 2) {
+                drawText5x7(renderer, ix, iy, scale, gray, fitToChars("NOTE: SAME STACK (CONSUMES 2 UNITS).", infoChars));
+                iy += 18;
+            }
+
+            if (haveCraftOutHint) {
+                std::string rs;
+                Color rc = gray;
+
+                if (craftOutHint.shardRefinement) {
+                    rs = "RECIPE: REFINEMENT (T" + std::to_string(craftOutHint.tier) + ")";
+                    rc = cyan;
+                } else if (craftOutHint.shardInfusion) {
+                    rs = "RECIPE: INFUSION (T" + std::to_string(craftOutHint.tier) + ")";
+                    rc = cyan;
+                } else {
+                    rs = std::string("RECIPE: ") + (craftOutHint.known ? "KNOWN" : "NEW");
+                    rs += " (T" + std::to_string(craftOutHint.tier) + ")";
+                    rc = craftOutHint.known ? gray : cyan;
+                }
+
+                drawText5x7(renderer, ix, iy, scale, rc, fitToChars(rs, infoChars));
+                iy += 18;
+            }
+
+            // Mini "recipe strip": icons for ING1 + ING2 => RESULT.
+            // This makes it easier to scan crafting outcomes without mentally mapping item names.
+            {
+                const int mini = 28;
+                const int gap = 6;
+                const int charW = scale * 6;
+                const int textY = iy + (mini - 14) / 2;
+
+                const int needW = mini + gap + charW + gap + mini + gap + (2 * charW) + gap + mini;
+                if (needW <= infoRect.w) {
+                    auto drawMiniIcon = [&](Item src, int dx, int dy, int sz, int seedOff) {
+                        SDL_Rect dst{ dx, dy, sz, sz };
+
+                        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 55);
+                        SDL_RenderFillRect(renderer, &dst);
+
+                        Item vis = src;
+                        if (isHallucinating(game)) {
+                            vis.kind = hallucinatedItemKind(game, src);
+                        }
+                        applyIdentificationVisuals(game, vis);
+
+                        SDL_Texture* t = itemTexture(vis, lastFrame + seedOff);
+                        if (t) SDL_RenderCopy(renderer, t, nullptr, &dst);
+
+                        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+                    };
+
+                    int mx = ix;
+                    drawMiniIcon(a, mx, iy, mini, a.id + 17);
+                    mx += mini + gap;
+                    drawText5x7(renderer, mx, textY, scale, gray, "+");
+                    mx += charW + gap;
+                    drawMiniIcon(b, mx, iy, mini, b.id + 23);
+                    mx += mini + gap;
+                    drawText5x7(renderer, mx, textY, scale, gray, "=>");
+                    mx += (2 * charW) + gap;
+                    Item r = craftOut;
+                    r.count = 1;
+                    drawMiniIcon(r, mx, iy, mini, 1337);
+
+                    iy += mini + 10;
+                }
+            }
+        }
 
         // Sprite preview
         const int previewPx = std::min(96, infoRect.w);
@@ -10375,16 +10944,51 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         if (tex) {
             SDL_RenderCopy(renderer, tex, nullptr, &sprDst);
         }
+
+        // When previewing a craft RESULT, also show the byproduct sprite (if any).
+        if (showCraftResult && craftCC.hasByproduct) {
+            const int bpSize = 32;
+            const int bx = ix + previewPx + 14;
+            const int by = iy + (previewPx - bpSize) / 2;
+
+            if (bx + bpSize <= infoRect.x + infoRect.w) {
+                SDL_Rect bpDst{ bx, by, bpSize, bpSize };
+
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 45);
+                SDL_RenderFillRect(renderer, &bpDst);
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+
+                Item bp = craftCC.byproduct;
+                bp.id = 0;
+
+                if (isHallucinating(game)) {
+                    bp.kind = hallucinatedItemKind(game, bp);
+                }
+
+                applyIdentificationVisuals(game, bp);
+
+                SDL_Texture* btex = itemTexture(bp, lastFrame + bp.id + 1337);
+                if (btex) {
+                    SDL_RenderCopy(renderer, btex, nullptr, &bpDst);
+                }
+
+                if (bp.count > 1) {
+                    drawText5x7(renderer, bx + 2, by + bpSize - 14, scale, gray, "x" + std::to_string(bp.count));
+                }
+            }
+        }
+
         iy += previewPx + 10;
 
         // Stats lines
         auto statLine = [&](const std::string& s, const Color& c) {
-            drawText5x7(renderer, ix, iy, scale, c, fitToChars(s, 32));
+            drawText5x7(renderer, ix, iy, scale, c, fitToChars(s, infoChars));
             iy += 18;
         };
 
 			auto statWrap = [&](const std::string& s, const Color& c, int maxLines = 3) {
-				const auto lines = wrapToChars(s, 32, maxLines);
+				const auto lines = wrapToChars(s, infoChars, maxLines);
 				for (const auto& ln : lines) {
 					statLine(ln, c);
 				}
@@ -10479,8 +11083,43 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         if (invCraft) {
             statLine("CRAFTING", yellow);
             const auto& lines = game.inventoryCraftPreviewLines();
+
+            auto begins = [](const std::string& s, const char* p) -> bool {
+                return s.rfind(p, 0) == 0;
+            };
+
+            auto craftColor = [&](const std::string& s) -> Color {
+                if (s.empty()) return gray;
+                if (begins(s, "MODE:")) return cyan;
+                if (begins(s, "POTENTIAL:")) return cyan;
+                if (begins(s, "EXAMPLES:")) return cyan;
+                if (begins(s, "EX:")) return white;
+                if (begins(s, "RESULT:") || begins(s, "BYPRODUCT:")) return white;
+                if (begins(s, "LOCKED:") || begins(s, "NEED") || begins(s, "SELECTED") || begins(s, "PICK ") || begins(s, "ING1 LOST")) return yellow;
+                if (begins(s, "SIGIL:")) return cyan;
+                if (begins(s, "KNOWN: YES")) return cyan;
+                if (begins(s, "KNOWN: NO")) return gray;
+                if (begins(s, "ING1:") || begins(s, "ING2:")) return white;
+                if (begins(s, "LEGEND:") || begins(s, "ENTER:") || begins(s, "SHIFT+")) return dim;
+                return gray;
+            };
+
+            auto craftMaxLines = [&](const std::string& s) -> int {
+                if (begins(s, "RESULT:") || begins(s, "BYPRODUCT:") || begins(s, "RUNE:") || begins(s, "ARTIFACT:") || begins(s, "EGO:") || begins(s, "EX:")) return 3;
+                return 2;
+            };
+
+            // Wrap lines so long recipe names/sigils aren't silently truncated.
+            // Cap count to keep the rest of the info panel visible.
+            const int maxShow = 14;
+            int shown = 0;
             for (const auto& l : lines) {
-                statLine(l, gray);
+                if (shown >= maxShow) {
+                    statLine("...", gray);
+                    break;
+                }
+                statWrap(l, craftColor(l), craftMaxLines(l));
+                shown += 1;
             }
             iy += 6;
         }

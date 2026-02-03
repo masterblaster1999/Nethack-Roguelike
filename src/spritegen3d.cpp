@@ -409,7 +409,7 @@ VoxelModel voxelizeExtrude(const SpritePixels& base2d, uint32_t seed, int maxDep
     };
 
     // Mask (alpha>0), with a small heuristic to ignore finalizeSprite() drop-shadows.
-    std::vector<uint8_t> mask(static_cast<size_t>(w * h), 0);
+    std::vector<uint8_t> mask(static_cast<size_t>(w * h), uint8_t{0});
 
     auto isLikelyDropShadow = [&](int x, int y) -> bool {
         const Color c = base2d.at(x,y);
@@ -450,7 +450,7 @@ VoxelModel voxelizeExtrude(const SpritePixels& base2d, uint32_t seed, int maxDep
         if (area <= 0) return;
 
         const int maxHole = std::clamp(area / 96, 2, 24); // 16×16 -> 2, 32×32 -> 10, capped.
-        std::vector<uint8_t> outside(static_cast<size_t>(area), 0);
+        std::vector<uint8_t> outside(static_cast<size_t>(area), uint8_t{0});
 
         std::queue<Vec2i> qb;
         auto pushBg = [&](int x, int y) {
@@ -483,7 +483,7 @@ VoxelModel voxelizeExtrude(const SpritePixels& base2d, uint32_t seed, int maxDep
             }
         }
 
-        std::vector<uint8_t> vis(static_cast<size_t>(area), 0);
+        std::vector<uint8_t> vis(static_cast<size_t>(area), uint8_t{0});
         std::queue<Vec2i> qc;
 
         for (int y = 0; y < h; ++y) {
@@ -2268,7 +2268,7 @@ void greedyMerge2D(int dimU, int dimV, const std::vector<Color>& cells, EmitFn e
     if (dimU <= 0 || dimV <= 0) return;
     if (static_cast<int>(cells.size()) != dimU * dimV) return;
 
-    std::vector<uint8_t> used(static_cast<size_t>(dimU * dimV), 0);
+    std::vector<uint8_t> used(static_cast<size_t>(dimU * dimV), uint8_t{0});
 
     auto idx = [&](int u, int v) -> size_t {
         return static_cast<size_t>(v * dimU + u);
@@ -3127,7 +3127,7 @@ Color sampleSpriteOr(const SpritePixels& s, int x, int y, Color fallback) {
     return (c.a == 0) ? fallback : c;
 }
 
-void carveBoxAlpha0(VoxelModel& m, int x0, int y0, int z0, int x1, int y1, int z1) {
+[[maybe_unused]] void carveBoxAlpha0(VoxelModel& m, int x0, int y0, int z0, int x1, int y1, int z1) {
         if (x0 > x1) std::swap(x0, x1);
         if (y0 > y1) std::swap(y0, y1);
         if (z0 > z1) std::swap(z0, z1);

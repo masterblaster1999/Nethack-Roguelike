@@ -2,7 +2,7 @@ add_executable(procrogue_tests
     test_main.cpp
 )
 
-target_link_libraries(procrogue_tests PRIVATE procrogue_core)
+target_link_libraries(procrogue_tests PRIVATE procrogue_spritegen)
 
 
 # The test suite intentionally peeks at internal game state for deterministic validation.

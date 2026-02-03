@@ -118,6 +118,25 @@ endif()
 procrogue_apply_warnings(procrogue_core)
 
 # ------------------------------------------------------------
+# SDL-free sprite generation / mesh utilities
+# ------------------------------------------------------------
+#
+# These sources are used both by the game (renderer) and the test suite.
+# Keeping them in a separate library allows CI/test builds to exercise the
+# sprite resampling logic without pulling in SDL.
+
+set(PROCROGUE_SPRITEGEN_SOURCES
+    src/spritegen.cpp
+    src/spritegen3d.cpp
+    src/mesh2d.cpp
+)
+
+add_library(procrogue_spritegen STATIC ${PROCROGUE_SPRITEGEN_SOURCES})
+target_compile_features(procrogue_spritegen PUBLIC cxx_std_17)
+target_link_libraries(procrogue_spritegen PUBLIC procrogue_core)
+procrogue_apply_warnings(procrogue_spritegen)
+
+# ------------------------------------------------------------
 # Headless tool (SDL-free)
 # ------------------------------------------------------------
 if (PROCROGUE_BUILD_HEADLESS)
@@ -141,16 +160,13 @@ add_executable(${PROCROGUE_TARGET}
     src/main.cpp
     src/keybinds.cpp
     src/render.cpp
-    src/mesh2d.cpp
-    src/spritegen.cpp
-    src/spritegen3d.cpp
 )
 set_target_properties(${PROCROGUE_TARGET} PROPERTIES OUTPUT_NAME ProcRogue)
 
 target_include_directories(${PROCROGUE_TARGET} PRIVATE src)
 target_compile_features(${PROCROGUE_TARGET} PRIVATE cxx_std_17)
 
-target_link_libraries(${PROCROGUE_TARGET} PRIVATE procrogue_core)
+target_link_libraries(${PROCROGUE_TARGET} PRIVATE procrogue_spritegen)
 
 # SDL redefines main() on some platforms unless SDL_MAIN_HANDLED is set.
 target_compile_definitions(${PROCROGUE_TARGET} PRIVATE SDL_MAIN_HANDLED)

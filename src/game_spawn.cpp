@@ -4481,10 +4481,10 @@ void Game::spawnChemicalHazards() {
     if (n == 0) return;
 
     // Ensure hazard fields are sized.
-    if (confusionGas_.size() != n) confusionGas_.assign(n, 0u);
-    if (poisonGas_.size() != n) poisonGas_.assign(n, 0u);
-    if (corrosiveGas_.size() != n) corrosiveGas_.assign(n, 0u);
-    if (fireField_.size() != n) fireField_.assign(n, 0u);
+    if (confusionGas_.size() != n) confusionGas_.assign(n, uint8_t{0});
+    if (poisonGas_.size() != n) poisonGas_.assign(n, uint8_t{0});
+    if (corrosiveGas_.size() != n) corrosiveGas_.assign(n, uint8_t{0});
+    if (fireField_.size() != n) fireField_.assign(n, uint8_t{0});
 
     auto idx = [&](int x, int y) -> size_t {
         return static_cast<size_t>(y * dung.width + x);
@@ -4897,9 +4897,9 @@ void Game::onDoorOpened(Vec2i doorPos, bool openerIsPlayer) {
     if (expect == 0) return;
 
     // Ensure arrays exist (safety for older saves / edge cases).
-    if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
-    if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
-    if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
+    if (confusionGas_.size() != expect) confusionGas_.assign(expect, uint8_t{0});
+    if (poisonGas_.size() != expect) poisonGas_.assign(expect, uint8_t{0});
+    if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, uint8_t{0});
 
     auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
     auto scoreAt = [&](Vec2i p) -> int {
@@ -5103,10 +5103,10 @@ void Game::applyEndOfTurnEffects() {
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
         if (expect > 0) {
-            if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
-            if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
-            if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
-            if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+            if (confusionGas_.size() != expect) confusionGas_.assign(expect, uint8_t{0});
+            if (poisonGas_.size() != expect) poisonGas_.assign(expect, uint8_t{0});
+            if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, uint8_t{0});
+            if (fireField_.size() != expect) fireField_.assign(expect, uint8_t{0});
         }
 
         // ------------------------------------------------------------
@@ -5587,15 +5587,15 @@ void Game::applyEndOfTurnEffects() {
     // ------------------------------------------------------------
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
-        if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+        if (confusionGas_.size() != expect) confusionGas_.assign(expect, uint8_t{0});
 
         auto gasIdx = [&](int x, int y) -> size_t {
             return static_cast<size_t>(y * dung.width + x);
         };
         auto gasAt = [&](int x, int y) -> uint8_t {
-            if (!dung.inBounds(x, y)) return 0u;
+            if (!dung.inBounds(x, y)) return uint8_t{0};
             const size_t i = gasIdx(x, y);
-            if (i >= confusionGas_.size()) return 0u;
+            if (i >= confusionGas_.size()) return uint8_t{0};
             return confusionGas_[i];
         };
 
@@ -5638,15 +5638,15 @@ void Game::applyEndOfTurnEffects() {
     // ------------------------------------------------------------
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
-        if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+        if (poisonGas_.size() != expect) poisonGas_.assign(expect, uint8_t{0});
 
         auto gasIdx = [&](int x, int y) -> size_t {
             return static_cast<size_t>(y * dung.width + x);
         };
         auto gasAt = [&](int x, int y) -> uint8_t {
-            if (!dung.inBounds(x, y)) return 0u;
+            if (!dung.inBounds(x, y)) return uint8_t{0};
             const size_t i = gasIdx(x, y);
-            if (i >= poisonGas_.size()) return 0u;
+            if (i >= poisonGas_.size()) return uint8_t{0};
             return poisonGas_[i];
         };
 
@@ -5690,15 +5690,15 @@ void Game::applyEndOfTurnEffects() {
     // ------------------------------------------------------------
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
-        if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
+        if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, uint8_t{0});
 
         auto gasIdx = [&](int x, int y) -> size_t {
             return static_cast<size_t>(y * dung.width + x);
         };
         auto gasAt = [&](int x, int y) -> uint8_t {
-            if (!dung.inBounds(x, y)) return 0u;
+            if (!dung.inBounds(x, y)) return uint8_t{0};
             const size_t i = gasIdx(x, y);
-            if (i >= corrosiveGas_.size()) return 0u;
+            if (i >= corrosiveGas_.size()) return uint8_t{0};
             return corrosiveGas_[i];
         };
 
@@ -5741,15 +5741,15 @@ void Game::applyEndOfTurnEffects() {
     // ------------------------------------------------------------
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
-        if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+        if (fireField_.size() != expect) fireField_.assign(expect, uint8_t{0});
 
         auto fireIdx = [&](int x, int y) -> size_t {
             return static_cast<size_t>(y * dung.width + x);
         };
         auto fireAt = [&](int x, int y) -> uint8_t {
-            if (!dung.inBounds(x, y)) return 0u;
+            if (!dung.inBounds(x, y)) return uint8_t{0};
             const size_t i = fireIdx(x, y);
-            if (i >= fireField_.size()) return 0u;
+            if (i >= fireField_.size()) return uint8_t{0};
             return fireField_[i];
         };
 
@@ -6620,7 +6620,7 @@ void Game::applyEndOfTurnEffects() {
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
         if (expect > 0 && confusionGas_.size() != expect) {
-            confusionGas_.assign(expect, 0u);
+            confusionGas_.assign(expect, uint8_t{0});
         }
 
         if (!confusionGas_.empty()) {
@@ -6720,7 +6720,7 @@ void Game::applyEndOfTurnEffects() {
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
         if (expect > 0 && poisonGas_.size() != expect) {
-            poisonGas_.assign(expect, 0u);
+            poisonGas_.assign(expect, uint8_t{0});
         }
 
         if (!poisonGas_.empty()) {
@@ -6817,7 +6817,7 @@ void Game::applyEndOfTurnEffects() {
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
         if (expect > 0 && corrosiveGas_.size() != expect) {
-            corrosiveGas_.assign(expect, 0u);
+            corrosiveGas_.assign(expect, uint8_t{0});
         }
 
         if (!corrosiveGas_.empty()) {
@@ -6990,9 +6990,9 @@ void Game::applyEndOfTurnEffects() {
         if (expect > 0 && corrosiveGas_.size() == expect) {
             auto idx2 = [&](int x, int y) -> size_t { return static_cast<size_t>(y * w + x); };
             auto gasAt = [&](Vec2i p) -> uint8_t {
-                if (!dung.inBounds(p.x, p.y)) return 0u;
+                if (!dung.inBounds(p.x, p.y)) return uint8_t{0};
                 const size_t i = idx2(p.x, p.y);
-                if (i >= corrosiveGas_.size()) return 0u;
+                if (i >= corrosiveGas_.size()) return uint8_t{0};
                 return corrosiveGas_[i];
             };
 
@@ -7108,7 +7108,7 @@ void Game::applyEndOfTurnEffects() {
     {
         const size_t expect = static_cast<size_t>(dung.width * dung.height);
         if (expect > 0 && fireField_.size() != expect) {
-            fireField_.assign(expect, 0u);
+            fireField_.assign(expect, uint8_t{0});
         }
 
         if (!fireField_.empty()) {

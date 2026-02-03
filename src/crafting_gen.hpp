@@ -13,8 +13,9 @@
 // - Save-compatible: uses only existing Item fields (no save format changes).
 //
 // Crafting can yield either:
-// - Consumables (potions/scrolls/wands/spellbooks/food/rune tablets), or
-// - Forged gear (weapons/armor/rings) with deterministic ego/artifact infusion.
+// - Consumables (potions/scrolls/wands/spellbooks/food/rune tablets),
+// - Forged gear (weapons/armor/rings) with deterministic ego/artifact infusion, or
+// - Refined essences (Essence Shards) when combining shards of the same tag.
 
 #include "items.hpp"
 #include "artifact_gen.hpp"
@@ -775,6 +776,165 @@ inline Outcome craft(uint32_t runSeed, const Item& a0, const Item& b0) {
     const Essence eb = essenceFor(b0);
 
     Outcome o;
+
+    // Special-case: Essence Shard refinement.
+    // Combining two shards of the same tag produces a higher-tier shard.
+    //
+    // This creates a small, deterministic progression loop for crafting byproducts
+    // (and trap salvage) without changing the save format.
+    if (a0.kind == ItemKind::EssenceShard && b0.kind == ItemKind::EssenceShard) {
+        // Only refine when both shards share a non-empty tag. Mixed-tag shards
+        // still fall through to normal crafting for interesting outcomes.
+        if (!ea.tag.empty() && ea.tag == eb.tag) {
+            const int outTier = clampi(std::max(ea.tier, eb.tier) + 1, 1, 12);
+
+            // Build a deterministic recipe seed for this refinement so it can
+            // still be journaled as a sigil like other crafts.
+            const uint32_t rs = recipeSeed(runSeed, a0, b0, ea, eb, outTier);
+
+            bool outShiny = false;
+            if (ea.shiny && eb.shiny) {
+                outShiny = true;
+            } else {
+                int shinyChance = 6 + outTier * 2; // 8..30-ish
+                if (ea.shiny || eb.shiny) shinyChance += 18;
+                if (outTier >= 10) shinyChance += 8;
+                shinyChance = clampi(shinyChance, 0, 100);
+
+                const uint32_t hShiny = hash32(rs ^ 0x51A7D00Du);
+                outShiny = ((hShiny % 100u) < static_cast<uint32_t>(shinyChance));
+            }
+
+            const crafttags::Tag tg = crafttags::tagFromToken(ea.tag);
+            const int tagId = crafttags::tagIndex(tg);
+
+            Item shard;
+            shard.kind = ItemKind::EssenceShard;
+            shard.count = 1;
+            shard.charges = 0;
+            shard.enchant = packEssenceShardEnchant(tagId, outTier, outShiny);
+            shard.buc = 0;
+            shard.ego = ItemEgo::None;
+            shard.spriteSeed = hash32(rs ^ 0xE55E1234u) ^ (static_cast<uint32_t>(tagId) * 0x9E3779B9u);
+
+            o.out = shard;
+            o.tagA = ea.tag;
+            o.tagB = eb.tag;
+            o.tier = outTier;
+            o.hasByproduct = false;
+            return o;
+        }
+    }
+
+    // Special-case: Essence Shard infusion.
+    // Combining an Essence Shard with wearable gear upgrades that gear in a
+    // deterministic way, preserving the base item kind.
+    //
+    // This gives Essence Shards a reliable use-case beyond rolling entirely new
+    // items, while keeping outcomes deterministic and order-independent.
+    const bool shardInfuse = (a0.kind == ItemKind::EssenceShard && isWearableGear(b0.kind)) ||
+                             (b0.kind == ItemKind::EssenceShard && isWearableGear(a0.kind));
+
+    if (shardInfuse) {
+        const Item& gearIn  = (a0.kind == ItemKind::EssenceShard) ? b0 : a0;
+        const Essence es = (a0.kind == ItemKind::EssenceShard) ? ea : eb;
+        const Essence eg = (a0.kind == ItemKind::EssenceShard) ? eb : ea;
+
+        // Infusion tier biases toward the shard's tier, but respects existing gear.
+        int itier = (es.tier + eg.tier + 1) / 2;
+        if (es.shiny) itier += 1;
+        o.tier = clampTier(itier);
+
+        const uint32_t rs = recipeSeed(runSeed, a0, b0, ea, eb, o.tier);
+
+        auto rollPct = [&](uint32_t salt, int pct) -> bool {
+            const int p = clampi(pct, 0, 100);
+            const uint32_t h = hash32(rs ^ salt);
+            return (h % 100u) < static_cast<uint32_t>(p);
+        };
+
+        // Base output: keep the gear kind and core identity.
+        Item out = gearIn;
+        out.count = 1;
+
+        // Deterministic upgrade magnitude from shard tier and "shiny" status.
+        int boost = 0;
+        if (es.tier >= 10) boost = 2;
+        else if (es.tier >= 6) boost = 1;
+        if (es.shiny) boost += 1;
+        if (!es.tag.empty() && es.tag == eg.tag) boost += 1;
+        boost = clampi(boost, 0, 3);
+
+        // Purify/cleanse: certain essences are better at stripping curses.
+        if (out.buc < 0) {
+            const bool canCleanse = es.shiny || hasAnyTagPair3(es.tag, eg.tag, "AURORA", "CLARITY", "LUCK");
+            if (canCleanse) {
+                int pct = 20 + es.tier * 6;
+                if (es.shiny) pct += 20;
+                if (hasTagPair(es.tag, eg.tag, "AURORA")) pct += 10;
+                pct = clampi(pct, 0, 100);
+                if (rollPct(0x1E55E001u, pct)) out.buc = 0;
+            }
+        } else if (out.buc == 0) {
+            const bool canBless = es.shiny || hasAnyTagPair2(es.tag, eg.tag, "LUCK", "AURORA");
+            if (canBless) {
+                int pct = 6 + es.tier * 3 + boost * 4;
+                if (es.shiny) pct += 10;
+                pct = clampi(pct, 0, 60);
+                if (rollPct(0x1E55EB1Eu, pct)) out.buc = 1;
+            }
+        }
+
+        // Apply the actual "upgrade".
+        if (isWandKind(out.kind)) {
+            const ItemDef& d = itemDef(out.kind);
+            const int maxC = std::max(1, d.maxCharges);
+            int cur = out.charges;
+            if (cur <= 0) cur = std::max(1, maxC / 2);
+            cur = clampi(cur, 1, maxC);
+
+            int delta = boost;
+            // Arc/Rune/Ember/Stone essences resonate with charged implements.
+            if (hasAnyTagPair3(es.tag, eg.tag, "ARC", "RUNE", "EMBER")) delta += 1;
+            if (hasTagPair(es.tag, eg.tag, "STONE")) delta += 1;
+            delta = clampi(delta, 0, 4);
+
+            out.charges = clampi(cur + delta, 1, maxC);
+        } else {
+            // Weapons/armor/rings: improve enchantment (never decreases here).
+            int delta = boost;
+            if (es.tier >= 9 && rollPct(0x1E55E99Eu, 35)) delta += 1;
+            delta = clampi(delta, 0, 4);
+            out.enchant = clampi(out.enchant + delta, -3, 6);
+
+            // Melee weapons: allow deterministic ego infusion at higher shard tiers.
+            if (canHaveMeleeEgoCraft(out.kind) && !itemIsArtifact(out) && out.ego == ItemEgo::None) {
+                if (!es.tag.empty() && es.tier >= 5) {
+                    RNG rng(rs ^ 0xA11CE5E1u);
+                    const ItemEgo want = desiredMeleeEgoForTags(es.tag, eg.tag, rng);
+                    int pct = 30 + es.tier * 5;
+                    if (es.shiny) pct += 10;
+                    if (want != ItemEgo::None && rollPct(0x1E55E600u, pct)) {
+                        out.ego = want;
+                    }
+                }
+            }
+        }
+
+        // Keep artifact identities stable; otherwise give the infused item a new procedural seed.
+        if (!itemIsArtifact(out)) {
+            out.spriteSeed = rs;
+        }
+
+        // Order-independent tag pair for journaling/selection.
+        const bool swapTags = (ea.tag > eb.tag) || (ea.tag == eb.tag && ingredientFingerprint(a0) > ingredientFingerprint(b0));
+        o.tagA = swapTags ? eb.tag : ea.tag;
+        o.tagB = swapTags ? ea.tag : eb.tag;
+
+        o.out = out;
+        o.hasByproduct = false;
+        return o;
+    }
 
     // Combine tiers; shiny ingredients slightly bias up.
     int t = (ea.tier + eb.tier + 1) / 2;

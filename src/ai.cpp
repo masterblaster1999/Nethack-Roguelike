@@ -1206,7 +1206,7 @@ void Game::monsterTurn() {
             };
 
             std::deque<Node> q;
-            std::vector<uint8_t> visited(static_cast<size_t>(W * H), 0u);
+            std::vector<uint8_t> visited(static_cast<size_t>(W * H), uint8_t{0});
             visited[idxOf(m.pos.x, m.pos.y)] = 1u;
 
             auto tryEnqueue = [&](Vec2i from, int dir, uint8_t firstDir, uint8_t dist) {
@@ -1684,7 +1684,7 @@ void Game::monsterTurn() {
                 auto ensureField = [&](std::vector<uint8_t>& f) {
                     const size_t n = static_cast<size_t>(W * H);
                     if (n == 0) return;
-                    if (f.size() != n) f.assign(n, 0u);
+                    if (f.size() != n) f.assign(n, uint8_t{0});
                 };
 
                 auto seedPoisonGas = [&](Vec2i c, int radius, uint8_t baseStrength) {

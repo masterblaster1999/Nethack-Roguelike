@@ -2255,7 +2255,7 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
         if (!readPod(in, gasCount)) return false;
 
         std::vector<uint8_t> gasTmp;
-        gasTmp.assign(gasCount, 0u);
+        gasTmp.assign(gasCount, uint8_t{0});
         for (uint32_t gi = 0; gi < gasCount; ++gi) {
             uint8_t gv = 0;
             if (!readPod(in, gv)) return false;
@@ -2264,7 +2264,7 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
 
         // Normalize size to the dungeon tile count when possible (defensive against older/partial saves).
         if (tileCount > 0) {
-            st.confusionGas.assign(tileCount, 0u);
+            st.confusionGas.assign(tileCount, uint8_t{0});
             const uint32_t copyN = std::min(gasCount, tileCount);
             for (uint32_t i = 0; i < copyN; ++i) {
                 st.confusionGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
@@ -2281,7 +2281,7 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
         if (!readPod(in, gasCount)) return false;
 
         std::vector<uint8_t> gasTmp;
-        gasTmp.assign(gasCount, 0u);
+        gasTmp.assign(gasCount, uint8_t{0});
         for (uint32_t gi = 0; gi < gasCount; ++gi) {
             uint8_t gv = 0;
             if (!readPod(in, gv)) return false;
@@ -2290,7 +2290,7 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
 
         // Normalize size to the dungeon tile count when possible.
         if (tileCount > 0) {
-            st.poisonGas.assign(tileCount, 0u);
+            st.poisonGas.assign(tileCount, uint8_t{0});
             const uint32_t copyN = std::min(gasCount, tileCount);
             for (uint32_t i = 0; i < copyN; ++i) {
                 st.poisonGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
@@ -2306,7 +2306,7 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
         uint32_t gasCount = 0;
         if (!readPod(in, gasCount)) return false;
         std::vector<uint8_t> gasTmp;
-        gasTmp.assign(gasCount, 0u);
+        gasTmp.assign(gasCount, uint8_t{0});
         for (uint32_t gi = 0; gi < gasCount; ++gi) {
             uint8_t v = 0u;
             if (!readPod(in, v)) return false;
@@ -2315,7 +2315,7 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
 
         // Normalize size to the dungeon tile count when possible.
         if (tileCount > 0) {
-            st.corrosiveGas.assign(tileCount, 0u);
+            st.corrosiveGas.assign(tileCount, uint8_t{0});
             const uint32_t copyN = std::min(gasCount, tileCount);
             for (uint32_t i = 0; i < copyN; ++i) {
                 st.corrosiveGas[static_cast<size_t>(i)] = gasTmp[static_cast<size_t>(i)];
@@ -2332,7 +2332,7 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
         if (!readPod(in, fireCount)) return false;
 
         std::vector<uint8_t> fireTmp;
-        fireTmp.assign(fireCount, 0u);
+        fireTmp.assign(fireCount, uint8_t{0});
         for (uint32_t fi = 0; fi < fireCount; ++fi) {
             uint8_t fv = 0;
             if (!readPod(in, fv)) return false;
@@ -2340,7 +2340,7 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
         }
 
         if (tileCount > 0) {
-            st.fireField.assign(tileCount, 0u);
+            st.fireField.assign(tileCount, uint8_t{0});
             const uint32_t copyN = std::min(fireCount, tileCount);
             for (uint32_t i = 0; i < copyN; ++i) {
                 st.fireField[static_cast<size_t>(i)] = fireTmp[static_cast<size_t>(i)];
@@ -2357,7 +2357,7 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
         if (!readPod(in, scentCount)) return false;
 
         std::vector<uint8_t> scentTmp;
-        scentTmp.assign(scentCount, 0u);
+        scentTmp.assign(scentCount, uint8_t{0});
         for (uint32_t si = 0; si < scentCount; ++si) {
             uint8_t sv = 0;
             if (!readPod(in, sv)) return false;
@@ -2366,7 +2366,7 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
 
         // Normalize size to the dungeon tile count when possible (defensive against older/partial saves).
         if (tileCount > 0) {
-            st.scentField.assign(tileCount, 0u);
+            st.scentField.assign(tileCount, uint8_t{0});
             const uint32_t copyN = std::min(scentCount, tileCount);
             for (uint32_t i = 0; i < copyN; ++i) {
                 st.scentField[static_cast<size_t>(i)] = scentTmp[static_cast<size_t>(i)];
@@ -3821,7 +3821,7 @@ if (ver >= 55u) {
         }
 
         // Auto-explore bookkeeping is transient per-floor; size it to this dungeon.
-        autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
 
         recomputeFov();
 

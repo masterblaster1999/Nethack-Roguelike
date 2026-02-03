@@ -2629,7 +2629,7 @@ inline void generateWildernessChunk(Dungeon& d, uint32_t runSeed, int chunkX, in
             dir.x = (dir.x > 0) ? 1 : (dir.x < 0 ? -1 : 0);
             dir.y = (dir.y > 0) ? 1 : (dir.y < 0 ? -1 : 0);
 
-            std::vector<uint8_t> visited(static_cast<size_t>(d.width * d.height), 0u);
+            std::vector<uint8_t> visited(static_cast<size_t>(d.width * d.height), uint8_t{0});
 
             int carvedTiles = 0;
             bool reachedWater = false;
@@ -2844,7 +2844,7 @@ inline void generateWildernessChunk(Dungeon& d, uint32_t runSeed, int chunkX, in
             const size_t N = static_cast<size_t>(W * H * 4);
             gScore.assign(N, std::numeric_limits<int>::max());
             parent.assign(N, -1);
-            closed.assign(N, 0);
+            closed.assign(N, uint8_t{0});
 
             // Biome-tuned smoothness: dense biomes bias smoother paths (less zig-zag),
             // while open biomes allow slightly more meander.
@@ -2950,7 +2950,7 @@ inline void generateWildernessChunk(Dungeon& d, uint32_t runSeed, int chunkX, in
             const size_t N = static_cast<size_t>(W * H * 4);
             std::fill(gScore.begin(), gScore.end(), std::numeric_limits<int>::max());
             std::fill(parent.begin(), parent.end(), -1);
-            std::fill(closed.begin(), closed.end(), 0);
+            std::fill(closed.begin(), closed.end(), uint8_t{0});
 
             auto heuristic = [&](int x, int y) -> int {
                 const int md = std::abs(goal.x - x) + std::abs(goal.y - y);

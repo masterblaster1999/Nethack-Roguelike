@@ -33,6 +33,15 @@ struct SpritePixels {
 // Implementation lives in spritegen.cpp.
 SpritePixels resampleSpriteToSize(const SpritePixels& src, int pxSize);
 
+// Utility: resample an arbitrary (possibly non-square) sprite.
+//
+// This is used primarily for isometric 2:1 diamond tiles (e.g. 16x8 -> 96x48)
+// and other UI elements that don't have a square aspect ratio.
+//
+// The implementation prefers the ScaleNx integer upscaling family (2x/3x)
+// when possible to preserve crisp pixel-art edges.
+SpritePixels resampleSpriteToRect(const SpritePixels& src, int outW, int outH);
+
 // Special seed flag for item sprites.
 //
 // When this bit is set, generateItemSprite() treats the low 8 bits of `seed`

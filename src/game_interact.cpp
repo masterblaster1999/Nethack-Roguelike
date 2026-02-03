@@ -860,7 +860,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
             // Lingering confusion gas cloud. This trap creates a persistent, tile-based hazard
             // that slowly diffuses and dissipates over time.
             const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+            if (confusionGas_.size() != expect) confusionGas_.assign(expect, uint8_t{0});
 
             // Apply an immediate confusion hit to the victim (the cloud will keep it topped up).
             const int turns = rng.range(4, 7) + std::min(4, depth_ / 3);
@@ -915,7 +915,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
             // Lingering poison gas cloud. This trap creates a persistent, tile-based hazard
             // that slowly diffuses and dissipates over time.
             const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+            if (poisonGas_.size() != expect) poisonGas_.assign(expect, uint8_t{0});
 
             // Apply an immediate poison hit to the victim (the cloud will keep it topped up).
             const int turns = rng.range(3, 6) + std::min(4, depth_ / 3);
@@ -970,7 +970,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
             // Lingering corrosive gas cloud. This trap creates a persistent, tile-based hazard
             // that slowly diffuses and dissipates over time.
             const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
+            if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, uint8_t{0});
 
             // Apply an immediate corrosion hit to the victim (the cloud will keep it topped up).
             const int turns = rng.range(3, 6) + std::min(3, depth_ / 4);
@@ -1348,7 +1348,7 @@ void Game::triggerSigilAt(Vec2i pos, Entity& victim) {
 
         auto ensureField = [&](std::vector<uint8_t>& field) {
             const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (field.size() != expect) field.assign(expect, 0u);
+            if (field.size() != expect) field.assign(expect, uint8_t{0});
         };
 
         auto idx = [&](int x, int y) -> size_t {
@@ -4389,7 +4389,7 @@ bool Game::harvestEcosystemNodeAtPlayer() {
         const int w = dung.width;
         const int hgt = dung.height;
         if (w <= 0 || hgt <= 0) return;
-        if (static_cast<int>(field.size()) != w * hgt) field.assign(w * hgt, 0);
+        if (static_cast<int>(field.size()) != w * hgt) field.assign(w * hgt, uint8_t{0});
 
         const int r2 = radius * radius;
         for (int dy = -radius; dy <= radius; ++dy) {

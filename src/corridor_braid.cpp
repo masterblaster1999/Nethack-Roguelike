@@ -83,7 +83,7 @@ CorridorBraidResult applyCorridorBraiding(Dungeon& d, RNG& rng, int depth, Corri
     auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * W + x); };
 
     // Build a simple room mask (room interiors) so we can treat corridors separately.
-    std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), 0);
+    std::vector<uint8_t> inRoom(static_cast<size_t>(W * H), uint8_t{0});
     for (const auto& r : d.rooms) {
         for (int y = r.y; y < r.y2(); ++y) {
             for (int x = r.x; x < r.x2(); ++x) {

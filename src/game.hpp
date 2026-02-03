@@ -1584,6 +1584,23 @@ void setControlPreset(ControlPreset preset) { controlPreset_ = preset; }
     bool isInventoryCraftMode() const { return invCraftMode; }
     int inventoryCraftFirstId() const { return invCraftFirstId_; }
     const std::vector<std::string>& inventoryCraftPreviewLines() const { return invCraftPreviewLines_; }
+
+    // Crafting UI helper: compute "would craft" metadata for list badges/highlights.
+    struct CraftUIHint {
+        bool valid = false;
+        bool locked = false;               // true when either ingredient is cursed+equipped
+        bool known = false;                // recipe already in the run's craft journal
+        bool shardRefinement = false;       // matching shard+shard upgrade
+        bool shardInfusion = false;         // shard+gear upgrade
+        int tier = 0;
+        uint32_t sig = 0u;
+        ItemKind outKind = ItemKind::Dagger; // only meaningful when valid=true
+        int outEnchant = 0;              // for visual accuracy (e.g., Essence Shards)
+        int outCharges = 0;              // optional (wands); UI helpers
+    };
+    CraftUIHint craftingUiHint(const Item& ing1, const Item& ing2) const;
+    int craftingKnownRecipeCount() const { return static_cast<int>(craftRecipeBook_.size()); }
+
     int inventorySelection() const { return invSel; }
     bool isEquipped(int itemId) const;
     std::string equippedTag(int itemId) const; // e.g. "M", "R", "A", "1", "2"

@@ -19,7 +19,9 @@
 #include "ecosystem_loot.hpp"
 #include "shrine_profile_gen.hpp"
 #include "victory_gen.hpp"
+#include "spritegen.hpp"
 #include <queue>
+#include <unordered_map>
 
 
 struct GameTestAccess {
@@ -764,6 +766,13 @@ bool test_crafting_ecosystem_catalyst_changes_outcome() {
     Game g;
     g.newGame(0xC0FFEEu);
 
+    // Ecosystems are only generated on non-camp dungeon branches.
+    {
+        Dungeon& camp = GameTestAccess::dung(g);
+        g.playerMut().pos = camp.stairsDown;
+        g.handleAction(Action::StairsDown);
+    }
+
     Dungeon& d = GameTestAccess::dung(g);
 
     // Build ecosystem cache.
@@ -780,17 +789,43 @@ bool test_crafting_ecosystem_catalyst_changes_outcome() {
     Vec2i posEco{-1, -1};
     EcosystemKind ecoKind = EcosystemKind::None;
 
-    for (int y = 0; y < d.height; ++y) {
-        for (int x = 0; x < d.width; ++x) {
+    // Pick two walkable positions that share the same room type (workstation),
+    // but differ in ecosystem catalyst.
+    bool found = false;
+    struct Pick {
+        bool hasNone = false;
+        bool hasEco = false;
+        Vec2i none{-1, -1};
+        Vec2i eco{-1, -1};
+        EcosystemKind ecoKind = EcosystemKind::None;
+    };
+    std::unordered_map<int, Pick> picks;
+    picks.reserve(16);
+
+    for (int y = 0; y < d.height && !found; ++y) {
+        for (int x = 0; x < d.width && !found; ++x) {
             if (!d.isWalkable(x, y)) continue;
-            Vec2i p{x, y};
-            if (roomTypeAtLocal(p) != RoomType::Normal) continue; // keep workstation constant
+            const Vec2i p{x, y};
+            const RoomType rt = roomTypeAtLocal(p);
             const EcosystemKind e = d.ecosystemAtCached(x, y);
-            if (e == EcosystemKind::None && posNone.x < 0) posNone = p;
-            if (e != EcosystemKind::None && posEco.x < 0) { posEco = p; ecoKind = e; }
-            if (posNone.x >= 0 && posEco.x >= 0) break;
+
+            Pick& pk = picks[static_cast<int>(rt)];
+            if (e == EcosystemKind::None && !pk.hasNone) {
+                pk.none = p;
+                pk.hasNone = true;
+            } else if (e != EcosystemKind::None && !pk.hasEco) {
+                pk.eco = p;
+                pk.ecoKind = e;
+                pk.hasEco = true;
+            }
+
+            if (pk.hasNone && pk.hasEco) {
+                posNone = pk.none;
+                posEco = pk.eco;
+                ecoKind = pk.ecoKind;
+                found = true;
+            }
         }
-        if (posNone.x >= 0 && posEco.x >= 0) break;
     }
 
     CHECK(posNone.x >= 0);
@@ -833,6 +868,381 @@ bool test_crafting_ecosystem_catalyst_changes_outcome() {
 
     // Catalyst salting should change the sigil/output seed.
     CHECK(ccNone.sig != ccEco.sig);
+
+    return true;
+}
+
+bool test_crafting_shard_refinement_location_invariant() {
+    // Combining two matching Essence Shards should deterministically refine them into
+    // a higher-tier shard, and the result should not depend on biome/workstation.
+
+    Game g;
+    g.newGame(0xC0FFEEu);
+
+    // Ecosystems are only generated on non-camp dungeon branches.
+    {
+        Dungeon& camp = GameTestAccess::dung(g);
+        g.playerMut().pos = camp.stairsDown;
+        g.handleAction(Action::StairsDown);
+    }
+
+    Dungeon& d = GameTestAccess::dung(g);
+
+    // Build ecosystem cache.
+    d.ensureMaterials(g.materialWorldSeed(), g.branch(), g.materialDepth(), g.dungeonMaxDepth());
+
+    auto roomTypeAtLocal = [&](Vec2i p) -> RoomType {
+        for (const auto& r : d.rooms) {
+            if (r.contains(p)) return r.type;
+        }
+        return RoomType::Normal;
+    };
+
+    Vec2i posNone{-1, -1};
+    Vec2i posEco{-1, -1};
+    EcosystemKind ecoKind = EcosystemKind::None;
+
+    // Pick two walkable positions that share the same room type (workstation),
+    // but differ in ecosystem catalyst.
+    bool found = false;
+    struct Pick {
+        bool hasNone = false;
+        bool hasEco = false;
+        Vec2i none{-1, -1};
+        Vec2i eco{-1, -1};
+        EcosystemKind ecoKind = EcosystemKind::None;
+    };
+    std::unordered_map<int, Pick> picks;
+    picks.reserve(16);
+
+    for (int y = 0; y < d.height && !found; ++y) {
+        for (int x = 0; x < d.width && !found; ++x) {
+            if (!d.isWalkable(x, y)) continue;
+            const Vec2i p{x, y};
+            const RoomType rt = roomTypeAtLocal(p);
+            const EcosystemKind e = d.ecosystemAtCached(x, y);
+
+            Pick& pk = picks[static_cast<int>(rt)];
+            if (e == EcosystemKind::None && !pk.hasNone) {
+                pk.none = p;
+                pk.hasNone = true;
+            } else if (e != EcosystemKind::None && !pk.hasEco) {
+                pk.eco = p;
+                pk.ecoKind = e;
+                pk.hasEco = true;
+            }
+
+            if (pk.hasNone && pk.hasEco) {
+                posNone = pk.none;
+                posEco = pk.eco;
+                ecoKind = pk.ecoKind;
+                found = true;
+            }
+        }
+    }
+
+    CHECK(posNone.x >= 0);
+    CHECK(posEco.x >= 0);
+    CHECK(ecoKind != EcosystemKind::None);
+
+    const int tagId = crafttags::tagIndex(crafttags::Tag::Ember);
+    const int inTier = 4;
+
+    Item s1;
+    s1.id = 1;
+    s1.kind = ItemKind::EssenceShard;
+    s1.count = 1;
+    s1.charges = 0;
+    s1.enchant = packEssenceShardEnchant(tagId, inTier, false);
+    s1.buc = 0;
+    s1.spriteSeed = 0x11111111u;
+    s1.shopPrice = 0;
+    s1.shopDepth = 0;
+    s1.ego = ItemEgo::None;
+    s1.flags = 0;
+
+    Item s2 = s1;
+    s2.id = 2;
+    s2.spriteSeed = 0x22222222u;
+
+    g.playerMut().pos = posNone;
+    const Game::CraftComputed ccNone = g.computeCraftComputed(s1, s2);
+    CHECK(ccNone.ecosystem == EcosystemKind::None);
+
+    g.playerMut().pos = posEco;
+    const Game::CraftComputed ccEco = g.computeCraftComputed(s1, s2);
+    CHECK(ccEco.ecosystem == ecoKind);
+
+    CHECK(ccNone.out.kind == ItemKind::EssenceShard);
+    CHECK(ccEco.out.kind == ItemKind::EssenceShard);
+
+    // Location should not change refinement output.
+    CHECK(ccNone.out.enchant == ccEco.out.enchant);
+    CHECK(ccNone.out.spriteSeed == ccEco.out.spriteSeed);
+
+    CHECK(essenceShardTagFromEnchant(ccNone.out.enchant) == tagId);
+    CHECK(essenceShardTierFromEnchant(ccNone.out.enchant) == inTier + 1);
+
+    // Still order-independent.
+    const Game::CraftComputed ccRev = g.computeCraftComputed(s2, s1);
+    CHECK(ccNone.out.enchant == ccRev.out.enchant);
+    CHECK(ccNone.out.spriteSeed == ccRev.out.spriteSeed);
+
+    return true;
+}
+
+
+bool test_crafting_shard_infusion_upgrades_gear() {
+    // Combining an Essence Shard with wearable gear should deterministically
+    // upgrade that gear (preserving the base item kind).
+
+    const uint32_t runSeed = 0x1234ABCDu;
+
+    const int tagId = crafttags::tagIndex(crafttags::Tag::Ember);
+
+    Item shard;
+    shard.kind = ItemKind::EssenceShard;
+    shard.count = 1;
+    shard.charges = 0;
+    shard.enchant = packEssenceShardEnchant(tagId, /*tier=*/10, /*shiny=*/false);
+    shard.buc = 0;
+    shard.spriteSeed = 0x11111111u;
+    shard.shopPrice = 0;
+    shard.shopDepth = 0;
+    shard.ego = ItemEgo::None;
+    shard.flags = 0;
+
+    Item sword;
+    sword.kind = ItemKind::Sword;
+    sword.count = 1;
+    sword.charges = 0;
+    sword.enchant = 0;
+    sword.buc = 0;
+    sword.spriteSeed = 0x22222222u;
+    sword.shopPrice = 0;
+    sword.shopDepth = 0;
+    sword.ego = ItemEgo::None;
+    sword.flags = 0;
+
+    const craftgen::Outcome o1 = craftgen::craft(runSeed, shard, sword);
+    const craftgen::Outcome o2 = craftgen::craft(runSeed, sword, shard);
+
+    CHECK(o1.tier == o2.tier);
+    CHECK(o1.tagA == o2.tagA);
+    CHECK(o1.tagB == o2.tagB);
+
+    CHECK(o1.out.kind == ItemKind::Sword);
+    CHECK(o2.out.kind == ItemKind::Sword);
+
+    CHECK(o1.out.spriteSeed == o2.out.spriteSeed);
+    CHECK(o1.out.enchant == o2.out.enchant);
+    CHECK(o1.out.buc == o2.out.buc);
+    CHECK(o1.out.charges == o2.out.charges);
+    CHECK(o1.out.ego == o2.out.ego);
+    CHECK(o1.out.flags == o2.out.flags);
+
+    // Tier 10 shard should provide a noticeable enchant bump.
+    CHECK(o1.out.enchant >= 2);
+
+    CHECK(!o1.hasByproduct);
+
+    return true;
+}
+
+bool test_crafting_same_stack_consumes_two_units() {
+    Game g;
+    g.newGame(0xBADA55u);
+
+    // Build a controlled inventory.
+    g.inv.clear();
+    g.shopDebtLedger_.fill(0);
+    g.nextItemId = 1;
+    g.equipMeleeId = 0;
+    g.equipRangedId = 0;
+    g.equipArmorId = 0;
+    g.equipRing1Id = 0;
+    g.equipRing2Id = 0;
+
+    Item kit;
+    kit.id = g.nextItemId++;
+    kit.kind = ItemKind::CraftingKit;
+    kit.count = 1;
+    kit.charges = 0;
+    kit.enchant = 0;
+    kit.buc = 0;
+    kit.spriteSeed = 0;
+    kit.shopPrice = 0;
+    kit.shopDepth = 0;
+    kit.ego = ItemEgo::None;
+    kit.flags = 0;
+
+    Item rocks;
+    rocks.id = g.nextItemId++;
+    rocks.kind = ItemKind::Rock;
+    rocks.count = 3;
+    rocks.charges = 0;
+    rocks.enchant = 0;
+    rocks.buc = 0;
+    rocks.spriteSeed = 0;
+    rocks.shopPrice = 0;
+    rocks.shopDepth = 0;
+    rocks.ego = ItemEgo::None;
+    rocks.flags = 0;
+
+    const int rockId = rocks.id;
+
+    g.inv.push_back(kit);
+    g.inv.push_back(rocks);
+
+    CHECK(g.craftCombineById(rockId, rockId));
+
+    int rockCount = 0;
+    for (const auto& it : g.inv) {
+        if (it.kind == ItemKind::Rock) rockCount += it.count;
+    }
+    CHECK(rockCount == 1);
+
+    bool hasKit = false;
+    for (const auto& it : g.inv) {
+        if (it.kind == ItemKind::CraftingKit) hasKit = true;
+    }
+    CHECK(hasKit);
+
+    return true;
+}
+
+bool test_crafting_blocks_cursed_equipped_ingredients() {
+    Game g;
+    g.newGame(0x1337u);
+
+    g.inv.clear();
+    g.shopDebtLedger_.fill(0);
+    g.nextItemId = 1;
+    g.equipMeleeId = 0;
+    g.equipRangedId = 0;
+    g.equipArmorId = 0;
+    g.equipRing1Id = 0;
+    g.equipRing2Id = 0;
+
+    Item kit;
+    kit.id = g.nextItemId++;
+    kit.kind = ItemKind::CraftingKit;
+    kit.count = 1;
+    kit.charges = 0;
+    kit.enchant = 0;
+    kit.buc = 0;
+    kit.spriteSeed = 0;
+    kit.shopPrice = 0;
+    kit.shopDepth = 0;
+    kit.ego = ItemEgo::None;
+    kit.flags = 0;
+
+    Item sword;
+    sword.id = g.nextItemId++;
+    sword.kind = ItemKind::Sword;
+    sword.count = 1;
+    sword.charges = 0;
+    sword.enchant = 0;
+    sword.buc = -1; // cursed
+    sword.spriteSeed = 0;
+    sword.shopPrice = 0;
+    sword.shopDepth = 0;
+    sword.ego = ItemEgo::None;
+    sword.flags = 0;
+
+    Item rock;
+    rock.id = g.nextItemId++;
+    rock.kind = ItemKind::Rock;
+    rock.count = 1;
+    rock.charges = 0;
+    rock.enchant = 0;
+    rock.buc = 0;
+    rock.spriteSeed = 0;
+    rock.shopPrice = 0;
+    rock.shopDepth = 0;
+    rock.ego = ItemEgo::None;
+    rock.flags = 0;
+
+    g.inv.push_back(kit);
+    g.inv.push_back(sword);
+    g.inv.push_back(rock);
+
+    g.equipMeleeId = sword.id;
+
+    const size_t invSizeBefore = g.inv.size();
+    CHECK(!g.craftCombineById(sword.id, rock.id));
+    CHECK(g.equipMeleeId == sword.id);
+    CHECK(g.inv.size() == invSizeBefore);
+
+    return true;
+}
+
+bool test_crafting_auto_unequips_consumed_gear() {
+    Game g;
+    g.newGame(0xFEEDBEEFu);
+
+    g.inv.clear();
+    g.shopDebtLedger_.fill(0);
+    g.nextItemId = 1;
+    g.equipMeleeId = 0;
+    g.equipRangedId = 0;
+    g.equipArmorId = 0;
+    g.equipRing1Id = 0;
+    g.equipRing2Id = 0;
+
+    Item kit;
+    kit.id = g.nextItemId++;
+    kit.kind = ItemKind::CraftingKit;
+    kit.count = 1;
+    kit.charges = 0;
+    kit.enchant = 0;
+    kit.buc = 0;
+    kit.spriteSeed = 0;
+    kit.shopPrice = 0;
+    kit.shopDepth = 0;
+    kit.ego = ItemEgo::None;
+    kit.flags = 0;
+
+    Item sword;
+    sword.id = g.nextItemId++;
+    sword.kind = ItemKind::Sword;
+    sword.count = 1;
+    sword.charges = 0;
+    sword.enchant = 0;
+    sword.buc = 0; // not cursed
+    sword.spriteSeed = 0;
+    sword.shopPrice = 0;
+    sword.shopDepth = 0;
+    sword.ego = ItemEgo::None;
+    sword.flags = 0;
+
+    Item rock;
+    rock.id = g.nextItemId++;
+    rock.kind = ItemKind::Rock;
+    rock.count = 1;
+    rock.charges = 0;
+    rock.enchant = 0;
+    rock.buc = 0;
+    rock.spriteSeed = 0;
+    rock.shopPrice = 0;
+    rock.shopDepth = 0;
+    rock.ego = ItemEgo::None;
+    rock.flags = 0;
+
+    g.inv.push_back(kit);
+    g.inv.push_back(sword);
+    g.inv.push_back(rock);
+
+    g.equipMeleeId = sword.id;
+
+    CHECK(g.craftCombineById(sword.id, rock.id));
+    CHECK(g.equipMeleeId == 0);
+
+    bool hasOldSword = false;
+    for (const auto& it : g.inv) {
+        if (it.id == sword.id) hasOldSword = true;
+    }
+    CHECK(!hasOldSword);
 
     return true;
 }
@@ -2503,11 +2913,256 @@ bool test_farming_till_plant_grow_harvest() {
 
     return true;
 }
+
+
+bool test_spritegen_scale3x_edge_rules() {
+    // This test exercises the optimized Scale3x rules (as used by resampleSpriteToSize)
+    // on a small, deterministic neighborhood that should expand a single corner.
+    SpritePixels src;
+    src.w = 16;
+    src.h = 16;
+
+    const Color W{255, 255, 255, 255};
+    const Color B{0, 0, 0, 255};
+
+    src.px.assign(static_cast<size_t>(src.w * src.h), W);
+
+    // Neighborhood around E at (8,8):
+    // A B C
+    // D E F
+    // G H I
+    // Choose values so (B != H && D != F) and D==B, E!=C, E!=G to trigger:
+    // E0/E1/E3 = black, rest = white.
+    src.at(8, 8) = W; // E
+    src.at(8, 7) = B; // B
+    src.at(9, 7) = B; // C
+    src.at(7, 8) = B; // D
+    src.at(7, 9) = B; // G
+    src.at(9, 8) = W; // F
+    src.at(8, 9) = W; // H
+
+    SpritePixels out = resampleSpriteToSize(src, 48);
+    CHECK(out.w == 48);
+    CHECK(out.h == 48);
+
+    auto eq = [&](const Color& a, const Color& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+
+    // The 3x block for source pixel (8,8) starts at (24,24) in the output.
+    CHECK(eq(out.at(24, 24), B)); // E0
+    CHECK(eq(out.at(25, 24), B)); // E1
+    CHECK(eq(out.at(26, 24), W)); // E2
+    CHECK(eq(out.at(24, 25), B)); // E3
+    CHECK(eq(out.at(25, 25), W)); // E4
+    CHECK(eq(out.at(26, 25), W)); // E5
+    CHECK(eq(out.at(24, 26), W)); // E6
+    CHECK(eq(out.at(25, 26), W)); // E7
+    CHECK(eq(out.at(26, 26), W)); // E8
+
+    return true;
+}
+
+bool test_spritegen_scale2x_transparent_rgb_invariant_corner_rounding() {
+    // Scale2x rounding should not depend on RGB values stored in fully transparent
+    // pixels (common when sprites are procedurally generated).
+    SpritePixels clean;
+    clean.w = 16;
+    clean.h = 16;
+    clean.px.assign(static_cast<size_t>(clean.w * clean.h), {0, 0, 0, 0});
+
+    // 2x2 opaque block at (8,8). The top-left corner pixel (8,8) has B and D as
+    // background; Scale2x uses D==B to decide corner rounding.
+    const Color O{0, 0, 0, 255};
+    clean.at(8, 8) = O;
+    clean.at(9, 8) = O;
+    clean.at(8, 9) = O;
+    clean.at(9, 9) = O;
+
+    SpritePixels noisy = clean;
+    // Inject RGB noise into fully transparent background neighbors B and D.
+    // B = (8,7), D = (7,8)
+    noisy.at(8, 7) = {10, 20, 30, 0};
+    noisy.at(7, 8) = {40, 50, 60, 0};
+
+    const SpritePixels outClean = resampleSpriteToSize(clean, 32);
+    const SpritePixels outNoisy = resampleSpriteToSize(noisy, 32);
+    CHECK(outClean.w == 32 && outClean.h == 32);
+    CHECK(outNoisy.w == 32 && outNoisy.h == 32);
+
+    // The top-left quadrant of the 2x2 output block for source E=(8,8) starts at
+    // (16,16). It should be background (transparent) in both cases.
+    CHECK(outClean.at(16, 16).a == 0);
+    CHECK(outNoisy.at(16, 16).a == 0);
+
+    // Entire output should match (including transparent pixels).
+    CHECK(outClean.px.size() == outNoisy.px.size());
+    for (size_t i = 0; i < outClean.px.size(); ++i) {
+        const Color& a = outClean.px[i];
+        const Color& b = outNoisy.px[i];
+        if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a) {
+            CHECK(false);
+        }
+    }
+    return true;
+}
+
+bool test_spritegen_resample_nearest_center_mapping() {
+    // The nearest resampler uses pixel-center sampling to avoid bias when scaling
+    // by non-integer factors. A simple gradient lets us validate the mapping.
+    SpritePixels src;
+    src.w = 16;
+    src.h = 16;
+    src.px.assign(static_cast<size_t>(src.w * src.h), {0, 0, 0, 255});
+
+    for (int y = 0; y < src.h; ++y) {
+        for (int x = 0; x < src.w; ++x) {
+            src.at(x, y) = {static_cast<uint8_t>(x), 0, 0, 255};
+        }
+    }
+
+    const SpritePixels out = resampleSpriteToSize(src, 24);
+    CHECK(out.w == 24 && out.h == 24);
+
+    // For 16 -> 24, pixel-center mapping yields:
+    // x=0->0, x=1->1, x=2->1, x=3->2, ...
+    CHECK(out.at(0, 0).r == 0);
+    CHECK(out.at(1, 0).r == 1);
+    CHECK(out.at(2, 0).r == 1);
+    CHECK(out.at(3, 0).r == 2);
+    CHECK(out.at(23, 0).r == 15);
+
+    return true;
+}
+
+bool test_spritegen_resample_factor_6_matches_chain() {
+    // Ensure the mixed 2x/3x integer scaling path is used (and stable):
+    // resample(16->96) should match resample(resample(16->32)->96).
+    SpritePixels src;
+    src.w = 16;
+    src.h = 16;
+
+    const Color W{255, 255, 255, 255};
+    const Color B{0, 0, 0, 255};
+
+    src.px.assign(static_cast<size_t>(src.w * src.h), W);
+
+    // Simple diagonal-ish mark to give the scaler something edgey.
+    for (int i = 2; i <= 13; ++i) {
+        src.at(i, i) = B;
+    }
+
+    const SpritePixels direct = resampleSpriteToSize(src, 96);
+    const SpritePixels step32 = resampleSpriteToSize(src, 32);
+    const SpritePixels chained = resampleSpriteToSize(step32, 96);
+
+    CHECK(direct.w == 96 && direct.h == 96);
+    CHECK(chained.w == 96 && chained.h == 96);
+    CHECK(direct.px.size() == chained.px.size());
+
+    for (size_t i = 0; i < direct.px.size(); ++i) {
+        const Color& a = direct.px[i];
+        const Color& b = chained.px[i];
+        if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a) {
+            CHECK(false);
+        }
+    }
+
+    return true;
+}
+
+bool test_spritegen_resample_rect_scale3x_edge_rules() {
+    // Verify that the non-square resampler uses the Scale3x rules when the
+    // requested size is an exact 3x multiple (e.g. 16x8 -> 48x24).
+    SpritePixels src;
+    src.w = 16;
+    src.h = 8;
+
+    const Color W{255, 255, 255, 255};
+    const Color B{0, 0, 0, 255};
+
+    src.px.assign(static_cast<size_t>(src.w * src.h), W);
+
+    // Neighborhood around E at (8,4):
+    // A B C
+    // D E F
+    // G H I
+    // Choose values so (B != H && D != F) and D==B, E!=C, E!=G to trigger:
+    // E0/E1/E3 = black, rest = white.
+    src.at(8, 4) = W; // E
+    src.at(8, 3) = B; // B
+    src.at(9, 3) = B; // C
+    src.at(7, 4) = B; // D
+    src.at(7, 5) = B; // G
+    src.at(9, 4) = W; // F
+    src.at(8, 5) = W; // H
+
+    SpritePixels out = resampleSpriteToRect(src, 48, 24);
+    CHECK(out.w == 48);
+    CHECK(out.h == 24);
+
+    auto eq = [&](const Color& a, const Color& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+
+    // The 3x block for source pixel (8,4) starts at (24,12) in the output.
+    CHECK(eq(out.at(24, 12), B)); // E0
+    CHECK(eq(out.at(25, 12), B)); // E1
+    CHECK(eq(out.at(26, 12), W)); // E2
+    CHECK(eq(out.at(24, 13), B)); // E3
+    CHECK(eq(out.at(25, 13), W)); // E4
+    CHECK(eq(out.at(26, 13), W)); // E5
+    CHECK(eq(out.at(24, 14), W)); // E6
+    CHECK(eq(out.at(25, 14), W)); // E7
+    CHECK(eq(out.at(26, 14), W)); // E8
+
+    return true;
+}
+
+bool test_spritegen_resample_rect_factor_6_matches_chain() {
+    // Ensure the mixed 2x/3x integer scaling path is used (and stable) for
+    // non-square sprites:
+    // resample(16x8->96x48) should match resample(resample(16x8->32x16)->96x48).
+    SpritePixels src;
+    src.w = 16;
+    src.h = 8;
+
+    const Color W{255, 255, 255, 255};
+    const Color B{0, 0, 0, 255};
+
+    src.px.assign(static_cast<size_t>(src.w * src.h), W);
+
+    // Add a slanted stroke so the scaler's edge rules matter.
+    for (int y = 1; y < src.h - 1; ++y) {
+        const int x = 2 + y * 2; // gentle slope across the 16-wide sprite
+        if (x >= 0 && x < src.w) src.at(x, y) = B;
+    }
+
+    const SpritePixels direct = resampleSpriteToRect(src, 96, 48);
+    const SpritePixels step32 = resampleSpriteToRect(src, 32, 16);
+    const SpritePixels chained = resampleSpriteToRect(step32, 96, 48);
+
+    CHECK(direct.w == 96 && direct.h == 48);
+    CHECK(chained.w == 96 && chained.h == 48);
+    CHECK(direct.px.size() == chained.px.size());
+
+    for (size_t i = 0; i < direct.px.size(); ++i) {
+        const Color& a = direct.px[i];
+        const Color& b = chained.px[i];
+        if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a) {
+            CHECK(false);
+        }
+    }
+
+    return true;
+}
+
 int main(int argc, char** argv) {
     std::vector<TestCase> tests = {
         {"new_game_determinism", test_new_game_determinism},
         {"scent_field_wind_bias", test_scent_field_wind_bias},
         {"ecosystem_stealth_fx", test_ecosystem_stealth_fx_sanity},
+        {"ecosystem_weapon_ego_loot_bias", test_ecosystem_weapon_ego_loot_bias},
         {"proc_leylines",        test_proc_leylines_basic},
         {"wfc_solver_basic",     test_wfc_solver_basic},
         {"wfc_solver_unsat",     test_wfc_solver_unsat_forced_contradiction},
@@ -2525,6 +3180,11 @@ int main(int argc, char** argv) {
         {"proc_monster_codename", test_proc_monster_codename_determinism},
         {"crafting_procgen",  test_crafting_procedural_determinism},
         {"crafting_ecosystem_catalysts", test_crafting_ecosystem_catalyst_changes_outcome},
+        {"crafting_shard_refinement", test_crafting_shard_refinement_location_invariant},
+        {"crafting_shard_infusion", test_crafting_shard_infusion_upgrades_gear},
+        {"crafting_same_stack", test_crafting_same_stack_consumes_two_units},
+        {"crafting_blocks_cursed_equipped", test_crafting_blocks_cursed_equipped_ingredients},
+        {"crafting_auto_unequip", test_crafting_auto_unequips_consumed_gear},
         {"trap_salvage_procgen", test_trap_salvage_procgen_determinism},
         {"graffiti_procgen", test_graffiti_procgen_determinism},
         {"sigil_procgen",    test_sigil_procgen_determinism},
@@ -2552,6 +3212,12 @@ int main(int argc, char** argv) {
         {"auto_explore_levitation_chasm_diagonal", test_auto_explore_frontier_levitation_diagonal_chasm_corner},
         {"overworld_gate_alignment", test_overworld_gate_alignment},
         {"ident_appearances", test_ident_appearance_procgen_determinism},
+        {"spritegen_scale3x_rules", test_spritegen_scale3x_edge_rules},
+        {"spritegen_scale2x_transparent_rgb", test_spritegen_scale2x_transparent_rgb_invariant_corner_rounding},
+        {"spritegen_nearest_center_mapping", test_spritegen_resample_nearest_center_mapping},
+        {"spritegen_resample_factor_6", test_spritegen_resample_factor_6_matches_chain},
+        {"spritegen_resample_rect_scale3x_rules", test_spritegen_resample_rect_scale3x_edge_rules},
+        {"spritegen_resample_rect_factor_6", test_spritegen_resample_rect_factor_6_matches_chain},
         {"shop_profiles",   test_proc_shop_profiles},
         {"shrine_profiles", test_proc_shrine_profiles},
         {"camp_stash_farming_starter_kit", test_camp_stash_has_farming_starter_kit},

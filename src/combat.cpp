@@ -1802,7 +1802,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
         // This creates tactical area denial (and doubles as a light source in darkness mode).
         {
             const size_t expect = static_cast<size_t>(dung.width * dung.height);
-            if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+            if (fireField_.size() != expect) fireField_.assign(expect, uint8_t{0});
 
             const int baseStrength = clampi(6 + depth_ / 3, 6, 12);
             int ignitedVisible = 0;
@@ -1822,7 +1822,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
                 const uint8_t next = static_cast<uint8_t>(clampi(s, 0, 255));
                 if (next > prev) {
                     fireField_[i] = next;
-                    if (prev == 0u && dung.at(bt.x, bt.y).visible) ++ignitedVisible;
+                    if (prev == uint8_t{0} && dung.at(bt.x, bt.y).visible) ++ignitedVisible;
                 }
             }
 
@@ -2269,7 +2269,7 @@ void Game::attackRanged(Entity& attacker, Vec2i target, int range, int atkBonus,
 
                     // A small ember patch (won't spread unless boosted by other fire).
                     const size_t expect = static_cast<size_t>(dung.width * dung.height);
-                    if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+                    if (fireField_.size() != expect) fireField_.assign(expect, uint8_t{0});
 
                     if (dung.isWalkable(land.x, land.y)) {
                         const size_t i = static_cast<size_t>(land.y * dung.width + land.x);

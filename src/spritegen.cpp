@@ -103,7 +103,23 @@ void circle(SpritePixels& s, int cx, int cy, int r, Color c) {
 // --- Resampling helpers -----------------------------------------------------
 
 inline bool sameColor(const Color& a, const Color& b) {
+    // Treat fully transparent pixels as equal regardless of RGB.
+    // This avoids edge artifacts when transparent pixels carry arbitrary RGB
+    // values (common in procedural art pipelines).
+    if (a.a == 0 && b.a == 0) return true;
     return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+}
+
+inline void canonicalizeTransparent(SpritePixels& s) {
+    // Avoid leaking arbitrary RGB values through fully transparent pixels.
+    // This makes resampling (and tests that compare exact pixels) stable.
+    for (Color& c : s.px) {
+        if (c.a == 0) {
+            c.r = 0;
+            c.g = 0;
+            c.b = 0;
+        }
+    }
 }
 
 inline int clampSpriteSize(int pxSize) {
@@ -117,33 +133,57 @@ SpritePixels resizeNearest(const SpritePixels& src, int outW, int outH) {
     }
 
     SpritePixels dst = makeSprite(outW, outH, {0,0,0,0});
+    // Use pixel-center sampling for better symmetry when resizing by
+    // non-integer factors (keeps edges aligned and reduces bias).
     for (int y = 0; y < outH; ++y) {
-        const int sy = (y * src.h) / outH;
+        const int64_t yNumer = static_cast<int64_t>(2 * y + 1) * static_cast<int64_t>(src.h);
+        const int64_t yDenom = static_cast<int64_t>(2 * outH);
+        int sy = static_cast<int>(yNumer / yDenom);
+        sy = std::clamp(sy, 0, src.h - 1);
+
         for (int x = 0; x < outW; ++x) {
-            const int sx = (x * src.w) / outW;
+            const int64_t xNumer = static_cast<int64_t>(2 * x + 1) * static_cast<int64_t>(src.w);
+            const int64_t xDenom = static_cast<int64_t>(2 * outW);
+            int sx = static_cast<int>(xNumer / xDenom);
+            sx = std::clamp(sx, 0, src.w - 1);
+
             dst.at(x, y) = src.at(sx, sy);
         }
     }
     return dst;
 }
 
+inline bool isPow2(int v) {
+    return v > 0 && (v & (v - 1)) == 0;
+}
+
 // Scale2x pixel-art upscaling algorithm (edge-aware). This preserves crisp
 // silhouettes much better than nearest-neighbor when scaling to 32/64/128/256.
+//
+// NOTE: The ScaleNx family samples border pixels by clamping to the nearest edge
+// pixel (matching the reference implementation), rather than treating out-of-bounds
+// samples as transparent.
 SpritePixels scale2x(const SpritePixels& src) {
     if (src.w <= 0 || src.h <= 0) return src;
     SpritePixels dst = makeSprite(src.w * 2, src.h * 2, {0,0,0,0});
 
+    auto edge = [&](int x, int y) -> Color {
+        x = std::clamp(x, 0, src.w - 1);
+        y = std::clamp(y, 0, src.h - 1);
+        return src.at(x, y);
+    };
+
     for (int y = 0; y < src.h; ++y) {
         for (int x = 0; x < src.w; ++x) {
-            const Color A = getPx(src, x - 1, y - 1);
-            const Color B = getPx(src, x,     y - 1);
-            const Color C = getPx(src, x + 1, y - 1);
-            const Color D = getPx(src, x - 1, y);
-            const Color E = getPx(src, x,     y);
-            const Color F = getPx(src, x + 1, y);
-            const Color G = getPx(src, x - 1, y + 1);
-            const Color H = getPx(src, x,     y + 1);
-            const Color I = getPx(src, x + 1, y + 1);
+            const Color A = edge(x - 1, y - 1);
+            const Color B = edge(x,     y - 1);
+            const Color C = edge(x + 1, y - 1);
+            const Color D = edge(x - 1, y);
+            const Color E = edge(x,     y);
+            const Color F = edge(x + 1, y);
+            const Color G = edge(x - 1, y + 1);
+            const Color H = edge(x,     y + 1);
+            const Color I = edge(x + 1, y + 1);
             (void)A; (void)C; (void)G; (void)I;
 
             Color E0 = E, E1 = E, E2 = E, E3 = E;
@@ -163,30 +203,96 @@ SpritePixels scale2x(const SpritePixels& src) {
     return dst;
 }
 
-inline bool isPow2(int v) {
-    return v > 0 && (v & (v - 1)) == 0;
-}
+// Scale3x pixel-art upscaling algorithm (edge-aware). Useful for crisp 48/96/192 targets
+// without falling back to nearest-neighbor.
+SpritePixels scale3x(const SpritePixels& src) {
+    if (src.w <= 0 || src.h <= 0) return src;
+    SpritePixels dst = makeSprite(src.w * 3, src.h * 3, {0,0,0,0});
 
-inline bool isPow2Multiple(int base, int target) {
-    if (base <= 0 || target <= 0) return false;
-    if (target < base) return false;
-    if (target % base != 0) return false;
-    return isPow2(target / base);
+    auto edge = [&](int x, int y) -> Color {
+        x = std::clamp(x, 0, src.w - 1);
+        y = std::clamp(y, 0, src.h - 1);
+        return src.at(x, y);
+    };
+
+    for (int y = 0; y < src.h; ++y) {
+        for (int x = 0; x < src.w; ++x) {
+            const Color A = edge(x - 1, y - 1);
+            const Color B = edge(x,     y - 1);
+            const Color C = edge(x + 1, y - 1);
+            const Color D = edge(x - 1, y);
+            const Color E = edge(x,     y);
+            const Color F = edge(x + 1, y);
+            const Color G = edge(x - 1, y + 1);
+            const Color H = edge(x,     y + 1);
+            const Color I = edge(x + 1, y + 1);
+
+            Color E0 = E, E1 = E, E2 = E, E3 = E, E4 = E, E5 = E, E6 = E, E7 = E, E8 = E;
+
+            if (!sameColor(B, H) && !sameColor(D, F)) {
+                E0 = sameColor(D, B) ? D : E;
+                E1 = ((sameColor(D, B) && !sameColor(E, C)) || (sameColor(B, F) && !sameColor(E, A))) ? B : E;
+                E2 = sameColor(B, F) ? F : E;
+                E3 = ((sameColor(D, B) && !sameColor(E, G)) || (sameColor(D, H) && !sameColor(E, A))) ? D : E;
+                E4 = E;
+                E5 = ((sameColor(B, F) && !sameColor(E, I)) || (sameColor(H, F) && !sameColor(E, C))) ? F : E;
+                E6 = sameColor(D, H) ? D : E;
+                E7 = ((sameColor(D, H) && !sameColor(E, I)) || (sameColor(H, F) && !sameColor(E, G))) ? H : E;
+                E8 = sameColor(H, F) ? F : E;
+            }
+
+            const int dx = 3 * x;
+            const int dy = 3 * y;
+
+            dst.at(dx + 0, dy + 0) = E0;
+            dst.at(dx + 1, dy + 0) = E1;
+            dst.at(dx + 2, dy + 0) = E2;
+            dst.at(dx + 0, dy + 1) = E3;
+            dst.at(dx + 1, dy + 1) = E4;
+            dst.at(dx + 2, dy + 1) = E5;
+            dst.at(dx + 0, dy + 2) = E6;
+            dst.at(dx + 1, dy + 2) = E7;
+            dst.at(dx + 2, dy + 2) = E8;
+        }
+    }
+    return dst;
 }
 
 SpritePixels resampleSpriteToSizeInternal(const SpritePixels& src, int pxSize) {
     pxSize = clampSpriteSize(pxSize);
-    if (src.w == pxSize && src.h == pxSize) return src;
+    if (src.w == pxSize && src.h == pxSize) {
+        SpritePixels out = src;
+        canonicalizeTransparent(out);
+        return out;
+    }
 
-    // Fast path: edge-aware Scale2x chain for powers-of-two scaling.
-    if (src.w == src.h && isPow2Multiple(src.w, pxSize)) {
+    // Fast path: ScaleNx integer upscaling (2x/3x families) for square sprites.
+    // This preserves crisp pixel-art edges much better than nearest-neighbor for
+    // common targets like 32/48/64/96/128/192/256.
+    if (src.w > 0 && src.h > 0 && src.w == src.h && pxSize > src.w && (pxSize % src.w) == 0) {
+        int factor = pxSize / src.w;
         SpritePixels cur = src;
-        while (cur.w < pxSize) cur = scale2x(cur);
-        return cur;
+
+        // Apply 2x first (cheaper intermediates), then 3x.
+        while ((factor % 2) == 0) {
+            cur = scale2x(cur);
+            factor /= 2;
+        }
+        while ((factor % 3) == 0) {
+            cur = scale3x(cur);
+            factor /= 3;
+        }
+
+        if (factor == 1 && cur.w == pxSize && cur.h == pxSize) {
+            canonicalizeTransparent(cur);
+            return cur;
+        }
     }
 
     // Fallback: nearest-neighbor resize.
-    return resizeNearest(src, pxSize, pxSize);
+    SpritePixels out = resizeNearest(src, pxSize, pxSize);
+    canonicalizeTransparent(out);
+    return out;
 }
 
 // --- Pixel-art helpers (ordered dithering, outlines, shadows) ---
@@ -355,7 +461,7 @@ Color rampShade(Color base, float shade01, int x, int y) {
 
 // Softer, hue-shifted ramp for environment tiles (stone, panels). Keeps the world looking
 // like crisp pixel-art instead of smooth gradients.
-Color rampShadeTile(Color base, float shade01, int x, int y) {
+[[maybe_unused]] Color rampShadeTile(Color base, float shade01, int x, int y) {
     shade01 = std::clamp(shade01, 0.0f, 1.0f);
 
     // Slight hue shift: cooler shadows, warmer highlights.
@@ -821,7 +927,7 @@ Color averageOpaqueColor(const SpritePixels& s) {
     };
 }
 
-void lineBlend(SpritePixels& s, int x0, int y0, int x1, int y1, Color c) {
+[[maybe_unused]] void lineBlend(SpritePixels& s, int x0, int y0, int x1, int y1, Color c) {
     int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
     int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
     int err = dx + dy;
@@ -4042,7 +4148,7 @@ case ItemKind::Arrow: {
 //
 // Implementation notes:
 //  - We keep a deterministic 16px "design grid" (or 16x8 for isometric diamonds)
-//    and resample to the requested pxSize using the generator's Scale2x chain.
+//    and resample to the requested pxSize using the generator's ScaleNx chain (2x/3x).
 //  - Overlays are transparent where appropriate and are designed to layer cleanly
 //    on top of the themed floor/wall/chasm base tiles.
 // -----------------------------------------------------------------------------
@@ -4094,22 +4200,48 @@ SpritePixels resampleSpriteToRectInternal(const SpritePixels& src, int outW, int
     outW = std::clamp(outW, 1, 512);
     outH = std::clamp(outH, 1, 512);
 
-    if (src.w == outW && src.h == outH) return src;
+    if (src.w == outW && src.h == outH) {
+        SpritePixels out = src;
+        canonicalizeTransparent(out);
+        return out;
+    }
 
-    // Fast path: Scale2x chain when both dimensions share the same power-of-two factor.
-    if (src.w > 0 && src.h > 0) {
+    // Fast path: ScaleNx integer upscaling for non-square sprites when both
+    // dimensions share the same integer factor. This is especially valuable
+    // for isometric 2:1 diamond tiles (16x8 -> 48x24/96x48/192x96) where a
+    // nearest-neighbor resize introduces jaggies.
+    if (src.w > 0 && src.h > 0 && outW > src.w && outH > src.h) {
         const int wFactor = (outW % src.w == 0) ? (outW / src.w) : 0;
         const int hFactor = (outH % src.h == 0) ? (outH / src.h) : 0;
-        if (wFactor > 0 && wFactor == hFactor && isPow2(wFactor)) {
+
+        if (wFactor > 0 && wFactor == hFactor) {
+            int factor = wFactor;
             SpritePixels cur = src;
-            while (cur.w < outW && cur.h < outH) {
+
+            // Apply 2x first (cheaper intermediates), then 3x.
+            while ((factor % 2) == 0) {
                 cur = scale2x(cur);
+                factor /= 2;
             }
-            if (cur.w == outW && cur.h == outH) return cur;
+            while ((factor % 3) == 0) {
+                cur = scale3x(cur);
+                factor /= 3;
+            }
+
+            if (factor == 1 && cur.w == outW && cur.h == outH) {
+                canonicalizeTransparent(cur);
+                return cur;
+            }
+
+            // Backwards-compat fallback: if the factor is a pure power-of-two
+            // we still prefer the Scale2x chain (already applied above).
+            // (This branch is left intentionally as a comment for clarity.)
         }
     }
 
-    return resizeNearest(src, outW, outH);
+    SpritePixels out = resizeNearest(src, outW, outH);
+    canonicalizeTransparent(out);
+    return out;
 }
 
 // Convert an (x,y) in a 2:1 isometric diamond (width=N, height=N/2) into
@@ -5721,6 +5853,10 @@ SpritePixels genIsoBoulderBlock16(uint32_t seed, int frame) {
 } // namespace
 
 // --- Public terrain/procedural functions ------------------------------------
+
+SpritePixels resampleSpriteToRect(const SpritePixels& src, int outW, int outH) {
+    return resampleSpriteToRectInternal(src, outW, outH);
+}
 
 SpritePixels generateFloorTile(uint32_t seed, int frame, int pxSize) {
     return generateThemedFloorTile(seed, 0, frame, pxSize);

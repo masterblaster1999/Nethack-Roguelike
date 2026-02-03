@@ -360,7 +360,7 @@ void ScoreBoard::trim(size_t maxEntries) {
         return newerEntry(entries_[ia], entries_[ib]);
     });
 
-    std::vector<uint8_t> keep(n, 0);
+    std::vector<uint8_t> keep(n, uint8_t{0});
     auto markFirst = [&](const std::vector<size_t>& order, size_t count) {
         const size_t c = std::min(count, order.size());
         for (size_t i = 0; i < c; ++i) {

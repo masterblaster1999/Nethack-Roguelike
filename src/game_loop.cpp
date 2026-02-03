@@ -976,6 +976,75 @@ void Game::handleAction(Action a) {
             return displayItemName(one);
         };
 
+        // Crafting UI QoL: cycle between usable ingredients (step 1) or
+        // interesting ingredient-2 options (step 2) without scrolling.
+        auto isEquippedId = [&](int id) -> bool {
+            return id != 0 && (id == equipMeleeId || id == equipRangedId || id == equipArmorId || id == equipRing1Id || id == equipRing2Id);
+        };
+
+        auto isLockedIngredient = [&](const Item& it) -> bool {
+            return isCraftIngredientKind(it.kind) && it.buc < 0 && isEquippedId(it.id);
+        };
+
+        auto cycleCraftSelection = [&](int dir) {
+            if (inv.empty()) return;
+            const int n = static_cast<int>(inv.size());
+            invSel = clampi(invSel, 0, n - 1);
+
+            const Item* ing1 = nullptr;
+            if (invCraftFirstId_ != 0) {
+                const int idx = findItemIndexById(inv, invCraftFirstId_);
+                if (idx >= 0) ing1 = &inv[static_cast<size_t>(idx)];
+            }
+
+            auto eligible = [&](const Item& it) -> bool {
+                if (!isCraftIngredientKind(it.kind)) return false;
+                if (isLockedIngredient(it)) return false;
+
+                // Same-stack (using ING1 twice) requires at least 2 units.
+                if (ing1 && it.id != 0 && it.id == ing1->id) {
+                    if (!isStackable(it.kind) || it.count < 2) return false;
+                }
+                return true;
+            };
+
+            auto interesting = [&](const Item& it) -> bool {
+                if (!ing1) return false;
+                const CraftUIHint h = craftingUiHint(*ing1, it);
+                if (!h.valid || h.locked) return false;
+                if (h.shardRefinement || h.shardInfusion) return true;
+                return !h.known;
+            };
+
+            auto wrapIndex = [&](int idx) -> int {
+                if (n <= 0) return 0;
+                int j = idx % n;
+                if (j < 0) j += n;
+                return j;
+            };
+
+            auto findNext = [&](auto pred) -> int {
+                for (int step = 1; step <= n; ++step) {
+                    const int j = wrapIndex(invSel + dir * step);
+                    if (pred(inv[static_cast<size_t>(j)])) return j;
+                }
+                return -1;
+            };
+
+            int next = -1;
+            if (ing1) {
+                next = findNext([&](const Item& it) { return eligible(it) && interesting(it); });
+            }
+            if (next < 0) {
+                next = findNext([&](const Item& it) { return eligible(it); });
+            }
+
+            if (next >= 0) {
+                invSel = next;
+                rebuildCraftingPreview();
+            }
+        };
+
         switch (a) {
             case Action::Up:
                 moveInventorySelection(-1);
@@ -992,6 +1061,61 @@ void Game::handleAction(Action a) {
             case Action::SortInventory:
                 sortInventory();
                 break;
+
+            case Action::Fire:
+                cycleCraftSelection(+1);
+                break;
+
+            case Action::Use:
+                cycleCraftSelection(-1);
+                break;
+
+            case Action::Right:
+                cycleCraftSelection(+1);
+                break;
+
+            case Action::Left:
+                cycleCraftSelection(-1);
+                break;
+
+            case Action::Drop: {
+                int dropId = 0;
+                if (!inv.empty()) {
+                    invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
+                    dropId = inv[static_cast<size_t>(invSel)].id;
+                }
+
+                const bool did = dropSelected();
+                if (did) {
+                    if (dropId != 0 && dropId == invCraftFirstId_) {
+                        invCraftFirstId_ = 0;
+                        pushMsg("INGREDIENT 1 CLEARED (DROPPED).", MessageKind::System, true);
+                    }
+                    rebuildCraftingPreview();
+                    advanceAfterPlayerAction();
+                }
+                break;
+            }
+
+            case Action::DropAll: {
+                int dropId = 0;
+                if (!inv.empty()) {
+                    invSel = clampi(invSel, 0, static_cast<int>(inv.size()) - 1);
+                    dropId = inv[static_cast<size_t>(invSel)].id;
+                }
+
+                const bool did = dropSelectedAll();
+                if (did) {
+                    if (dropId != 0 && dropId == invCraftFirstId_) {
+                        invCraftFirstId_ = 0;
+                        pushMsg("INGREDIENT 1 CLEARED (DROPPED).", MessageKind::System, true);
+                    }
+                    rebuildCraftingPreview();
+                    advanceAfterPlayerAction();
+                }
+                break;
+            }
+
 
             case Action::Confirm: {
                 if (inv.empty()) {
@@ -1010,21 +1134,94 @@ void Game::handleAction(Action a) {
                     break;
                 }
 
+                // Block selecting cursed equipped items as ingredients (they can't be removed/consumed).
+                if (selIt.buc < 0) {
+                    if (selIt.id == equipMeleeId) {
+                        pushMsg("YOUR WEAPON IS CURSED AND WELDED TO YOUR HAND!", MessageKind::Warning, true);
+                        break;
+                    }
+                    if (selIt.id == equipRangedId) {
+                        pushMsg("YOUR RANGED WEAPON IS CURSED AND WON'T LET GO!", MessageKind::Warning, true);
+                        break;
+                    }
+                    if (selIt.id == equipArmorId) {
+                        pushMsg("YOUR ARMOR IS CURSED AND WON'T COME OFF!", MessageKind::Warning, true);
+                        break;
+                    }
+                    if (selIt.id == equipRing1Id || selIt.id == equipRing2Id) {
+                        pushMsg("YOUR RING IS CURSED AND STUCK TO YOUR FINGER!", MessageKind::Warning, true);
+                        break;
+                    }
+                }
+
                 if (invCraftFirstId_ == 0) {
                     invCraftFirstId_ = selIt.id;
                     pushMsg("INGREDIENT 1: " + selectedItemName(selIt) + ". SELECT INGREDIENT 2.", MessageKind::System, true);
 
-                    // Small UX: nudge selection off the first ingredient when possible.
-                    moveInventorySelection(1);
+                    // UX: if the first ingredient is stackable with 2+ units, keep selection so
+                    // the player can quickly craft using the same stack twice.
+                    const bool canUseSameStackTwice = isStackable(selIt.kind) && selIt.count >= 2;
+
+                    // If we're not staying on the same stack, jump to an interesting ING2 candidate
+                    // (prefers NEW/REF/INF outcomes) rather than just the next ingredient row.
+                    if (!canUseSameStackTwice) {
+                        cycleCraftSelection(+1);
+                    }
+
+                    rebuildCraftingPreview();
                 } else {
                     const int firstId = invCraftFirstId_;
-                    const bool acted = craftCombineById(firstId, selIt.id);
+                    const int secondId = selIt.id;
+                    const bool sameStack = (firstId != 0 && firstId == secondId);
+
+                    const bool acted = craftCombineById(firstId, secondId);
                     if (acted) {
-                        // Chain-crafting convenience: stay in craft mode, clear selection.
-                        invCraftFirstId_ = 0;
-                        pushMsg("CRAFT AGAIN OR ESC TO EXIT.", MessageKind::System, true);
+                        // QoL: if ING1 still exists after crafting (e.g. stackable ingredient),
+                        // keep it selected so you can chain-craft different ING2s quickly.
+                        bool keepIng1 = false;
+                        {
+                            const int idx = findItemIndexById(inv, firstId);
+                            if (idx >= 0 && idx < static_cast<int>(inv.size())) {
+                                const Item& it1 = inv[static_cast<size_t>(idx)];
+                                if (isCraftIngredientKind(it1.kind) && it1.count > 0) {
+                                    keepIng1 = true;
+                                }
+                            }
+                        }
+
+                        bool preserveSameStack = false;
+
+                        if (!keepIng1) {
+                            invCraftFirstId_ = 0;
+                            pushMsg("CRAFT AGAIN: PICK ING1 OR ESC TO EXIT.", MessageKind::System, true);
+                        } else {
+                            invCraftFirstId_ = firstId;
+                            pushMsg("CRAFT AGAIN: PICK ING2 (ING1 KEPT). ESC: CLEAR ING1.", MessageKind::System, true);
+
+                            // If we crafted using the same stack twice and still have 2+ units,
+                            // keep the cursor on the stack so you can repeat quickly (e.g. shard refinement).
+                            if (sameStack) {
+                                const int idx = findItemIndexById(inv, firstId);
+                                if (idx >= 0 && idx < static_cast<int>(inv.size())) {
+                                    const Item& it1 = inv[static_cast<size_t>(idx)];
+                                    if (isStackable(it1.kind) && it1.count >= 2) {
+                                        invSel = idx;
+                                        preserveSameStack = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Keep the cursor on something craft-usable after inventory mutations.
+                        if (!preserveSameStack) {
+                            cycleCraftSelection(+1);
+                        }
+
                         rebuildCraftingPreview();
                         advanceAfterPlayerAction();
+                    } else {
+                        // Keep the overlay in sync (ingredient might have disappeared, etc).
+                        rebuildCraftingPreview();
                     }
                 }
                 break;
@@ -1033,7 +1230,16 @@ void Game::handleAction(Action a) {
             case Action::Cancel:
             case Action::Inventory:
                 if (invCraftFirstId_ != 0) {
+                    const int oldFirstId = invCraftFirstId_;
                     invCraftFirstId_ = 0;
+
+                    // UX: when clearing ING1, snap selection back to the old ING1 row if it still exists.
+                    const int idx = findItemIndexById(inv, oldFirstId);
+                    if (idx >= 0) {
+                        invSel = idx;
+                    }
+                    invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+
                     pushMsg("INGREDIENT 1 CLEARED.", MessageKind::System, true);
                 } else {
                     invCraftMode = false;

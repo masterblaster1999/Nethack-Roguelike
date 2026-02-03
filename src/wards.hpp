@@ -368,7 +368,7 @@ inline float wardRepelChance(WardWord w, EntityKind k, uint8_t strength) {
             break;
     }
 
-    const float usesF = static_cast<float>(std::min<uint8_t>(strength, 30u));
+    const float usesF = static_cast<float>(std::min<uint8_t>(strength, uint8_t{30}));
     float chance = base + perUse * usesF;
 
     // Apply per-monster resistance.

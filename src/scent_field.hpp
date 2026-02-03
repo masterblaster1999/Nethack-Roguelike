@@ -79,7 +79,7 @@ inline void updateScentField(int width,
     if (n == 0) return;
 
     if (field.size() != n) {
-        field.assign(n, 0u);
+        field.assign(n, uint8_t{0});
     }
 
     auto inBounds = [&](int x, int y) -> bool {
@@ -95,21 +95,21 @@ inline void updateScentField(int width,
             const size_t i = idx(x, y);
 
             if (!isWalkable(x, y)) {
-                field[i] = 0u;
+                field[i] = uint8_t{0};
                 continue;
             }
 
             const uint8_t v = field[i];
-            if (v == 0u) continue;
+            if (v == uint8_t{0}) continue;
 
             const ScentCellFx fx = fxAt(x, y);
             const int decay = clampi(params.baseDecay + fx.decayDelta, 0, params.maxDecay);
-            field[i] = (v > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(v - static_cast<uint8_t>(decay)) : 0u;
+            field[i] = (v > static_cast<uint8_t>(decay)) ? static_cast<uint8_t>(v - static_cast<uint8_t>(decay)) : uint8_t{0};
         }
     }
 
     // --- Phase 2: deposit at source ---
-    if (depositStrength > 0u && inBounds(depositPos.x, depositPos.y) && isWalkable(depositPos.x, depositPos.y)) {
+    if (depositStrength > uint8_t{0} && inBounds(depositPos.x, depositPos.y) && isWalkable(depositPos.x, depositPos.y)) {
         const size_t pi = idx(depositPos.x, depositPos.y);
         field[pi] = std::max(field[pi], depositStrength);
     }
@@ -146,14 +146,14 @@ inline void updateScentField(int width,
             const size_t i = idx(x, y);
 
             if (!isWalkable(x, y)) {
-                next[i] = 0u;
+                next[i] = uint8_t{0};
                 continue;
             }
 
             const ScentCellFx fx = fxAt(x, y);
             const int baseDrop = params.baseSpreadDrop + fx.spreadDropDelta;
 
-            uint8_t best = 0u;
+            uint8_t best = uint8_t{0};
 
             for (const auto& d : dirs4) {
                 const int nx = x + d[0];
@@ -162,14 +162,14 @@ inline void updateScentField(int width,
                 if (!isWalkable(nx, ny)) continue;
 
                 const uint8_t nv = field[idx(nx, ny)];
-                if (nv == 0u) continue;
+                if (nv == uint8_t{0}) continue;
 
                 // Direction scent is travelling from neighbor -> current.
                 const int tdx = x - nx;
                 const int tdy = y - ny;
                 const int drop = clampi(baseDrop + windDropAdjust(tdx, tdy), params.minSpreadDrop, params.maxSpreadDrop);
 
-                const uint8_t cand = (nv > static_cast<uint8_t>(drop)) ? static_cast<uint8_t>(nv - static_cast<uint8_t>(drop)) : 0u;
+                const uint8_t cand = (nv > static_cast<uint8_t>(drop)) ? static_cast<uint8_t>(nv - static_cast<uint8_t>(drop)) : uint8_t{0};
                 if (cand > best) best = cand;
             }
 

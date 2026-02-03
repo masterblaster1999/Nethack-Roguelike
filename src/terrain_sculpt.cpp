@@ -37,7 +37,7 @@ static bool stairsConnected(const Dungeon& d) {
     if (d.stairsUp == d.stairsDown) return true;
 
     const size_t n = static_cast<size_t>(d.width * d.height);
-    std::vector<uint8_t> vis(n, 0);
+    std::vector<uint8_t> vis(n, uint8_t{0});
     auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * d.width + x); };
 
     std::deque<Vec2i> q;
@@ -133,7 +133,8 @@ TerrainSculptResult applyTerrainSculpt(Dungeon& d, RNG& rng, int depth, TerrainS
     // 0xFF means "not inside any room".
     // ------------------------------------------------------------
     const size_t n = static_cast<size_t>(d.width * d.height);
-    std::vector<uint8_t> roomType(n, 0xFFu);
+    constexpr uint8_t kNoRoomType = uint8_t{0xFFu};
+    std::vector<uint8_t> roomType(n, kNoRoomType);
     auto idx = [&](int x, int y) -> size_t { return static_cast<size_t>(y * d.width + x); };
 
     for (const Room& r : d.rooms) {
@@ -147,20 +148,20 @@ TerrainSculptResult applyTerrainSculpt(Dungeon& d, RNG& rng, int depth, TerrainS
 
     auto inProtectedRoom = [&](int x, int y) -> bool {
         const uint8_t rt = roomType[idx(x, y)];
-        if (rt == 0xFFu) return false;
+        if (rt == kNoRoomType) return false;
         const RoomType rtt = static_cast<RoomType>(rt);
         return rtt != RoomType::Normal;
     };
 
     // If we are in "outside-room" modes, avoid editing *inside* rooms.
     auto insideAnyRoom = [&](int x, int y) -> bool {
-        return roomType[idx(x, y)] != 0xFFu;
+        return roomType[idx(x, y)] != kNoRoomType;
     };
 
     // ------------------------------------------------------------
     // Protection mask: doors/stairs and their nearby tiles are immutable.
     // ------------------------------------------------------------
-    std::vector<uint8_t> protect(n, 0);
+    std::vector<uint8_t> protect(n, uint8_t{0});
 
     auto protectRadius = [&](Vec2i p, int r) {
         if (!d.inBounds(p.x, p.y)) return;
@@ -202,7 +203,7 @@ TerrainSculptResult applyTerrainSculpt(Dungeon& d, RNG& rng, int depth, TerrainS
     // ------------------------------------------------------------
     // Identify an edge band: tiles where Wall touches Floor (4-neighborhood).
     // ------------------------------------------------------------
-    std::vector<uint8_t> band(n, 0);
+    std::vector<uint8_t> band(n, uint8_t{0});
 
     auto isEdge = [&](int x, int y) -> bool {
         const TileType t = d.at(x, y).type;
@@ -241,7 +242,7 @@ TerrainSculptResult applyTerrainSculpt(Dungeon& d, RNG& rng, int depth, TerrainS
 
     // Expand edge band into a slightly thicker "mutable" region so the smooth pass
     // has some space to operate.
-    std::vector<uint8_t> mut(n, 0);
+    std::vector<uint8_t> mut(n, uint8_t{0});
     for (int y = 1; y < d.height - 1; ++y) {
         for (int x = 1; x < d.width - 1; ++x) {
             if (band[idx(x, y)] == 0) continue;

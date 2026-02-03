@@ -266,7 +266,7 @@ inline EcosystemFx ecosystemFx(const EcosystemKind e)
     switch (e) {
         case EcosystemKind::FungalBloom:
             fx.footstepNoiseDelta = -1;
-            fx.scentDecayDelta = +2;
+            fx.scentDecayDelta = -1;
             fx.scentSpreadDropDelta = -1;
             fx.hearingMaskDelta = +1;
             fx.listenRangeDelta = -1;
@@ -323,7 +323,7 @@ inline EcosystemFx ecosystemFx(const EcosystemKind e)
             break;
         case EcosystemKind::FloodedGrotto:
             fx.footstepNoiseDelta = +2;
-            fx.scentDecayDelta = -2;
+            fx.scentDecayDelta = +2;
             fx.scentSpreadDropDelta = +2;
             fx.hearingMaskDelta = +2;
             fx.listenRangeDelta = -2;

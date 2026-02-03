@@ -1994,13 +1994,13 @@ void Game::newGame(uint32_t seed) {
         overworld::ensureBorderGates(dung, seed_, 0, 0);
     }
     // Environmental fields reset per floor (no lingering gas on a fresh level).
-    confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-    poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-    fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-    scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+    confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+    poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+    fireField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+    scentField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
 
     // Auto-explore bookkeeping is transient per-floor; size it to this dungeon.
-    autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+    autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
 
     // Shrines get a visible altar overlay tile (placed before graffiti/spawns so it stays clear).
     spawnAltars();
@@ -2366,19 +2366,19 @@ bool Game::restoreLevel(LevelId id) {
 
     confusionGas_ = it->second.confusionGas;
     const size_t expect = static_cast<size_t>(dung.width * dung.height);
-    if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+    if (confusionGas_.size() != expect) confusionGas_.assign(expect, uint8_t{0});
 
     poisonGas_ = it->second.poisonGas;
-    if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+    if (poisonGas_.size() != expect) poisonGas_.assign(expect, uint8_t{0});
 
     corrosiveGas_ = it->second.corrosiveGas;
-    if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
+    if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, uint8_t{0});
 
     fireField_ = it->second.fireField;
-    if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+    if (fireField_.size() != expect) fireField_.assign(expect, uint8_t{0});
 
     scentField_ = it->second.scentField;
-    if (scentField_.size() != expect) scentField_.assign(expect, 0u);
+    if (scentField_.size() != expect) scentField_.assign(expect, uint8_t{0});
 
     // Keep player, restore monsters.
     ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
@@ -2429,19 +2429,19 @@ bool Game::restoreOverworldChunk(int x, int y) {
 
     confusionGas_ = it->second.confusionGas;
     const size_t expect = static_cast<size_t>(dung.width * dung.height);
-    if (confusionGas_.size() != expect) confusionGas_.assign(expect, 0u);
+    if (confusionGas_.size() != expect) confusionGas_.assign(expect, uint8_t{0});
 
     poisonGas_ = it->second.poisonGas;
-    if (poisonGas_.size() != expect) poisonGas_.assign(expect, 0u);
+    if (poisonGas_.size() != expect) poisonGas_.assign(expect, uint8_t{0});
 
     corrosiveGas_ = it->second.corrosiveGas;
-    if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, 0u);
+    if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, uint8_t{0});
 
     fireField_ = it->second.fireField;
-    if (fireField_.size() != expect) fireField_.assign(expect, 0u);
+    if (fireField_.size() != expect) fireField_.assign(expect, uint8_t{0});
 
     scentField_ = it->second.scentField;
-    if (scentField_.size() != expect) scentField_.assign(expect, 0u);
+    if (scentField_.size() != expect) scentField_.assign(expect, uint8_t{0});
 
     // Keep player, restore monsters.
     ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
@@ -2500,7 +2500,7 @@ const Dungeon* Game::overworldChunkDungeon(int x, int y) const {
 
 
 uint8_t Game::overworldChunkFeatureFlags(int x, int y) const {
-    if (!overworldChunkDiscovered(x, y)) return 0u;
+    if (!overworldChunkDiscovered(x, y)) return uint8_t{0};
 
     const OverworldKey key{x, y};
     auto it = overworldFeatureFlags_.find(key);
@@ -2508,9 +2508,9 @@ uint8_t Game::overworldChunkFeatureFlags(int x, int y) const {
 
     // Fallback: if the chunk is currently loaded, derive flags from its room list.
     const Dungeon* d = overworldChunkDungeon(x, y);
-    if (!d) return 0u;
+    if (!d) return uint8_t{0};
 
-    uint8_t flags = 0u;
+    uint8_t flags = uint8_t{0};
     for (const auto& r : d->rooms) {
         if (r.type == RoomType::Shop) flags |= OW_FEATURE_WAYSTATION;
         if (r.type == RoomType::Vault) flags |= OW_FEATURE_STRONGHOLD;
@@ -3029,7 +3029,7 @@ void Game::recordOverworldChunkFeatureFlags(int x, int y, const Dungeon& d) {
     // Only store flags for chunks we've actually discovered.
     if (!overworldChunkDiscovered(x, y)) return;
 
-    uint8_t flags = 0u;
+    uint8_t flags = uint8_t{0};
     for (const auto& r : d.rooms) {
         if (r.type == RoomType::Shop) flags |= OW_FEATURE_WAYSTATION;
         if (r.type == RoomType::Vault) flags |= OW_FEATURE_STRONGHOLD;
@@ -3083,7 +3083,7 @@ void Game::markOverworldDiscovered(int x, int y) {
     if (x == 0 && y == 0) {
         overworldVisited_.insert(OverworldKey{0, 0});
         // Home is a special marker; keep its feature flags stable (usually 0).
-        overworldFeatureFlags_.emplace(OverworldKey{0, 0}, 0u);
+        overworldFeatureFlags_.emplace(OverworldKey{0, 0}, uint8_t{0});
         return;
     }
 
@@ -3266,11 +3266,11 @@ bool Game::tryOverworldStep(int dx, int dy) {
         overworld::generateWildernessChunk(dung, seed_, overworldX_, overworldY_);
         dung.ensureMaterials(materialWorldSeed(), branch_, materialDepth(), dungeonMaxDepth());
 
-        confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-        poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-        corrosiveGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-        fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-        scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+        poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+        corrosiveGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+        fireField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+        scentField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
 
         // Place player before spawning so we never spawn on top of them.
         const Vec2i arrival = computeArrival();
@@ -3336,7 +3336,7 @@ bool Game::tryOverworldStep(int dx, int dy) {
     }
 
     // Auto-explore bookkeeping is transient per-floor; size it to the current dungeon.
-    autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+    autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
 
     // Procedural ecosystem discovery is also transient per-floor; initialize it
     // to the player's current region to avoid noisy "first-step" callouts.
@@ -4860,11 +4860,11 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         dung.computeEndlessStratumInfo(seed_, branch_, depth_, DUNGEON_MAX_DEPTH);
         dung.computeCampaignStratumInfo(seed_, branch_, depth_, DUNGEON_MAX_DEPTH);
 
-        confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-        poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-        corrosiveGas_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-        fireField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
-        scentField_.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+        confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+        poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+        corrosiveGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+        fireField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+        scentField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
 
         // Shrines get a visible altar overlay tile (placed before graffiti/spawns so it stays clear).
         spawnAltars();
@@ -4989,7 +4989,7 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
     }
 
     // Auto-explore bookkeeping is transient per-floor; size it to the current dungeon.
-    autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), 0u);
+    autoExploreSearchTriedTurns.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
 
     // Procedural ecosystem discovery is also transient per-floor; initialize it
     // to the player's current region to avoid noisy "first-step" callouts.

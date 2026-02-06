@@ -1525,6 +1525,128 @@ bool test_proc_shop_profiles()
 }
 
 
+static void makeAllVisibleFloor(Dungeon& d) {
+    for (auto& t : d.tiles) {
+        t.type = TileType::Floor;
+        t.visible = true;
+        t.explored = true;
+    }
+}
+
+
+bool test_shopkeeper_look_shows_deterministic_name() {
+    Game g;
+    g.newGame(0x0BEEF123u);
+
+    g.branch_ = DungeonBranch::Main;
+    g.depth_ = 4;
+
+    g.dung = Dungeon(10, 6);
+    g.dung.rooms.clear();
+    makeAllVisibleFloor(g.dung);
+
+    Room shop;
+    shop.type = RoomType::Shop;
+    shop.x = 1;
+    shop.y = 1;
+    shop.w = 8;
+    shop.h = 4;
+    g.dung.rooms.push_back(shop);
+
+    const shopgen::ShopProfile prof = shopgen::profileFor(g.seed(), g.depth(), shop);
+    const std::string expected = std::string("SHOPKEEPER ") + shopgen::shopkeeperNameFor(prof);
+
+    g.ents.clear();
+    g.ground.clear();
+
+    Entity p;
+    p.id = 1;
+    p.kind = EntityKind::Player;
+    p.hpMax = 20;
+    p.hp = 20;
+    p.pos = {1, 3};
+    g.playerId_ = p.id;
+    g.ents.push_back(p);
+
+    Entity sk;
+    sk.id = 2;
+    sk.kind = EntityKind::Shopkeeper;
+    sk.hpMax = 12;
+    sk.hp = 12;
+    sk.pos = {5, 3};
+    sk.spriteSeed = hashCombine(prof.seed, "SK"_tag);
+    sk.alerted = false;
+    g.ents.push_back(sk);
+
+    const std::string desc = g.describeAt(sk.pos);
+    CHECK(desc.find(expected) != std::string::npos);
+    return true;
+}
+
+
+bool test_targeting_warning_includes_shopkeeper_name() {
+    Game g;
+    g.newGame(0x0BEEF124u);
+
+    g.branch_ = DungeonBranch::Main;
+    g.depth_ = 4;
+
+    g.dung = Dungeon(12, 6);
+    g.dung.rooms.clear();
+    makeAllVisibleFloor(g.dung);
+
+    Room shop;
+    shop.type = RoomType::Shop;
+    shop.x = 1;
+    shop.y = 1;
+    shop.w = 10;
+    shop.h = 4;
+    g.dung.rooms.push_back(shop);
+
+    const shopgen::ShopProfile prof = shopgen::profileFor(g.seed(), g.depth(), shop);
+    const std::string expectedLabel = std::string("SHOPKEEPER ") + shopgen::shopkeeperNameFor(prof);
+
+    g.ents.clear();
+    g.ground.clear();
+
+    Entity p;
+    p.id = 1;
+    p.kind = EntityKind::Player;
+    p.hpMax = 20;
+    p.hp = 20;
+    p.pos = {1, 3};
+    g.playerId_ = p.id;
+    g.ents.push_back(p);
+
+    Entity sk;
+    sk.id = 2;
+    sk.kind = EntityKind::Shopkeeper;
+    sk.hpMax = 12;
+    sk.hp = 12;
+    sk.pos = {4, 3};
+    sk.spriteSeed = hashCombine(prof.seed, "SK"_tag);
+    sk.alerted = false;
+    g.ents.push_back(sk);
+
+    // Ensure the player has a valid ranged option (throwing rocks).
+    g.inv.clear();
+    Item rocks;
+    rocks.id = 1;
+    rocks.kind = ItemKind::Rock;
+    rocks.count = 1;
+    g.inv.push_back(rocks);
+
+    g.targeting = true;
+    g.targetingMode_ = Game::TargetingMode::Ranged;
+    g.targetPos = {6, 3};
+    g.recomputeTargetLine();
+
+    CHECK(g.targetValid);
+    CHECK(g.targetingWarningText().find(expectedLabel) != std::string::npos);
+    return true;
+}
+
+
 bool test_proc_shrine_profiles()
 {
     // Determinism + HUD-safe naming.
@@ -3219,6 +3341,8 @@ int main(int argc, char** argv) {
         {"spritegen_resample_rect_scale3x_rules", test_spritegen_resample_rect_scale3x_edge_rules},
         {"spritegen_resample_rect_factor_6", test_spritegen_resample_rect_factor_6_matches_chain},
         {"shop_profiles",   test_proc_shop_profiles},
+        {"shopkeeper_look_name", test_shopkeeper_look_shows_deterministic_name},
+        {"shopkeeper_target_warning_name", test_targeting_warning_includes_shopkeeper_name},
         {"shrine_profiles", test_proc_shrine_profiles},
         {"camp_stash_farming_starter_kit", test_camp_stash_has_farming_starter_kit},
         {"farming_till_plant_grow_harvest", test_farming_till_plant_grow_harvest},

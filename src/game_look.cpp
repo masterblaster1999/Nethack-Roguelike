@@ -2,6 +2,8 @@
 
 #include "proc_names.hpp"
 
+#include "shopkeeper_identity.hpp"
+
 #include "shrine_profile_gen.hpp"
 
 #include "wards.hpp"
@@ -839,6 +841,12 @@ if (!hallu && branch_ != DungeonBranch::Camp) {
                     label += kindLabel;
                 } else {
                     label = kindLabel;
+                }
+
+                // Shopkeepers have deterministic names based on the shop profile.
+                // Preserve hallucination behavior: do not reveal the true kind/name.
+                if (!hallu && e->kind == EntityKind::Shopkeeper) {
+                    label = shopid::shopkeeperLabelForUI(*this, *e);
                 }
 
                 if (e->friendly) {

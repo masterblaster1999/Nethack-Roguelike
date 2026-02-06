@@ -1,17 +1,15 @@
 {
-  "patch_id": "round264_patch",
-  "previous_patch_id": "round263_patch",
-  "round": 264,
-  "created_utc": "2026-02-03T13:40:00Z",
-  "summary": "Fix test/CI build by factoring spritegen into an SDL-free library, silencing Werror-only unused helpers, and making ecosystem crafting tests run on non-camp levels.",
+  "patch_id": "roundN_patch",
+  "previous_patch_id": "round264_patch",
+  "round": 265,
+  "created_utc": "2026-02-06T00:00:00Z",
+  "summary": "Add deterministic shopkeeper names to LOOK and targeting warnings, and replace the placeholder GitHub Actions workflow with a real cross-platform CMake/CTest CI run.",
   "files_changed_or_added_this_round": [
     "PATCH_MANIFEST.json",
-    "CMakeLists.txt",
-    "tests/CMakeLists.txt",
-    "src/dungeon.cpp",
-    "src/dungeon.hpp",
-    "src/spritegen.cpp",
-    "src/spritegen3d.cpp",
+    ".github/workflows/blank.yml",
+    "src/game_look.cpp",
+    "src/game_targeting.cpp",
+    "src/shopkeeper_identity.hpp",
     "tests/test_main.cpp"
   ],
   "files_in_patch_zip": [
@@ -30,15 +28,18 @@
     "src/game_automove.cpp",
     "src/game_interact.cpp",
     "src/game_inventory.cpp",
+    "src/game_look.cpp",
     "src/game_loop.cpp",
     "src/game_save.cpp",
     "src/game_spawn.cpp",
     "src/game_spellcasting.cpp",
+    "src/game_targeting.cpp",
     "src/game_world.cpp",
     "src/overworld.hpp",
     "src/render.cpp",
     "src/scent_field.hpp",
     "src/scores.cpp",
+    "src/shopkeeper_identity.hpp",
     "src/spritegen.cpp",
     "src/spritegen.hpp",
     "src/spritegen3d.cpp",
@@ -49,22 +50,19 @@
     "tests/test_main.cpp"
   ],
   "notes_for_reviewer": [
-    "CMake: new procrogue_spritegen (SDL-free) library; game and tests now link to it.",
-    "Werror: annotate several unused internal helpers with [[maybe_unused]] so tests-only builds succeed.",
-    "EcosystemFx: fix FungalBloom/FloodedGrotto scent-decay sign to match intended behavior and unit tests.",
-    "Tests: ecosystem catalyst/refinement tests now descend from Camp to Main and choose positions by matching workstation.",
-    "Tests: auto-unequip crafting check now asserts the consumed item id is removed (output can legally be same kind)."
+    "UI: LOOK now labels shopkeepers as 'SHOPKEEPER <NAME>' using deterministic shop profile identity (without leaking during hallucination).",
+    "Targeting: safety warnings now include the same shopkeeper name in protected-entity prompts.",
+    "Tests: add coverage ensuring LOOK + targeting warning include the deterministic shopkeeper label.",
+    "CI: replace placeholder workflow with a CMake preset build that runs unit tests on ubuntu/macos/windows with -Werror."
   ],
   "patch_notes": [
-    "CMake: factor sprite generation sources into a reusable SDL-free library and link it into both the game and unit tests.",
-    "Fix -Werror unused-function failures in dungeon and spritegen sources by marking inactive helpers as maybe_unused.",
-    "Ecosystem stealth FX: correct scent-decay deltas for FungalBloom and FloodedGrotto.",
-    "Tests: make ecosystem crafting tests run on non-camp levels and be robust to room/workstation layout.",
-    "Tests: refine the auto-unequip craft assertion to track the consumed item by id."
+    "Expose deterministic shopkeeper identity in UI: show 'SHOPKEEPER <NAME>' in LOOK and targeting safety prompts.",
+    "Add unit tests verifying shopkeeper names appear in LOOK text and targeting warning strings.",
+    "Replace placeholder GitHub Actions workflow with a real CI job that configures/builds/tests using the existing CMake presets (no SDL dependency)."
   ],
   "notes": [
-    "Unit tests now link spritegen without enabling SDL/game builds.",
-    "CI/test builds with -Werror no longer fail on unused internal helpers.",
-    "Ecosystem catalyst tests run from a dungeon level that actually generates ecosystems."
+    "Shopkeeper names are stable across runs/floors because they are derived from the shop profile seed.",
+    "CI now exercises the tests preset with warnings-as-errors enabled on all three major OS runners.",
+    "New tests use a tiny synthetic dungeon to keep determinism and avoid generator flakiness."
   ]
 }

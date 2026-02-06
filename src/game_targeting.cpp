@@ -4,6 +4,7 @@
 #include "fishing_gen.hpp"
 #include "projectile_utils.hpp"
 #include "proc_spells.hpp"
+#include "shopkeeper_identity.hpp"
 
 namespace {
 static bool isTargetCandidateHostile(const Game& g, const Entity& e) {
@@ -46,7 +47,7 @@ static bool isProtectedNonHostile(const Game& g, const Entity& e) {
     return false;
 }
 
-static std::string protectedNameForUI(const Entity& e) {
+static std::string protectedNameForUI(const Game& g, const Entity& e) {
     // Keep this short: the targeting HUD has limited room.
     if (e.kind == EntityKind::Player) return "YOU";
 
@@ -56,7 +57,7 @@ static std::string protectedNameForUI(const Entity& e) {
     }
 
     if (e.kind == EntityKind::Shopkeeper && !e.alerted) {
-        return "SHOPKEEPER";
+        return shopid::shopkeeperLabelForUI(g, e);
     }
 
     return n;
@@ -2014,7 +2015,7 @@ void Game::recomputeTargetLine() {
 
             if (!inMask(e.pos.x, e.pos.y)) continue;
 
-            aoeHits.push_back(protectedNameForUI(e));
+            aoeHits.push_back(protectedNameForUI(*this, e));
         }
     }
 
@@ -2024,7 +2025,7 @@ void Game::recomputeTargetLine() {
         std::vector<std::string> parts;
         if (protectedOnLine) {
             std::ostringstream ss;
-            ss << "LINE " << protectedDist << ": " << protectedNameForUI(*protectedOnLine);
+            ss << "LINE " << protectedDist << ": " << protectedNameForUI(*this, *protectedOnLine);
             parts.push_back(ss.str());
         }
         if (!aoeHits.empty()) {

@@ -1013,26 +1013,178 @@ void applyRimLight(SpritePixels& s, int edgeDx, int edgeDy, Color highlight) {
     }
 }
 
-void finalizeSprite(SpritePixels& s, uint32_t seed, int frame, uint8_t outlineAlpha, uint8_t shadowAlpha) {
-    (void)seed;
+inline int alphaMaskAt(const SpritePixels& s, int x, int y) {
+    if (x < 0 || y < 0 || x >= s.w || y >= s.h) return 0;
+    return (s.at(x, y).a > 0) ? 1 : 0;
+}
 
+void applyMicroRelight(SpritePixels& s, uint32_t seed, int frame, float strength) {
+    strength = std::clamp(strength, 0.0f, 1.0f);
+    if (strength <= 0.001f || s.w <= 0 || s.h <= 0) return;
+
+    const SpritePixels orig = s;
+
+    // Slightly animated key-light direction (deterministic 4-frame loop).
+    const float seedPhase = hash01_16(hash32(seed ^ 0x51A1117u)) * TAU;
+    const float t = phaseAngle_4(frame);
+    const float lx = -0.52f + 0.12f * std::cos(seedPhase + t);
+    const float ly = -0.74f + 0.10f * std::sin(seedPhase + t * 1.3f);
+    const float lz = 1.00f;
+    const float invLen = 1.0f / std::sqrt(std::max(1e-6f, lx * lx + ly * ly + lz * lz));
+    const float nxL = lx * invLen;
+    const float nyL = ly * invLen;
+    const float nzL = lz * invLen;
+
+    for (int y = 0; y < s.h; ++y) {
+        for (int x = 0; x < s.w; ++x) {
+            const Color c0 = orig.at(x, y);
+            if (c0.a == 0) continue;
+
+            const float gx = static_cast<float>(alphaMaskAt(orig, x + 1, y) - alphaMaskAt(orig, x - 1, y));
+            const float gy = static_cast<float>(alphaMaskAt(orig, x, y + 1) - alphaMaskAt(orig, x, y - 1));
+
+            float nx = -0.90f * gx;
+            float ny = -0.90f * gy;
+            float nz = 1.0f;
+
+            const float nInv = 1.0f / std::sqrt(std::max(1e-6f, nx * nx + ny * ny + nz * nz));
+            nx *= nInv;
+            ny *= nInv;
+            nz *= nInv;
+
+            float diff = nx * nxL + ny * nyL + nz * nzL;
+            diff = std::clamp(diff, 0.0f, 1.0f);
+
+            int open = 0;
+            open += (alphaMaskAt(orig, x + 1, y) == 0) ? 1 : 0;
+            open += (alphaMaskAt(orig, x - 1, y) == 0) ? 1 : 0;
+            open += (alphaMaskAt(orig, x, y + 1) == 0) ? 1 : 0;
+            open += (alphaMaskAt(orig, x, y - 1) == 0) ? 1 : 0;
+
+            float shade = 0.88f + 0.24f * diff;
+            if (open <= 1) shade *= 0.97f; // inner mass
+            if (open >= 3) shade *= 1.03f; // exposed contour
+
+            const float n = loopValueNoise2D01(static_cast<float>(x) * 0.93f + 1.7f,
+                                               static_cast<float>(y) * 0.93f - 2.4f,
+                                               seed ^ 0xC011AA7u,
+                                               4.0f,
+                                               frame,
+                                               1.8f) - 0.5f;
+            shade *= (1.0f + n * 0.06f * strength);
+            shade = std::clamp(shade, 0.75f, 1.18f);
+
+            s.at(x, y) = mul(c0, 1.0f + (shade - 1.0f) * strength);
+        }
+    }
+}
+
+void applySpecularTwinkle(SpritePixels& s, uint32_t seed, int frame, float strength) {
+    strength = std::clamp(strength, 0.0f, 1.0f);
+    if (strength <= 0.001f || s.w <= 0 || s.h <= 0) return;
+
+    const float t = phaseAngle_4(frame);
+
+    for (int y = 0; y < s.h; ++y) {
+        for (int x = 0; x < s.w; ++x) {
+            Color c = s.at(x, y);
+            if (c.a == 0) continue;
+
+            const float lum = luma01(c);
+            if (lum < 0.58f) continue;
+
+            const uint32_t h = hash32(hashCombine(seed ^ 0x57EC11Au,
+                                                  hashCombine(static_cast<uint32_t>(x),
+                                                              static_cast<uint32_t>(y))));
+
+            // Keep glints sparse so sprites don't look noisy.
+            if ((h & 0x0Fu) != 0u) continue;
+
+            const float ph = static_cast<float>((h >> 8) & 0xFFu) * (TAU / 255.0f);
+            const float w = 0.5f + 0.5f * std::sin(t * 2.0f + ph);
+
+            const float k = strength * (0.03f + 0.09f * lum) * w;
+            if (k <= 0.001f) continue;
+
+            c = lerp(c, Color{255, 255, 255, c.a}, std::clamp(k, 0.0f, 0.18f));
+            s.at(x, y) = c;
+        }
+    }
+}
+
+void finalizeSprite(SpritePixels& s, uint32_t seed, int frame, uint8_t outlineAlpha, uint8_t shadowAlpha) {
     // Derive a dark outline color from the sprite itself (tinted outline reads well).
     // Compute this *before* adding a shadow so the shadow doesn't skew the average.
     const Color avg = averageOpaqueColor(s);
     Color outline = add(mul(avg, 0.18f), -18, -18, -18);
     outline.a = outlineAlpha;
 
+    // A tiny deterministic pulse keeps static 2D sprites from feeling dead-still.
+    const float ph = hash01_16(hash32(seed ^ 0xF11CA71u)) * TAU;
+    const float p = 0.5f + 0.5f * std::sin(phaseAngle_4(frame) + ph);
+    const uint8_t shA = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(shadowAlpha * (0.86f + 0.20f * p))), 0, 255));
+    const float contour = std::clamp(0.90f + 0.04f * p, 0.80f, 0.98f);
+    const uint8_t rimA = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(30.0f + 28.0f * p)), 0, 255));
+
     // 1) Drop shadow first so the outline overwrites it on edge pixels.
-    applyDropShadow(s, 1, 1, shadowAlpha);
+    applyDropShadow(s, 1, 1, shA);
 
     // 2) Outline.
     applyExteriorOutline(s, outline);
 
     // 3) Slight contour lighting: darker bottom-right, lighter top-left.
-    applyContourShade(s, 1, 1, 0.92f);
+    applyContourShade(s, 1, 1, contour);
 
-    Color rim{255, 255, 255, static_cast<uint8_t>(35 + ((frame % 2) ? 15 : 0))};
+    Color rim{255, 255, 255, rimA};
     applyRimLight(s, -1, -1, rim);
+
+    // 4) Per-pixel relight + sparse twinkle to improve 2D depth/animation quality.
+    applyMicroRelight(s, seed, frame, 0.90f);
+    applySpecularTwinkle(s, seed, frame, 0.85f);
+}
+
+void polishUpscaledSprite(SpritePixels& s) {
+    if (s.w <= 20 || s.h <= 20) return;
+
+    // Very light unsharp pass on opaque interior pixels. This keeps large 2D sprite
+    // previews crisp without adding ringing around transparent edges.
+    const float amount = (s.w >= 160 || s.h >= 160) ? 0.16f : ((s.w >= 96 || s.h >= 96) ? 0.19f : 0.22f);
+    const SpritePixels orig = s;
+
+    for (int y = 0; y < s.h; ++y) {
+        for (int x = 0; x < s.w; ++x) {
+            const Color c0 = orig.at(x, y);
+            if (c0.a < 96) continue;
+
+            int sr = 0, sg = 0, sb = 0, n = 0;
+            const int nx[4] = {x + 1, x - 1, x, x};
+            const int ny[4] = {y, y, y + 1, y - 1};
+            for (int i = 0; i < 4; ++i) {
+                const int xx = nx[i];
+                const int yy = ny[i];
+                if (xx < 0 || yy < 0 || xx >= s.w || yy >= s.h) continue;
+                const Color cn = orig.at(xx, yy);
+                if (cn.a < 96) continue;
+                sr += cn.r;
+                sg += cn.g;
+                sb += cn.b;
+                ++n;
+            }
+            if (n == 0) continue;
+
+            const float mr = static_cast<float>(sr) / static_cast<float>(n);
+            const float mg = static_cast<float>(sg) / static_cast<float>(n);
+            const float mb = static_cast<float>(sb) / static_cast<float>(n);
+
+            const int rr = static_cast<int>(std::lround(static_cast<float>(c0.r) + (static_cast<float>(c0.r) - mr) * amount));
+            const int gg = static_cast<int>(std::lround(static_cast<float>(c0.g) + (static_cast<float>(c0.g) - mg) * amount));
+            const int bb = static_cast<int>(std::lround(static_cast<float>(c0.b) + (static_cast<float>(c0.b) - mb) * amount));
+
+            s.at(x, y).r = clamp8(rr);
+            s.at(x, y).g = clamp8(gg);
+            s.at(x, y).b = clamp8(bb);
+        }
+    }
 }
 
 
@@ -1571,7 +1723,9 @@ Color baseColorFor(EntityKind k, RNG& rng) {
 // expose a stable entry point for other translation units (renderer UI previews,
 // etc.).
 SpritePixels resampleSpriteToSize(const SpritePixels& src, int pxSize) {
-    return resampleSpriteToSizeInternal(src, pxSize);
+    SpritePixels out = resampleSpriteToSizeInternal(src, pxSize);
+    polishUpscaledSprite(out);
+    return out;
 }
 
 
@@ -2489,7 +2643,8 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
             // A tiny chibi \"VTuber\" figurine: big head, big eyes, lots of hair color.
             // The persona text uses vtuberMixSeed(seed) too (vtuber_gen.hpp), so the name
             // and visual tend to \"match\" consistently across runs.
-            RNG vrng(vtuberMixSeed(seed));
+            const uint32_t figSig = vtuberMixSeed(seed ^ 0x6C8E9CF5u);
+            RNG vrng(figSig);
 
             static constexpr Color SKIN[] = {
                 {255, 224, 200, 255},
@@ -2525,18 +2680,69 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
             Color skinShade = mul(skin, 0.88f);
 
             Color hair = HAIR[vrng.range(0, hairN - 1)];
-            Color hairDark = mul(hair, 0.70f);
-            Color hairLight = add(hair, 20, 20, 20);
-
             Color eye = EYES[vrng.range(0, eyeN - 1)];
-            Color eyeDark = mul(eye, 0.70f);
 
             // Accent: a small hue-ish shift from eye color.
             Color accent = add(eye, vrng.range(-25, 25), vrng.range(-25, 25), vrng.range(-25, 25));
             Color outfit = mul(accent, 0.85f);
 
-            const int hairStyle = vrng.range(0, 3);
-            const int accessory = vrng.range(0, 4);
+            int hairStyle = vrng.range(0, 3);
+            int accessory = vrng.range(0, 6);
+
+            // Procedural visual variance knobs so figurines are less samey.
+            int faceShape = vrng.range(0, 2);   // 0 round, 1 wide, 2 narrow
+            int eyeStyle = vrng.range(0, 2);    // 0 glossy, 1 round, 2 sharp
+            int outfitPattern = vrng.range(0, 2);
+            bool hasCheekMark = vrng.chance(0.33f);
+            bool hasHairStreak = vrng.chance(0.42f);
+            bool hasStarPupils = vrng.chance(0.24f);
+
+            hair = add(hair, vrng.range(-16, 16), vrng.range(-16, 16), vrng.range(-16, 16));
+            eye  = add(eye,  vrng.range(-12, 12), vrng.range(-12, 12), vrng.range(-12, 12));
+            accent = add(accent, vrng.range(-18, 18), vrng.range(-18, 18), vrng.range(-18, 18));
+            outfit = add(outfit, vrng.range(-15, 15), vrng.range(-12, 12), vrng.range(-15, 15));
+
+            // Deterministic named VTuber archetypes.
+            // 0: "Comet Captain", 1: "Velvet Nocturne"
+            const uint32_t archetypeRoll = figSig % 12u;
+            const bool isCometCaptain = (archetypeRoll == 0u);
+            const bool isVelvetNocturne = (archetypeRoll == 1u);
+            if (isCometCaptain) {
+                hair = add({112, 230, 255, 255}, vrng.range(-8, 8), vrng.range(-6, 6), vrng.range(-8, 8));
+                eye = add({255, 182, 116, 255}, vrng.range(-6, 6), vrng.range(-6, 6), vrng.range(-6, 6));
+                accent = {255, 216, 128, 255};
+                outfit = add({86, 122, 214, 255}, vrng.range(-6, 6), vrng.range(-6, 6), vrng.range(-6, 6));
+                hairStyle = 1;
+                accessory = 5;
+                eyeStyle = 0;
+                outfitPattern = 1;
+                hasStarPupils = true;
+                hasHairStreak = true;
+            } else if (isVelvetNocturne) {
+                hair = add({88, 78, 176, 255}, vrng.range(-8, 8), vrng.range(-8, 8), vrng.range(-8, 8));
+                eye = add({244, 124, 224, 255}, vrng.range(-8, 8), vrng.range(-8, 8), vrng.range(-8, 8));
+                accent = {208, 156, 255, 255};
+                outfit = add({80, 52, 124, 255}, vrng.range(-6, 6), vrng.range(-6, 6), vrng.range(-6, 6));
+                hairStyle = 2;
+                accessory = 6;
+                faceShape = 2;
+                eyeStyle = 2;
+                outfitPattern = 2;
+                hasCheekMark = true;
+            }
+
+            Color hairDark = mul(hair, 0.70f);
+            Color hairLight = add(hair, 20, 20, 20);
+            Color eyeDark = mul(eye, 0.70f);
+            if (isCometCaptain) {
+                hairDark = mul(hair, 0.62f);
+                hairLight = add(hair, 32, 20, 12);
+                eyeDark = mul(eye, 0.68f);
+            } else if (isVelvetNocturne) {
+                hairDark = mul(hair, 0.58f);
+                hairLight = add(hair, 28, 18, 42);
+                eyeDark = mul(eye, 0.66f);
+            }
 
             const bool blink = ((frame + static_cast<int>(seed & 31u)) % 34) <= 1;
             const bool mouthOpen = ((frame + static_cast<int>((seed >> 5) & 31u)) % 16) < 6;
@@ -2546,8 +2752,23 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
             circle(s, 8, 5, 6, hair);
 
             // Face / head (big)
-            circle(s, 8, 9, 5, skin);
-            circle(s, 8, 11, 4, skinShade);
+            switch (faceShape) {
+                case 0: // round
+                    circle(s, 8, 9, 5, skin);
+                    circle(s, 8, 11, 4, skinShade);
+                    break;
+                case 1: // wider cheeks
+                    circle(s, 8, 9, 5, skin);
+                    rect(s, 4, 9, 9, 3, skin);
+                    circle(s, 8, 11, 4, skinShade);
+                    break;
+                case 2: // narrower jaw
+                default:
+                    circle(s, 8, 9, 4, skin);
+                    rect(s, 5, 8, 7, 5, skin);
+                    circle(s, 8, 11, 3, skinShade);
+                    break;
+            }
 
             // Side locks (vary slightly per style)
             if (hairStyle == 0) {
@@ -2633,12 +2854,36 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
                     setPx(s, 8, 5, mul(accent, 0.85f));
                     break;
                 }
-                case 4: // tiny horns
-                default: {
+                case 4: { // tiny horns
                     setPx(s, 5, 3, accent);
                     setPx(s, 6, 2, accent);
                     setPx(s, 11, 3, accent);
                     setPx(s, 10, 2, accent);
+                    break;
+                }
+                case 5: { // comet headset + star clip
+                    line(s, 4, 5, 12, 5, accent);
+                    circle(s, 4, 9, 1, accent);
+                    circle(s, 12, 9, 1, accent);
+                    line(s, 12, 10, 14, 11, accent);
+                    setPx(s, 11, 2, {255, 246, 190, 220});
+                    setPx(s, 10, 3, {255, 226, 150, 190});
+                    setPx(s, 12, 3, {255, 226, 150, 190});
+                    break;
+                }
+                case 6: { // crescent circlet + side chains
+                    line(s, 5, 4, 11, 4, accent);
+                    circle(s, 8, 3, 2, add(accent, 22, 22, 22));
+                    circle(s, 9, 3, 1, hairDark);
+                    line(s, 3, 8, 3, 12, mul(accent, 0.78f));
+                    line(s, 13, 8, 13, 12, mul(accent, 0.78f));
+                    break;
+                }
+                default: {
+                    line(s, 4, 5, 12, 5, accent);
+                    circle(s, 4, 9, 1, accent);
+                    circle(s, 12, 9, 1, accent);
+                    line(s, 12, 10, 14, 11, accent);
                     break;
                 }
             }
@@ -2649,20 +2894,39 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
                 line(s, 5, 10, 7, 10, eyeDark);
                 line(s, 9, 10, 11, 10, eyeDark);
             } else {
-                rect(s, 5, 9, 3, 3, white);
-                rect(s, 9, 9, 3, 3, white);
+                if (eyeStyle == 0) {
+                    rect(s, 5, 9, 3, 3, white);
+                    rect(s, 9, 9, 3, 3, white);
+                    rect(s, 6, 10, 1, 2, eye);
+                    rect(s, 10, 10, 1, 2, eye);
+                    rect(s, 6, 9, 1, 1, eyeDark);
+                    rect(s, 10, 9, 1, 1, eyeDark);
+                    setPx(s, 6, 10, {255,255,255,170});
+                    setPx(s, 10, 10, {255,255,255,170});
+                } else if (eyeStyle == 1) {
+                    rect(s, 5, 9, 3, 3, white);
+                    rect(s, 9, 9, 3, 3, white);
+                    circle(s, 6, 10, 1, eye);
+                    circle(s, 10, 10, 1, eye);
+                    setPx(s, 6, 9, eyeDark);
+                    setPx(s, 10, 9, eyeDark);
+                    setPx(s, 6, 10, {255,255,255,155});
+                    setPx(s, 10, 10, {255,255,255,155});
+                } else {
+                    rect(s, 5, 9, 3, 2, white);
+                    rect(s, 9, 9, 3, 2, white);
+                    line(s, 5, 9, 7, 9, eyeDark);
+                    line(s, 9, 9, 11, 9, eyeDark);
+                    setPx(s, 6, 10, eye);
+                    setPx(s, 10, 10, eye);
+                    setPx(s, 6, 9, {255,255,255,130});
+                    setPx(s, 10, 9, {255,255,255,130});
+                }
 
-                // iris
-                rect(s, 6, 10, 1, 2, eye);
-                rect(s, 10, 10, 1, 2, eye);
-
-                // darker top
-                rect(s, 6, 9, 1, 1, eyeDark);
-                rect(s, 10, 9, 1, 1, eyeDark);
-
-                // highlight
-                setPx(s, 6, 10, {255,255,255,170});
-                setPx(s, 10, 10, {255,255,255,170});
+                if (hasStarPupils) {
+                    setPx(s, 6, 11, add(eye, 28, 28, 28));
+                    setPx(s, 10, 11, add(eye, 28, 28, 28));
+                }
             }
 
             // Mouth
@@ -2682,6 +2946,9 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
                 setPx(s, 5, 11, {255, 140, 170, 60});
                 setPx(s, 11, 11, {255, 140, 170, 60});
             }
+            if (hasCheekMark) {
+                setPx(s, 11, 12, mul(accent, 0.72f));
+            }
 
             // Outfit / base
             rect(s, 5, 14, 7, 2, outfit);
@@ -2690,6 +2957,37 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
             setPx(s, 8, 14, {255,255,255,120});
             setPx(s, 7, 14, {255,255,255,90});
             setPx(s, 9, 14, {255,255,255,90});
+
+            if (outfitPattern == 0) {
+                line(s, 8, 14, 8, 15, add(accent, 35, 35, 35));
+            } else if (outfitPattern == 1) {
+                line(s, 5, 14, 11, 14, mul(add(accent, 25, 25, 25), 0.90f));
+                setPx(s, 6, 15, mul(accent, 0.82f));
+                setPx(s, 10, 15, mul(accent, 0.82f));
+            } else {
+                setPx(s, 6, 15, mul(add(accent, 20, 20, 20), 0.85f));
+                setPx(s, 8, 15, mul(add(accent, 20, 20, 20), 0.85f));
+                setPx(s, 10, 15, mul(add(accent, 20, 20, 20), 0.85f));
+            }
+
+            if (isCometCaptain) {
+                // Distinctive visor + side trail so this reads as a unique character.
+                rect(s, 5, 9, 7, 1, {130, 228, 255, 120});
+                line(s, 11, 9, 12, 14, mul(hair, 0.86f));
+                line(s, 12, 8, 13, 13, hairDark);
+                rect(s, 6, 14, 5, 1, add(outfit, 24, 12, 8));
+            } else if (isVelvetNocturne) {
+                // Distinctive moon motif and trailing veil.
+                setPx(s, 8, 4, add(accent, 28, 28, 28));
+                line(s, 4, 10, 4, 14, mul(accent, 0.72f));
+                line(s, 12, 10, 12, 14, mul(accent, 0.72f));
+                rect(s, 6, 14, 5, 1, add(outfit, 20, 8, 28));
+            }
+
+            if (hasHairStreak) {
+                line(s, 6, 5, 6, 10, hairLight);
+                setPx(s, 10, 6, mul(hairLight, 0.82f));
+            }
 
             // Hair highlight flicker
             if (frame % 2 == 1) {
@@ -2813,6 +3111,13 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
 
             auto drawHead = [&](int cx, int cy, uint32_t sseed, const Color& acc, bool small) {
                 RNG rr(vtuberMixSeed(sseed ^ 0xA9B4C2D1u));
+                const uint32_t portraitSig = vtuberMixSeed(sseed ^ 0x6C8E9CF5u);
+                const uint32_t archetypeRoll = portraitSig % 12u;
+                const bool isCometCaptain = (archetypeRoll == 0u);
+                const bool isVelvetNocturne = (archetypeRoll == 1u);
+                int portraitStyle = rr.range(0, 2); // 0 center, 1 left sweep, 2 right sweep
+                bool hasStarPupil = rr.chance(0.25f);
+                bool hasCheekMark = rr.chance(0.28f);
 
                 const int skinN = static_cast<int>(sizeof(SKIN) / sizeof(SKIN[0]));
                 Color skin = SKIN[rr.range(0, skinN - 1)];
@@ -2825,6 +3130,22 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
 
                 Color eye = add(acc, rr.range(-25, 25), rr.range(-25, 25), rr.range(-25, 25));
                 Color eyeDark = mul(eye, 0.70f);
+
+                if (isCometCaptain) {
+                    hair = add({112, 230, 255, 255}, rr.range(-8, 8), rr.range(-6, 6), rr.range(-8, 8));
+                    hairDark = mul(hair, 0.62f);
+                    eye = add({255, 182, 116, 255}, rr.range(-6, 6), rr.range(-6, 6), rr.range(-6, 6));
+                    eyeDark = mul(eye, 0.68f);
+                    hasStarPupil = true;
+                    portraitStyle = 1;
+                } else if (isVelvetNocturne) {
+                    hair = add({88, 78, 176, 255}, rr.range(-8, 8), rr.range(-8, 8), rr.range(-8, 8));
+                    hairDark = mul(hair, 0.58f);
+                    eye = add({244, 124, 224, 255}, rr.range(-8, 8), rr.range(-8, 8), rr.range(-8, 8));
+                    eyeDark = mul(eye, 0.66f);
+                    portraitStyle = 2;
+                    hasCheekMark = true;
+                }
 
                 const int rHair  = small ? 2 : 4;
                 const int rHair2 = small ? 1 : 3;
@@ -2840,6 +3161,14 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
                 } else {
                     setPx(s, cx, cy + 1, skinShade);
                 }
+                if (portraitStyle == 1) {
+                    line(s, cx - 2, cy - 1, cx + 1, cy, hair);
+                } else if (portraitStyle == 2) {
+                    line(s, cx + 2, cy - 1, cx - 1, cy, hair);
+                } else {
+                    setPx(s, cx - 2, cy, hair);
+                    setPx(s, cx + 2, cy, hairDark);
+                }
 
                 // Eyes (blink sometimes)
                 const bool blink = ((frame + static_cast<int>(sseed & 31u)) % 28) <= 1;
@@ -2854,12 +3183,32 @@ SpritePixels generateItemSprite(ItemKind kind, uint32_t seed, int frame, bool us
                         circle(s, cx + 1, cy + 1, 1, eye);
                         setPx(s, cx - 1, cy, {255,255,255,150});
                         setPx(s, cx + 1, cy, {255,255,255,150});
+                        if (hasStarPupil) {
+                            setPx(s, cx - 1, cy + 2, add(eye, 30, 30, 30));
+                            setPx(s, cx + 1, cy + 2, add(eye, 30, 30, 30));
+                        }
                     }
                 }
 
                 // Alt-art: small accent star above the portrait.
                 if (ed == VtuberCardEdition::AltArt && !small && rr.chance(0.55f)) {
                     setPx(s, cx, cy - 2, add(acc, 40, 40, 40));
+                }
+
+                if (isCometCaptain) {
+                    setPx(s, cx + 1, cy - 2, {255, 246, 190, 210});
+                    if (!small) {
+                        rect(s, cx - 2, cy + 1, 5, 1, {130, 228, 255, 105});
+                    }
+                } else if (isVelvetNocturne) {
+                    setPx(s, cx - 1, cy - 2, {224, 198, 255, 210});
+                    if (!small) {
+                        setPx(s, cx + 2, cy + 2, mul(acc, 0.76f));
+                    }
+                }
+
+                if (!small && hasCheekMark) {
+                    setPx(s, cx + 2, cy + 2, mul(acc, 0.70f));
                 }
             };
 
@@ -4405,59 +4754,111 @@ void fillQuad(SpritePixels& s,
     fillTri(s, x0, y0, x2, y2, x3, y3, c);
 }
 
+struct FloorSampleContext {
+    TilePalette p;
+    int ox = 0;
+    int oy = 0;
+};
+
+FloorSampleContext makeFloorSampleContext(uint8_t style, uint32_t seed) {
+    FloorSampleContext ctx{};
+    ctx.p = floorPalette(style, seed);
+
+    RNG rng(hashCombine(seed, 0xF100Au));
+    ctx.ox = rng.range(0, 3);
+    ctx.oy = rng.range(0, 3);
+    return ctx;
+}
+
+inline float floorTriFacetLift(uint32_t seed, int u, int v, int frame) {
+    constexpr int kCell = 4;
+    const int cx = u / kCell;
+    const int cy = v / kCell;
+    const int lx = u % kCell;
+    const int ly = v % kCell;
+
+    const uint32_t cellH = hash32(hashCombine(seed ^ 0x7A1A0F2u, hashCombine(static_cast<uint32_t>(cx), static_cast<uint32_t>(cy))));
+    const bool diagSlash = (cellH & 1u) != 0u;
+    const bool triA = diagSlash ? ((lx + ly) < kCell) : (lx >= ly);
+
+    const uint32_t triH = hash32(hashCombine(cellH ^ 0x51F7u, triA ? 0xA11CEu : 0xBEEFu));
+    const float amp = 0.035f + 0.070f * hash01_16(triH); // subtle 3.5%..10.5%
+    const float phase = hash01_16(hash32(triH ^ 0xC0FFEEu)) * TAU;
+
+    const float n = loopValueNoise2D01(static_cast<float>(u) + 13.0f,
+                                       static_cast<float>(v) - 7.0f,
+                                       triH ^ 0xD1CEu,
+                                       3.0f, frame, 0.9f);
+    const float wave = std::sin(phaseAngle_4(frame) + phase + (n - 0.5f) * 1.8f);
+    return wave * amp;
+}
+
+Color sampleFloorMaterial(const FloorSampleContext& ctx, uint32_t seed, uint8_t style, int u, int v, int frame) {
+    // Subtle looped domain warp makes tiny tiles read less grid-aligned while
+    // remaining deterministic and seamless over the 4-frame animation cycle.
+    const float warpX = (loopValueNoise2D01(static_cast<float>(u) + 5.0f,
+                                            static_cast<float>(v) - 3.0f,
+                                            seed ^ 0x57A5u,
+                                            5.5f, frame, 0.85f) - 0.5f) * 1.0f;
+    const float warpY = (loopValueNoise2D01(static_cast<float>(u) - 4.0f,
+                                            static_cast<float>(v) + 7.0f,
+                                            seed ^ 0x91AFu,
+                                            5.5f, frame, 0.85f) - 0.5f) * 1.0f;
+
+    const float n = valueNoise2D01(static_cast<float>(u) + warpX,
+                                   static_cast<float>(v) + warpY,
+                                   seed ^ 0xA11CEu, 1.8f);
+    const int dv = static_cast<int>(std::lround((n - 0.5f) * 12.0f));
+    Color c = add(ctx.p.base, dv, dv, dv);
+
+    // Grout lines every ~4px, offset per seed.
+    const bool grout = (((u + ctx.ox) % 4) == 0) || (((v + ctx.oy) % 4) == 0);
+    if (grout && n > 0.10f) {
+        c = add(ctx.p.grout, dv / 2, dv / 2, dv / 2);
+    }
+
+    // Style accents.
+    if (style == 2) { // Lair: moss patches
+        if (noise01(seed ^ 0xB055u, u / 2, v / 2) > 0.72f) {
+            c = lerp(c, ctx.p.accent, 0.45f);
+        }
+    } else if (style == 6) { // Shop: plank-ish streaks
+        if (((v + ctx.oy) % 3) == 0) c = lerp(c, ctx.p.dark, 0.25f);
+    } else if (style == 5) { // Vault: cold inlay lines
+        if (((u + ctx.ox) % 5) == 0 && ((v + ctx.oy) % 5) != 0) c = lerp(c, ctx.p.accent, 0.35f);
+    } else if (style == 1) { // Treasure: occasional sparkles
+        const bool sparkle = ((hash32(hashCombine(seed, hashCombine(u, v))) & 31u) == 0u);
+        if (sparkle) {
+            const int tw = ((frame + ((u + v) & 3)) & 3);
+            c = (tw == 0) ? ctx.p.accent2 : ctx.p.light;
+        }
+    } else if (style == 4) { // Secret: hairline cracks
+        if ((hash32(hashCombine(seed ^ 0xC1ACu, hashCombine(u, v))) & 63u) == 0u) {
+            c = lerp(c, ctx.p.dark, 0.55f);
+        }
+    }
+
+    // Animated triangular floor facets: reads like tiny plates moving up/down.
+    c = mul(c, 1.0f + floorTriFacetLift(seed, u, v, frame));
+    return c;
+}
+
 // --- Base (16px) tile generators -------------------------------------------
 
 SpritePixels genFloor16(uint32_t seed, uint8_t style, int frame) {
-    (void)frame;
-    const TilePalette p = floorPalette(style, seed);
-    SpritePixels s = makeSprite(16, 16, p.base);
+    const FloorSampleContext ctx = makeFloorSampleContext(style, seed);
+    SpritePixels s = makeSprite(16, 16, ctx.p.base);
 
-    RNG rng(hashCombine(seed, 0xF100Au));
-    const int ox = rng.range(0, 3);
-    const int oy = rng.range(0, 3);
-
-    // Base noise + subtle slab lines.
     for (int y = 0; y < 16; ++y) {
         for (int x = 0; x < 16; ++x) {
-            const float n = noise01(seed ^ 0xA11CEu, x, y);
-            const int v = static_cast<int>(std::lround((n - 0.5f) * 12.0f));
-            Color c = add(p.base, v, v, v);
-
-            // Grout lines every ~4px, offset per seed.
-            const bool grout = (((x + ox) % 4) == 0) || (((y + oy) % 4) == 0);
-            if (grout && n > 0.10f) {
-                c = add(p.grout, v / 2, v / 2, v / 2);
-            }
-
-            // Style accents.
-            if (style == 2) { // Lair: moss patches
-                if (noise01(seed ^ 0xB055u, x / 2, y / 2) > 0.72f) {
-                    c = lerp(c, p.accent, 0.45f);
-                }
-            } else if (style == 6) { // Shop: plank-ish streaks
-                if (((y + oy) % 3) == 0) c = lerp(c, p.dark, 0.25f);
-            } else if (style == 5) { // Vault: cold inlay lines
-                if (((x + ox) % 5) == 0 && ((y + oy) % 5) != 0) c = lerp(c, p.accent, 0.35f);
-            } else if (style == 1) { // Treasure: occasional sparkles
-                const bool sparkle = ((hash32(hashCombine(seed, hashCombine(x, y))) & 31u) == 0u);
-                if (sparkle) {
-                    const int tw = ((frame + ((x + y) & 3)) & 3);
-                    c = (tw == 0) ? p.accent2 : p.light;
-                }
-            } else if (style == 4) { // Secret: hairline cracks
-                if ((hash32(hashCombine(seed ^ 0xC1ACu, hashCombine(x, y))) & 63u) == 0u) {
-                    c = lerp(c, p.dark, 0.55f);
-                }
-            }
-
-            setPx(s, x, y, c);
+            setPx(s, x, y, sampleFloorMaterial(ctx, seed, style, x, y, frame));
         }
     }
 
     if (style == 3) {
         // Shrine: central rune mark (subtle, so it still tiles).
         const uint16_t rune = static_cast<uint16_t>(0b01010'11111'01010);
-        drawRuneGlyph(s, 5, 5, rune, withAlpha(p.accent, 220));
+        drawRuneGlyph(s, 5, 5, rune, withAlpha(ctx.p.accent, 220));
     }
 
     return s;
@@ -4470,6 +4871,8 @@ SpritePixels genWall16(uint32_t seed, int frame) {
 
     const int brickH = 3;
     const int brickW = 5;
+    const bool lightFromLeft = (hash32(seed ^ 0xA17E51u) & 1u) == 0u;
+    const int crackX = 2 + static_cast<int>(hash32(seed ^ 0xC12AC5u) % 12u);
 
     for (int y = 0; y < 16; ++y) {
         const int row = y / (brickH + 1);
@@ -4494,8 +4897,25 @@ SpritePixels genWall16(uint32_t seed, int frame) {
             const float g = noise01(seed ^ 0x5170AEu, x, y);
             if (g > 0.92f) bc = lerp(bc, p.accent2, 0.35f);
 
+            // Directional light so big wall fields read less flat.
+            const float lGrad = lightFromLeft ? (1.0f - static_cast<float>(x) / 15.0f)
+                                              : (static_cast<float>(x) / 15.0f);
+            const float tGrad = 1.0f - static_cast<float>(y) / 15.0f;
+            const float lit = 0.92f + 0.08f * (0.60f * lGrad + 0.40f * tGrad);
+            bc = mul(bc, lit);
+
+            // Sparse hairline crack with tiny jag.
+            if (std::abs(x - crackX - (((y / 3) & 1) ? 1 : 0)) <= 0 && ((y + row) % 2) == 0) {
+                bc = lerp(bc, p.dark, 0.45f);
+            }
+
             setPx(s, x, y, bc);
         }
+    }
+
+    // Slight dark cap at the very top reinforces wall height in top-down.
+    for (int x = 0; x < 16; ++x) {
+        setPx(s, x, 0, lerp(getPx(s, x, 0), p.dark, 0.35f));
     }
 
     return s;
@@ -4535,47 +4955,19 @@ SpritePixels genChasm16(uint32_t seed, int frame) {
 // Generate a 16x8 isometric diamond tile directly in diamond space by reusing
 // the same (u,v) square-coordinate material function.
 SpritePixels genIsoFloor16(uint32_t seed, uint8_t style, int frame) {
+    const FloorSampleContext ctx = makeFloorSampleContext(style, seed);
     SpritePixels out = makeSprite(16, 8, {0,0,0,0});
+
     for (int y = 0; y < 8; ++y) {
         for (int x = 0; x < 16; ++x) {
             int u=0, v=0;
             if (!isoDiamondToSquareUV(16, x, y, u, v)) continue;
 
-            // Reuse square floor generation by sampling its deterministic pixel.
-            // Generate on demand rather than allocating a temp 16x16.
-            const TilePalette p = floorPalette(style, seed);
-            const float n = noise01(seed ^ 0xA11CEu, u, v);
-            const int dv = static_cast<int>(std::lround((n - 0.5f) * 12.0f));
-            Color c = add(p.base, dv, dv, dv);
-
-            // Grout lines: keep aligned to square grid for a coherent iso read.
-            const int ox = static_cast<int>(hash32(seed) & 3u);
-            const int oy = static_cast<int>((hash32(seed ^ 0x1234u) >> 8) & 3u);
-            const bool grout = (((u + ox) % 4) == 0) || (((v + oy) % 4) == 0);
-            if (grout && n > 0.10f) c = add(p.grout, dv / 2, dv / 2, dv / 2);
-
-            // Style accents mirrored from genFloor16().
-            if (style == 2) {
-                if (noise01(seed ^ 0xB055u, u / 2, v / 2) > 0.72f) c = lerp(c, p.accent, 0.45f);
-            } else if (style == 6) {
-                if (((v + oy) % 3) == 0) c = lerp(c, p.dark, 0.25f);
-            } else if (style == 5) {
-                if (((u + ox) % 5) == 0 && ((v + oy) % 5) != 0) c = lerp(c, p.accent, 0.35f);
-            } else if (style == 1) {
-                const bool sparkle = ((hash32(hashCombine(seed, hashCombine(u, v))) & 31u) == 0u);
-                if (sparkle) {
-                    const int tw = ((frame + ((u + v) & 3)) & 3);
-                    c = (tw == 0) ? p.accent2 : p.light;
-                }
-            } else if (style == 4) {
-                if ((hash32(hashCombine(seed ^ 0xC1ACu, hashCombine(u, v))) & 63u) == 0u) {
-                    c = lerp(c, p.dark, 0.55f);
-                }
-            }
+            Color c = sampleFloorMaterial(ctx, seed, style, u, v, frame);
 
             // Slight edge darken to read as a diamond without looking like a hard grid.
             const int edgeD = std::min({u, v, 15 - u, 15 - v});
-            if (edgeD <= 1) c = lerp(c, p.dark, 0.18f);
+            if (edgeD <= 1) c = lerp(c, ctx.p.dark, 0.18f);
 
             setPx(out, x, y, c);
         }
@@ -4595,7 +4987,7 @@ SpritePixels genIsoFloor16(uint32_t seed, uint8_t style, int frame) {
                     // Only draw if this pixel is inside the diamond.
                     int u=0, v=0;
                     if (isoDiamondToSquareUV(16, px, py, u, v)) {
-                        setPx(out, px, py, withAlpha(floorPalette(style, seed).accent, 220));
+                        setPx(out, px, py, withAlpha(ctx.p.accent, 220));
                     }
                 }
             }
@@ -5625,29 +6017,51 @@ SpritePixels genDoor16(uint32_t seed, bool open, bool locked, int frame) {
     const Color wood = {140, 100, 60, 255};
     const Color wood2= {110,  78, 46, 255};
     const Color metal= {220, 220, 230, 255};
+    const bool hingeLeft = (hash32(seed ^ 0xD001FACEu) & 1u) == 0u;
 
     if (open) {
         // Doorway frame.
-        rect(s, 4, 4, 2, 8, wp.base);
-        rect(s, 10, 4, 2, 8, wp.base);
+        rect(s, 4, 4, 2, 8, lerp(wp.base, wp.light, 0.15f));
+        rect(s, 10, 4, 2, 8, lerp(wp.base, wp.dark, 0.08f));
         rect(s, 4, 4, 8, 2, wp.light);
+        rect(s, 4, 11, 8, 1, lerp(wp.dark, wp.base, 0.35f)); // threshold
         outlineRect(s, 4, 4, 8, 8, wp.dark);
+
+        // Hinge-side jamb accent so open doors feel anchored.
+        const int jx = hingeLeft ? 5 : 10;
+        for (int y = 5; y < 11; ++y) {
+            setPx(s, jx, y, lerp(wp.dark, wp.grout, 0.25f));
+        }
     } else {
-        // Closed door slab.
-        rect(s, 5, 4, 6, 9, wood);
-        outlineRect(s, 5, 4, 6, 9, wp.dark);
+        // Stone frame + closed slab.
+        rect(s, 4, 4, 8, 9, lerp(wp.base, wp.dark, 0.10f));
+        outlineRect(s, 4, 4, 8, 9, wp.dark);
+        rect(s, 5, 5, 6, 7, wood);
+        outlineRect(s, 5, 5, 6, 7, withAlpha(wp.dark, 235));
+
+        // Vertical plank pattern + tiny lighting gradient.
         for (int y = 5; y < 12; ++y) {
-            if ((y & 1) == 0) {
-                setPx(s, 6, y, wood2);
-                setPx(s, 9, y, wood2);
+            for (int x = 5; x < 11; ++x) {
+                const bool plank = ((x - 5) & 1) == 0;
+                Color c = plank ? wood : wood2;
+                const float t = static_cast<float>(y - 5) / 6.0f;
+                c = mul(c, 1.05f - 0.12f * t);
+                setPx(s, x, y, c);
             }
         }
-        // Handle / lock.
+
+        // Hinge rivets.
+        const int hx = hingeLeft ? 5 : 10;
+        setPx(s, hx, 6, metal);
+        setPx(s, hx, 10, metal);
+
+        // Handle / lock on the opposite side.
+        const int handleX = hingeLeft ? 9 : 6;
         if (locked) {
-            rect(s, 8, 8, 2, 2, metal);
-            setPx(s, 9, 10, metal);
+            rect(s, handleX, 8, 2, 2, metal);
+            setPx(s, handleX, 10, metal);
         } else {
-            setPx(s, 10, 9, metal);
+            setPx(s, handleX, 9, metal);
         }
     }
 
@@ -5781,6 +6195,7 @@ SpritePixels genIsoDoorBlock16(uint32_t seed, bool locked, int frame) {
     const Color wood = {150, 110, 70, 255};
     const Color wood2= {110,  80, 48, 255};
     const Color metal= {220, 220, 230, 255};
+    const bool hingeHigh = (hash32(seed ^ 0xD00D515u) & 1u) == 0u;
 
     // Door panel rectangle in approximate left face region.
     for (int y = 7; y < 13; ++y) {
@@ -5790,12 +6205,23 @@ SpritePixels genIsoDoorBlock16(uint32_t seed, bool locked, int frame) {
         }
     }
 
+    // Lintel + sill so the doorway reads as carved into masonry.
+    for (int x = 4; x < 8; ++x) {
+        if (getPx(s, x, 7).a != 0) setPx(s, x, 7, lerp(getPx(s, x, 7), Color{210, 190, 155, 255}, 0.18f));
+        if (getPx(s, x, 12).a != 0) setPx(s, x, 12, lerp(getPx(s, x, 12), Color{40, 35, 30, 255}, 0.35f));
+    }
+
     if (locked) {
         setPx(s, 6, 10, metal);
         setPx(s, 6, 11, metal);
     } else {
         setPx(s, 7, 10, metal);
     }
+
+    // Hinge accents.
+    const int hy0 = hingeHigh ? 8 : 9;
+    setPx(s, 4, hy0, metal);
+    setPx(s, 4, 11, metal);
 
     return s;
 }
@@ -5814,6 +6240,12 @@ SpritePixels genIsoDoorwayBlock16(uint32_t seed, int frame) {
             if (x == 5 || x == 8 || y == 8) continue;
             setPx(s, x, y, {0,0,0,0});
         }
+    }
+
+    // Inner recess shading around the doorway cutout.
+    for (int y = 8; y < 14; ++y) {
+        if (getPx(s, 5, y).a != 0) setPx(s, 5, y, lerp(getPx(s, 5, y), Color{30, 30, 34, 255}, 0.35f));
+        if (getPx(s, 8, y).a != 0) setPx(s, 8, y, lerp(getPx(s, 8, y), Color{30, 30, 34, 255}, 0.22f));
     }
 
     applyExteriorOutline(s, {20, 20, 26, 200});
@@ -6501,9 +6933,49 @@ SpritePixels generateProjectileSprite(ProjectileKind kind, uint32_t seed, int fr
         return renderSprite3DProjectile(kind, base, seed, frame, pxSize);
     }
 
-    // 2D mode: upscale the base sprite.
-    SpritePixels out = resampleSpriteToSizeInternal(base, pxSize);
-    return out;
+    // Extra 2D-only micro-animation accents so projectile frames read with stronger motion.
+    switch (kind) {
+        case ProjectileKind::Arrow: {
+            const int t = frame & 3;
+            if (t == 1 || t == 3) {
+                blendOver(base, 2, 13, {210, 220, 240, 95});
+                blendOver(base, 1, 14, {180, 190, 220, 70});
+            }
+            break;
+        }
+        case ProjectileKind::Rock: {
+            if ((frame & 1) == 1) {
+                setPx(base, 6, 8, add(getPx(base, 6, 8), 18, 18, 18));
+                setPx(base, 10, 12, mul(getPx(base, 10, 12), 0.82f));
+            }
+            break;
+        }
+        case ProjectileKind::Spark: {
+            const int wob = (frame & 1) ? 1 : -1;
+            blendOver(base, 8 + wob, 8, {255, 255, 230, 145});
+            break;
+        }
+        case ProjectileKind::Fireball: {
+            const int wob = (frame & 1) ? 1 : 0;
+            blendOver(base, 8 + wob, 4, {255, 240, 185, 140});
+            break;
+        }
+        case ProjectileKind::Torch: {
+            if ((frame & 1) == 0) {
+                blendOver(base, 7, 5, {255, 230, 170, 120});
+            } else {
+                blendOver(base, 9, 5, {255, 230, 170, 120});
+            }
+            break;
+        }
+    }
+
+    const uint8_t outA = (kind == ProjectileKind::Spark || kind == ProjectileKind::Fireball) ? 190 : 210;
+    const uint8_t shA = (kind == ProjectileKind::Spark || kind == ProjectileKind::Fireball) ? 52 : 68;
+    finalizeSprite(base, seed ^ (static_cast<uint32_t>(kind) * 0x9E3779B9u), frame, outA, shA);
+
+    // 2D mode: upscale with sprite-specific post-processing.
+    return resampleSpriteToSize(base, pxSize);
 }
 
 // -----------------------------------------------------------------------------

@@ -1209,6 +1209,8 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
         ok &= updateIniKey(settingsPath, "bind_look", "shift+semicolon, v");
         // Help: remove 'h' to avoid conflicting with vi movement.
         ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash, cmd+?");
+        // NetHack-style spell key.
+        ok &= updateIniKey(settingsPath, "bind_spells", "z, shift+z");
         // Sneak: avoid 'n' (movement down-right in vi keys).
         ok &= updateIniKey(settingsPath, "bind_sneak", "shift+n");
         ok &= updateIniKey(settingsPath, "bind_evade", "ctrl+e");
@@ -1232,6 +1234,8 @@ static bool applyControlPreset(Game& game, ControlPreset preset, bool verbose = 
         ok &= updateIniKey(settingsPath, "bind_dig", "shift+d");
         ok &= updateIniKey(settingsPath, "bind_look", "l, v");
         ok &= updateIniKey(settingsPath, "bind_help", "f1, shift+slash, h, cmd+?");
+        // Keep Shift+Z in modern WASD, where plain Z is diagonal movement.
+        ok &= updateIniKey(settingsPath, "bind_spells", "shift+z");
         ok &= updateIniKey(settingsPath, "bind_sneak", "n");
         ok &= updateIniKey(settingsPath, "bind_evade", "ctrl+e");
     }
@@ -2738,6 +2742,22 @@ static void runExtendedCommand(Game& game, const std::string& rawLine) {
             ss << " | GULLIES " << d.fluvialGullyCount;
             ss << " | CHASM " << d.fluvialChasmCount;
             ss << " | CAUSEWAYS " << d.fluvialCausewayCount;
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            ss << "TERRAIN SPRINGS";
+            ss << " | CLUSTERS " << d.dungeonSeepSpringCount;
+            ss << " | FOUNTAINS " << d.dungeonSeepFountainTiles;
+            game.pushSystemMessage(ss.str());
+        }
+
+        {
+            std::ostringstream ss;
+            ss << "TERRAIN CONFLUENCE";
+            ss << " | NODES " << d.dungeonConfluenceCount;
+            ss << " | FOUNTAINS " << d.dungeonConfluenceFountainTiles;
             game.pushSystemMessage(ss.str());
         }
 

@@ -938,6 +938,10 @@ inline void generateWildernessChunk(Dungeon& d, uint32_t runSeed, int chunkX, in
     d.fluvialGullyCount = 0;
     d.fluvialChasmCount = 0;
     d.fluvialCausewayCount = 0;
+    d.dungeonSeepSpringCount = 0;
+    d.dungeonSeepFountainTiles = 0;
+    d.dungeonConfluenceCount = 0;
+    d.dungeonConfluenceFountainTiles = 0;
     d.overworldSpringCount = 0;
     d.overworldBrookCount = 0;
     d.overworldBrookTiles = 0;

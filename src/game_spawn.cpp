@@ -1148,6 +1148,60 @@ Entity Game::makeMonster(EntityKind k, Vec2i pos, int groupId, bool allowGear, u
         e.procAbility2Cd = 0;
     }
 
+    // Lifecycle + character traits.
+    if (lifecycleEligibleKind(e.kind)) {
+        e.lifeStage = LifeStage::Adult;
+        e.lifeSex = lifecycleRollSex(e.spriteSeed, e.kind);
+        e.lifeTraitMask = lifecycleRollTraitMask(e.spriteSeed, e.kind);
+
+        if (lifeHasTrait(e.lifeTraitMask, LifeTrait::Hardy)) {
+            const int oldMax = std::max(1, e.hpMax);
+            e.hpMax = std::max(oldMax + 1, (oldMax * 125 + 99) / 100);
+            e.hp += (e.hpMax - oldMax);
+        }
+        if (lifeHasTrait(e.lifeTraitMask, LifeTrait::Fierce)) {
+            e.baseAtk += 1;
+        }
+        if (lifeHasTrait(e.lifeTraitMask, LifeTrait::Tough)) {
+            e.baseDef += 1;
+        }
+        if (lifeHasTrait(e.lifeTraitMask, LifeTrait::Swift)) {
+            e.speed += 12;
+        }
+
+        e.hpMax = std::max(1, e.hpMax);
+        e.hp = std::clamp(e.hp, 1, e.hpMax);
+        e.speed = std::max(40, e.speed);
+
+        // Adult baseline snapshot used for later stage scaling.
+        e.lifeBaseHpMax = e.hpMax;
+        e.lifeBaseAtk = e.baseAtk;
+        e.lifeBaseDef = e.baseDef;
+        e.lifeBaseSpeed = e.speed;
+
+        const int matureAge = lifecycleStageDurationTurns(LifeStage::Newborn)
+                            + lifecycleStageDurationTurns(LifeStage::Child);
+        const uint32_t h = hash32(hashCombine(e.spriteSeed ^ 0xA61ED00Du,
+                                              static_cast<uint32_t>(std::max(0, depth_))));
+        e.lifeAgeTurns = matureAge + static_cast<int>(h % 241u);
+        e.lifeStageTurns = static_cast<int>((h >> 8) % 240u);
+        e.lifeReproductionCooldown = static_cast<int>(
+            (h >> 16) % static_cast<uint32_t>(lifecycleReproductionCooldownTurns(e.lifeTraitMask) + 1));
+        e.lifeBirthCount = 0;
+    } else {
+        e.lifeStage = LifeStage::Adult;
+        e.lifeSex = LifeSex::Unknown;
+        e.lifeTraitMask = 0u;
+        e.lifeAgeTurns = 0;
+        e.lifeStageTurns = 0;
+        e.lifeReproductionCooldown = 0;
+        e.lifeBirthCount = 0;
+        e.lifeBaseHpMax = std::max(1, e.hpMax);
+        e.lifeBaseAtk = e.baseAtk;
+        e.lifeBaseDef = e.baseDef;
+        e.lifeBaseSpeed = std::max(1, e.speed);
+    }
+
     return e;
 }
 
@@ -4485,6 +4539,7 @@ void Game::spawnChemicalHazards() {
     if (poisonGas_.size() != n) poisonGas_.assign(n, uint8_t{0});
     if (corrosiveGas_.size() != n) corrosiveGas_.assign(n, uint8_t{0});
     if (fireField_.size() != n) fireField_.assign(n, uint8_t{0});
+    if (adhesiveFluid_.size() != n) adhesiveFluid_.assign(n, uint8_t{0});
 
     auto idx = [&](int x, int y) -> size_t {
         return static_cast<size_t>(y * dung.width + x);
@@ -4552,6 +4607,7 @@ void Game::spawnChemicalHazards() {
         Acidic,       // corrosive gas
         Mixed,        // corrosive + poison (reacts into confusion)
         Volatile,     // poison + embers (fire)
+        Adhesive,     // sticky polymer sludge (adhesive fluid)
     };
 
     // A few Gray-Scott reaction-diffusion presets that produce distinct "spill" patterns.
@@ -4563,9 +4619,13 @@ void Game::spawnChemicalHazards() {
         {1.0f, 0.50f, 0.0460f, 0.0630f},
     };
 
-    auto chooseTheme = [&]() -> ChemTheme {
+    auto chooseTheme = [&](int wetScore) -> ChemTheme {
+        // Wet laboratories with active water sources produce deterministic sticky runoff.
+        if (wetScore >= 4) return ChemTheme::Adhesive;
+
         // Deeper floors bias toward nastier chemistry.
         int r = crng.range(0, 99);
+        if (wetScore > 0 && r < 18) return ChemTheme::Adhesive;
         if (depth_ >= 8 && r < 16) return ChemTheme::Mixed;
         if (depth_ >= 6 && r < 36) return ChemTheme::Acidic;
         if (depth_ >= 5 && r >= 92) return ChemTheme::Volatile;
@@ -4580,16 +4640,37 @@ void Game::spawnChemicalHazards() {
         if (labsSeeded >= labBudget) break;
         if (r.type != RoomType::Laboratory) continue;
 
+        // Wetness score from fishable water inside the room interior.
+        int wetScore = 0;
+        const int wx0 = r.x + 1;
+        const int wy0 = r.y + 1;
+        const int wx1 = r.x + r.w - 2;
+        const int wy1 = r.y + r.h - 2;
+        for (int y = wy0; y <= wy1; ++y) {
+            for (int x = wx0; x <= wx1; ++x) {
+                if (!dung.inBounds(x, y)) continue;
+                const TileType tt = dung.at(x, y).type;
+                if (tt == TileType::Fountain) wetScore += 4;
+                else if (tt == TileType::Chasm) wetScore += 2;
+                if (wetScore >= 12) break;
+            }
+            if (wetScore >= 12) break;
+        }
+
         // Avoid seeding hazards in/near the start room.
         const Vec2i c{r.cx(), r.cy()};
         const int distStart = manhattan(c, player().pos);
         float chance = 0.18f + 0.02f * static_cast<float>(std::min(depth_, 12));
         if (distStart <= 10) chance *= 0.35f;
         if (r.w * r.h >= 70) chance += 0.06f;
-        chance = clampf(chance, 0.08f, 0.55f);
-        if (!crng.chance(chance)) continue;
+        if (wetScore > 0) chance += 0.12f;
+        chance = clampf(chance, 0.08f, 0.70f);
 
-        const ChemTheme theme = chooseTheme();
+        // Active in-room water in a lab almost always causes a spill signature.
+        const bool forcedWetLab = (wetScore >= 4);
+        if (!forcedWetLab && !crng.chance(chance)) continue;
+
+        const ChemTheme theme = chooseTheme(wetScore);
 
         // Work on the room interior (skip the perimeter tiles so doors remain less "spammy").
         const int x0 = r.x + 1;
@@ -4689,6 +4770,10 @@ void Game::spawnChemicalHazards() {
                             addField(poisonGas_, gi, v);
                             if (dist == 0) addField(fireField_, gi, static_cast<uint8_t>(clampi(7 + s / 3, 0, 255)));
                             break;
+                        case ChemTheme::Adhesive:
+                            addField(adhesiveFluid_, gi, static_cast<uint8_t>(clampi(s + 2, 0, 255)));
+                            if (dist == 0) addField(poisonGas_, gi, static_cast<uint8_t>(clampi(2 + s / 3, 0, 255)));
+                            break;
                     }
                 }
             }
@@ -4746,6 +4831,15 @@ void Game::spawnChemicalHazards() {
                         if (bn > 0.78f) {
                             const uint8_t fv = static_cast<uint8_t>(clampi(6 + s / 2, 0, 255));
                             addField(fireField_, gi, fv);
+                        }
+                        break;
+
+                    case ChemTheme::Adhesive:
+                        // Polymer sludge clusters: cohesive sticky patches with a mildly toxic core.
+                        addField(adhesiveFluid_, gi, static_cast<uint8_t>(clampi(s + ((bn > 0.60f) ? 3 : 0), 0, 255)));
+                        if (bn > 0.86f) {
+                            const uint8_t pv = static_cast<uint8_t>(clampi(2 + s / 3, 0, 255));
+                            addField(poisonGas_, gi, pv);
                         }
                         break;
                 }
@@ -5107,6 +5201,7 @@ void Game::applyEndOfTurnEffects() {
             if (poisonGas_.size() != expect) poisonGas_.assign(expect, uint8_t{0});
             if (corrosiveGas_.size() != expect) corrosiveGas_.assign(expect, uint8_t{0});
             if (fireField_.size() != expect) fireField_.assign(expect, uint8_t{0});
+            if (adhesiveFluid_.size() != expect) adhesiveFluid_.assign(expect, uint8_t{0});
         }
 
         // ------------------------------------------------------------
@@ -5784,6 +5879,65 @@ void Game::applyEndOfTurnEffects() {
             applyFireTo(m, false);
         }
     }
+
+    // ------------------------------------------------------------
+    // Environmental fields: Adhesive fluid (persistent, tile-based)
+    //
+    // Sticky ooze is stored as an intensity map (0..255). Higher intensities
+    // can briefly ensnare entities standing in it.
+    // ------------------------------------------------------------
+    {
+        const size_t expect = static_cast<size_t>(dung.width * dung.height);
+        if (adhesiveFluid_.size() != expect) adhesiveFluid_.assign(expect, uint8_t{0});
+
+        auto fluidIdx = [&](int x, int y) -> size_t {
+            return static_cast<size_t>(y * dung.width + x);
+        };
+        auto fluidAt = [&](int x, int y) -> uint8_t {
+            if (!dung.inBounds(x, y)) return uint8_t{0};
+            const size_t i = fluidIdx(x, y);
+            if (i >= adhesiveFluid_.size()) return uint8_t{0};
+            return adhesiveFluid_[i];
+        };
+
+        auto applyFluidTo = [&](Entity& e, bool isPlayer) {
+            const uint8_t a = fluidAt(e.pos.x, e.pos.y);
+            if (a < 8u) return;
+
+            // Only stronger concentrations impose brief movement friction.
+            if (a >= 20u) {
+                const int before = e.effects.webTurns;
+                // Important: only apply while currently unwebbed.
+                // Reapplying every end-of-turn can lock entities indefinitely.
+                if (before <= 0) {
+                    int minTurns = 1 + static_cast<int>(a) / 64;
+                    minTurns = clampi(minTurns, 1, 3);
+                    e.effects.webTurns = std::max(e.effects.webTurns, minTurns);
+
+                    if (e.effects.webTurns > 0) {
+                        if (isPlayer) {
+                            pushMsg("YOU'RE BOGGED DOWN BY STICKY OOZE!", MessageKind::Warning, true);
+                        } else if (dung.inBounds(e.pos.x, e.pos.y) && dung.at(e.pos.x, e.pos.y).visible) {
+                            std::ostringstream ss;
+                            ss << kindName(e.kind) << " GETS BOGGED DOWN!";
+                            pushMsg(ss.str(), MessageKind::Info, false);
+                        }
+                    }
+                }
+            } else if (isPlayer && (turnCount % 6u) == 0u) {
+                // Low-intensity feedback (throttled) so players can read the field.
+                pushMsg("YOUR BOOTS DRAG THROUGH STICKY SLIME.", MessageKind::System, true);
+            }
+        };
+
+        applyFluidTo(p, true);
+        for (auto& m : ents) {
+            if (m.id == playerId_) continue;
+            if (m.hp <= 0) continue;
+            applyFluidTo(m, false);
+        }
+    }
+
     // Timed poison: hurts once per full turn.
     if (p.effects.poisonTurns > 0) {
         p.effects.poisonTurns = std::max(0, p.effects.poisonTurns - 1);
@@ -6911,6 +7065,240 @@ void Game::applyEndOfTurnEffects() {
         }
     }
 
+    // ------------------------------------------------------------
+    // Adhesive fluid simulation (procedural + cohesive movement).
+    //
+    // The field is seeded deterministically from wet topology (fountains/chasms)
+    // and then updated as a cohesive ooze that prefers to stay clumped while
+    // slowly creeping along local moisture/flow gradients.
+    // ------------------------------------------------------------
+    {
+        const int w = dung.width;
+        const int h = dung.height;
+        const size_t expect = static_cast<size_t>(w * h);
+
+        if (expect > 0 && adhesiveFluid_.size() != expect) {
+            adhesiveFluid_.assign(expect, uint8_t{0});
+        }
+
+        if (!adhesiveFluid_.empty()) {
+            auto idx2 = [&](int x, int y) -> size_t {
+                return static_cast<size_t>(y * w + x);
+            };
+            auto passable = [&](int x, int y) -> bool {
+                return dung.inBounds(x, y) && dung.isWalkable(x, y);
+            };
+            constexpr Vec2i kDirs[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+
+            uint32_t glueSeed = levelGenSeed(LevelId{branch_, depth_});
+            if (atCamp()) {
+                glueSeed = hashCombine(glueSeed, static_cast<uint32_t>(overworldX_));
+                glueSeed = hashCombine(glueSeed, static_cast<uint32_t>(overworldY_));
+            }
+            glueSeed = hashCombine(glueSeed, 0xAD1500F1u);
+
+            // Precompute local wetness once per turn (0..255) from nearby fishable water.
+            std::vector<uint8_t> wetness(expect, uint8_t{0});
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    if (!passable(x, y)) continue;
+                    int wet = 0;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            const int nx = x + dx;
+                            const int ny = y + dy;
+                            if (!dung.inBounds(nx, ny)) continue;
+                            const TileType tt = dung.at(nx, ny).type;
+                            if (tt == TileType::Fountain) wet += 3;
+                            else if (tt == TileType::Chasm) wet += 1;
+                        }
+                    }
+                    if (dung.at(x, y).type == TileType::Fountain) wet += 5;
+                    wetness[idx2(x, y)] = static_cast<uint8_t>(clampi(wet, 0, 255));
+                }
+            }
+
+            // One-shot deterministic seed if the field is currently empty on this level.
+            bool anyAdhesive = false;
+            for (uint8_t v : adhesiveFluid_) {
+                if (v > 0u) {
+                    anyAdhesive = true;
+                    break;
+                }
+            }
+
+            if (!anyAdhesive) {
+                int seeded = 0;
+                size_t fallbackI = expect;
+                uint32_t fallbackH = UINT32_MAX;
+
+                for (int y = 0; y < h; ++y) {
+                    for (int x = 0; x < w; ++x) {
+                        if (!passable(x, y)) continue;
+                        const Vec2i tp{x, y};
+                        if (tp == dung.stairsUp || tp == dung.stairsDown) continue;
+
+                        const size_t i = idx2(x, y);
+                        const int wet = static_cast<int>(wetness[i]);
+
+                        const uint32_t tileTag = static_cast<uint32_t>(i);
+                        const uint32_t h0 = hash32(hashCombine(glueSeed, tileTag));
+                        if (h0 < fallbackH) {
+                            fallbackH = h0;
+                            fallbackI = i;
+                        }
+
+                        if (wet <= 0) continue;
+
+                        const int chance = clampi(8 + wet * 8, 0, 92);
+                        if (static_cast<int>(h0 % 100u) >= chance) continue;
+
+                        int base = 6 + wet * 2 + static_cast<int>((h0 >> 9) % 12u);
+                        if (dung.at(x, y).type == TileType::Fountain) base += 16;
+                        base = clampi(base, 0, 140);
+
+                        if (base > 0) {
+                            adhesiveFluid_[i] = static_cast<uint8_t>(base);
+                            ++seeded;
+                        }
+                    }
+                }
+
+                if (seeded == 0 && fallbackI < expect) {
+                    adhesiveFluid_[fallbackI] = uint8_t{14};
+                }
+            }
+
+            // Calm levels still get a deterministic gentle ooze drift.
+            Vec2i oozeFlow = wind;
+            if (oozeFlow.x == 0 && oozeFlow.y == 0) {
+                constexpr Vec2i kDrift[4] = { {1,0}, {0,1}, {-1,0}, {0,-1} };
+                const uint32_t phaseSeed = hashCombine(glueSeed, static_cast<uint32_t>(turnCount / 10u));
+                oozeFlow = kDrift[hash32(phaseSeed) & 3u];
+            }
+            const Vec2i oozeUp{-oozeFlow.x, -oozeFlow.y};
+
+            std::vector<int> accum(expect, 0);
+
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const size_t i = idx2(x, y);
+                    const int s = static_cast<int>(adhesiveFluid_[i]);
+                    if (s <= 0) continue;
+                    if (!passable(x, y)) continue;
+
+                    const int wet = static_cast<int>(wetness[i]);
+                    const TerrainMaterial mat = dung.materialAtCached(x, y);
+
+                    int decay = 1;
+                    if (wet <= 0) decay += 1;
+
+                    switch (mat) {
+                        case TerrainMaterial::Moss:
+                        case TerrainMaterial::Dirt:
+                        case TerrainMaterial::Wood:
+                            decay = std::max(1, decay - 1);
+                            break;
+                        case TerrainMaterial::Metal:
+                        case TerrainMaterial::Crystal:
+                        case TerrainMaterial::Obsidian:
+                        case TerrainMaterial::Marble:
+                            decay += 1;
+                            break;
+                        default:
+                            break;
+                    }
+                    decay = clampi(decay, 1, 4);
+
+                    int retain = std::max(0, s - decay);
+                    if (retain <= 0) continue;
+
+                    int bestX = x;
+                    int bestY = y;
+                    int bestScore = s * 4 + wet * 8 + 12; // cohesion bias to stay clumped.
+
+                    for (const Vec2i& d : kDirs) {
+                        const int nx = x + d.x;
+                        const int ny = y + d.y;
+                        if (!passable(nx, ny)) continue;
+                        const size_t j = idx2(nx, ny);
+
+                        int score = static_cast<int>(adhesiveFluid_[j]) * 5 + static_cast<int>(wetness[j]) * 10;
+                        if (d.x == oozeFlow.x && d.y == oozeFlow.y) score += 4 + windStr;
+                        if (d.x == oozeUp.x && d.y == oozeUp.y) score -= 2 + std::max(0, windStr - 1);
+
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestX = nx;
+                            bestY = ny;
+                        }
+                    }
+
+                    int move = 0;
+                    if ((bestX != x || bestY != y) && retain > 2) {
+                        move = retain / 3;
+                        if (move > 18) move = 18;
+                        if (move < 1 && retain >= 9) move = 1;
+                    }
+
+                    int self = retain - move;
+                    if (self > 0) accum[i] += self;
+
+                    if (move > 0) {
+                        const size_t j = idx2(bestX, bestY);
+                        accum[j] += move;
+                    }
+
+                    // Small neighbor bleed keeps contiguous blobs from breaking into checkerboards.
+                    if (retain >= 10) {
+                        for (const Vec2i& d : kDirs) {
+                            const int nx = x + d.x;
+                            const int ny = y + d.y;
+                            if (!passable(nx, ny)) continue;
+                            const size_t j = idx2(nx, ny);
+                            if (adhesiveFluid_[j] < 6u) continue;
+                            accum[j] += 1;
+                            if (accum[i] > 0) accum[i] -= 1;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Moisture sources continuously feed the ooze field.
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    if (!passable(x, y)) continue;
+                    const size_t i = idx2(x, y);
+                    const int wet = static_cast<int>(wetness[i]);
+                    if (wet <= 0) continue;
+
+                    int source = 0;
+                    if (dung.at(x, y).type == TileType::Fountain) {
+                        source = 16 + wet * 2;
+                    } else if (wet >= 3) {
+                        source = 2 + wet;
+                    }
+
+                    if (source > accum[i]) accum[i] = source;
+
+                    if (wet >= 4) {
+                        const uint32_t h0 = hash32(hashCombine(glueSeed ^ 0x91E5u, static_cast<uint32_t>(i)));
+                        if (((turnCount + (h0 & 3u)) % 4u) == 0u) {
+                            accum[i] += 1 + static_cast<int>((h0 >> 8) & 1u);
+                        }
+                    }
+                }
+            }
+
+            std::vector<uint8_t> next(expect, uint8_t{0});
+            for (size_t i = 0; i < expect; ++i) {
+                next[i] = static_cast<uint8_t>(clampi(accum[i], 0, 255));
+            }
+            adhesiveFluid_.swap(next);
+        }
+    }
+
 
     // ------------------------------------------------------------
     // Field chemistry: vented laboratory doors leak fumes even while closed.
@@ -7218,6 +7606,12 @@ void Game::cleanupDead() {
         }
     }
     if (shopkeeperDied) {
+        int forgivenLedger = 0;
+        if (depth_ >= 1 && depth_ <= DUNGEON_MAX_DEPTH) {
+            forgivenLedger = std::max(0, shopDebtLedger_[depth_]);
+            shopDebtLedger_[depth_] = 0;
+        }
+
         for (auto& gi : ground) {
             if (gi.item.shopDepth == depth_ && gi.item.shopPrice > 0) {
                 gi.item.shopPrice = 0;
@@ -7230,7 +7624,15 @@ void Game::cleanupDead() {
                 it.shopDepth = 0;
             }
         }
+        if (forgivenLedger > 0) {
+            pushMsg("THE SHOPKEEPER'S LEDGER BURNS TO ASH.", MessageKind::System, true);
+        }
         pushMsg("THE SHOPKEEPER IS DEAD. EVERYTHING IS FREE!", MessageKind::Success, true);
+
+        if (merchantGuildAlerted_ && shopDebtTotal() <= 0) {
+            standDownMerchantGuild();
+            pushMsg("THE MERCHANT GUILD STANDS DOWN.", MessageKind::System, true);
+        }
     }
 
     // Ensure ecosystem/material caches are ready for any deterministic biome-aligned drops.

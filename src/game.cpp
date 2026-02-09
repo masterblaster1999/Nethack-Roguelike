@@ -10,6 +10,7 @@
 #include "victory_gen.hpp"
 #include "fishing_gen.hpp"
 #include "farm_gen.hpp"
+#include "shop_profile_gen.hpp"
 #include <cstring>
 #include <cmath>
 #include <sstream>
@@ -1810,6 +1811,7 @@ void Game::newGame(uint32_t seed) {
     poisonGas_.clear();
     corrosiveGas_.clear();
     fireField_.clear();
+    adhesiveFluid_.clear();
     scentField_.clear();
     inv.clear();
     shopDebtLedger_.fill(0);
@@ -1996,7 +1998,9 @@ void Game::newGame(uint32_t seed) {
     // Environmental fields reset per floor (no lingering gas on a fresh level).
     confusionGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
     poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+    corrosiveGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
     fireField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+    adhesiveFluid_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
     scentField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
 
     // Auto-explore bookkeeping is transient per-floor; size it to this dungeon.
@@ -2326,6 +2330,7 @@ void Game::storeCurrentLevel() {
     st.poisonGas = poisonGas_;
     st.corrosiveGas = corrosiveGas_;
     st.fireField = fireField_;
+    st.adhesiveFluid = adhesiveFluid_;
     st.scentField = scentField_;
     st.monsters.clear();
     for (const auto& e : ents) {
@@ -2376,6 +2381,9 @@ bool Game::restoreLevel(LevelId id) {
 
     fireField_ = it->second.fireField;
     if (fireField_.size() != expect) fireField_.assign(expect, uint8_t{0});
+
+    adhesiveFluid_ = it->second.adhesiveFluid;
+    if (adhesiveFluid_.size() != expect) adhesiveFluid_.assign(expect, uint8_t{0});
 
     scentField_ = it->second.scentField;
     if (scentField_.size() != expect) scentField_.assign(expect, uint8_t{0});
@@ -2439,6 +2447,9 @@ bool Game::restoreOverworldChunk(int x, int y) {
 
     fireField_ = it->second.fireField;
     if (fireField_.size() != expect) fireField_.assign(expect, uint8_t{0});
+
+    adhesiveFluid_ = it->second.adhesiveFluid;
+    if (adhesiveFluid_.size() != expect) adhesiveFluid_.assign(expect, uint8_t{0});
 
     scentField_ = it->second.scentField;
     if (scentField_.size() != expect) scentField_.assign(expect, uint8_t{0});
@@ -3254,6 +3265,7 @@ bool Game::tryOverworldStep(int dx, int dy) {
         poisonGas_.clear();
         corrosiveGas_.clear();
         fireField_.clear();
+        adhesiveFluid_.clear();
         scentField_.clear();
 
         const uint32_t gameplayRngState = rng.state;
@@ -3270,6 +3282,7 @@ bool Game::tryOverworldStep(int dx, int dy) {
         poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
         corrosiveGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
         fireField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+        adhesiveFluid_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
         scentField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
 
         // Place player before spawning so we never spawn on top of them.
@@ -4532,7 +4545,7 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
     // If we're leaving a shop while still owing money, the shopkeeper becomes hostile.
     if (playerInShop()) {
         const int debt = shopDebtThisDepth();
-        if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
+        if (debt > 0) {
             triggerShopTheftAlarm(player().pos, player().pos);
         }
     }
@@ -4836,6 +4849,7 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         poisonGas_.clear();
         corrosiveGas_.clear();
         fireField_.clear();
+        adhesiveFluid_.clear();
         scentField_.clear();
 
         // Level generation is deterministic per level identity and does not perturb the gameplay
@@ -4864,6 +4878,7 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
         poisonGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
         corrosiveGas_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
         fireField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
+        adhesiveFluid_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
         scentField_.assign(static_cast<size_t>(dung.width * dung.height), uint8_t{0});
 
         // Shrines get a visible altar overlay tile (placed before graffiti/spawns so it stays clear).
@@ -5228,15 +5243,6 @@ void Game::changeLevel(LevelId newLevel, bool goingDown) {
 
 
 void Game::triggerShopTheftAlarm(Vec2i shopInsidePos, Vec2i playerPos) {
-    // If no peaceful shopkeeper remains, there is nobody to raise the alarm.
-    if (!anyPeacefulShopkeeper(ents, playerId_)) return;
-
-    setShopkeepersAlerted(ents, playerId_, playerPos, true);
-    pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
-
-    // Merchant guild now considers you "wanted" until the debt is cleared.
-    merchantGuildAlerted_ = true;
-
     // Try to find the shop room so guards can spawn just outside.
     const Room* shopRoom = nullptr;
     for (const Room& r : dung.rooms) {
@@ -5246,6 +5252,47 @@ void Game::triggerShopTheftAlarm(Vec2i shopInsidePos, Vec2i playerPos) {
             break;
         }
     }
+
+    bool sawLivingKeeper = false;
+    bool raisedAlarm = false;
+    if (shopRoom) {
+        for (Entity& e : ents) {
+            if (e.id == playerId_) continue;
+            if (e.hp <= 0) continue;
+            if (e.kind != EntityKind::Shopkeeper) continue;
+            if (!shopRoom->contains(e.pos)) continue;
+            sawLivingKeeper = true;
+            if (e.alerted) continue;
+            e.alerted = true;
+            e.lastKnownPlayerPos = playerPos;
+            e.lastKnownPlayerAge = 0;
+            raisedAlarm = true;
+        }
+    } else {
+        for (Entity& e : ents) {
+            if (e.id == playerId_) continue;
+            if (e.hp <= 0) continue;
+            if (e.kind != EntityKind::Shopkeeper) continue;
+            sawLivingKeeper = true;
+            if (e.alerted) continue;
+            e.alerted = true;
+            e.lastKnownPlayerPos = playerPos;
+            e.lastKnownPlayerAge = 0;
+            raisedAlarm = true;
+        }
+    }
+
+    if (!sawLivingKeeper || !raisedAlarm) return;
+
+    if (shopRoom) {
+        const shopgen::ShopProfile prof = shopgen::profileFor(seed_, depth_, *shopRoom);
+        pushMsg("SHOPKEEPER " + shopgen::shopkeeperNameFor(prof) + " SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+    } else {
+        pushMsg("THE SHOPKEEPER SHOUTS: \"THIEF!\"", MessageKind::Warning, true);
+    }
+
+    // Merchant guild now considers you "wanted" until the debt is cleared.
+    merchantGuildAlerted_ = true;
 
     // Sample potential spawn tiles near the shop boundary.
     std::vector<Vec2i> candidates;
@@ -5443,6 +5490,35 @@ static void hashEntity(Hash64& hh, const Entity& e) {
 
     // v38+: pocket consumable (used by some monsters)
     hashItem(hh, e.pocketConsumable);
+
+    // Lifecycle fields are only simulation-relevant for eligible kinds.
+    // For ineligible kinds (player, shopkeepers, etc.), hash a canonical form so
+    // save/load normalization does not perturb determinism hashes.
+    if (!lifecycleEligibleKind(e.kind)) {
+        hh.addEnum(LifeStage::Adult);
+        hh.addEnum(LifeSex::Unknown);
+        hh.addU32(0u);
+        hh.addI32(0);
+        hh.addI32(0);
+        hh.addI32(0);
+        hh.addI32(0);
+        hh.addI32(std::max(1, e.hpMax));
+        hh.addI32(std::max(1, e.baseAtk));
+        hh.addI32(std::max(0, e.baseDef));
+        hh.addI32(std::max(1, e.speed));
+    } else {
+        hh.addEnum(e.lifeStage);
+        hh.addEnum(e.lifeSex);
+        hh.addU32(static_cast<uint32_t>(e.lifeTraitMask));
+        hh.addI32(e.lifeAgeTurns);
+        hh.addI32(e.lifeStageTurns);
+        hh.addI32(e.lifeReproductionCooldown);
+        hh.addI32(e.lifeBirthCount);
+        hh.addI32(e.lifeBaseHpMax);
+        hh.addI32(e.lifeBaseAtk);
+        hh.addI32(e.lifeBaseDef);
+        hh.addI32(e.lifeBaseSpeed);
+    }
 }
 
 static void hashDungeon(Hash64& hh, const Dungeon& d) {
@@ -5537,6 +5613,9 @@ static void hashLevelState(Hash64& hh, const LevelState& ls) {
 
     hh.addU32(static_cast<uint32_t>(ls.fireField.size()));
     for (uint8_t v : ls.fireField) hh.addU8(v);
+
+    hh.addU32(static_cast<uint32_t>(ls.adhesiveFluid.size()));
+    for (uint8_t v : ls.adhesiveFluid) hh.addU8(v);
 
     hh.addU32(static_cast<uint32_t>(ls.scentField.size()));
     for (uint8_t v : ls.scentField) hh.addU8(v);
@@ -5676,6 +5755,9 @@ uint64_t Game::determinismHash() const {
 
     hh.addU32(static_cast<uint32_t>(fireField_.size()));
     for (uint8_t v : fireField_) hh.addU8(v);
+
+    hh.addU32(static_cast<uint32_t>(adhesiveFluid_.size()));
+    for (uint8_t v : adhesiveFluid_) hh.addU8(v);
 
     hh.addU32(static_cast<uint32_t>(scentField_.size()));
     for (uint8_t v : scentField_) hh.addU8(v);

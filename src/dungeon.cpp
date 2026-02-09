@@ -123,6 +123,11 @@ void fillWalls(Dungeon& d) {
     d.fluvialChasmCount = 0;
     d.fluvialCausewayCount = 0;
 
+    d.dungeonSeepSpringCount = 0;
+    d.dungeonSeepFountainTiles = 0;
+    d.dungeonConfluenceCount = 0;
+    d.dungeonConfluenceFountainTiles = 0;
+
 
     d.perimTunnelCarvedTiles = 0;
     d.perimTunnelHatchCount = 0;
@@ -1721,43 +1726,61 @@ void computePassableBridges(const Dungeon& d, std::vector<EdgeKey>& outBridges) 
         return d.isPassable(x, y);
     };
 
-    auto forEachNeighbor = [&](int u, const std::function<void(int)>& fn) {
-        const int x = u % W;
-        const int y = u / W;
-        static const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
-        for (const auto& dv : dirs) {
-            const int nx = x + dv[0];
-            const int ny = y + dv[1];
-            if (!d.inBounds(nx, ny)) continue;
-            if (!d.isPassable(nx, ny)) continue;
-            fn(ny * W + nx);
-        }
+    // Iterative Tarjan DFS (bridges) to avoid deep recursion on large/open floors.
+    struct DfsFrame {
+        int u = -1;
+        int nextDir = 0;
     };
-
-    std::function<void(int)> dfs = [&](int u) {
-        disc[static_cast<size_t>(u)] = t;
-        low[static_cast<size_t>(u)] = t;
-        ++t;
-
-        forEachNeighbor(u, [&](int v) {
-            if (disc[static_cast<size_t>(v)] == -1) {
-                parent[static_cast<size_t>(v)] = u;
-                dfs(v);
-                low[static_cast<size_t>(u)] = std::min(low[static_cast<size_t>(u)], low[static_cast<size_t>(v)]);
-
-                if (low[static_cast<size_t>(v)] > disc[static_cast<size_t>(u)]) {
-                    outBridges.push_back(packEdgeKey(u, v));
-                }
-            } else if (v != parent[static_cast<size_t>(u)]) {
-                low[static_cast<size_t>(u)] = std::min(low[static_cast<size_t>(u)], disc[static_cast<size_t>(v)]);
-            }
-        });
-    };
+    static const int kDirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
 
     for (int i = 0; i < N; ++i) {
         if (!isNode(i)) continue;
         if (disc[static_cast<size_t>(i)] != -1) continue;
-        dfs(i);
+
+        std::vector<DfsFrame> st;
+        st.reserve(128);
+
+        disc[static_cast<size_t>(i)] = t;
+        low[static_cast<size_t>(i)] = t;
+        ++t;
+        parent[static_cast<size_t>(i)] = -1;
+        st.push_back(DfsFrame{i, 0});
+
+        while (!st.empty()) {
+            DfsFrame& fr = st.back();
+            const int u = fr.u;
+
+            if (fr.nextDir < 4) {
+                const int dIdx = fr.nextDir++;
+                const int ux = u % W;
+                const int uy = u / W;
+                const int nx = ux + kDirs[dIdx][0];
+                const int ny = uy + kDirs[dIdx][1];
+                if (!d.inBounds(nx, ny)) continue;
+                if (!d.isPassable(nx, ny)) continue;
+
+                const int v = ny * W + nx;
+                if (disc[static_cast<size_t>(v)] == -1) {
+                    parent[static_cast<size_t>(v)] = u;
+                    disc[static_cast<size_t>(v)] = t;
+                    low[static_cast<size_t>(v)] = t;
+                    ++t;
+                    st.push_back(DfsFrame{v, 0});
+                } else if (v != parent[static_cast<size_t>(u)]) {
+                    low[static_cast<size_t>(u)] = std::min(low[static_cast<size_t>(u)], disc[static_cast<size_t>(v)]);
+                }
+                continue;
+            }
+
+            st.pop_back();
+            const int p = parent[static_cast<size_t>(u)];
+            if (p >= 0) {
+                low[static_cast<size_t>(p)] = std::min(low[static_cast<size_t>(p)], low[static_cast<size_t>(u)]);
+                if (low[static_cast<size_t>(u)] > disc[static_cast<size_t>(p)]) {
+                    outBridges.push_back(packEdgeKey(p, u));
+                }
+            }
+        }
     }
 
     std::sort(outBridges.begin(), outBridges.end());
@@ -19530,6 +19553,237 @@ static bool maybeCarveRiftCachePockets(Dungeon& d, RNG& rng, int depth, GenKind 
     return d.riftCacheCount > 0;
 }
 
+
+// ------------------------------------------------------------
+// Dungeon seep springs (subterranean fountain clusters)
+//
+// Places a few deterministic Floor->Fountain micro-POIs on non-camp dungeon
+// floors. This piggybacks on existing interactions (drink/fishing) and gives
+// deeper floors occasional water landmarks without changing critical traversal:
+// fountains are walkable and never replace stairs/doors.
+// ------------------------------------------------------------
+static bool maybePlaceDungeonSeepSprings(Dungeon& d, RNG& rng, int depth, GenKind g, bool ensureFishingWater) {
+    d.dungeonSeepSpringCount = 0;
+    d.dungeonSeepFountainTiles = 0;
+
+    if (depth <= 0) return false;
+    if (d.width < 14 || d.height < 12) return false;
+
+    float spawnProb = 0.08f + 0.012f * static_cast<float>(std::min(depth, 12));
+
+    // Wet/rocky generators get more seep activity.
+    if (g == GenKind::Cavern || g == GenKind::Mines) spawnProb += 0.16f;
+    else if (g == GenKind::Catacombs) spawnProb += 0.10f;
+    else if (g == GenKind::RoomsGraph) spawnProb += 0.05f;
+    else if (g == GenKind::Maze || g == GenKind::Warrens) spawnProb *= 0.60f;
+
+    spawnProb = std::clamp(spawnProb, 0.05f, 0.55f);
+
+    int target = 0;
+    if (rng.chance(spawnProb)) target = 1;
+    if (depth >= 5 && rng.chance(spawnProb * 0.50f)) target += 1;
+    if (depth >= 10 && rng.chance(spawnProb * 0.30f)) target += 1;
+    target = clampi(target, 0, 3);
+
+    static const Vec2i kDirs[4] = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
+
+    auto nearStairs = [&](Vec2i p) -> bool {
+        if (d.inBounds(d.stairsUp.x, d.stairsUp.y) && manhattan2(p, d.stairsUp) <= 6) return true;
+        if (d.inBounds(d.stairsDown.x, d.stairsDown.y) && manhattan2(p, d.stairsDown) <= 6) return true;
+        return false;
+    };
+
+    auto countPassableCardinal = [&](Vec2i p) -> int {
+        int n = 0;
+        for (const Vec2i& dv : kDirs) {
+            const int nx = p.x + dv.x;
+            const int ny = p.y + dv.y;
+            if (!d.inBounds(nx, ny)) continue;
+            if (d.isPassable(nx, ny)) ++n;
+        }
+        return n;
+    };
+
+    auto hasNearbyFountain = [&](Vec2i p, int rad) -> bool {
+        for (int dy = -rad; dy <= rad; ++dy) {
+            for (int dx = -rad; dx <= rad; ++dx) {
+                const int x = p.x + dx;
+                const int y = p.y + dy;
+                if (!d.inBounds(x, y)) continue;
+                if (d.at(x, y).type == TileType::Fountain) return true;
+            }
+        }
+        return false;
+    };
+
+    auto tileEligible = [&](Vec2i p) -> bool {
+        if (!d.inBounds(p.x, p.y)) return false;
+        if (p.x <= 1 || p.y <= 1 || p.x >= d.width - 2 || p.y >= d.height - 2) return false;
+        if (isStairsTile(d, p.x, p.y)) return false;
+        if (nearStairs(p)) return false;
+        if (d.at(p.x, p.y).type != TileType::Floor) return false;
+        if (anyDoorInRadius(d, p.x, p.y, 1)) return false;
+        if (countPassableCardinal(p) < 2) return false;
+        if (const Room* rr = findRoomContaining(d, p.x, p.y)) {
+            if (rr->type != RoomType::Normal) return false;
+        }
+        return true;
+    };
+
+    if (target > 0) {
+        const int maxAttempts = target * 220;
+        for (int attempt = 0; attempt < maxAttempts && target > 0; ++attempt) {
+            const Vec2i center{rng.range(2, d.width - 3), rng.range(2, d.height - 3)};
+            if (!tileEligible(center)) continue;
+            if (hasNearbyFountain(center, 2)) continue;
+
+            std::vector<Vec2i> cluster;
+            cluster.reserve(4);
+            cluster.push_back(center);
+
+            // Shape roll:
+            //  - single spring
+            //  - short trickle (2 in a line)
+            //  - tiny basin (3-tile motif)
+            const int shape = rng.range(0, 99);
+            if (shape >= 45 && shape < 80) {
+                const Vec2i d0 = kDirs[rng.range(0, 3)];
+                cluster.push_back({center.x + d0.x, center.y + d0.y});
+            } else if (shape >= 80) {
+                const Vec2i d0 = kDirs[rng.range(0, 3)];
+                const Vec2i p0{d0.y, -d0.x}; // perpendicular
+                cluster.push_back({center.x + d0.x, center.y + d0.y});
+                cluster.push_back({center.x + p0.x, center.y + p0.y});
+            }
+
+            if (depth >= 8 && cluster.size() < 4 && rng.chance(0.25f)) {
+                const Vec2i d1 = kDirs[rng.range(0, 3)];
+                cluster.push_back({center.x + d1.x, center.y + d1.y});
+            }
+
+            // Deduplicate offsets if random picks collided.
+            for (size_t i = 0; i < cluster.size(); ++i) {
+                for (size_t j = i + 1; j < cluster.size();) {
+                    if (cluster[j] == cluster[i]) {
+                        cluster.erase(cluster.begin() + static_cast<std::ptrdiff_t>(j));
+                    } else {
+                        ++j;
+                    }
+                }
+            }
+
+            bool ok = true;
+            for (const Vec2i& p : cluster) {
+                if (!tileEligible(p)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) continue;
+
+            int placed = 0;
+            for (const Vec2i& p : cluster) {
+                if (d.at(p.x, p.y).type != TileType::Floor) continue;
+                d.at(p.x, p.y).type = TileType::Fountain;
+                placed += 1;
+            }
+
+            if (placed <= 0) continue;
+            d.dungeonSeepSpringCount += 1;
+            d.dungeonSeepFountainTiles += placed;
+            target -= 1;
+        }
+    }
+
+    auto countFishingWaterTiles = [&]() -> int {
+        int n = 0;
+        for (int y = 1; y < d.height - 1; ++y) {
+            for (int x = 1; x < d.width - 1; ++x) {
+                const TileType tt = d.at(x, y).type;
+                if (tt == TileType::Fountain || tt == TileType::Chasm) ++n;
+            }
+        }
+        return n;
+    };
+
+    // Guarantee at least one fishable water source on dungeon floors.
+    if (ensureFishingWater && countFishingWaterTiles() <= 0) {
+        auto fallbackEligible = [&](Vec2i p, bool strict) -> bool {
+            if (!d.inBounds(p.x, p.y)) return false;
+            if (p.x <= 1 || p.y <= 1 || p.x >= d.width - 2 || p.y >= d.height - 2) return false;
+            if (isStairsTile(d, p.x, p.y)) return false;
+            if (d.at(p.x, p.y).type != TileType::Floor) return false;
+            if (anyDoorInRadius(d, p.x, p.y, 1)) return false;
+            if (strict && nearStairs(p)) return false;
+            if (!strict) {
+                if (d.inBounds(d.stairsUp.x, d.stairsUp.y) && manhattan2(p, d.stairsUp) <= 3) return false;
+                if (d.inBounds(d.stairsDown.x, d.stairsDown.y) && manhattan2(p, d.stairsDown) <= 3) return false;
+            }
+
+            const int needPassable = strict ? 2 : 1;
+            if (countPassableCardinal(p) < needPassable) return false;
+
+            if (const Room* rr = findRoomContaining(d, p.x, p.y)) {
+                if (rr->type == RoomType::Shop || rr->type == RoomType::Camp) return false;
+                if (strict && rr->type != RoomType::Normal) return false;
+            }
+            return true;
+        };
+
+        auto pickFallbackTile = [&](bool strict) -> Vec2i {
+            Vec2i best{-1, -1};
+            int bestScore = std::numeric_limits<int>::min();
+            const uint32_t salt = hash32(hashCombine(static_cast<uint32_t>(depth), static_cast<uint32_t>(g)));
+
+            for (int y = 2; y < d.height - 2; ++y) {
+                for (int x = 2; x < d.width - 2; ++x) {
+                    const Vec2i p{x, y};
+                    if (!fallbackEligible(p, strict)) continue;
+
+                    const int du = d.inBounds(d.stairsUp.x, d.stairsUp.y) ? manhattan2(p, d.stairsUp) : 8;
+                    const int dd = d.inBounds(d.stairsDown.x, d.stairsDown.y) ? manhattan2(p, d.stairsDown) : 8;
+                    const int edge = std::min({p.x, p.y, d.width - 1 - p.x, d.height - 1 - p.y});
+                    const int passN = countPassableCardinal(p);
+                    const int jitter = static_cast<int>(
+                        hash32(hashCombine(salt, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y)))) & 0x0Fu);
+
+                    const int score = std::min(du, dd) * 12 + edge * 3 + passN * 7 + jitter;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = p;
+                    }
+                }
+            }
+            return best;
+        };
+
+        Vec2i fallback = pickFallbackTile(/*strict=*/true);
+        if (!d.inBounds(fallback.x, fallback.y)) {
+            fallback = pickFallbackTile(/*strict=*/false);
+        }
+        if (!d.inBounds(fallback.x, fallback.y)) {
+            // Last-resort safety: any non-stair floor tile.
+            for (int y = 1; y < d.height - 1 && !d.inBounds(fallback.x, fallback.y); ++y) {
+                for (int x = 1; x < d.width - 1; ++x) {
+                    if (isStairsTile(d, x, y)) continue;
+                    if (d.at(x, y).type == TileType::Floor) {
+                        fallback = {x, y};
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (d.inBounds(fallback.x, fallback.y) && d.at(fallback.x, fallback.y).type == TileType::Floor) {
+            d.at(fallback.x, fallback.y).type = TileType::Fountain;
+            d.dungeonSeepSpringCount += 1;
+            d.dungeonSeepFountainTiles += 1;
+        }
+    }
+
+    return d.dungeonSeepSpringCount > 0;
+}
+
 static int countDeadEnds(const Dungeon& d) {
     int dead = 0;
     static const int dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
@@ -20474,6 +20728,296 @@ static void applyFluvialGullies(Dungeon& d, DungeonBranch branch, int depth, int
     }
 }
 
+// -----------------------------------------------------------------------------
+// Hydro confluence weave (novel fused procgen pass)
+//
+// Combines multiple procedural signals into an additional water micro-network:
+// - Existing local hydrology (nearby chasms/fountains from earlier passes)
+// - Macro terrain fields (height/ridge from the deterministic heightfield)
+// - Local topology (junction-ness / passable neighbors)
+// - Stratum/gen-kind theme nudges
+//
+// The pass only performs Floor->Fountain conversions (walkable), so it can add
+// fishing landmarks and route identity without risking connectivity regressions.
+// -----------------------------------------------------------------------------
+static bool applyHydroConfluenceWeave(Dungeon& d, RNG& rng, DungeonBranch branch,
+                                      int depth, int maxDepth, GenKind g,
+                                      uint32_t worldSeed, const EndlessStratumInfo& st) {
+    d.dungeonConfluenceCount = 0;
+    d.dungeonConfluenceFountainTiles = 0;
+
+    if (branch != DungeonBranch::Main) return false;
+    if (depth <= 0) return false;
+    if (d.width < 16 || d.height < 12) return false;
+
+    float pNode = 0.10f + 0.012f * static_cast<float>(std::min(depth, 14));
+    if (g == GenKind::Cavern || g == GenKind::Mines) pNode += 0.18f;
+    else if (g == GenKind::RoomsGraph || g == GenKind::RoomsBsp) pNode += 0.10f;
+    else if (g == GenKind::Catacombs) pNode += 0.06f;
+    else if (g == GenKind::Maze || g == GenKind::Warrens) pNode *= 0.65f;
+    pNode = std::clamp(pNode, 0.08f, 0.58f);
+
+    int target = 0;
+    if (rng.chance(pNode)) target = 1;
+    if (depth >= 6 && rng.chance(pNode * 0.55f)) target += 1;
+    if (depth >= 10 && rng.chance(pNode * 0.35f)) target += 1;
+    target = clampi(target, 0, 3);
+    if (target <= 0) return false;
+
+    const uint32_t seedBase =
+        (worldSeed != 0u) ? worldSeed
+                          : hash32(hashCombine(0xC0F10A5Eu, static_cast<uint32_t>(depth)));
+    const uint32_t hfSeed = heightfieldSeedKey(seedBase, branch, depth, maxDepth, st);
+    const uint32_t tieSeed = hash32(hashCombine(hfSeed ^ 0xC0B6F1A1u, static_cast<uint32_t>(g)));
+
+    auto nearStairs = [&](int x, int y, int rad) -> bool {
+        const Vec2i p{x, y};
+        if (d.inBounds(d.stairsUp.x, d.stairsUp.y) && manhattan2(p, d.stairsUp) <= rad) return true;
+        if (d.inBounds(d.stairsDown.x, d.stairsDown.y) && manhattan2(p, d.stairsDown) <= rad) return true;
+        return false;
+    };
+
+    auto countPassableCardinal = [&](int x, int y) -> int {
+        int n = 0;
+        static const Vec2i kDirs[4] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (const Vec2i& dv : kDirs) {
+            const int nx = x + dv.x;
+            const int ny = y + dv.y;
+            if (!d.inBounds(nx, ny)) continue;
+            if (d.isPassable(nx, ny)) ++n;
+        }
+        return n;
+    };
+
+    auto countNearbyWater = [&](int x, int y, int rad) -> int {
+        int n = 0;
+        for (int dy = -rad; dy <= rad; ++dy) {
+            for (int dx = -rad; dx <= rad; ++dx) {
+                const int nx = x + dx;
+                const int ny = y + dy;
+                if (!d.inBounds(nx, ny)) continue;
+                const TileType tt = d.at(nx, ny).type;
+                if (tt == TileType::Fountain || tt == TileType::Chasm) ++n;
+            }
+        }
+        return n;
+    };
+
+    auto roomOk = [&](int x, int y) -> bool {
+        if (const Room* rr = findRoomContaining(d, x, y)) {
+            return rr->type == RoomType::Normal;
+        }
+        return true;
+    };
+
+    auto tileEligible = [&](int x, int y) -> bool {
+        if (!d.inBounds(x, y)) return false;
+        if (x <= 1 || y <= 1 || x >= d.width - 2 || y >= d.height - 2) return false;
+        if (d.at(x, y).type != TileType::Floor) return false;
+        if (nearStairs(x, y, 6)) return false;
+        if (anyDoorInRadius(d, x, y, 1)) return false;
+        if (!roomOk(x, y)) return false;
+        if (countPassableCardinal(x, y) < 2) return false;
+        return true;
+    };
+
+    struct Candidate {
+        Vec2i pos;
+        float score = 0.0f;
+        uint32_t tie = 0u;
+    };
+    std::vector<Candidate> cands;
+    cands.reserve(static_cast<size_t>(d.width * d.height / 3));
+
+    const float invW = 1.0f / static_cast<float>(std::max(1, d.width));
+    const float invH = 1.0f / static_cast<float>(std::max(1, d.height));
+
+    float themeWetBias = 0.0f;
+    switch (st.theme) {
+        case EndlessStratumTheme::Caverns:   themeWetBias = 0.10f; break;
+        case EndlessStratumTheme::Mines:     themeWetBias = 0.06f; break;
+        case EndlessStratumTheme::Warrens:   themeWetBias = 0.04f; break;
+        case EndlessStratumTheme::Catacombs: themeWetBias = 0.02f; break;
+        default:                             themeWetBias = 0.0f; break;
+    }
+
+    const float minScore = (g == GenKind::Maze || g == GenKind::Warrens) ? 0.57f : 0.47f;
+
+    for (int y = 2; y < d.height - 2; ++y) {
+        for (int x = 2; x < d.width - 2; ++x) {
+            if (!tileEligible(x, y)) continue;
+
+            const int passN = countPassableCardinal(x, y);
+            const int nearWater2 = countNearbyWater(x, y, 2);
+
+            const float fx = (static_cast<float>(x) + 0.5f) * invW;
+            const float fy = (static_cast<float>(y) + 0.5f) * invH;
+            const float h01 = hfHeight01(hfSeed, fx, fy);
+            const float ridge01 = hfRidge01(hfSeed, fx, fy);
+
+            const float hL = hfHeight01(hfSeed, std::clamp(fx - invW, 0.0f, 1.0f), fy);
+            const float hR = hfHeight01(hfSeed, std::clamp(fx + invW, 0.0f, 1.0f), fy);
+            const float hU = hfHeight01(hfSeed, fx, std::clamp(fy - invH, 0.0f, 1.0f));
+            const float hD = hfHeight01(hfSeed, fx, std::clamp(fy + invH, 0.0f, 1.0f));
+            const float relief = std::clamp((std::fabs(hR - hL) + std::fabs(hD - hU)) * 3.5f, 0.0f, 1.0f);
+
+            const float wet01 = std::clamp(static_cast<float>(nearWater2) / 8.0f, 0.0f, 1.0f);
+            const float basin01 = 1.0f - h01;
+            const float topo01 = (passN >= 4) ? 1.0f : ((passN == 3) ? 0.72f : 0.48f);
+            const float zone01 = std::clamp(static_cast<float>(d.biomeZoneCount) / 4.0f, 0.0f, 1.0f);
+
+            float genBias = 0.0f;
+            if (g == GenKind::Cavern) genBias += 0.08f;
+            else if (g == GenKind::Mines) genBias += 0.05f;
+            else if (g == GenKind::Maze || g == GenKind::Warrens) genBias -= 0.05f;
+
+            const uint32_t tie = hash32(hashCombine(tieSeed, hashCombine(static_cast<uint32_t>(x), static_cast<uint32_t>(y))));
+            const float jitter = (rand01(tie) - 0.5f) * 0.10f;
+
+            float score = 0.0f;
+            score += 0.32f * wet01;
+            score += 0.24f * basin01;
+            score += 0.14f * ridge01;
+            score += 0.12f * relief;
+            score += 0.10f * topo01;
+            score += 0.04f * zone01;
+            score += themeWetBias;
+            score += genBias;
+            score += jitter;
+
+            if (score < minScore) continue;
+            cands.push_back(Candidate{{x, y}, score, tie});
+        }
+    }
+
+    if (cands.empty()) return false;
+
+    std::sort(cands.begin(), cands.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.score != b.score) return a.score > b.score;
+        return a.tie < b.tie;
+    });
+
+    std::vector<Vec2i> anchors;
+    anchors.reserve(static_cast<size_t>(target));
+
+    const int minSep = 9;
+    for (const Candidate& c : cands) {
+        if (static_cast<int>(anchors.size()) >= target) break;
+        bool sepOk = true;
+        for (const Vec2i& p : anchors) {
+            if (manhattan2(c.pos, p) < minSep) {
+                sepOk = false;
+                break;
+            }
+        }
+        if (!sepOk) continue;
+        anchors.push_back(c.pos);
+    }
+
+    if (anchors.empty()) return false;
+
+    auto motifEligible = [&](int x, int y) -> bool {
+        if (!d.inBounds(x, y)) return false;
+        if (x <= 1 || y <= 1 || x >= d.width - 2 || y >= d.height - 2) return false;
+        if (nearStairs(x, y, 6)) return false;
+        if (isStairsTile(d, x, y)) return false;
+        const TileType tt = d.at(x, y).type;
+        if (!(tt == TileType::Floor || tt == TileType::Fountain)) return false;
+        if (anyDoorInRadius(d, x, y, 0)) return false;
+        if (!roomOk(x, y)) return false;
+        return true;
+    };
+
+    auto pushUnique = [](std::vector<Vec2i>& out, Vec2i p) -> bool {
+        for (const Vec2i& q : out) {
+            if (q == p) return false;
+        }
+        out.push_back(p);
+        return true;
+    };
+
+    static const Vec2i kDirs[4] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+    for (const Vec2i& anchor : anchors) {
+        if (!motifEligible(anchor.x, anchor.y)) continue;
+
+        std::vector<Vec2i> motif;
+        motif.reserve(10);
+        pushUnique(motif, anchor);
+
+        Vec2i cur = anchor;
+        Vec2i prev = anchor;
+
+        const int maxSteps = clampi(2 + depth / 5 + rng.range(0, 2), 2, 7);
+        for (int step = 0; step < maxSteps; ++step) {
+            Vec2i best{-1, -1};
+            float bestScore = -9999.0f;
+
+            for (const Vec2i& dv : kDirs) {
+                const int nx = cur.x + dv.x;
+                const int ny = cur.y + dv.y;
+                if (!motifEligible(nx, ny)) continue;
+
+                const float fx = (static_cast<float>(nx) + 0.5f) * invW;
+                const float fy = (static_cast<float>(ny) + 0.5f) * invH;
+                const float basin01 = 1.0f - hfHeight01(hfSeed, fx, fy);
+                const float ridge01 = hfRidge01(hfSeed, fx, fy);
+                const float wet01 = std::clamp(static_cast<float>(countNearbyWater(nx, ny, 2)) / 8.0f, 0.0f, 1.0f);
+
+                uint32_t h = hash32(hashCombine(tieSeed ^ 0x9C5E7A11u,
+                                                hashCombine(static_cast<uint32_t>(nx), static_cast<uint32_t>(ny))));
+                float s = 0.48f * wet01 + 0.30f * basin01 + 0.12f * ridge01 + 0.10f * rand01(h);
+                if (nx == prev.x && ny == prev.y) s -= 0.85f;
+                if (manhattan2({nx, ny}, anchor) > 7) s -= 0.25f;
+                if (d.at(nx, ny).type == TileType::Fountain) s -= 0.35f;
+
+                if (s > bestScore) {
+                    bestScore = s;
+                    best = {nx, ny};
+                }
+            }
+
+            if (!d.inBounds(best.x, best.y)) break;
+            pushUnique(motif, best);
+
+            const Vec2i dir{best.x - cur.x, best.y - cur.y};
+            prev = cur;
+            cur = best;
+
+            // Occasional short side branch to create a braided spring feel.
+            if (rng.chance(0.22f) && motif.size() < 9) {
+                const Vec2i p0{dir.y, -dir.x};
+                const Vec2i p1{-dir.y, dir.x};
+                Vec2i side = rng.chance(0.5f) ? Vec2i{cur.x + p0.x, cur.y + p0.y}
+                                              : Vec2i{cur.x + p1.x, cur.y + p1.y};
+                if (!motifEligible(side.x, side.y)) {
+                    side = (side.x == cur.x + p0.x && side.y == cur.y + p0.y)
+                        ? Vec2i{cur.x + p1.x, cur.y + p1.y}
+                        : Vec2i{cur.x + p0.x, cur.y + p0.y};
+                }
+                if (motifEligible(side.x, side.y)) {
+                    pushUnique(motif, side);
+                }
+            }
+        }
+
+        int placed = 0;
+        for (const Vec2i& p : motif) {
+            if (!d.inBounds(p.x, p.y)) continue;
+            Tile& t = d.at(p.x, p.y);
+            if (t.type != TileType::Floor) continue;
+            t.type = TileType::Fountain;
+            placed += 1;
+        }
+
+        if (placed <= 0) continue;
+        d.dungeonConfluenceCount += 1;
+        d.dungeonConfluenceFountainTiles += placed;
+    }
+
+    return d.dungeonConfluenceCount > 0;
+}
+
 
 static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, DungeonBranch branch, int depth, int maxDepth, GenKind g, uint32_t worldSeed, const EndlessStratumInfo& stratum) {
     [[maybe_unused]] const EndlessStratumTheme theme = stratum.theme;
@@ -20663,6 +21207,14 @@ static void generateStandardFloorWithKind(Dungeon& d, RNG& rng, DungeonBranch br
     // Rift cache pockets: tiny optional boulder-bridge micro-puzzles off normal rooms.
     (void)maybeCarveRiftCachePockets(d, rng, depth, g);
 
+    // Subterranean seep springs: small fountain clusters that create fishable/drinkable
+    // micro-POIs on normal dungeon floors.
+    (void)maybePlaceDungeonSeepSprings(d, rng, depth, g, /*ensureFishingWater=*/true);
+
+    // Hydro confluence weave: fuse existing water + macro geology + topology into
+    // additional spring threads for stronger floor identity and fishing landmarks.
+    (void)applyHydroConfluenceWeave(d, rng, branch, depth, maxDepth, g, worldSeed, stratum);
+
     ensureBorders(d);
 
     // Final safety: ensure stair tiles survive any later carving/decoration overlap.
@@ -20763,6 +21315,10 @@ static int scoreFloorCandidate(const Dungeon& d, int depth, int maxDepth, uint32
     score += d.crawlspaceNetworkCount * 140;
     score += d.crawlspaceDoorCount * 50;
     score += d.crawlspaceCacheCount * 60;
+    score += d.dungeonSeepSpringCount * 55;
+    score += std::min(6, d.dungeonSeepFountainTiles) * 6;
+    score += d.dungeonConfluenceCount * 80;
+    score += std::min(10, d.dungeonConfluenceFountainTiles) * 7;
 
     // Slight room-count preference (keeps room-based floors from collapsing into corridor spaghetti).
     score += std::min(20, static_cast<int>(d.rooms.size())) * 30;
@@ -20859,6 +21415,11 @@ void Dungeon::generate(RNG& rng, DungeonBranch branch, int depth, int maxDepth, 
     fluvialGullyCount = 0;
     fluvialChasmCount = 0;
     fluvialCausewayCount = 0;
+
+    dungeonSeepSpringCount = 0;
+    dungeonSeepFountainTiles = 0;
+    dungeonConfluenceCount = 0;
+    dungeonConfluenceFountainTiles = 0;
 
     overworldSpringCount = 0;
     overworldBrookCount = 0;

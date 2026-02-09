@@ -19,6 +19,7 @@
 #include "rng.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 
 inline int noiseInvestigateRadius(int volume, int effVolume, int distCost) {
@@ -75,12 +76,29 @@ inline uint32_t noiseInvestigateHash(uint32_t runSeed, uint32_t turn, int monste
 // Convert a hash into a deterministic offset within [-radius, +radius] on each axis.
 inline Vec2i noiseInvestigateOffset(uint32_t h, int radius) {
     if (radius <= 0) return Vec2i{0, 0};
-    const int span = radius * 2 + 1;
 
-    const uint32_t h1 = hash32(h);
-    const uint32_t h2 = hash32(h ^ 0x9e3779b9u);
+    // Sample from a discrete Manhattan-diamond (not a square) to avoid
+    // over-representing far diagonal offsets for a given uncertainty radius.
+    //
+    // Number of lattice points with |dx| + |dy| <= r:
+    //   1 + 2*r*(r+1)
+    const uint32_t count = static_cast<uint32_t>(1 + 2 * radius * (radius + 1));
+    uint32_t pick = hash32(h) % count;
 
-    const int dx = static_cast<int>(h1 % static_cast<uint32_t>(span)) - radius;
-    const int dy = static_cast<int>(h2 % static_cast<uint32_t>(span)) - radius;
-    return Vec2i{dx, dy};
+    for (int r = 0; r <= radius; ++r) {
+        for (int dx = -r; dx <= r; ++dx) {
+            const int dyAbs = r - std::abs(dx);
+            if (dyAbs == 0) {
+                if (pick == 0u) return Vec2i{dx, 0};
+                --pick;
+            } else {
+                if (pick == 0u) return Vec2i{dx, dyAbs};
+                --pick;
+                if (pick == 0u) return Vec2i{dx, -dyAbs};
+                --pick;
+            }
+        }
+    }
+
+    return Vec2i{0, 0};
 }

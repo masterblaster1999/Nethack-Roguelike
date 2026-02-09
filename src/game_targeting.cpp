@@ -138,8 +138,9 @@ static bool isFishableTile(const Game& g, Vec2i p) {
     // Fountains are a small water source on any floor.
     if (tt == TileType::Fountain) return true;
 
-    // In the overworld/surface camp, TileType::Chasm represents water basins.
-    if (tt == TileType::Chasm && g.atCamp()) return true;
+    // Chasm tiles are used for rivers/basins/lakes in the overworld and for
+    // flooded ravines/lake features underground.
+    if (tt == TileType::Chasm) return true;
 
     return false;
 }
@@ -849,6 +850,41 @@ void Game::beginFishingTargeting(int rodItemId) {
         return;
     }
 
+    // Find a visible fishable tile within rod range before entering targeting.
+    // If none are available, keep gameplay in normal mode and give direct feedback.
+    const int range = (d.range > 0) ? d.range : 6;
+    Vec2i bestTarget = player().pos;
+    int bestDist = 1 << 30;
+    bool foundInRange = false;
+    bool sawAnyVisibleFishable = false;
+
+    for (int y = 0; y < dung.height; ++y) {
+        for (int x = 0; x < dung.width; ++x) {
+            if (!dung.at(x, y).visible) continue;
+            const Vec2i p{x, y};
+            if (!isFishableTile(*this, p)) continue;
+
+            sawAnyVisibleFishable = true;
+            const int dist = chebyshev(player().pos, p);
+            if (dist <= 0 || dist > range) continue;
+
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestTarget = p;
+                foundInRange = true;
+            }
+        }
+    }
+
+    if (!foundInRange) {
+        if (sawAnyVisibleFishable) {
+            pushMsg("NO WATER IN RANGE.", MessageKind::Info, true);
+        } else {
+            pushMsg("NO VISIBLE WATER TO FISH.", MessageKind::Info, true);
+        }
+        return;
+    }
+
     targeting = true;
     targetingMode_ = TargetingMode::Fish;
     targetingFishingRodItemId_ = rodItemId;
@@ -863,23 +899,8 @@ void Game::beginFishingTargeting(int rodItemId) {
     statsOpen = false;
     msgScroll = 0;
 
-    // Start the cursor on the nearest visible fishable tile (if any), otherwise on the player.
-    targetPos = player().pos;
-    const int range = (d.range > 0) ? d.range : 6;
-    int best = 1 << 30;
-    for (int y = 0; y < dung.height; ++y) {
-        for (int x = 0; x < dung.width; ++x) {
-            if (!dung.at(x, y).visible) continue;
-            const Vec2i p{x, y};
-            if (!isFishableTile(*this, p)) continue;
-            const int dist = chebyshev(player().pos, p);
-            if (dist <= 0 || dist > range) continue;
-            if (dist < best) {
-                best = dist;
-                targetPos = p;
-            }
-        }
-    }
+    // Start on the nearest visible fishable tile in range.
+    targetPos = bestTarget;
 
     targetStatusText_.clear();
     recomputeTargetLine();
@@ -1638,7 +1659,8 @@ void Game::recomputeTargetLine() {
         const int idx = findItemIndexById(inv, targetingFishingRodItemId_);
         if (idx >= 0) {
             const Item& rod = inv[static_cast<size_t>(idx)];
-            range = std::max(1, itemDef(rod.kind).range);
+            const int rodRange = itemDef(rod.kind).range;
+            range = (rodRange > 0) ? rodRange : 6;
         } else {
             range = 6;
         }

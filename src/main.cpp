@@ -1187,7 +1187,10 @@ int main(int argc, char** argv) {
 
                         // During replay playback, only allow replay controls + safe visual toggles.
                         if (replayActive) {
-                            const Action ra = keyBinds.mapKey(game, key, mod);
+                            Action ra = keyBinds.mapKey(game, key, mod);
+                            if (ra == Action::None && rawKey != key) {
+                                ra = keyBinds.mapKey(game, rawKey, mod);
+                            }
 
                             // Ignore key repeat for replay controls (prevents accidental rapid toggles).
                             if (isRepeat && ra != Action::LogUp && ra != Action::LogDown) {
@@ -1752,7 +1755,10 @@ int main(int argc, char** argv) {
                         // We only treat digits as a count if they are *not* currently bound to an action.
                         int digit = -1;
                         if (!isRepeat && noCountMods && countPrefixAllowedNow() && isCountDigit(key, digit)) {
-                            const Action digitMapped = keyBinds.mapKey(game, key, mod);
+                            Action digitMapped = keyBinds.mapKey(game, key, mod);
+                            if (digitMapped == Action::None && rawKey != key) {
+                                digitMapped = keyBinds.mapKey(game, rawKey, mod);
+                            }
                             if (digitMapped == Action::None) {
                                 if (inputCountPrefix == 0 && digit == 0) {
                                     // Ignore leading zero.
@@ -1766,6 +1772,9 @@ int main(int argc, char** argv) {
                         }
 
                         Action a = keyBinds.mapKey(game, key, mod);
+                        if (a == Action::None && rawKey != key) {
+                            a = keyBinds.mapKey(game, rawKey, mod);
+                        }
 
                         auto allowRepeatAction = [](Action act) -> bool {
                             switch (act) {

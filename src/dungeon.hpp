@@ -597,6 +597,15 @@ mutable std::vector<uint8_t> leylineCache;
     int fluvialChasmCount = 0;      // Total tiles converted to Chasm by the pass.
     int fluvialCausewayCount = 0;   // Bridges/causeways placed to preserve connectivity.
 
+    // Not serialized: subterranean seep springs (small fountain clusters on dungeon floors).
+    // These create deterministic micro-POIs that tie into existing drink/fishing interactions.
+    int dungeonSeepSpringCount = 0;    // Number of spring clusters placed.
+    int dungeonSeepFountainTiles = 0;  // Total Floor->Fountain conversions by the pass.
+    // Not serialized: hydro-confluence weave pass.
+    // This fuses topology + hydrology + macro heightfield signals into extra spring "threads".
+    int dungeonConfluenceCount = 0;         // Number of confluence nodes accepted.
+    int dungeonConfluenceFountainTiles = 0; // Additional Floor->Fountain conversions by confluence weaving.
+
     // Not serialized: overworld wilderness POIs.
     // Some overworld chunks place 0..N "springs" as TileType::Fountain to add
     // deterministic, interactable points-of-interest to the surface.

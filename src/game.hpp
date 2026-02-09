@@ -115,6 +115,183 @@ inline const char* entityKindName(EntityKind k) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Entity life cycle (birth -> childhood -> adulthood)
+// ---------------------------------------------------------------------------
+
+enum class LifeStage : uint8_t {
+    Newborn = 0,
+    Child,
+    Adult,
+};
+
+inline const char* lifeStageName(LifeStage s) {
+    switch (s) {
+        case LifeStage::Newborn: return "NEWBORN";
+        case LifeStage::Child:   return "CHILD";
+        case LifeStage::Adult:   return "ADULT";
+        default:                 return "ADULT";
+    }
+}
+
+enum class LifeSex : uint8_t {
+    Unknown = 0,
+    Female,
+    Male,
+};
+
+inline const char* lifeSexName(LifeSex s) {
+    switch (s) {
+        case LifeSex::Female: return "FEMALE";
+        case LifeSex::Male:   return "MALE";
+        default:              return "UNKNOWN";
+    }
+}
+
+enum class LifeTrait : uint16_t {
+    None    = 0u,
+    Hardy   = 1u << 0, // extra max HP
+    Swift   = 1u << 1, // extra speed
+    Fierce  = 1u << 2, // extra attack
+    Tough   = 1u << 3, // extra defense
+    Fertile = 1u << 4, // shorter reproduction cooldown
+};
+
+inline constexpr uint16_t lifeTraitBit(LifeTrait t) {
+    return static_cast<uint16_t>(t);
+}
+
+inline constexpr bool lifeHasTrait(uint16_t mask, LifeTrait t) {
+    return (mask & lifeTraitBit(t)) != 0u;
+}
+
+inline constexpr LifeTrait LIFE_TRAIT_ALL[] = {
+    LifeTrait::Hardy,
+    LifeTrait::Swift,
+    LifeTrait::Fierce,
+    LifeTrait::Tough,
+    LifeTrait::Fertile,
+};
+
+inline const char* lifeTraitName(LifeTrait t) {
+    switch (t) {
+        case LifeTrait::Hardy:   return "HARDY";
+        case LifeTrait::Swift:   return "SWIFT";
+        case LifeTrait::Fierce:  return "FIERCE";
+        case LifeTrait::Tough:   return "TOUGH";
+        case LifeTrait::Fertile: return "FERTILE";
+        default:                 return "NONE";
+    }
+}
+
+inline std::string lifeTraitList(uint16_t mask, const char* sep = ", ") {
+    std::string out;
+    bool first = true;
+    for (LifeTrait t : LIFE_TRAIT_ALL) {
+        if (!lifeHasTrait(mask, t)) continue;
+        if (!first) out += sep;
+        first = false;
+        out += lifeTraitName(t);
+    }
+    return out;
+}
+
+inline bool lifecycleEligibleKind(EntityKind k) {
+    switch (k) {
+        case EntityKind::Player:
+        case EntityKind::Shopkeeper:
+        case EntityKind::Guard:
+        case EntityKind::Ghost:
+        case EntityKind::Mimic:
+            return false;
+        default:
+            return true;
+    }
+}
+
+inline int lifecycleStageDurationTurns(LifeStage s) {
+    switch (s) {
+        case LifeStage::Newborn: return 100;
+        case LifeStage::Child:   return 260;
+        case LifeStage::Adult:
+        default:
+            return 0;
+    }
+}
+
+inline int lifecycleReproductionCooldownTurns(uint16_t traitMask) {
+    int turns = 360;
+    if (lifeHasTrait(traitMask, LifeTrait::Fertile)) turns -= 120;
+    return std::max(120, turns);
+}
+
+inline int lifecycleStageHpPercent(LifeStage s) {
+    switch (s) {
+        case LifeStage::Newborn: return 45;
+        case LifeStage::Child:   return 75;
+        case LifeStage::Adult:
+        default:
+            return 100;
+    }
+}
+
+inline int lifecycleStageAtkPercent(LifeStage s) {
+    switch (s) {
+        case LifeStage::Newborn: return 45;
+        case LifeStage::Child:   return 75;
+        case LifeStage::Adult:
+        default:
+            return 100;
+    }
+}
+
+inline int lifecycleStageDefPercent(LifeStage s) {
+    switch (s) {
+        case LifeStage::Newborn: return 40;
+        case LifeStage::Child:   return 70;
+        case LifeStage::Adult:
+        default:
+            return 100;
+    }
+}
+
+inline int lifecycleStageSpeedPercent(LifeStage s) {
+    switch (s) {
+        case LifeStage::Newborn: return 85;
+        case LifeStage::Child:   return 95;
+        case LifeStage::Adult:
+        default:
+            return 100;
+    }
+}
+
+inline LifeSex lifecycleRollSex(uint32_t seed, EntityKind kind) {
+    const uint32_t h = hash32(hashCombine(seed ^ 0x1A7E5E5u, static_cast<uint32_t>(kind)));
+    return ((h & 1u) != 0u) ? LifeSex::Male : LifeSex::Female;
+}
+
+inline uint16_t lifecycleRollTraitMask(uint32_t seed, EntityKind kind) {
+    if (!lifecycleEligibleKind(kind)) return 0u;
+
+    RNG trng(hashCombine(seed ^ 0xC1FEC0DEu, static_cast<uint32_t>(kind)));
+    uint16_t mask = 0u;
+
+    // 1..2 traits, mostly 1.
+    const int wanted = trng.chance(0.27f) ? 2 : 1;
+    int picked = 0;
+    constexpr int traitCount = static_cast<int>(sizeof(LIFE_TRAIT_ALL) / sizeof(LIFE_TRAIT_ALL[0]));
+    for (int attempts = 0; attempts < 10 && picked < wanted; ++attempts) {
+        const int idx = trng.range(0, traitCount - 1);
+        const uint16_t bit = lifeTraitBit(LIFE_TRAIT_ALL[idx]);
+        if ((mask & bit) != 0u) continue;
+        mask |= bit;
+        ++picked;
+    }
+
+    if (mask == 0u) mask = lifeTraitBit(LifeTrait::Hardy);
+    return mask;
+}
+
 
 // -----------------------------------------------------------------------------
 // Hearing (noise sensitivity)
@@ -1076,6 +1253,20 @@ struct Entity {
     // Used by a few intelligent monsters so they can drink a potion mid-fight.
     // id==0 means the slot is empty.
     Item pocketConsumable;
+
+    // Lifecycle state (append-only for save compatibility).
+    // Adult baseline values are derived at spawn and used to rescale stats per life stage.
+    LifeStage lifeStage = LifeStage::Adult;
+    LifeSex lifeSex = LifeSex::Unknown;
+    uint16_t lifeTraitMask = 0u;
+    int lifeAgeTurns = 0;
+    int lifeStageTurns = 0;
+    int lifeReproductionCooldown = 0;
+    int lifeBirthCount = 0;
+    int lifeBaseHpMax = 0;
+    int lifeBaseAtk = 0;
+    int lifeBaseDef = 0;
+    int lifeBaseSpeed = 0;
 };
 
 struct FXProjectile {
@@ -1222,6 +1413,10 @@ struct LevelState {
     // Persistent flames / embers left behind by explosions and other fire sources.
     std::vector<uint8_t> fireField;
 
+    // Persistent adhesive ooze / slime field (0..255).
+    // Higher values indicate stickier, more cohesive fluid.
+    std::vector<uint8_t> adhesiveFluid;
+
     // Persistent scent trail used by smell-capable monsters to track the player.
     // Stored as a per-tile intensity map (0..255).
     std::vector<uint8_t> scentField;
@@ -1357,6 +1552,10 @@ public:
     // Persistent fire field on the current level (0..255 intensity).
     // 0 means no fire. Only meaningful on in-bounds tiles.
     uint8_t fireAt(int x, int y) const;
+
+    // Persistent adhesive ooze on the current level (0..255 intensity).
+    // 0 means no adhesive fluid. Only meaningful on in-bounds tiles.
+    uint8_t adhesiveFluidAt(int x, int y) const;
 
     // Persistent scent trail intensity on the current level (0..255).
     // 0 means no scent. Only meaningful on in-bounds tiles.
@@ -2326,7 +2525,11 @@ bool clearItemCallLabel(ItemKind k);
     // Unit-test access hook.
     friend struct GameTestAccess;
 
+#if defined(PROCROGUE_TEST_ACCESS)
+public:
+#else
 private:
+#endif
     // Internal: evaluate the run's procedurally generated win conditions.
     // If 'missing' is provided and the conditions are not met, it is filled with
     // one or more short requirement lines suitable for the message log.
@@ -2497,6 +2700,7 @@ private:
     std::vector<uint8_t> poisonGas_;
     std::vector<uint8_t> corrosiveGas_;
     std::vector<uint8_t> fireField_;
+    std::vector<uint8_t> adhesiveFluid_;
     std::vector<uint8_t> scentField_;
 
     int nextItemId = 1;
@@ -2987,7 +3191,11 @@ private:
     ScoreBoard scores;
     bool runRecorded = false;
 
+#if defined(PROCROGUE_TEST_ACCESS)
+public:
+#else
 private:
+#endif
     void pushMsg(const std::string& s, MessageKind kind = MessageKind::Info, bool fromPlayer = true);
 
     Entity* entityById(int id);
@@ -2997,6 +3205,7 @@ private:
     const Entity* entityAt(int x, int y) const;
 
     bool tryMove(Entity& e, int dx, int dy);
+    bool attemptPlayerWebBreak(bool weakAttempt);
 
     // Compute the positional noise volume produced by a single player step onto `pos`.
     // Used by movement, and by LOOK-mode Sound Preview so the UI matches real stealth rules.
@@ -3147,6 +3356,11 @@ private:
     // Shops / economy
     // Triggered when the player escapes a shop with unpaid goods or attacks the shopkeeper.
     void triggerShopTheftAlarm(Vec2i shopInsidePos, Vec2i playerPos);
+    void announceEnteredShop(Vec2i pos, bool includeDebtReminder = true);
+    void onPlayerShopTransition(Vec2i from, Vec2i to, bool allowDebtAlarm = true, bool includeEntryDebtReminder = true);
+    bool anyLivingShopkeeperInRoom(const Room* shopRoom) const;
+    bool anyPeacefulShopkeeperInRoom(const Room* shopRoom) const;
+    void standDownMerchantGuild();
 
     // Save/load
 public:
@@ -3159,7 +3373,11 @@ public:
     // Convenience: attempt to load the requested save file, and if it fails,
     // automatically try rotated backups (<path>.bak1..bak10) in order.
     bool loadFromFileWithBackups(const std::string& path);
+#if defined(PROCROGUE_TEST_ACCESS)
+public:
+#else
 private:
+#endif
 
     // Helpers
     int equippedMeleeIndex() const;
@@ -3299,6 +3517,7 @@ private:
     void onDoorOpened(Vec2i doorPos, bool openerIsPlayer);
 
     void applyEndOfTurnEffects();
+    void tickLifeCycles();
     void updateScentMap();
     Vec2i randomFreeTileInRoom(const Room& r, int tries = 200);
 

@@ -961,11 +961,15 @@ void Game::emitNoise(Vec2i pos, int volume) {
             const uint32_t base = noiseInvestigateHash(seed_, turnCount, m.id, pos, volume, eff, d);
 
             // Try a few candidates (deterministic sequence) until we land on a reasonable tile.
-            for (int attempt = 0; attempt < 10; ++attempt) {
+            for (int attempt = 0; attempt < 16; ++attempt) {
                 const uint32_t h = hashCombine(base, static_cast<uint32_t>(attempt));
                 const Vec2i off = noiseInvestigateOffset(h, r);
                 const Vec2i cand{pos.x + off.x, pos.y + off.y};
                 if (!validInvestigateTile(cand)) continue;
+                // Keep investigate targets in the same acoustically connected region
+                // that this listener could have heard from.
+                const int cd = sound[static_cast<size_t>(idx(cand.x, cand.y))];
+                if (cd < 0 || cd > eff) continue;
                 investigatePos = cand;
                 break;
             }
@@ -1231,7 +1235,7 @@ void Game::setAutoStepDelayMs(int ms) {
 
 namespace {
 constexpr uint32_t SAVE_MAGIC = 0x50525356u; // 'PRSV'
-constexpr uint32_t SAVE_VERSION = 58u; // v58: overworld waypoint
+constexpr uint32_t SAVE_VERSION = 60u; // v60: persistent adhesive fluid field
 
 constexpr uint32_t BONES_MAGIC = 0x454E4F42u; // "BONE" (little-endian)
 constexpr uint32_t BONES_VERSION = 2u;
@@ -1534,6 +1538,32 @@ void writeEntity(std::ostream& out, const Entity& e) {
         writePod(out, cd1);
         writePod(out, cd2);
     }
+
+    // v59+: lifecycle state (stage/sex/traits/age/reproduction + adult baseline stats)
+    if constexpr (SAVE_VERSION >= 59u) {
+        uint8_t lifeStage = static_cast<uint8_t>(e.lifeStage);
+        uint8_t lifeSex = static_cast<uint8_t>(e.lifeSex);
+        uint16_t lifeTraits = e.lifeTraitMask;
+        int32_t lifeAge = e.lifeAgeTurns;
+        int32_t lifeStageTurns = e.lifeStageTurns;
+        int32_t lifeReproCd = e.lifeReproductionCooldown;
+        int32_t lifeBirths = e.lifeBirthCount;
+        int32_t lifeBaseHpMax = e.lifeBaseHpMax;
+        int32_t lifeBaseAtk = e.lifeBaseAtk;
+        int32_t lifeBaseDef = e.lifeBaseDef;
+        int32_t lifeBaseSpeed = e.lifeBaseSpeed;
+        writePod(out, lifeStage);
+        writePod(out, lifeSex);
+        writePod(out, lifeTraits);
+        writePod(out, lifeAge);
+        writePod(out, lifeStageTurns);
+        writePod(out, lifeReproCd);
+        writePod(out, lifeBirths);
+        writePod(out, lifeBaseHpMax);
+        writePod(out, lifeBaseAtk);
+        writePod(out, lifeBaseDef);
+        writePod(out, lifeBaseSpeed);
+    }
 }
 
 bool readEntity(std::istream& in, Entity& e, uint32_t version) {
@@ -1598,6 +1628,19 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
     uint8_t procAbility2 = 0;
     int32_t procAbility1Cd = 0;
     int32_t procAbility2Cd = 0;
+
+    // v59+: lifecycle state
+    uint8_t lifeStage = static_cast<uint8_t>(LifeStage::Adult);
+    uint8_t lifeSex = static_cast<uint8_t>(LifeSex::Unknown);
+    uint16_t lifeTraits = 0u;
+    int32_t lifeAge = 0;
+    int32_t lifeStageTurns = 0;
+    int32_t lifeReproCd = 0;
+    int32_t lifeBirths = 0;
+    int32_t lifeBaseHpMax = 0;
+    int32_t lifeBaseAtk = 0;
+    int32_t lifeBaseDef = 0;
+    int32_t lifeBaseSpeed = 0;
 
     Item gearMelee;
     Item gearArmor;
@@ -1721,6 +1764,20 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         if (!readPod(in, procAbility2Cd)) return false;
     }
 
+    if (version >= 59u) {
+        if (!readPod(in, lifeStage)) return false;
+        if (!readPod(in, lifeSex)) return false;
+        if (!readPod(in, lifeTraits)) return false;
+        if (!readPod(in, lifeAge)) return false;
+        if (!readPod(in, lifeStageTurns)) return false;
+        if (!readPod(in, lifeReproCd)) return false;
+        if (!readPod(in, lifeBirths)) return false;
+        if (!readPod(in, lifeBaseHpMax)) return false;
+        if (!readPod(in, lifeBaseAtk)) return false;
+        if (!readPod(in, lifeBaseDef)) return false;
+        if (!readPod(in, lifeBaseSpeed)) return false;
+    }
+
     e.id = id;
     e.kind = static_cast<EntityKind>(kind);
     e.pos = { x, y };
@@ -1842,6 +1899,52 @@ bool readEntity(std::istream& in, Entity& e, uint32_t version) {
         e.lastKnownPlayerAge = 9999;
         e.speed = baseSpeedFor(e.kind);
         e.energy = 0;
+    }
+
+    if (version >= 59u) {
+        if (lifeStage > static_cast<uint8_t>(LifeStage::Adult)) {
+            lifeStage = static_cast<uint8_t>(LifeStage::Adult);
+        }
+        if (lifeSex > static_cast<uint8_t>(LifeSex::Male)) {
+            lifeSex = static_cast<uint8_t>(LifeSex::Unknown);
+        }
+        e.lifeStage = static_cast<LifeStage>(lifeStage);
+        e.lifeSex = static_cast<LifeSex>(lifeSex);
+        e.lifeTraitMask = lifeTraits;
+        e.lifeAgeTurns = std::max(0, lifeAge);
+        e.lifeStageTurns = std::max(0, lifeStageTurns);
+        e.lifeReproductionCooldown = std::max(0, lifeReproCd);
+        e.lifeBirthCount = std::max(0, lifeBirths);
+        e.lifeBaseHpMax = std::max(1, lifeBaseHpMax);
+        e.lifeBaseAtk = std::max(1, lifeBaseAtk);
+        e.lifeBaseDef = std::max(0, lifeBaseDef);
+        e.lifeBaseSpeed = std::max(1, lifeBaseSpeed);
+    } else {
+        e.lifeStage = LifeStage::Adult;
+        e.lifeSex = lifecycleEligibleKind(e.kind) ? lifecycleRollSex(e.spriteSeed, e.kind) : LifeSex::Unknown;
+        e.lifeTraitMask = lifecycleEligibleKind(e.kind) ? lifecycleRollTraitMask(e.spriteSeed, e.kind) : 0u;
+        e.lifeAgeTurns = 0;
+        e.lifeStageTurns = 0;
+        e.lifeReproductionCooldown = 0;
+        e.lifeBirthCount = 0;
+        e.lifeBaseHpMax = std::max(1, e.hpMax);
+        e.lifeBaseAtk = std::max(1, e.baseAtk);
+        e.lifeBaseDef = std::max(0, e.baseDef);
+        e.lifeBaseSpeed = std::max(1, e.speed);
+    }
+
+    if (!lifecycleEligibleKind(e.kind)) {
+        e.lifeStage = LifeStage::Adult;
+        e.lifeSex = LifeSex::Unknown;
+        e.lifeTraitMask = 0u;
+        e.lifeAgeTurns = 0;
+        e.lifeStageTurns = 0;
+        e.lifeReproductionCooldown = 0;
+        e.lifeBirthCount = 0;
+        e.lifeBaseHpMax = std::max(1, e.hpMax);
+        e.lifeBaseAtk = std::max(1, e.baseAtk);
+        e.lifeBaseDef = std::max(0, e.baseDef);
+        e.lifeBaseSpeed = std::max(1, e.speed);
     }
 
     return true;
@@ -2020,6 +2123,20 @@ void writeLevelStatePayload(std::ostream& out, const LevelState& st) {
         for (uint32_t fi = 0; fi < fireCount; ++fi) {
             uint8_t v = 0u;
             if (fi < st.fireField.size()) v = st.fireField[static_cast<size_t>(fi)];
+            writePod(out, v);
+        }
+    }
+
+    // Adhesive fluid field (v60+)
+    // Stored as a per-tile intensity map.
+    if constexpr (SAVE_VERSION >= 60u) {
+        const uint32_t expected = tileCount;
+        uint32_t adhesiveCount = static_cast<uint32_t>(st.adhesiveFluid.size());
+        if (adhesiveCount != expected) adhesiveCount = expected;
+        writePod(out, adhesiveCount);
+        for (uint32_t ai = 0; ai < adhesiveCount; ++ai) {
+            uint8_t v = 0u;
+            if (ai < st.adhesiveFluid.size()) v = st.adhesiveFluid[static_cast<size_t>(ai)];
             writePod(out, v);
         }
     }
@@ -2347,6 +2464,31 @@ bool readLevelStatePayload(std::istream& in, uint32_t ver, LevelState& st) {
             }
         } else {
             st.fireField = std::move(fireTmp);
+        }
+    }
+
+    // Adhesive fluid field (v60+)
+    st.adhesiveFluid.clear();
+    if (ver >= 60u) {
+        uint32_t adhesiveCount = 0;
+        if (!readPod(in, adhesiveCount)) return false;
+
+        std::vector<uint8_t> adhesiveTmp;
+        adhesiveTmp.assign(adhesiveCount, uint8_t{0});
+        for (uint32_t ai = 0; ai < adhesiveCount; ++ai) {
+            uint8_t av = 0;
+            if (!readPod(in, av)) return false;
+            adhesiveTmp[ai] = av;
+        }
+
+        if (tileCount > 0) {
+            st.adhesiveFluid.assign(tileCount, uint8_t{0});
+            const uint32_t copyN = std::min(adhesiveCount, tileCount);
+            for (uint32_t i = 0; i < copyN; ++i) {
+                st.adhesiveFluid[static_cast<size_t>(i)] = adhesiveTmp[static_cast<size_t>(i)];
+            }
+        } else {
+            st.adhesiveFluid = std::move(adhesiveTmp);
         }
     }
 

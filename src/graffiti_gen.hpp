@@ -30,6 +30,10 @@ enum class HintKind : uint8_t {
     Shop,
     Chasm,
     BoulderBridge,
+    Fountain,
+    StairsDown,
+    Junction,
+    DeadEnd,
 };
 
 struct Hint {
@@ -76,6 +80,19 @@ inline bool hasNeighborChasm(const Dungeon& dung, int x, int y) {
     return false;
 }
 
+inline int orthWalkableDegree(const Dungeon& dung, int x, int y) {
+    static constexpr int kDx[4] = {1, -1, 0, 0};
+    static constexpr int kDy[4] = {0, 0, 1, -1};
+    int d = 0;
+    for (int i = 0; i < 4; ++i) {
+        const int nx = x + kDx[i];
+        const int ny = y + kDy[i];
+        if (!dung.inBounds(nx, ny)) continue;
+        if (dung.isWalkable(nx, ny)) ++d;
+    }
+    return d;
+}
+
 inline void addWeighted(std::vector<Hint>& out, HintKind k, Vec2i pos, int w) {
     w = std::max(1, w);
     for (int i = 0; i < w; ++i) out.push_back(Hint{k, pos});
@@ -100,6 +117,9 @@ inline std::vector<Hint> collectHints(const Dungeon& dung) {
     int chasmCount = 0;
     int chasmSumX = 0;
     int chasmSumY = 0;
+    int fountainCount = 0;
+    int fountainSumX = 0;
+    int fountainSumY = 0;
 
     for (int y = 0; y < dung.height; ++y) {
         for (int x = 0; x < dung.width; ++x) {
@@ -113,10 +133,26 @@ inline std::vector<Hint> collectHints(const Dungeon& dung) {
                 chasmCount += 1;
                 chasmSumX += x;
                 chasmSumY += y;
+            } else if (tt == TileType::Fountain) {
+                fountainCount += 1;
+                fountainSumX += x;
+                fountainSumY += y;
             } else if (tt == TileType::Boulder) {
                 if (hasNeighborChasm(dung, x, y)) {
                     // Boulder bridge opportunities are valuable.
                     addWeighted(out, HintKind::BoulderBridge, Vec2i{x, y}, 2);
+                }
+            }
+
+            if (dung.isWalkable(x, y) && tt != TileType::Altar && tt != TileType::Fountain) {
+                const int degree = orthWalkableDegree(dung, x, y);
+                const uint32_t h = hashCombine(0xA11C0DEu, static_cast<uint32_t>(x * 131 + y * 977));
+                if (degree >= 3 && (h % 7u) == 0u) {
+                    // Sparse "crossroads" hints improve wayfinding flavor.
+                    addWeighted(out, HintKind::Junction, Vec2i{x, y}, 1);
+                } else if (degree == 1 && (h % 11u) == 0u) {
+                    // Rare dead-end breadcrumbs for hidden stash flavor.
+                    addWeighted(out, HintKind::DeadEnd, Vec2i{x, y}, 1);
                 }
             }
         }
@@ -126,6 +162,13 @@ inline std::vector<Hint> collectHints(const Dungeon& dung) {
     if (chasmCount > 0) {
         Vec2i c{chasmSumX / chasmCount, chasmSumY / chasmCount};
         addWeighted(out, HintKind::Chasm, c, 2);
+    }
+    if (fountainCount > 0) {
+        Vec2i c{fountainSumX / fountainCount, fountainSumY / fountainCount};
+        addWeighted(out, HintKind::Fountain, c, 2);
+    }
+    if (dung.inBounds(dung.stairsDown.x, dung.stairsDown.y)) {
+        addWeighted(out, HintKind::StairsDown, dung.stairsDown, 2);
     }
 
     return out;
@@ -221,12 +264,84 @@ inline std::string makeHintLine(uint32_t seed, const Hint& h, Vec2i from) {
                 default:ss << "MOVE THE BOULDER."; break;
             }
         } break;
+        case HintKind::Fountain: {
+            switch (pat) {
+                case 0: ss << "WATER " << dist << " " << dir << "."; break;
+                case 1: ss << "DRINK WHERE THE STONE WEEPS."; break;
+                case 2: ss << "SPLASHES " << dir << "."; break;
+                case 3: ss << "THE SPRING REMEMBERS."; break;
+                case 4: ss << "FOUNTAIN " << dir << "."; break;
+                default:ss << "FOLLOW THE DRIP."; break;
+            }
+        } break;
+        case HintKind::StairsDown: {
+            switch (pat) {
+                case 0: ss << "DOWNSTAIRS " << dist << " " << dir << "."; break;
+                case 1: ss << "DESCEND " << dir << "."; break;
+                case 2: ss << "THE NEXT DEPTH WAITS " << dir << "."; break;
+                case 3: ss << "STAIRS " << dir << "."; break;
+                case 4: ss << "DEEPER LIES " << dir << "."; break;
+                default:ss << "DOWN IS A DIRECTION."; break;
+            }
+        } break;
+        case HintKind::Junction: {
+            switch (pat) {
+                case 0: ss << "PATHS SPLIT " << dir << "."; break;
+                case 1: ss << "CHOOSE CAREFULLY AT THE CROSSROADS."; break;
+                case 2: ss << "THREE WAYS, ONE MISTAKE."; break;
+                case 3: ss << "JUNCTION " << dist << " " << dir << "."; break;
+                case 4: ss << "ECHOES TURN " << dir << "."; break;
+                default:ss << "COUNT YOUR EXITS."; break;
+            }
+        } break;
+        case HintKind::DeadEnd: {
+            switch (pat) {
+                case 0: ss << "DEAD END " << dir << "."; break;
+                case 1: ss << "CLOSE ENDS HIDE THINGS."; break;
+                case 2: ss << "NO WAY FORWARD " << dir << "."; break;
+                case 3: ss << "STARE AT THE STONE " << dir << "."; break;
+                case 4: ss << "THE WALL MAY OPEN."; break;
+                default:ss << "DEAD ENDS KEEP SECRETS."; break;
+            }
+        } break;
         default:
             ss << "...";
             break;
     }
 
     return clipLine(ss.str());
+}
+
+inline std::string makeGlyphOmenLine(uint32_t seed, RoomType roomType, int depth) {
+    static constexpr std::array<const char*, 16> kGlyphSyll = {{
+        "AKH", "UL", "SER", "NEM", "VAK", "THO", "IR", "KEL",
+        "MOR", "DRA", "ZAI", "QEN", "YAR", "LUX", "VOR", "ESH",
+    }};
+
+    auto pick = [](const char* const* arr, size_t n, uint32_t h) -> const char* {
+        return (n == 0) ? "" : arr[h % n];
+    };
+
+    uint32_t h = hashCombine(hash32(seed ^ 0xA77E5EEDu), static_cast<uint32_t>(std::max(1, depth)));
+    h = hashCombine(h, static_cast<uint32_t>(roomType));
+
+    const char* a = pick(kGlyphSyll.data(), kGlyphSyll.size(), h ^ 0x11u);
+    const char* b = pick(kGlyphSyll.data(), kGlyphSyll.size(), h ^ 0x22u);
+    const char* c = pick(kGlyphSyll.data(), kGlyphSyll.size(), h ^ 0x33u);
+    const int d = std::clamp(depth, 1, 99);
+    const int codeA = d / 10;
+    const int codeB = d % 10;
+
+    std::ostringstream code;
+    code << a << "-" << b << "-" << c << "-" << codeA << codeB;
+
+    switch (h % 5u) {
+        case 0: return clipLine(std::string("GLYPH: ") + code.str() + ".");
+        case 1: return clipLine(std::string("PALIMPSEST: ") + code.str() + ".");
+        case 2: return clipLine(std::string("THE WALL WRITES ") + code.str() + ".");
+        case 3: return clipLine(std::string("DO NOT READ ") + code.str() + " ALOUD.");
+        default:return clipLine(std::string("SCRATCHES SPELL ") + code.str() + ".");
+    }
 }
 
 inline std::string makeAmbientLine(uint32_t seed, RoomType roomType, int depth) {
@@ -341,6 +456,19 @@ inline std::string makeAmbientLine(uint32_t seed, RoomType roomType, int depth) 
     const uint32_t oneRoll = hash32(h ^ 0x0BADCABEu) % 100u;
     if (oneRoll < 32u) {
         return std::string(kOneLiners[hash32(h ^ 0x00u) % kOneLiners.size()]);
+    }
+
+    // Rare obscure add-on: generated "glyph omen" strings, mostly in deep
+    // and lore-rich rooms (library/lab/secret/vault).
+    const uint32_t glyphRoll = hash32(h ^ 0xC1F3A11u) % 100u;
+    const bool glyphRoom =
+        roomType == RoomType::Library ||
+        roomType == RoomType::Laboratory ||
+        roomType == RoomType::Secret ||
+        roomType == RoomType::Vault;
+    const int glyphChance = glyphRoom ? 24 : 8;
+    if (std::max(1, depth) >= 6 && glyphRoll < static_cast<uint32_t>(glyphChance)) {
+        return makeGlyphOmenLine(seed, roomType, depth);
     }
 
     // Strong room-type override sometimes.

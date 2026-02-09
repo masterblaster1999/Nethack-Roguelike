@@ -4433,7 +4433,9 @@ static void drawSpriteWithShadowOutline(SDL_Renderer* r,
                                         Color mod,
                                         Uint8 alpha,
                                         bool shadow,
-                                        bool outline) {
+                                        bool outline,
+                                        double angleDeg = 0.0,
+                                        SDL_RendererFlip flip = SDL_FLIP_NONE) {
     if (!r || !tex) return;
 
     // Scale the outline/shadow strength based on how bright the tile lighting is.
@@ -4447,7 +4449,12 @@ static void drawSpriteWithShadowOutline(SDL_Renderer* r,
         d.y += dy;
         SDL_SetTextureColorMod(tex, rMod, gMod, bMod);
         SDL_SetTextureAlphaMod(tex, aMod);
-        SDL_RenderCopy(r, tex, nullptr, &d);
+        if (std::abs(angleDeg) > 0.001 || flip != SDL_FLIP_NONE) {
+            const SDL_Point c{ d.w / 2, d.h / 2 };
+            SDL_RenderCopyEx(r, tex, nullptr, &d, angleDeg, &c, flip);
+        } else {
+            SDL_RenderCopy(r, tex, nullptr, &d);
+        }
     };
 
     // Shadow first (offset down-right).
@@ -4466,7 +4473,12 @@ static void drawSpriteWithShadowOutline(SDL_Renderer* r,
     // Main sprite.
     SDL_SetTextureColorMod(tex, mod.r, mod.g, mod.b);
     SDL_SetTextureAlphaMod(tex, alpha);
-    SDL_RenderCopy(r, tex, nullptr, &dst);
+    if (std::abs(angleDeg) > 0.001 || flip != SDL_FLIP_NONE) {
+        const SDL_Point c{ dst.w / 2, dst.h / 2 };
+        SDL_RenderCopyEx(r, tex, nullptr, &dst, angleDeg, &c, flip);
+    } else {
+        SDL_RenderCopy(r, tex, nullptr, &dst);
+    }
 
     SDL_SetTextureColorMod(tex, 255, 255, 255);
     SDL_SetTextureAlphaMod(tex, 255);
@@ -4656,13 +4668,52 @@ void Renderer::ensureRaycast3DAssets(uint32_t styleSeed, uint32_t lvlSeed) {
     }
 
     // Doors / chasm
+    // Raycast walls are fully opaque surfaces. Compositing door overlays on top of a wall
+    // backdrop avoids black/empty alpha regions and makes doors read as embedded geometry.
     const uint32_t doorTag = tag32("RC3D_DOOR");
     const uint32_t lockTag = tag32("RC3D_LOCK");
+    const uint32_t doorBackTag = tag32("RC3D_DBACK");
     const uint32_t chasmTag = tag32("RC3D_CHASM");
 
+    auto composeDoorSurface = [&](uint32_t seed, const SpritePixels& overlay) -> SpritePixels {
+        SpritePixels wall = generateWallTile(hashCombine(styleSeed, hashCombine(doorBackTag, seed)), 0, texPx);
+        if (wall.w <= 0 || wall.h <= 0 || wall.px.empty()) {
+            return overlay;
+        }
+
+        // Subtle doorway framing to make the opening read better in first-person perspective.
+        const int x0 = std::max(2, texPx / 5);
+        const int x1 = std::max(x0 + 2, texPx - x0 - 1);
+        const int y0 = std::max(2, texPx / 8);
+        const int y1 = std::max(y0 + 2, texPx - std::max(2, texPx / 10) - 1);
+
+        for (int y = 0; y < wall.h; ++y) {
+            for (int x = 0; x < wall.w; ++x) {
+                Color c = wall.px[static_cast<size_t>(y * wall.w + x)];
+                if ((x == x0 || x == x1 || y == y0 || y == y1) && y >= y0 && y <= y1 && x >= x0 && x <= x1) {
+                    c = lerpColor(c, Color{26, 24, 20, 255}, 0.45f);
+                } else if (x > x0 && x < x1 && y > y0 && y < y1) {
+                    // Slight recess inside the doorway panel.
+                    c = mulColor(c, Color{230, 230, 230, 255});
+                }
+                wall.px[static_cast<size_t>(y * wall.w + x)] = c;
+            }
+        }
+
+        const size_t n = std::min(wall.px.size(), overlay.px.size());
+        for (size_t i = 0; i < n; ++i) {
+            wall.px[i] = alphaBlendOver(wall.px[i], overlay.px[i]);
+        }
+        return wall;
+    };
+
     for (int v = 0; v < RAYCAST3D_VARIANTS; ++v) {
-        raycast3DDoorClosedTex_[static_cast<size_t>(v)] = generateDoorTile(hashCombine(styleSeed, hashCombine(doorTag, static_cast<uint32_t>(v))), 0, texPx);
-        raycast3DDoorLockedTex_[static_cast<size_t>(v)] = generateLockedDoorTile(hashCombine(styleSeed, hashCombine(lockTag, static_cast<uint32_t>(v))), 0, texPx);
+        const uint32_t doorSeed = hashCombine(styleSeed, hashCombine(doorTag, static_cast<uint32_t>(v)));
+        const uint32_t lockSeed = hashCombine(styleSeed, hashCombine(lockTag, static_cast<uint32_t>(v)));
+        const SpritePixels closedOverlay = generateDoorTile(doorSeed, /*open=*/false, 0, texPx);
+        const SpritePixels lockedOverlay = generateLockedDoorTile(lockSeed, 0, texPx);
+        raycast3DDoorClosedTex_[static_cast<size_t>(v)] = composeDoorSurface(doorSeed, closedOverlay);
+        raycast3DDoorLockedTex_[static_cast<size_t>(v)] = composeDoorSurface(lockSeed, lockedOverlay);
         raycast3DChasmTex_[static_cast<size_t>(v)] = generateChasmTile(hashCombine(lvlSeed, hashCombine(chasmTag, static_cast<uint32_t>(v))), 0, texPx);
     }
 
@@ -6873,6 +6924,75 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
         }
     };
 
+    enum class DoorAxis : uint8_t {
+        Vertical = 0,   // wall mass to N/S, passage to E/W
+        Horizontal = 1, // wall mass to E/W, passage to N/S
+    };
+
+    auto isDoorTile = [&](TileType tt) -> bool {
+        return tt == TileType::DoorClosed || tt == TileType::DoorLocked || tt == TileType::DoorOpen;
+    };
+
+    auto doorFrameScore = [&](TileType tt) -> int {
+        switch (tt) {
+            case TileType::Wall:
+            case TileType::DoorSecret:
+            case TileType::DoorClosed:
+            case TileType::DoorLocked:
+                return 3;
+            case TileType::Pillar:
+            case TileType::Boulder:
+                return 1;
+            default:
+                return 0;
+        }
+    };
+
+    auto doorPassageScore = [&](TileType tt) -> int {
+        switch (tt) {
+            case TileType::Floor:
+            case TileType::DoorOpen:
+            case TileType::StairsUp:
+            case TileType::StairsDown:
+            case TileType::Fountain:
+            case TileType::Altar:
+                return 1;
+            default:
+                return 0;
+        }
+    };
+
+    auto doorAxisAt = [&](int tx, int ty) -> DoorAxis {
+        auto sample = [&](int xx, int yy) -> TileType {
+            if (!d.inBounds(xx, yy)) return TileType::Wall;
+            return d.at(xx, yy).type;
+        };
+
+        const TileType n = sample(tx, ty - 1);
+        const TileType e = sample(tx + 1, ty);
+        const TileType s = sample(tx, ty + 1);
+        const TileType w = sample(tx - 1, ty);
+
+        const int frameNS = doorFrameScore(n) + doorFrameScore(s);
+        const int frameEW = doorFrameScore(e) + doorFrameScore(w);
+        const int passNS = doorPassageScore(n) + doorPassageScore(s);
+        const int passEW = doorPassageScore(e) + doorPassageScore(w);
+
+        const int verticalScore = frameNS * 2 + passEW;
+        const int horizontalScore = frameEW * 2 + passNS;
+
+        if (verticalScore > horizontalScore + 1) return DoorAxis::Vertical;
+        if (horizontalScore > verticalScore + 1) return DoorAxis::Horizontal;
+
+        if (frameEW > frameNS) return DoorAxis::Horizontal;
+        if (frameNS > frameEW) return DoorAxis::Vertical;
+
+        const uint32_t h = hash32(hashCombine(lvlSeed ^ 0xD00A515u,
+                                              hashCombine(static_cast<uint32_t>(tx),
+                                                          static_cast<uint32_t>(ty))));
+        return ((h & 1u) == 0u) ? DoorAxis::Vertical : DoorAxis::Horizontal;
+    };
+
     auto wallOpenMaskAt = [&](int tx, int ty) -> uint8_t {
         uint8_t m = 0;
         if (!d.inBounds(tx, ty - 1) || !isWallMass(d.at(tx, ty - 1).type)) m |= 0x01u; // N
@@ -6917,6 +7037,10 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
         if (!mapTileInView(x, y)) return;
         const Tile& t = d.at(x, y);
         SDL_Rect dst = tileDst(x, y);
+        const bool doorHere = isDoorTile(t.type);
+        const DoorAxis doorAxis = doorHere ? doorAxisAt(x, y) : DoorAxis::Vertical;
+        const bool doorAxisHorizontal = (doorAxis == DoorAxis::Horizontal);
+        const SDL_RendererFlip isoDoorFlip = doorAxisHorizontal ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
 
         if (!t.explored) {
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -7096,7 +7220,12 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
                         const Color doorMod = applyTerrainPalette(baseMod, t.type, style);
                         SDL_SetTextureColorMod(otex, doorMod.r, doorMod.g, doorMod.b);
                         SDL_SetTextureAlphaMod(otex, a);
-                        SDL_RenderCopy(renderer, otex, nullptr, &dst);
+                        if (doorAxisHorizontal) {
+                            const SDL_Point c{ dst.w / 2, dst.h / 2 };
+                            SDL_RenderCopyEx(renderer, otex, nullptr, &dst, 90.0, &c, SDL_FLIP_NONE);
+                        } else {
+                            SDL_RenderCopy(renderer, otex, nullptr, &dst);
+                        }
                         SDL_SetTextureColorMod(otex, 255, 255, 255);
                         SDL_SetTextureAlphaMod(otex, 255);
                     }
@@ -7347,7 +7476,7 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
             }
 
             // Tall blockers & objects.
-            auto drawTall = [&](SDL_Texture* tex, bool outline) {
+            auto drawTall = [&](SDL_Texture* tex, bool outline, SDL_RendererFlip flip) {
                 if (!tex) return;
                 SDL_Rect sdst = spriteDst(x, y);
 
@@ -7377,7 +7506,8 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
                     }
                 }
 
-                drawSpriteWithShadowOutline(renderer, tex, sdst, modTall, aa, /*shadow=*/false, outline);
+                drawSpriteWithShadowOutline(renderer, tex, sdst, modTall, aa, /*shadow=*/false, outline,
+                                            /*angleDeg=*/0.0, flip);
             };
 
             if (t.type == TileType::Wall || t.type == TileType::DoorSecret) {
@@ -7386,70 +7516,70 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
                     const size_t v = pickCoherentVariantIndex(x, y, seed, wallBlockVarIso.size());
                     SDL_Texture* wtex = wallBlockVarIso[v][static_cast<size_t>(frame % FRAMES)];
                     // Wall blocks are already outlined in their procedural art.
-                    drawTall(wtex, /*outline=*/false);
+                    drawTall(wtex, /*outline=*/false, SDL_FLIP_NONE);
                 }
             } else if (t.type == TileType::DoorClosed) {
                 if (!doorBlockClosedVarIso.empty()) {
                     const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xD00Du ^ 0xC105EDu;
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(doorBlockClosedVarIso.size()));
-                    drawTall(doorBlockClosedVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false);
+                    drawTall(doorBlockClosedVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false, isoDoorFlip);
                 } else {
                     // Fallback (should be rare): top-down overlay sprite.
-                    drawTall(doorClosedOverlayTex[static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
+                    drawTall(doorClosedOverlayTex[static_cast<size_t>(frame % FRAMES)], /*outline=*/true, isoDoorFlip);
                 }
             } else if (t.type == TileType::DoorLocked) {
                 if (!doorBlockLockedVarIso.empty()) {
                     const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xD00Du ^ 0x10CCEDu;
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(doorBlockLockedVarIso.size()));
-                    drawTall(doorBlockLockedVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false);
+                    drawTall(doorBlockLockedVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false, isoDoorFlip);
                 } else {
                     // Fallback (should be rare): top-down overlay sprite.
-                    drawTall(doorLockedOverlayTex[static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
+                    drawTall(doorLockedOverlayTex[static_cast<size_t>(frame % FRAMES)], /*outline=*/true, isoDoorFlip);
                 }
             } else if (t.type == TileType::DoorOpen) {
                 if (!doorBlockOpenVarIso.empty()) {
                     const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xD00Du ^ 0x0B0A1u;
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(doorBlockOpenVarIso.size()));
-                    drawTall(doorBlockOpenVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false);
+                    drawTall(doorBlockOpenVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false, isoDoorFlip);
                 }
             } else if (t.type == TileType::Pillar) {
                 const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                static_cast<uint32_t>(y)) ^ 0x9111A0u;
                 if (!pillarBlockVarIso.empty()) {
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(pillarBlockVarIso.size()));
-                    drawTall(pillarBlockVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false);
+                    drawTall(pillarBlockVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false, SDL_FLIP_NONE);
                 } else if (!pillarOverlayVar.empty()) {
                     // Fallback: top-down overlay sprite (less ideal in isometric view).
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(pillarOverlayVar.size()));
-                    drawTall(pillarOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
+                    drawTall(pillarOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true, SDL_FLIP_NONE);
                 }
             } else if (t.type == TileType::Boulder) {
                 const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                static_cast<uint32_t>(y)) ^ 0xB011D3u;
                 if (!boulderBlockVarIso.empty()) {
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(boulderBlockVarIso.size()));
-                    drawTall(boulderBlockVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false);
+                    drawTall(boulderBlockVarIso[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/false, SDL_FLIP_NONE);
                 } else if (!boulderOverlayVar.empty()) {
                     // Fallback: top-down overlay sprite (less ideal in isometric view).
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(boulderOverlayVar.size()));
-                    drawTall(boulderOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
+                    drawTall(boulderOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true, SDL_FLIP_NONE);
                 }
             } else if (t.type == TileType::Fountain) {
                 if (!fountainOverlayVar.empty()) {
                     const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xF017A1u;
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(fountainOverlayVar.size()));
-                    drawTall(fountainOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
+                    drawTall(fountainOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true, SDL_FLIP_NONE);
                 }
             } else if (t.type == TileType::Altar) {
                 if (!altarOverlayVar.empty()) {
                     const uint32_t hh = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
                                                    static_cast<uint32_t>(y)) ^ 0xA17A12u;
                     const size_t idx = static_cast<size_t>(hash32(hh) % static_cast<uint32_t>(altarOverlayVar.size()));
-                    drawTall(altarOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true);
+                    drawTall(altarOverlayVar[idx][static_cast<size_t>(frame % FRAMES)], /*outline=*/true, SDL_FLIP_NONE);
                 }
             }
 
@@ -7826,7 +7956,12 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
 
                 SDL_SetTextureColorMod(otex, om.r, om.g, om.b);
                 SDL_SetTextureAlphaMod(otex, 255);
-                SDL_RenderCopy(renderer, otex, nullptr, &dst);
+                if (doorHere && doorAxisHorizontal) {
+                    const SDL_Point c{ dst.w / 2, dst.h / 2 };
+                    SDL_RenderCopyEx(renderer, otex, nullptr, &dst, 90.0, &c, SDL_FLIP_NONE);
+                } else {
+                    SDL_RenderCopy(renderer, otex, nullptr, &dst);
+                }
                 SDL_SetTextureColorMod(otex, 255, 255, 255);
                 SDL_SetTextureAlphaMod(otex, 255);
             }
@@ -8439,6 +8574,86 @@ auto applyTerrainStyleMod = [&](const Color& baseMod, int tx, int ty, TileType t
 
                 // Fallback: simple tinted quad.
                 SDL_SetRenderDrawColor(renderer, 220, 200, 90, static_cast<uint8_t>(a));
+                SDL_RenderFillRect(renderer, &r);
+            }
+        }
+
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    }
+
+
+    // Draw adhesive fluid (visible tiles only). This is a persistent, tile-based field
+    // that creeps from wet tiles and moves cohesively over time.
+    {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+        const bool haveGasTex = isoView ? (gasVarIso[0][0] != nullptr) : (gasVar[0][0] != nullptr);
+
+        for (int y = 0; y < d.height; ++y) {
+            for (int x = 0; x < d.width; ++x) {
+                const Tile& t = d.at(x, y);
+                if (!t.visible) continue;
+
+                const uint8_t aField = game.adhesiveFluidAt(x, y);
+                if (aField == 0u) continue;
+
+                const uint8_t m = lightMod(x, y);
+
+                int a = 46 + static_cast<int>(aField) * 12;
+                a = (a * static_cast<int>(m)) / 255;
+                a = std::max(26, std::min(210, a));
+
+                // Slow pulse (less flickery than gas).
+                a = std::max(22, std::min(220, a + (static_cast<int>((frame + x * 2 + y * 5) % 7) - 3)));
+
+                SDL_Rect r = tileDst(x, y);
+
+                if (haveGasTex) {
+                    const uint32_t h = hashCombine(hashCombine(lvlSeed, static_cast<uint32_t>(x)),
+                                                   static_cast<uint32_t>(y)) ^ 0xAD15u;
+                    const size_t vi = static_cast<size_t>(hash32(h) % static_cast<uint32_t>(GAS_VARS));
+
+                    const FrameBlend fb = sampleFrameBlend(240u, h ^ 0xA0D5EEDu);
+                    const uint8_t w1 = fb.w1;
+                    const uint8_t w0 = static_cast<uint8_t>(255u - w1);
+
+                    const bool useIso = isoView && (gasVarIso[0][0] != nullptr);
+                    const auto* gset = useIso ? &gasVarIso : &gasVar;
+
+                    SDL_Texture* g0 = (*gset)[vi][static_cast<size_t>(fb.f0)];
+                    SDL_Texture* g1 = (*gset)[vi][static_cast<size_t>(fb.f1)];
+
+                    if (g0 || g1) {
+                        // Warm amber-brown tint to read as sticky fluid (not vapor).
+                        const Color lmod = tileColorMod(x, y, /*visible=*/true);
+                        const Color base{220, 165, 95, 255};
+
+                        const uint8_t mr = static_cast<uint8_t>((static_cast<int>(base.r) * lmod.r) / 255);
+                        const uint8_t mg = static_cast<uint8_t>((static_cast<int>(base.g) * lmod.g) / 255);
+                        const uint8_t mb = static_cast<uint8_t>((static_cast<int>(base.b) * lmod.b) / 255);
+
+                        auto drawOne = [&](SDL_Texture* tex, uint8_t alpha) {
+                            if (!tex || alpha == 0u) return;
+                            SDL_SetTextureColorMod(tex, mr, mg, mb);
+                            SDL_SetTextureAlphaMod(tex, alpha);
+                            SDL_RenderCopy(renderer, tex, nullptr, &r);
+                            SDL_SetTextureColorMod(tex, 255, 255, 255);
+                            SDL_SetTextureAlphaMod(tex, 255);
+                        };
+
+                        const int a0i = (a * static_cast<int>(w0)) / 255;
+                        const int a1i = (a * static_cast<int>(w1)) / 255;
+                        const uint8_t a0 = static_cast<uint8_t>(std::clamp(a0i, 0, 255));
+                        const uint8_t a1 = static_cast<uint8_t>(std::clamp(a1i, 0, 255));
+
+                        drawOne(g0, a0);
+                        drawOne(g1, a1);
+                        continue;
+                    }
+                }
+
+                // Fallback: simple tinted quad.
+                SDL_SetRenderDrawColor(renderer, 200, 150, 90, static_cast<uint8_t>(a));
                 SDL_RenderFillRect(renderer, &r);
             }
         }
@@ -10678,7 +10893,7 @@ void Renderer::drawInventoryOverlay(const Game& game) {
                     nRef = pcIt->second.nRef;
                     nInf = pcIt->second.nInf;
                 } else {
-                    CraftPotCounts c{};
+                    CraftPotCounts counts{};
                     for (const auto& it2 : inv) {
                         if (!isCraftIngredientKind(it2.kind)) continue;
                         const bool locked2 = (it2.buc < 0) && !game.equippedTag(it2.id).empty();
@@ -10686,15 +10901,15 @@ void Renderer::drawInventoryOverlay(const Game& game) {
                 
                         const auto h = game.craftingUiHint(it, it2);
                         if (!h.valid || h.locked) continue;
-                        if (h.shardRefinement) c.nRef += 1;
-                        else if (h.shardInfusion) c.nInf += 1;
-                        else if (!h.known) c.nNew += 1;
+                        if (h.shardRefinement) counts.nRef += 1;
+                        else if (h.shardInfusion) counts.nInf += 1;
+                        else if (!h.known) counts.nNew += 1;
                     }
                 
-                    nNew = c.nNew;
-                    nRef = c.nRef;
-                    nInf = c.nInf;
-                    craftPotCache.emplace(it.id, c);
+                    nNew = counts.nNew;
+                    nRef = counts.nRef;
+                    nInf = counts.nInf;
+                    craftPotCache.emplace(it.id, counts);
                 }
 
                 const int total = nNew + nRef + nInf;
@@ -10806,7 +11021,6 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         // predicted craft OUTPUT in the right panel (icon + stats) so scanning candidates
         // is about what you will make, not just what you're hovering.
         bool showCraftResult = false;
-        Game::CraftComputed craftCC{};
         Item craftOut{};
         Game::CraftUIHint craftOutHint{};
         bool haveCraftOutHint = false;
@@ -10829,8 +11043,11 @@ void Renderer::drawInventoryOverlay(const Game& game) {
                     showCraftResult = true;
                     craftOutHint = h;
                     haveCraftOutHint = true;
-                    craftCC = game.computeCraftComputed(*ing1, selIt);
-                    craftOut = craftCC.out;
+                    craftOut.kind = h.outKind;
+                    craftOut.spriteSeed = h.sig;
+                    craftOut.enchant = h.outEnchant;
+                    craftOut.charges = h.outCharges;
+                    craftOut.count = 1;
                     craftOut.id = 0;
                 }
             }
@@ -10888,10 +11105,10 @@ void Renderer::drawInventoryOverlay(const Game& game) {
             {
                 const int mini = 28;
                 const int gap = 6;
-                const int charW = scale * 6;
+                const int miniCharW = scale * 6;
                 const int textY = iy + (mini - 14) / 2;
 
-                const int needW = mini + gap + charW + gap + mini + gap + (2 * charW) + gap + mini;
+                const int needW = mini + gap + miniCharW + gap + mini + gap + (2 * miniCharW) + gap + mini;
                 if (needW <= infoRect.w) {
                     auto drawMiniIcon = [&](Item src, int dx, int dy, int sz, int seedOff) {
                         SDL_Rect dst{ dx, dy, sz, sz };
@@ -10916,11 +11133,11 @@ void Renderer::drawInventoryOverlay(const Game& game) {
                     drawMiniIcon(a, mx, iy, mini, a.id + 17);
                     mx += mini + gap;
                     drawText5x7(renderer, mx, textY, scale, gray, "+");
-                    mx += charW + gap;
+                    mx += miniCharW + gap;
                     drawMiniIcon(b, mx, iy, mini, b.id + 23);
                     mx += mini + gap;
                     drawText5x7(renderer, mx, textY, scale, gray, "=>");
-                    mx += (2 * charW) + gap;
+                    mx += (2 * miniCharW) + gap;
                     Item r = craftOut;
                     r.count = 1;
                     drawMiniIcon(r, mx, iy, mini, 1337);
@@ -10943,40 +11160,6 @@ void Renderer::drawInventoryOverlay(const Game& game) {
         SDL_Texture* tex = itemTexture(visIt, lastFrame + visIt.id);
         if (tex) {
             SDL_RenderCopy(renderer, tex, nullptr, &sprDst);
-        }
-
-        // When previewing a craft RESULT, also show the byproduct sprite (if any).
-        if (showCraftResult && craftCC.hasByproduct) {
-            const int bpSize = 32;
-            const int bx = ix + previewPx + 14;
-            const int by = iy + (previewPx - bpSize) / 2;
-
-            if (bx + bpSize <= infoRect.x + infoRect.w) {
-                SDL_Rect bpDst{ bx, by, bpSize, bpSize };
-
-                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 45);
-                SDL_RenderFillRect(renderer, &bpDst);
-                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
-
-                Item bp = craftCC.byproduct;
-                bp.id = 0;
-
-                if (isHallucinating(game)) {
-                    bp.kind = hallucinatedItemKind(game, bp);
-                }
-
-                applyIdentificationVisuals(game, bp);
-
-                SDL_Texture* btex = itemTexture(bp, lastFrame + bp.id + 1337);
-                if (btex) {
-                    SDL_RenderCopy(renderer, btex, nullptr, &bpDst);
-                }
-
-                if (bp.count > 1) {
-                    drawText5x7(renderer, bx + 2, by + bpSize - 14, scale, gray, "x" + std::to_string(bp.count));
-                }
-            }
         }
 
         iy += previewPx + 10;
@@ -14942,4 +15125,3 @@ void Renderer::drawLookOverlay(const Game& game) {
         }
     }
 }
-

@@ -74,6 +74,116 @@ int Game::playerFootstepNoiseVolumeAt(Vec2i pos) const {
     return std::max(0, vol);
 }
 
+bool Game::anyLivingShopkeeperInRoom(const Room* shopRoom) const {
+    if (shopRoom == nullptr) return false;
+    for (const Entity& e : ents) {
+        if (e.id == playerId_) continue;
+        if (e.hp <= 0) continue;
+        if (e.kind != EntityKind::Shopkeeper) continue;
+        if (!shopRoom->contains(e.pos)) continue;
+        return true;
+    }
+    return false;
+}
+
+bool Game::anyPeacefulShopkeeperInRoom(const Room* shopRoom) const {
+    if (shopRoom == nullptr) return false;
+    for (const Entity& e : ents) {
+        if (e.id == playerId_) continue;
+        if (e.hp <= 0) continue;
+        if (e.kind != EntityKind::Shopkeeper) continue;
+        if (e.alerted) continue;
+        if (!shopRoom->contains(e.pos)) continue;
+        return true;
+    }
+    return false;
+}
+
+void Game::announceEnteredShop(Vec2i pos, bool includeDebtReminder) {
+    const Room* shopRoom = shopgen::shopRoomAt(dung, pos);
+    if (shopRoom == nullptr) {
+        pushMsg("YOU ENTER A SHOP.", MessageKind::Info, true);
+        return;
+    }
+
+    const shopgen::ShopProfile prof = shopgen::profileFor(seed_, depth_, *shopRoom);
+    const std::string keeperName = shopgen::shopkeeperNameFor(prof);
+    pushMsg("YOU ENTER " + shopgen::shopNameFor(prof) + ".", MessageKind::Info, true);
+
+    const bool peacefulKeeperHere = anyPeacefulShopkeeperInRoom(shopRoom);
+    const bool livingKeeperHere = anyLivingShopkeeperInRoom(shopRoom);
+    if (peacefulKeeperHere) {
+        pushMsg("SHOPKEEPER " + keeperName + " SAYS: " + shopgen::greetingFor(prof), MessageKind::Info, true);
+        if (includeDebtReminder) {
+            const int owedHere = shopDebtThisDepth();
+            if (owedHere > 0) {
+                pushMsg("SHOPKEEPER " + keeperName + " SAYS: \"YOU STILL OWE " + std::to_string(owedHere) + " GOLD.\"", MessageKind::Warning, true);
+            }
+        }
+    } else if (livingKeeperHere) {
+        pushMsg("SHOPKEEPER " + keeperName + " WATCHES YOU COLDLY.", MessageKind::Warning, true);
+    } else {
+        pushMsg("THE SHOP SEEMS UNATTENDED.", MessageKind::Info, false);
+    }
+}
+
+void Game::onPlayerShopTransition(Vec2i from, Vec2i to, bool allowDebtAlarm, bool includeEntryDebtReminder) {
+    const bool wasInShop = (roomTypeAt(dung, from) == RoomType::Shop);
+    const bool nowInShop = (roomTypeAt(dung, to) == RoomType::Shop);
+
+    if (wasInShop && !nowInShop && allowDebtAlarm) {
+        if (shopDebtThisDepth() > 0) {
+            triggerShopTheftAlarm(from, to);
+        }
+    }
+
+    if (!wasInShop && nowInShop) {
+        announceEnteredShop(to, includeEntryDebtReminder);
+    }
+}
+
+bool Game::attemptPlayerWebBreak(bool weakAttempt) {
+    Entity& p = playerMut();
+    if (p.hp <= 0) return false;
+    if (entityCanPhase(p.kind)) return false;
+    if (p.effects.webTurns <= 0) return false;
+
+    // Base breakout chance: strength/dexterity/level all contribute.
+    float breakChance = 0.06f;
+    breakChance += 0.03f * static_cast<float>(std::max(0, playerMight()));
+    breakChance += 0.02f * static_cast<float>(std::max(0, playerAgility()));
+    breakChance += 0.01f * static_cast<float>(std::max(0, charLevel - 1));
+
+    // Pity ramp: as web duration runs down from repeated failed turns, breakout
+    // gets meaningfully easier.
+    const float remain01 = std::clamp((static_cast<float>(p.effects.webTurns) - 1.0f) / 6.0f, 0.0f, 1.0f);
+    breakChance += (1.0f - remain01) * 0.18f;
+
+    if (weakAttempt) breakChance *= 0.55f;
+    breakChance = std::clamp(breakChance, weakAttempt ? 0.03f : 0.06f, weakAttempt ? 0.55f : 0.85f);
+
+    if (rng.chance(breakChance)) {
+        p.effects.webTurns = 0;
+        if (weakAttempt) {
+            pushMsg("YOU WRENCH LOOSE WHILE WAITING!", MessageKind::Success, true);
+            emitNoise(p.pos, 6);
+        } else {
+            pushMsg("YOU RIP FREE OF THE WEBBING!", MessageKind::Success, true);
+            emitNoise(p.pos, 9);
+        }
+    } else {
+        if (weakAttempt) {
+            pushMsg("YOU TEST THE WEBBING, BUT STAY STUCK.", MessageKind::Warning, true);
+            emitNoise(p.pos, 4);
+        } else {
+            pushMsg("YOU STRUGGLE AGAINST STICKY WEBBING!", MessageKind::Warning, true);
+            emitNoise(p.pos, 7);
+        }
+    }
+
+    return true;
+}
+
 
 bool Game::tryMove(Entity& e, int dx, int dy) {
     if (e.hp <= 0) return false;
@@ -90,10 +200,8 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     // Webbed: you can still act (use items, fire, etc.) but cannot move.
     // Attempting to move consumes a turn (so the web can wear off).
     if (!phasing && e.effects.webTurns > 0) {
-        if (e.kind == EntityKind::Player) {
-            pushMsg("YOU STRUGGLE AGAINST STICKY WEBBING!", MessageKind::Warning, true);
-            // Struggling is loud enough to draw attention.
-            emitNoise(e.pos, 7);
+        if (e.id == playerId_) {
+            return attemptPlayerWebBreak(/*weakAttempt=*/false);
         }
         return true;
     }
@@ -373,35 +481,7 @@ bool Game::tryMove(Entity& e, int dx, int dy) {
     if (!moved) return false;
 
     if (e.kind == EntityKind::Player) {
-        const bool wasInShop = (roomTypeAt(dung, prevPos) == RoomType::Shop);
-        const bool nowInShop = (roomTypeAt(dung, e.pos) == RoomType::Shop);
-        if (wasInShop && !nowInShop) {
-            const int debt = shopDebtThisDepth();
-            if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
-                triggerShopTheftAlarm(prevPos, e.pos);
-            }
-        }
-        if (!wasInShop && nowInShop) {
-            if (const Room* shopRoom = shopgen::shopRoomAt(dung, e.pos)) {
-                const shopgen::ShopProfile prof = shopgen::profileFor(seed_, depth_, *shopRoom);
-                pushMsg("YOU ENTER " + shopgen::shopNameFor(prof) + ".", MessageKind::Info, true);
-
-                bool keeperHere = false;
-                for (const Entity& en : ents) {
-                    if (en.kind == EntityKind::Shopkeeper && !en.alerted && shopRoom->contains(en.pos)) {
-                        keeperHere = true;
-                        break;
-                    }
-                }
-                if (keeperHere) {
-                    pushMsg("SHOPKEEPER " + shopgen::shopkeeperNameFor(prof) + " SAYS: " + shopgen::greetingFor(prof), MessageKind::Info, true);
-                } else {
-                    pushMsg("THE SHOP SEEMS UNATTENDED.", MessageKind::Info, false);
-                }
-            } else {
-                pushMsg("YOU ENTER A SHOP.", MessageKind::Info, true);
-            }
-        }
+        onPlayerShopTransition(prevPos, e.pos, /*allowDebtAlarm=*/true, /*includeEntryDebtReminder=*/true);
         // Footstep noise: small, but enough for nearby monsters to investigate.
         // Scales with encumbrance + armor clank + substrate material, and respects sneak.
         const int vol = playerFootstepNoiseVolumeAt(e.pos);
@@ -806,35 +886,7 @@ void Game::triggerTrapAt(Vec2i pos, Entity& victim, bool fromDisarm) {
             victim.pos = dst;
             if (isPlayer) {
                 recomputeFov();
-                const bool wasInShop = (roomTypeAt(dung, prevPos) == RoomType::Shop);
-                const bool nowInShop = (roomTypeAt(dung, victim.pos) == RoomType::Shop);
-                if (wasInShop && !nowInShop) {
-                    const int debt = shopDebtThisDepth();
-                    if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
-                        triggerShopTheftAlarm(prevPos, victim.pos);
-                    }
-                }
-                if (!wasInShop && nowInShop) {
-                    if (const Room* shopRoom = shopgen::shopRoomAt(dung, victim.pos)) {
-                        const shopgen::ShopProfile prof = shopgen::profileFor(seed_, depth_, *shopRoom);
-                        pushMsg("YOU ENTER " + shopgen::shopNameFor(prof) + ".", MessageKind::Info, true);
-
-                        bool keeperHere = false;
-                        for (const Entity& en : ents) {
-                            if (en.kind == EntityKind::Shopkeeper && !en.alerted && shopRoom->contains(en.pos)) {
-                                keeperHere = true;
-                                break;
-                            }
-                        }
-                        if (keeperHere) {
-                            pushMsg("SHOPKEEPER " + shopgen::shopkeeperNameFor(prof) + " SAYS: " + shopgen::greetingFor(prof), MessageKind::Info, true);
-                        } else {
-                            pushMsg("THE SHOP SEEMS UNATTENDED.", MessageKind::Info, false);
-                        }
-                    } else {
-                        pushMsg("YOU ENTER A SHOP.", MessageKind::Info, true);
-                    }
-                }
+                onPlayerShopTransition(prevPos, victim.pos, /*allowDebtAlarm=*/true, /*includeEntryDebtReminder=*/true);
             }
             break;
         }
@@ -1489,31 +1541,7 @@ void Game::triggerSigilAt(Vec2i pos, Entity& victim) {
                             say("A FORCE YANKS YOU BACK!", MessageKind::Warning, true);
                         }
                     }
-
-                    // If the teleport brought you into a shop, announce the shop
-                    // (procedural identity + greeting).
-                    const bool finalNowInShop = (roomTypeAt(dung, victim.pos) == RoomType::Shop);
-                    if (!wasInShop && finalNowInShop) {
-                        if (const Room* shopRoom = shopgen::shopRoomAt(dung, victim.pos)) {
-                            const shopgen::ShopProfile prof = shopgen::profileFor(seed_, depth_, *shopRoom);
-                            say("YOU ENTER " + shopgen::shopNameFor(prof) + ".", MessageKind::Info, true);
-
-                            bool keeperHere = false;
-                            for (const Entity& en : ents) {
-                                if (en.kind == EntityKind::Shopkeeper && !en.alerted && shopRoom->contains(en.pos)) {
-                                    keeperHere = true;
-                                    break;
-                                }
-                            }
-                            if (keeperHere) {
-                                say("SHOPKEEPER " + shopgen::shopkeeperNameFor(prof) + " SAYS: " + shopgen::greetingFor(prof), MessageKind::Info, true);
-                            } else {
-                                say("THE SHOP SEEMS UNATTENDED.", MessageKind::Info, false);
-                            }
-                        } else {
-                            say("YOU ENTER A SHOP.", MessageKind::Info, true);
-                        }
-                    }
+                    onPlayerShopTransition(from, victim.pos, /*allowDebtAlarm=*/false, /*includeEntryDebtReminder=*/true);
                 }
 
                 // A teleport should wake up the floor a bit.
@@ -1998,33 +2026,7 @@ bool Game::disarmTrap() {
                     Vec2i prevPos = p.pos;
                     p.pos = dst;
                     recomputeFov();
-                    const bool wasInShop = (roomTypeAt(dung, prevPos) == RoomType::Shop);
-                    const bool nowInShop = (roomTypeAt(dung, p.pos) == RoomType::Shop);
-                    if (wasInShop && !nowInShop) {
-                        const int debt = shopDebtThisDepth();
-                        if (debt > 0 && anyPeacefulShopkeeper(ents, playerId_)) {
-                            triggerShopTheftAlarm(prevPos, p.pos);
-                        }
-                    }
-
-                    if (!wasInShop && nowInShop) {
-                        if (const Room* shopRoom = shopgen::shopRoomAt(dung, p.pos)) {
-                            const shopgen::ShopProfile prof = shopgen::profileFor(seed_, depth_, *shopRoom);
-                            pushMsg("YOU ENTER " + shopgen::shopNameFor(prof) + ".", MessageKind::Info, true);
-
-                            bool keeperHere = false;
-                            for (const Entity& en : ents) {
-                                if (en.kind == EntityKind::Shopkeeper && !en.alerted && shopRoom->contains(en.pos)) {
-                                    keeperHere = true;
-                                    break;
-                                }
-                            }
-                            if (keeperHere) {
-                                pushMsg("SHOPKEEPER " + shopgen::shopkeeperNameFor(prof) + " SAYS: " + shopgen::greetingFor(prof),
-                                    MessageKind::Info, true);
-                            }
-                        }
-                    }
+                    onPlayerShopTransition(prevPos, p.pos, /*allowDebtAlarm=*/true, /*includeEntryDebtReminder=*/true);
                     break;
                 }
                 case TrapKind::Alarm: {
@@ -3453,6 +3455,45 @@ bool Game::augury() {
     return true;
 }
 
+void Game::standDownMerchantGuild() {
+    // Current level: calm shopkeepers.
+    setShopkeepersAlerted(ents, playerId_, player().pos, false);
+
+    // Remove merchant guild guards from this level.
+    ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
+        return e.id != playerId_ && e.hp > 0 && e.kind == EntityKind::Guard;
+    }), ents.end());
+
+    // Stored levels: calm shopkeepers + remove guards.
+    for (auto& [d, st] : levels) {
+        for (auto& e : st.monsters) {
+            if (e.hp <= 0) continue;
+            if (e.kind == EntityKind::Shopkeeper) {
+                e.alerted = false;
+            }
+        }
+
+        st.monsters.erase(std::remove_if(st.monsters.begin(), st.monsters.end(), [&](const Entity& e) {
+            return e.hp > 0 && e.kind == EntityKind::Guard;
+        }), st.monsters.end());
+    }
+
+    // Trapdoor fallers are keyed by (branch, depth), so remove guards across all entries.
+    for (auto it = trapdoorFallers_.begin(); it != trapdoorFallers_.end(); ) {
+        auto& q = it->second;
+        q.erase(std::remove_if(q.begin(), q.end(), [&](const Entity& e) {
+            return e.hp > 0 && e.kind == EntityKind::Guard;
+        }), q.end());
+        if (q.empty()) {
+            it = trapdoorFallers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    merchantGuildAlerted_ = false;
+}
+
 bool Game::payAtShop() {
     if (gameOver || gameWon) return false;
 
@@ -3461,50 +3502,11 @@ bool Game::payAtShop() {
         return false;
     }
 
-    if (!anyLivingShopkeeper(ents, playerId_)) {
-        pushMsg("THERE IS NO SHOPKEEPER HERE.", MessageKind::Info, true);
+    const Room* here = shopgen::shopRoomAt(dung, player().pos);
+    if (!anyLivingShopkeeperInRoom(here)) {
+        pushMsg("THERE IS NO SHOPKEEPER IN THIS SHOP.", MessageKind::Info, true);
         return false;
     }
-
-    auto standDownMerchantGuild = [&]() {
-        // Calm shopkeepers on the current level.
-        setShopkeepersAlerted(ents, playerId_, player().pos, false);
-
-        // Remove merchant guild guards from this level.
-        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
-            return e.id != playerId_ && e.hp > 0 && e.kind == EntityKind::Guard;
-        }), ents.end());
-
-        // Calm shopkeepers + remove guards from stored levels (so the world "cools down" everywhere).
-        for (auto& [d, st] : levels) {
-            for (auto& e : st.monsters) {
-                if (e.hp <= 0) continue;
-                if (e.kind == EntityKind::Shopkeeper) {
-                    e.alerted = false;
-                }
-            }
-
-            st.monsters.erase(std::remove_if(st.monsters.begin(), st.monsters.end(), [&](const Entity& e) {
-                return e.hp > 0 && e.kind == EntityKind::Guard;
-            }), st.monsters.end());
-        }
-
-        // Also cancel any queued trapdoor fallers that are guards.
-        // Trapdoor fallers are keyed by (branch, depth), so remove guards across all entries.
-        for (auto it = trapdoorFallers_.begin(); it != trapdoorFallers_.end(); ) {
-            auto& q = it->second;
-            q.erase(std::remove_if(q.begin(), q.end(), [&](const Entity& e) {
-                return e.hp > 0 && e.kind == EntityKind::Guard;
-            }), q.end());
-            if (q.empty()) {
-                it = trapdoorFallers_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
-        merchantGuildAlerted_ = false;
-    };
 
     const int availableGold = countGold(inv);
     if (availableGold <= 0) {
@@ -3638,43 +3640,6 @@ bool Game::payAtCamp() {
         pushMsg("YOU MUST BE AT CAMP TO SETTLE YOUR DEBTS.", MessageKind::Info, true);
         return false;
     }
-
-    auto standDownMerchantGuild = [&]() {
-        // Current level (camp) shouldn't have shopkeepers/guards, but keep it symmetric.
-        setShopkeepersAlerted(ents, playerId_, player().pos, false);
-        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](const Entity& e) {
-            return e.id != playerId_ && e.hp > 0 && e.kind == EntityKind::Guard;
-        }), ents.end());
-
-        // Stored levels: calm shopkeepers + remove guards.
-        for (auto& [d, st] : levels) {
-            for (auto& e : st.monsters) {
-                if (e.hp <= 0) continue;
-                if (e.kind == EntityKind::Shopkeeper) {
-                    e.alerted = false;
-                }
-            }
-
-            st.monsters.erase(std::remove_if(st.monsters.begin(), st.monsters.end(), [&](const Entity& e) {
-                return e.hp > 0 && e.kind == EntityKind::Guard;
-            }), st.monsters.end());
-        }
-
-        // Trapdoor fallers are keyed by (branch, depth), so remove guards across all entries.
-        for (auto it = trapdoorFallers_.begin(); it != trapdoorFallers_.end(); ) {
-            auto& q = it->second;
-            q.erase(std::remove_if(q.begin(), q.end(), [&](const Entity& e) {
-                return e.hp > 0 && e.kind == EntityKind::Guard;
-            }), q.end());
-            if (q.empty()) {
-                it = trapdoorFallers_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
-        merchantGuildAlerted_ = false;
-    };
 
     const int owedTotal = shopDebtTotal();
     if (owedTotal <= 0) {

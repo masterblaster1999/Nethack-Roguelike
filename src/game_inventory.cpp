@@ -2255,6 +2255,12 @@ bool Game::equipSelected() {
     const Item& it = inv[static_cast<size_t>(invSel)];
     const ItemDef& d = itemDef(it.kind);
 
+    // Some inventory tools are intentionally non-equipable but should still work from
+    // the "equip/wield" input path for smoother classic controls.
+    if (d.slot == EquipSlot::None && isInventoryQuickUseKind(it.kind)) {
+        return useSelected();
+    }
+
     auto equippedItemCursed = [&](int id) -> bool {
         if (id == 0) return false;
         const int idx = findItemIndexById(inv, id);
@@ -2675,6 +2681,7 @@ bool Game::useSelected() {
 
     auto consumeOneStackable = [&]() {
         if (!isStackable(it.kind)) return;
+        const ItemKind usedKind = it.kind;
 
         // Using up unpaid shop goods still leaves you owing the shopkeeper.
         // Record the per-unit cost into the shop debt ledger before consuming.
@@ -2690,10 +2697,15 @@ bool Game::useSelected() {
             inv.erase(inv.begin() + invSel);
             invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
         }
+
+        if (isScrollKind(usedKind)) {
+            ++conductScrollsRead_;
+        }
     };
 
     auto consumeOneNonStackable = [&]() {
         if (invSel < 0 || invSel >= static_cast<int>(inv.size())) return;
+        const ItemKind usedKind = it.kind;
 
         // Reading/using an unpaid item still leaves you owing the shopkeeper.
         if (it.shopPrice > 0 && it.shopDepth > 0) {
@@ -2705,6 +2717,10 @@ bool Game::useSelected() {
 
         inv.erase(inv.begin() + invSel);
         invSel = clampi(invSel, 0, std::max(0, static_cast<int>(inv.size()) - 1));
+
+        if (isSpellbookKind(usedKind)) {
+            ++conductSpellbooksRead_;
+        }
     };
 
 
@@ -2751,6 +2767,12 @@ bool Game::useSelected() {
 
         // Not currently out: place the companion by targeting a valid tile.
         beginCaptureTargeting(it.id);
+        return false;
+    }
+
+    // Crafting kits open the dedicated crafting inventory flow.
+    if (it.kind == ItemKind::CraftingKit) {
+        beginCrafting();
         return false;
     }
 
@@ -2925,12 +2947,8 @@ bool Game::useSelected() {
         return true;
     }
 
-    // Spellbooks (WIP): learn a spell and consume the book.
-    if (it.kind == ItemKind::SpellbookMagicMissile || it.kind == ItemKind::SpellbookBlink ||
-        it.kind == ItemKind::SpellbookMinorHeal || it.kind == ItemKind::SpellbookDetectTraps ||
-        it.kind == ItemKind::SpellbookFireball || it.kind == ItemKind::SpellbookStoneskin ||
-        it.kind == ItemKind::SpellbookHaste || it.kind == ItemKind::SpellbookInvisibility ||
-        it.kind == ItemKind::SpellbookPoisonCloud) {
+    // Spellbooks: learn the spell if unknown; re-reading known books grants minor mana insight.
+    if (isSpellbookKind(it.kind)) {
 
         SpellKind sk = SpellKind::MagicMissile;
         switch (it.kind) {
@@ -2945,6 +2963,7 @@ bool Game::useSelected() {
             case ItemKind::SpellbookPoisonCloud: sk = SpellKind::PoisonCloud; break;
             default: break;
         }
+        const SpellDef& sd = spellDef(sk);
 
         const uint32_t idx = static_cast<uint32_t>(sk);
         const uint32_t bit = (idx < 32u) ? (1u << idx) : 0u;
@@ -2956,7 +2975,37 @@ bool Game::useSelected() {
             ss << "YOU LEARN " << spellName(sk) << ".";
             pushMsg(ss.str(), MessageKind::Success, true);
         } else {
-            pushMsg("YOU STUDY THE BOOK, BUT LEARN NOTHING NEW.", MessageKind::Info, true);
+            std::ostringstream ss;
+            ss << "YOU REHEARSE " << spellName(sk) << ".";
+            pushMsg(ss.str(), MessageKind::Info, true);
+        }
+
+        const int maxMana = std::max(0, playerManaMax());
+        const int beforeMana = mana_;
+
+        int insightGain = already ? std::max(1, (sd.manaCost + 1) / 2)
+                                  : std::max(2, sd.manaCost + 1);
+        if (it.buc > 0) {
+            insightGain += std::max(1, sd.manaCost / 2);
+        } else if (it.buc < 0) {
+            insightGain = std::max(1, insightGain / 2);
+        }
+
+        mana_ = clampi(mana_ + insightGain, 0, maxMana);
+
+        if (it.buc < 0) {
+            Entity& p = playerMut();
+            const int conf = clampi(1 + sd.manaCost / 2 + rng.range(0, 2), 1, 10);
+            p.effects.confusionTurns = std::max(p.effects.confusionTurns, conf);
+            pushMsg("THE CURSED GLYPHS SCRAMBLE YOUR THOUGHTS.", MessageKind::Warning, true);
+        }
+
+        if (mana_ > beforeMana) {
+            std::ostringstream ss;
+            ss << "ARCANE INSIGHT RESTORES MANA " << beforeMana << "->" << mana_ << ".";
+            pushMsg(ss.str(), MessageKind::Info, true);
+        } else if (already) {
+            pushMsg("THE LESSON FEELS FAMILIAR.", MessageKind::System, true);
         }
 
         consumeOneNonStackable();

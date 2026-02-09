@@ -520,6 +520,13 @@ void Game::handleAction(Action a) {
                 identifyRandom();
                 closeInventory();
                 break;
+            case Action::Spells:
+                // Allow the spells hotkey to work even while this modal prompt is open.
+                invIdentifyMode = false;
+                invEnchantRingMode = false;
+                closeInventory();
+                openSpells();
+                break;
             default:
                 // Ignore other actions while the prompt is active.
                 break;
@@ -603,6 +610,12 @@ void Game::handleAction(Action a) {
                 // Treat cancel as "pick randomly" so the scroll isn't wasted.
                 enchantRandom();
                 closeInventory();
+                break;
+            case Action::Spells:
+                // Allow the spells hotkey to work even while this modal prompt is open.
+                invEnchantRingMode = false;
+                closeInventory();
+                openSpells();
                 break;
             default:
                 // Ignore other actions while the prompt is active.
@@ -943,6 +956,11 @@ void Game::handleAction(Action a) {
                         break;
                 }
                 break;
+            case Action::Spells:
+                // Keep global spells hotkey behavior consistent from modal inventory prompts.
+                closeInventory();
+                openSpells();
+                break;
 
             default:
                 // Ignore other actions while the prompt is active.
@@ -1246,6 +1264,11 @@ void Game::handleAction(Action a) {
                     pushMsg("CRAFTING MODE EXITED.", MessageKind::System, true);
                 }
                 rebuildCraftingPreview();
+                break;
+            case Action::Spells:
+                // Keep global spells hotkey behavior consistent while crafting.
+                closeInventory();
+                openSpells();
                 break;
 
             default:
@@ -2832,7 +2855,7 @@ if (optionsSel == 20) {
                     const Item& it = inv[static_cast<size_t>(invSel)];
                     const ItemDef& d = itemDef(it.kind);
                     if (d.slot != EquipSlot::None) acted = equipSelected();
-                    else if (d.consumable) acted = useSelected();
+                    else if (d.consumable || isInventoryQuickUseKind(it.kind)) acted = useSelected();
                 }
                 break;
             }
@@ -3000,7 +3023,10 @@ if (optionsSel == 20) {
 
             fishingFightTurnsLeft_ = std::max(0, fishingFightTurnsLeft_ - 1);
 
-            // Break / escape conditions.
+            // Resolution order matters:
+            // - Break/slip outcomes always fail immediately.
+            // - A successful reel-in should still count on the final available turn.
+            // - Timeout is checked last.
             if (fishingFightTension_ >= 100) {
                 // Line snaps: punish the rod a bit.
                 Item& rod = inv[static_cast<size_t>(rodIdx)];
@@ -3022,13 +3048,13 @@ if (optionsSel == 20) {
                 return true;
             }
 
-            if (fishingFightTurnsLeft_ <= 0) {
-                loseFish("THE FISH TIRES OF YOU AND ESCAPES.", MessageKind::Info);
+            if (fishingFightProgress_ >= 100) {
+                landFish();
                 return true;
             }
 
-            if (fishingFightProgress_ >= 100) {
-                landFish();
+            if (fishingFightTurnsLeft_ <= 0) {
+                loseFish("THE FISH TIRES OF YOU AND ESCAPES.", MessageKind::Info);
                 return true;
             }
 
@@ -3085,8 +3111,13 @@ if (optionsSel == 20) {
         case Action::RunDownLeft:  requestAutoRun(Vec2i{-1, 1}); acted = false; break;
         case Action::RunDownRight: requestAutoRun(Vec2i{1, 1}); acted = false; break;
         case Action::Wait:
-            pushMsg("YOU WAIT.", MessageKind::Info);
-            acted = true;
+            if (p.effects.webTurns > 0 && !entityCanPhase(p.kind)) {
+                // Balance/QoL: waiting while webbed makes a weaker breakout attempt.
+                acted = attemptPlayerWebBreak(/*weakAttempt=*/true);
+            } else {
+                pushMsg("YOU WAIT.", MessageKind::Info);
+                acted = true;
+            }
             break;
         case Action::Parry:
             if (p.effects.parryTurns > 0) pushMsg("YOU HOLD YOUR GUARD.", MessageKind::Info);
@@ -3764,6 +3795,227 @@ void Game::tame() {
 
 
 
+void Game::tickLifeCycles() {
+    if (ents.empty()) return;
+
+    auto ensureAdultBaseline = [](Entity& e) {
+        if (e.lifeBaseHpMax <= 0) e.lifeBaseHpMax = std::max(1, e.hpMax);
+        if (e.lifeBaseAtk <= 0) e.lifeBaseAtk = std::max(1, e.baseAtk);
+        if (e.lifeBaseDef < 0) e.lifeBaseDef = std::max(0, e.baseDef);
+        if (e.lifeBaseSpeed <= 0) e.lifeBaseSpeed = std::max(1, e.speed);
+    };
+
+    auto applyStageStats = [&](Entity& e, bool preserveHpRatio) {
+        ensureAdultBaseline(e);
+
+        const int oldHpMax = std::max(1, e.hpMax);
+        const int newHpMax = std::max(1, (e.lifeBaseHpMax * lifecycleStageHpPercent(e.lifeStage)) / 100);
+        const int newAtk = std::max(1, (e.lifeBaseAtk * lifecycleStageAtkPercent(e.lifeStage)) / 100);
+        const int newDef = std::max(0, (e.lifeBaseDef * lifecycleStageDefPercent(e.lifeStage)) / 100);
+        const int newSpeed = std::max(35, (e.lifeBaseSpeed * lifecycleStageSpeedPercent(e.lifeStage)) / 100);
+
+        e.hpMax = newHpMax;
+        e.baseAtk = newAtk;
+        e.baseDef = newDef;
+        e.speed = newSpeed;
+
+        if (preserveHpRatio) {
+            const int64_t scaled = (static_cast<int64_t>(std::max(0, e.hp)) * newHpMax) / oldHpMax;
+            e.hp = static_cast<int>(scaled);
+            if (e.hp <= 0 && newHpMax > 0) e.hp = 1;
+        } else {
+            e.hp = newHpMax;
+        }
+        e.hp = std::clamp(e.hp, 0, e.hpMax);
+    };
+
+    struct PendingBirth {
+        EntityKind kind = EntityKind::Goblin;
+        Vec2i pos{0, 0};
+        int groupId = 0;
+        bool friendly = false;
+        bool alerted = false;
+        uint32_t seed = 0u;
+    };
+    std::vector<PendingBirth> births;
+
+    auto isBirthTile = [&](Vec2i p) {
+        if (!dung.inBounds(p.x, p.y)) return false;
+        if (!dung.isWalkable(p.x, p.y)) return false;
+        if (entityAt(p.x, p.y) != nullptr) return false;
+        if (p == dung.stairsUp || p == dung.stairsDown) return false;
+        for (const auto& b : births) {
+            if (b.pos == p) return false;
+        }
+        return true;
+    };
+
+    auto countLocalSameKind = [&](const Entity& src, int radius) {
+        int n = 0;
+        for (const auto& e : ents) {
+            if (e.hp <= 0) continue;
+            if (e.kind != src.kind) continue;
+            if (chebyshev(e.pos, src.pos) > radius) continue;
+            ++n;
+        }
+        return n;
+    };
+
+    const int matureAge = lifecycleStageDurationTurns(LifeStage::Newborn)
+                        + lifecycleStageDurationTurns(LifeStage::Child);
+
+    static const Vec2i kDirs8[8] = {
+        {1, 0}, {-1, 0}, {0, 1}, {0, -1},
+        {1, 1}, {1, -1}, {-1, 1}, {-1, -1},
+    };
+
+    for (size_t i = 0; i < ents.size(); ++i) {
+        Entity& e = ents[i];
+        if (e.id == playerId_ || e.hp <= 0) continue;
+
+        if (!lifecycleEligibleKind(e.kind)) {
+            e.lifeStage = LifeStage::Adult;
+            e.lifeSex = LifeSex::Unknown;
+            e.lifeTraitMask = 0u;
+            e.lifeAgeTurns = 0;
+            e.lifeStageTurns = 0;
+            e.lifeReproductionCooldown = 0;
+            e.lifeBirthCount = 0;
+            e.lifeBaseHpMax = std::max(1, e.hpMax);
+            e.lifeBaseAtk = std::max(1, e.baseAtk);
+            e.lifeBaseDef = std::max(0, e.baseDef);
+            e.lifeBaseSpeed = std::max(1, e.speed);
+            continue;
+        }
+
+        if (e.lifeSex == LifeSex::Unknown) {
+            e.lifeSex = lifecycleRollSex(e.spriteSeed, e.kind);
+        }
+        if (e.lifeTraitMask == 0u) {
+            e.lifeTraitMask = lifecycleRollTraitMask(e.spriteSeed, e.kind);
+        }
+        ensureAdultBaseline(e);
+
+        e.lifeAgeTurns = std::max(0, e.lifeAgeTurns);
+        e.lifeStageTurns = std::max(0, e.lifeStageTurns);
+        e.lifeReproductionCooldown = std::max(0, e.lifeReproductionCooldown);
+
+        if (e.lifeReproductionCooldown > 0) {
+            --e.lifeReproductionCooldown;
+        }
+
+        ++e.lifeAgeTurns;
+        ++e.lifeStageTurns;
+
+        const LifeStage prevStage = e.lifeStage;
+        if (e.lifeStage == LifeStage::Newborn &&
+            e.lifeStageTurns >= lifecycleStageDurationTurns(LifeStage::Newborn)) {
+            e.lifeStage = LifeStage::Child;
+            e.lifeStageTurns = 0;
+        } else if (e.lifeStage == LifeStage::Child &&
+                   e.lifeStageTurns >= lifecycleStageDurationTurns(LifeStage::Child)) {
+            e.lifeStage = LifeStage::Adult;
+            e.lifeStageTurns = 0;
+            e.lifeReproductionCooldown = std::max(e.lifeReproductionCooldown,
+                                                  lifecycleReproductionCooldownTurns(e.lifeTraitMask) / 2);
+        }
+
+        if (e.lifeStage != prevStage) {
+            applyStageStats(e, /*preserveHpRatio=*/true);
+        }
+
+        if (e.lifeStage != LifeStage::Adult) continue;
+        if (e.lifeAgeTurns < matureAge + 40) continue;
+        if (e.lifeStageTurns < 80) continue;
+        if (e.lifeReproductionCooldown > 0) continue;
+        if (e.effects.fearTurns > 0 || e.effects.webTurns > 0 || e.effects.confusionTurns > 0) continue;
+        if (e.hp < std::max(1, (e.hpMax * 60) / 100)) continue;
+        if (countLocalSameKind(e, 8) >= 7) continue;
+        if (births.size() >= 8) break;
+
+        int mateIdx = -1;
+        for (size_t j = 0; j < ents.size(); ++j) {
+            if (j == i) continue;
+            const Entity& m = ents[j];
+            if (m.id == playerId_ || m.hp <= 0) continue;
+            if (m.kind != e.kind) continue;
+            if (m.friendly != e.friendly) continue;
+            if (!lifecycleEligibleKind(m.kind)) continue;
+            if (m.lifeStage != LifeStage::Adult) continue;
+            if (m.lifeReproductionCooldown > 0) continue;
+            if (m.lifeAgeTurns < matureAge + 40) continue;
+            if (m.hp < std::max(1, (m.hpMax * 60) / 100)) continue;
+            if (chebyshev(m.pos, e.pos) > 3) continue;
+            if (e.lifeSex != LifeSex::Unknown &&
+                m.lifeSex != LifeSex::Unknown &&
+                e.lifeSex == m.lifeSex) {
+                continue;
+            }
+            mateIdx = static_cast<int>(j);
+            break;
+        }
+        if (mateIdx < 0) continue;
+
+        Vec2i spawn{-1, -1};
+        for (const Vec2i d : kDirs8) {
+            const Vec2i p{e.pos.x + d.x, e.pos.y + d.y};
+            if (isBirthTile(p)) {
+                spawn = p;
+                break;
+            }
+        }
+        if (spawn.x < 0) {
+            const Entity& mate = ents[static_cast<size_t>(mateIdx)];
+            for (const Vec2i d : kDirs8) {
+                const Vec2i p{mate.pos.x + d.x, mate.pos.y + d.y};
+                if (isBirthTile(p)) {
+                    spawn = p;
+                    break;
+                }
+            }
+        }
+        if (spawn.x < 0) continue;
+
+        Entity& mate = ents[static_cast<size_t>(mateIdx)];
+        const uint32_t childSeed = hash32(hashCombine(e.spriteSeed ^ 0xB17BABEu,
+                                                      mate.spriteSeed ^ 0xA11CE5Eu,
+                                                      static_cast<uint32_t>(turnCount),
+                                                      static_cast<uint32_t>(births.size() + 1u)));
+
+        PendingBirth b;
+        b.kind = e.kind;
+        b.pos = spawn;
+        b.groupId = e.groupId;
+        b.friendly = e.friendly && mate.friendly;
+        b.alerted = e.alerted || mate.alerted;
+        b.seed = childSeed;
+        births.push_back(b);
+
+        e.lifeReproductionCooldown = lifecycleReproductionCooldownTurns(e.lifeTraitMask);
+        mate.lifeReproductionCooldown = lifecycleReproductionCooldownTurns(mate.lifeTraitMask);
+        e.lifeStageTurns = 0;
+        mate.lifeStageTurns = 0;
+        ++e.lifeBirthCount;
+        ++mate.lifeBirthCount;
+    }
+
+    for (const auto& b : births) {
+        Entity child = makeMonster(b.kind, b.pos, b.groupId, /*allowGear=*/false,
+                                   b.seed, /*allowProcVariant=*/false);
+        child.friendly = b.friendly;
+        child.alerted = b.alerted;
+        child.lifeStage = LifeStage::Newborn;
+        child.lifeAgeTurns = 0;
+        child.lifeStageTurns = 0;
+        child.lifeReproductionCooldown = lifecycleReproductionCooldownTurns(child.lifeTraitMask);
+        child.lifeBirthCount = 0;
+        applyStageStats(child, /*preserveHpRatio=*/false);
+        child.hp = child.hpMax;
+        ents.push_back(std::move(child));
+    }
+}
+
+
 void Game::advanceAfterPlayerAction() {
     // One "turn" = one player action that consumes time.
     // Haste gives the player an extra action every other turn by skipping the monster turn.
@@ -3858,6 +4110,7 @@ void Game::advanceAfterPlayerAction() {
         }
     }
 
+    tickLifeCycles();
     applyEndOfTurnEffects();
     updateFarmGrowth();
     cleanupDead();
@@ -4280,5 +4533,3 @@ void Game::keybindsUnbindSelected() {
     requestKeyBindsReload();
     pushSystemMessage("UNBOUND " + bindKey + ".");
 }
-
-

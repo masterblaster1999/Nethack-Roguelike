@@ -615,6 +615,14 @@ uint8_t Game::fireAt(int x, int y) const {
     if (i >= fireField_.size()) return uint8_t{0};
     return fireField_[i];
 }
+
+uint8_t Game::adhesiveFluidAt(int x, int y) const {
+    if (!dung.inBounds(x, y)) return uint8_t{0};
+    const size_t i = static_cast<size_t>(y * dung.width + x);
+    if (i >= adhesiveFluid_.size()) return uint8_t{0};
+    return adhesiveFluid_[i];
+}
+
 void Game::updateScentMap() {
     const int W = dung.width;
     const int H = dung.height;

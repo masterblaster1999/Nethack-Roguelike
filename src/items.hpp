@@ -335,6 +335,15 @@ inline bool isFishKind(ItemKind k) { return k == ItemKind::Fish; }
 inline bool isCraftingKitKind(ItemKind k) { return k == ItemKind::CraftingKit; }
 inline bool isEssenceShardKind(ItemKind k) { return k == ItemKind::EssenceShard; }
 
+// Non-consumable items that still have an active "use" behavior from inventory.
+// These should behave like context-use items for ENTER/EQUIP in inventory UIs.
+inline bool isInventoryQuickUseKind(ItemKind k) {
+    return isCaptureSphereFullKind(k) ||
+           isFishingRodKind(k) ||
+           isCraftingKitKind(k) ||
+           k == ItemKind::GardenHoe;
+}
+
 // --- Bounty helpers (append-only) ---
 
 inline bool isBountyContractKind(ItemKind k) { return k == ItemKind::BountyContract; }

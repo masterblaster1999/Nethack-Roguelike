@@ -1,5 +1,13 @@
 # Changelog
 
+## Round 239
+- Procgen graffiti add-on: expanded hint collection with new floor signals:
+  - fountains (`TileType::Fountain`) now contribute directional rumor hints
+  - stairs-down location now contributes descent hints
+  - sparse topology hints from generated walkability structure (`junction` / `dead-end` breadcrumbs)
+- Procgen graffiti add-on: added deterministic deep-floor "glyph omen" lines (palimpsest-style cipher strings) with room-type bias for lore-heavy rooms (library/lab/secret/vault).
+- Tests: strengthened `graffiti_procgen` determinism coverage for new hint kinds and glyph omen generation.
+
 
 ## Round 238
 - Build (MSVC): fixed main.cpp/render.cpp compile errors by ensuring patched sources apply to the nested zip folder layout.

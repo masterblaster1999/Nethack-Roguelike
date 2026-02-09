@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
+
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+
 project(ProcRogue
     VERSION 0.22.0
     DESCRIPTION "A tiny NetHack-inspired roguelike with procedurally generated pixel sprites (SDL2)"
@@ -13,6 +21,19 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PROCROGUE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+
+set(_PROCROGUE_WINDOWS_UNLOCK_LINK_OUTPUTS_DEFAULT OFF)
+if (WIN32)
+    set(_PROCROGUE_WINDOWS_UNLOCK_LINK_OUTPUTS_DEFAULT ON)
+endif()
+option(
+    PROCROGUE_WINDOWS_UNLOCK_LINK_OUTPUTS
+    "Stop stale running ProcRogue binaries before link on Windows to avoid LNK1168 file-lock failures"
+    ${_PROCROGUE_WINDOWS_UNLOCK_LINK_OUTPUTS_DEFAULT}
+)
+unset(_PROCROGUE_WINDOWS_UNLOCK_LINK_OUTPUTS_DEFAULT)
+
+set(PROCROGUE_WINDOWS_UNLOCK_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/unlock_binary.cmake")
 
 # When PROCROGUE_BUILD_TESTS=ON we want the project to configure/build cleanly
 # without requiring SDL2. Developers can still set PROCROGUE_BUILD_GAME=ON to
@@ -43,12 +64,76 @@ endif()
 option(PROCROGUE_FETCH_SDL2 "Fetch SDL2 automatically when it is not found" ${_PROCROGUE_FETCH_SDL2_DEFAULT})
 unset(_PROCROGUE_FETCH_SDL2_DEFAULT)
 
+function(procrogue_infer_triplet_crt_linkage out_var triplet)
+    set(_PROCROGUE_LINKAGE "unknown")
+    if (triplet)
+        string(TOLOWER "${triplet}" _PROCROGUE_TRIPLET_LOWER)
+        if (_PROCROGUE_TRIPLET_LOWER MATCHES "-static-md$" OR _PROCROGUE_TRIPLET_LOWER MATCHES "-windows$")
+            set(_PROCROGUE_LINKAGE "dynamic")
+        elseif (_PROCROGUE_TRIPLET_LOWER MATCHES "-static$")
+            set(_PROCROGUE_LINKAGE "static")
+        endif()
+        unset(_PROCROGUE_TRIPLET_LOWER)
+    endif()
+    set(${out_var} "${_PROCROGUE_LINKAGE}" PARENT_SCOPE)
+endfunction()
+
+if (MSVC)
+    if (NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    endif()
+
+    set(_PROCROGUE_MSVC_CRT_LINKAGE "unknown")
+    if (CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL")
+        set(_PROCROGUE_MSVC_CRT_LINKAGE "dynamic")
+    elseif (CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "^MultiThreaded")
+        set(_PROCROGUE_MSVC_CRT_LINKAGE "static")
+    endif()
+
+    set(_PROCROGUE_VCPKG_CRT_LINKAGE "unknown")
+    if (DEFINED VCPKG_CRT_LINKAGE AND NOT VCPKG_CRT_LINKAGE STREQUAL "")
+        string(TOLOWER "${VCPKG_CRT_LINKAGE}" _PROCROGUE_VCPKG_CRT_LINKAGE)
+        if (NOT _PROCROGUE_VCPKG_CRT_LINKAGE STREQUAL "dynamic" AND
+            NOT _PROCROGUE_VCPKG_CRT_LINKAGE STREQUAL "static")
+            set(_PROCROGUE_VCPKG_CRT_LINKAGE "unknown")
+        endif()
+    elseif (DEFINED VCPKG_TARGET_TRIPLET AND NOT VCPKG_TARGET_TRIPLET STREQUAL "")
+        procrogue_infer_triplet_crt_linkage(_PROCROGUE_VCPKG_CRT_LINKAGE "${VCPKG_TARGET_TRIPLET}")
+    endif()
+
+    if (NOT _PROCROGUE_MSVC_CRT_LINKAGE STREQUAL "unknown" AND
+        NOT _PROCROGUE_VCPKG_CRT_LINKAGE STREQUAL "unknown" AND
+        NOT _PROCROGUE_MSVC_CRT_LINKAGE STREQUAL _PROCROGUE_VCPKG_CRT_LINKAGE)
+        message(FATAL_ERROR
+            "MSVC runtime ABI mismatch:\n"
+            "  CMAKE_MSVC_RUNTIME_LIBRARY='${CMAKE_MSVC_RUNTIME_LIBRARY}' (${_PROCROGUE_MSVC_CRT_LINKAGE} CRT)\n"
+            "  vcpkg expects '${_PROCROGUE_VCPKG_CRT_LINKAGE}' CRT\n"
+            "\n"
+            "Select matching settings:\n"
+            "  - /MD preset/toolchain with dynamic CRT triplet (e.g. x64-windows)\n"
+            "  - /MT preset/toolchain with static CRT triplet (e.g. x64-windows-static)\n"
+        )
+    endif()
+
+    message(STATUS "MSVC runtime ABI: ${CMAKE_MSVC_RUNTIME_LIBRARY}")
+    if (DEFINED VCPKG_CRT_LINKAGE AND NOT VCPKG_CRT_LINKAGE STREQUAL "")
+        message(STATUS "vcpkg CRT linkage: ${VCPKG_CRT_LINKAGE}")
+    endif()
+    if (DEFINED VCPKG_TARGET_TRIPLET AND NOT VCPKG_TARGET_TRIPLET STREQUAL "")
+        message(STATUS "vcpkg triplet: ${VCPKG_TARGET_TRIPLET}")
+    endif()
+
+    unset(_PROCROGUE_MSVC_CRT_LINKAGE)
+    unset(_PROCROGUE_VCPKG_CRT_LINKAGE)
+endif()
+
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
 function(procrogue_apply_warnings tgt)
     if (MSVC)
-        target_compile_options(${tgt} PRIVATE /W4)
+        # /FS + /Zf improve PDB access behavior; /MP speeds large TU builds.
+        target_compile_options(${tgt} PRIVATE /W4 /FS /Zf /MP)
         if (PROCROGUE_WARNINGS_AS_ERRORS)
             target_compile_options(${tgt} PRIVATE /WX)
         endif()
@@ -58,6 +143,28 @@ function(procrogue_apply_warnings tgt)
             target_compile_options(${tgt} PRIVATE -Werror)
         endif()
     endif()
+endfunction()
+
+function(procrogue_enable_windows_link_unlock tgt output_name)
+    if (NOT PROCROGUE_WINDOWS_UNLOCK_LINK_OUTPUTS OR NOT WIN32 OR NOT MSVC)
+        return()
+    endif()
+
+    if (NOT EXISTS "${PROCROGUE_WINDOWS_UNLOCK_SCRIPT}")
+        message(FATAL_ERROR
+            "Expected unlock helper script at '${PROCROGUE_WINDOWS_UNLOCK_SCRIPT}', but it was not found."
+        )
+    endif()
+
+    add_custom_command(
+        TARGET ${tgt}
+        PRE_LINK
+        COMMAND
+            ${CMAKE_COMMAND}
+            "-DPROCROGUE_UNLOCK_IMAGE=${output_name}.exe"
+            -P "${PROCROGUE_WINDOWS_UNLOCK_SCRIPT}"
+        VERBATIM
+    )
 endfunction()
 
 # ------------------------------------------------------------
@@ -147,6 +254,7 @@ if (PROCROGUE_BUILD_HEADLESS)
 
     target_link_libraries(procrogue_headless PRIVATE procrogue_core)
     procrogue_apply_warnings(procrogue_headless)
+    procrogue_enable_windows_link_unlock(procrogue_headless ProcRogueHeadless)
 endif()
 
 # ------------------------------------------------------------
@@ -178,6 +286,7 @@ endif()
 
 
 procrogue_apply_warnings(${PROCROGUE_TARGET})
+procrogue_enable_windows_link_unlock(${PROCROGUE_TARGET} ProcRogue)
 
 # ------------------------------------------------------------
 # SDL2 dependency (only required for the game executable)
@@ -239,6 +348,16 @@ if (NOT _SDL2_LIB)
 
         include(FetchContent)
 
+        if (MSVC)
+            # Keep SDL's CRT linkage aligned with the active project runtime ABI.
+            set(_PROCROGUE_SDL_STATIC_CRT OFF)
+            if (CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "^MultiThreaded($|Debug$)")
+                set(_PROCROGUE_SDL_STATIC_CRT ON)
+            endif()
+            set(SDL_FORCE_STATIC_VCRT ${_PROCROGUE_SDL_STATIC_CRT} CACHE BOOL "" FORCE)
+            unset(_PROCROGUE_SDL_STATIC_CRT)
+        endif()
+
         # Keep the fetched SDL build lean.
         set(SDL_TESTS OFF CACHE BOOL "" FORCE)
         set(SDL_TEST OFF CACHE BOOL "" FORCE)
@@ -246,14 +365,53 @@ if (NOT _SDL2_LIB)
         set(SDL_SHARED OFF CACHE BOOL "" FORCE)
         set(SDL_STATIC ON CACHE BOOL "" FORCE)
         set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+        set(FETCHCONTENT_QUIET OFF)
+
+        set(_PROCROGUE_SDL_URL "https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.32.10.tar.gz")
+        set(_PROCROGUE_SDL_ARCHIVE_CANDIDATES
+            "${CMAKE_CURRENT_SOURCE_DIR}/_deps/sdl2-subbuild/sdl2-populate-prefix/src/release-2.32.10.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/ninja-release/_deps/sdl2-subbuild/sdl2-populate-prefix/src/release-2.32.10.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/ninja-debug/_deps/sdl2-subbuild/sdl2-populate-prefix/src/release-2.32.10.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/ninja-release-game/_deps/sdl2-subbuild/sdl2-populate-prefix/src/release-2.32.10.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/ninja-debug-game/_deps/sdl2-subbuild/sdl2-populate-prefix/src/release-2.32.10.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/msvc/_deps/sdl2-subbuild/sdl2-populate-prefix/src/release-2.32.10.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/msvc-static/_deps/sdl2-subbuild/sdl2-populate-prefix/src/release-2.32.10.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/msvc-vcpkg/_deps/sdl2-subbuild/sdl2-populate-prefix/src/release-2.32.10.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/msvc-static-vcpkg/_deps/sdl2-subbuild/sdl2-populate-prefix/src/release-2.32.10.tar.gz"
+        )
+        set(_PROCROGUE_SDL_ARCHIVE_LOCAL "")
+        foreach(_PROCROGUE_SDL_ARCHIVE_PATH IN LISTS _PROCROGUE_SDL_ARCHIVE_CANDIDATES)
+            if (EXISTS "${_PROCROGUE_SDL_ARCHIVE_PATH}")
+                file(SIZE "${_PROCROGUE_SDL_ARCHIVE_PATH}" _PROCROGUE_SDL_ARCHIVE_SIZE)
+                if (_PROCROGUE_SDL_ARCHIVE_SIZE GREATER 0)
+                    set(_PROCROGUE_SDL_ARCHIVE_LOCAL "${_PROCROGUE_SDL_ARCHIVE_PATH}")
+                    break()
+                endif()
+
+                message(STATUS "Ignoring empty SDL2 archive cache file: ${_PROCROGUE_SDL_ARCHIVE_PATH}")
+                file(REMOVE "${_PROCROGUE_SDL_ARCHIVE_PATH}")
+            endif()
+        endforeach()
+
+        if (_PROCROGUE_SDL_ARCHIVE_LOCAL)
+            set(_PROCROGUE_SDL_URL "${_PROCROGUE_SDL_ARCHIVE_LOCAL}")
+            message(STATUS "Using cached SDL2 archive: ${_PROCROGUE_SDL_ARCHIVE_LOCAL}")
+        else()
+            message(STATUS "No local SDL2 archive cache found; downloading from upstream.")
+        endif()
 
         # Download SDL2 source via a release archive URL, so a stock Visual Studio install
         # can configure without needing Git installed.
         FetchContent_Declare(
             SDL2
-            URL https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.32.10.tar.gz
+            URL "${_PROCROGUE_SDL_URL}"
         )
         FetchContent_MakeAvailable(SDL2)
+        unset(_PROCROGUE_SDL_URL)
+        unset(_PROCROGUE_SDL_ARCHIVE_CANDIDATES)
+        unset(_PROCROGUE_SDL_ARCHIVE_LOCAL)
+        unset(_PROCROGUE_SDL_ARCHIVE_PATH)
+        unset(_PROCROGUE_SDL_ARCHIVE_SIZE)
 
         procrogue_detect_sdl2(_SDL2_LIB _SDL2_MAIN)
     endif()
@@ -282,6 +440,7 @@ if (NOT _SDL2_LIB)
         "  2) Install SDL2 via vcpkg and configure CMake with the vcpkg toolchain:\n"
         "     - vcpkg install sdl2\n"
         "     - cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake\n"
+        "     - or set VCPKG_ROOT and use preset: cmake --preset msvc-vcpkg\n"
         "  3) Install SDL2 (development files) and set SDL2_DIR or CMAKE_PREFIX_PATH to SDL2's CMake config folder.\n"
     )
 endif()

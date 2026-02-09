@@ -324,18 +324,85 @@ Exports (written to your save/config directory):
 
 ## Building
 
-See `docs/BUILDING.md`.
+See `docs/BUILDING.md` for the full platform guide.
 
-To build the unit tests (SDL-free):
-```bash
-cmake -S . -B build -DPROCROGUE_BUILD_GAME=OFF -DPROCROGUE_BUILD_TESTS=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
+### SDL flows (quick matrix)
+
+- FetchContent SDL (Windows default): `procrogue.bat play`
+- vcpkg SDL (Windows): `procrogue.bat play vcpkg`
+- System SDL2 package (Linux/macOS): standard CMake configure/build
+- SDL-free tests/headless: `cmake --preset tests` or `PROCROGUE_BUILD_GAME=OFF`
+
+### Windows quick start
+
+```bat
+procrogue.bat play
+procrogue.bat play debug
+procrogue.bat play static
+procrogue.bat play vcpkg
+procrogue.bat play vcpkg-static
+procrogue.bat test
 ```
 
-To verify a replay headlessly (no SDL2 required), build the headless tool:
+### CMake presets quick start
+
 ```bash
-cmake -S . -B build -DPROCROGUE_BUILD_GAME=OFF -DPROCROGUE_BUILD_HEADLESS=ON
-cmake --build build --target ProcRogueHeadless
-./ProcRogueHeadless --replay your_run.prr
+cmake --list-presets
+cmake --list-presets=build
 ```
+
+SDL-free tests preset:
+
+```bash
+cmake --preset tests
+cmake --build --preset tests
+ctest --preset tests --output-on-failure
+```
+
+PowerShell note for Ninja presets (`tests`, `ninja-debug`, `ninja-release`):
+
+```powershell
+.\procrogue-env.ps1 -RepairPreset tests
+cmake --preset tests
+cmake --build --preset tests
+ctest --preset tests --output-on-failure
+```
+
+One-shot PowerShell test flow (toolchain + stale-cache repair + configure/build/test):
+
+```powershell
+.\procrogue-test.ps1
+```
+
+If a previous run was interrupted and left locked build files:
+
+```powershell
+.\procrogue-test.ps1 -StopStaleBuildTools
+```
+
+MSVC ABI presets:
+
+- `msvc`: dynamic CRT (`/MD`, `/MDd`)
+- `msvc-static`: static CRT (`/MT`, `/MTd`)
+- `msvc-vcpkg`: dynamic CRT (`/MD`, `/MDd`) via vcpkg manifest
+- `msvc-static-vcpkg`: static CRT (`/MT`, `/MTd`) via vcpkg manifest
+
+```powershell
+cmake --preset msvc
+cmake --build --preset build-msvc-release
+
+cmake --preset msvc-static
+cmake --build --preset build-msvc-static-release
+```
+
+### Headless replay verification (no SDL2)
+
+```bash
+cmake -S . -B build_headless -DPROCROGUE_BUILD_GAME=OFF -DPROCROGUE_BUILD_HEADLESS=ON
+cmake --build build_headless --target ProcRogueHeadless
+```
+
+Run example:
+
+- `build_headless/ProcRogueHeadless --replay your_run.prr` (single-config generators)
+- `build_headless/<Config>/ProcRogueHeadless.exe --replay your_run.prr` (Visual Studio multi-config)

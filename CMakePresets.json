@@ -9,29 +9,123 @@
         {
             "name": "ninja-debug",
             "displayName": "Ninja Debug",
-            "generator": "Ninja",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
             "binaryDir": "${sourceDir}/build/ninja-debug",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/msvc-md.cmake",
+                "PROCROGUE_BUILD_GAME": "OFF",
+                "PROCROGUE_BUILD_HEADLESS": "ON",
+                "PROCROGUE_BUILD_TESTS": "OFF",
+                "PROCROGUE_FETCH_SDL2": "OFF",
+                "CMAKE_SUPPRESS_REGENERATION": "ON"
             }
         },
         {
             "name": "ninja-release",
             "displayName": "Ninja Release",
-            "generator": "Ninja",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
             "binaryDir": "${sourceDir}/build/ninja-release",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/msvc-md.cmake",
+                "PROCROGUE_BUILD_GAME": "OFF",
+                "PROCROGUE_BUILD_HEADLESS": "ON",
+                "PROCROGUE_BUILD_TESTS": "OFF",
+                "PROCROGUE_FETCH_SDL2": "OFF",
+                "CMAKE_SUPPRESS_REGENERATION": "ON"
+            }
+        },
+        {
+            "name": "ninja-debug-game",
+            "displayName": "Ninja Debug (Game + SDL)",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build/ninja-debug-game",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/msvc-md.cmake",
+                "PROCROGUE_BUILD_GAME": "ON",
+                "PROCROGUE_BUILD_HEADLESS": "OFF",
+                "PROCROGUE_BUILD_TESTS": "OFF",
+                "PROCROGUE_FETCH_SDL2": "ON",
+                "CMAKE_SUPPRESS_REGENERATION": "ON"
+            }
+        },
+        {
+            "name": "ninja-release-game",
+            "displayName": "Ninja Release (Game + SDL)",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build/ninja-release-game",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/msvc-md.cmake",
+                "PROCROGUE_BUILD_GAME": "ON",
+                "PROCROGUE_BUILD_HEADLESS": "OFF",
+                "PROCROGUE_BUILD_TESTS": "OFF",
+                "PROCROGUE_FETCH_SDL2": "ON",
+                "CMAKE_SUPPRESS_REGENERATION": "ON"
+            }
+        },
+        {
+            "name": "msvc-base",
+            "hidden": true,
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "cacheVariables": {
+                "PROCROGUE_FETCH_SDL2": "ON",
+                "PROCROGUE_BUILD_GAME": "ON",
+                "PROCROGUE_BUILD_TESTS": "OFF",
+                "PROCROGUE_BUILD_HEADLESS": "ON"
+            }
+        },
+        {
+            "name": "msvc-vcpkg-base",
+            "hidden": true,
+            "inherits": "msvc-base",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_MANIFEST_MODE": "ON"
             }
         },
         {
             "name": "msvc",
-            "displayName": "Visual Studio 2022 (x64)",
-            "generator": "Visual Studio 17 2022",
+            "displayName": "Visual Studio 2022 (x64, /MD)",
+            "inherits": "msvc-base",
             "binaryDir": "${sourceDir}/build/msvc",
-            "architecture": "x64",
             "cacheVariables": {
-                "PROCROGUE_FETCH_SDL2": "ON"
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/msvc-md.cmake"
+            }
+        },
+        {
+            "name": "msvc-vcpkg",
+            "displayName": "Visual Studio 2022 (x64, /MD, vcpkg)",
+            "inherits": "msvc-vcpkg-base",
+            "binaryDir": "${sourceDir}/build/msvc-vcpkg",
+            "cacheVariables": {
+                "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/msvc-md.cmake"
+            }
+        },
+        {
+            "name": "msvc-static",
+            "displayName": "Visual Studio 2022 (x64, /MT)",
+            "inherits": "msvc-base",
+            "binaryDir": "${sourceDir}/build/msvc-static",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/msvc-mt.cmake",
+                "PROCROGUE_BUILD_GAME": "OFF",
+                "PROCROGUE_BUILD_TESTS": "OFF",
+                "PROCROGUE_BUILD_HEADLESS": "ON",
+                "PROCROGUE_FETCH_SDL2": "OFF",
+                "CMAKE_SUPPRESS_REGENERATION": "ON"
+            }
+        },
+        {
+            "name": "msvc-static-vcpkg",
+            "displayName": "Visual Studio 2022 (x64, /MT, vcpkg)",
+            "inherits": "msvc-vcpkg-base",
+            "binaryDir": "${sourceDir}/build/msvc-static-vcpkg",
+            "cacheVariables": {
+                "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/msvc-mt.cmake"
             }
         },
         {
@@ -48,10 +142,10 @@
         {
             "name": "tests",
             "displayName": "Tests (no SDL)",
-            "generator": "Ninja",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
             "binaryDir": "${sourceDir}/build/tests",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug",
                 "PROCROGUE_BUILD_GAME": "OFF",
                 "PROCROGUE_BUILD_TESTS": "ON"
             }
@@ -59,22 +153,84 @@
     ],
     "buildPresets": [
         {
+            "name": "build-msvc-base",
+            "hidden": true,
+            "jobs": 1,
+            "nativeToolOptions": [
+                "/nodeReuse:false"
+            ]
+        },
+        {
             "name": "build-ninja-debug",
-            "configurePreset": "ninja-debug"
+            "inherits": "build-msvc-base",
+            "configurePreset": "ninja-debug",
+            "configuration": "Debug",
+            "targets": [
+                "procrogue_headless"
+            ]
         },
         {
             "name": "build-ninja-release",
-            "configurePreset": "ninja-release"
+            "inherits": "build-msvc-base",
+            "configurePreset": "ninja-release",
+            "configuration": "Release",
+            "targets": [
+                "procrogue_headless"
+            ]
+        },
+        {
+            "name": "build-ninja-debug-game",
+            "inherits": "build-msvc-base",
+            "configurePreset": "ninja-debug-game",
+            "configuration": "Debug",
+            "jobs": 1,
+            "targets": [
+                "proc_rogue"
+            ]
+        },
+        {
+            "name": "build-ninja-release-game",
+            "inherits": "build-msvc-base",
+            "configurePreset": "ninja-release-game",
+            "configuration": "Release",
+            "jobs": 1,
+            "targets": [
+                "proc_rogue"
+            ]
         },
         {
             "name": "build-msvc-release",
+            "inherits": "build-msvc-base",
             "configurePreset": "msvc",
+            "configuration": "Release"
+        },
+        {
+            "name": "build-msvc-vcpkg-release",
+            "inherits": "build-msvc-base",
+            "configurePreset": "msvc-vcpkg",
+            "configuration": "Release"
+        },
+        {
+            "name": "build-msvc-static-release",
+            "inherits": "build-msvc-base",
+            "configurePreset": "msvc-static",
+            "configuration": "Release",
+            "targets": [
+                "procrogue_headless"
+            ]
+        },
+        {
+            "name": "build-msvc-static-vcpkg-release",
+            "inherits": "build-msvc-base",
+            "configurePreset": "msvc-static-vcpkg",
             "configuration": "Release"
         },
         {
             "name": "tests",
             "displayName": "Build tests (no SDL)",
-            "configurePreset": "tests"
+            "inherits": "build-msvc-base",
+            "configurePreset": "tests",
+            "configuration": "Debug"
         }
     ],
     "testPresets": [
@@ -82,8 +238,41 @@
             "name": "tests",
             "displayName": "Run unit tests",
             "configurePreset": "tests",
+            "configuration": "Debug",
+            "execution": {
+                "jobs": 8
+            },
             "output": {
-                "outputOnFailure": true
+                "outputOnFailure": true,
+                "shortProgress": true
+            }
+        },
+        {
+            "name": "tests-serial",
+            "displayName": "Run unit tests (serial)",
+            "inherits": "tests",
+            "execution": {
+                "jobs": 1
+            }
+        },
+        {
+            "name": "tests-worldgen",
+            "displayName": "Run worldgen-focused tests",
+            "inherits": "tests",
+            "filter": {
+                "include": {
+                    "label": "worldgen"
+                }
+            }
+        },
+        {
+            "name": "tests-gameplay",
+            "displayName": "Run gameplay-focused tests",
+            "inherits": "tests",
+            "filter": {
+                "include": {
+                    "label": "gameplay"
+                }
             }
         }
     ]

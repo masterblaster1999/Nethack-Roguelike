@@ -70,29 +70,83 @@ static void clearOverworldChunkCache(Game& g) {
 };
 
 #include <cctype>
+#include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
 namespace {
 
-fs::path testTempDir() {
-    // Prefer a real temp directory but fall back to the current directory if
-    // the platform doesn't provide one (or it throws).
-    fs::path base;
-    try {
-        base = fs::temp_directory_path();
-    } catch (...) {
-        base = fs::current_path();
-    }
+int currentProcessId() {
+#if defined(_WIN32)
+    return static_cast<int>(_getpid());
+#else
+    return static_cast<int>(getpid());
+#endif
+}
 
-    fs::path dir = base / "procrogue_tests";
-    std::error_code ec;
-    fs::create_directories(dir, ec);
+std::string sanitizePathToken(std::string s) {
+    for (char& ch : s) {
+        const bool ok = (ch >= 'a' && ch <= 'z') ||
+                        (ch >= 'A' && ch <= 'Z') ||
+                        (ch >= '0' && ch <= '9') ||
+                        ch == '-' || ch == '_';
+        if (!ok) ch = '_';
+    }
+    if (s.empty()) s = "unnamed";
+    return s;
+}
+
+std::string readEnvVar(const char* name) {
+#if defined(_WIN32)
+    char* value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, name) != 0 || value == nullptr) {
+        if (value) free(value);
+        return {};
+    }
+    std::string out(value);
+    free(value);
+    return out;
+#else
+    const char* value = std::getenv(name);
+    return value ? std::string(value) : std::string{};
+#endif
+}
+
+fs::path testTempDir() {
+    static const fs::path dir = []() {
+        // Prefer a real temp directory but fall back to the current directory if
+        // the platform doesn't provide one (or it throws).
+        fs::path base;
+        try {
+            base = fs::temp_directory_path();
+        } catch (...) {
+            base = fs::current_path();
+        }
+
+        std::string testName = readEnvVar("PROCROGUE_TEST_NAME");
+        if (testName.empty()) testName = "suite";
+        testName = sanitizePathToken(testName);
+
+        fs::path p = base / "procrogue_tests" /
+                     (testName + "_" + std::to_string(currentProcessId()));
+        std::error_code ec;
+        fs::create_directories(p, ec);
+        return p;
+    }();
     return dir;
 }
 
@@ -113,10 +167,53 @@ bool containsCaseInsensitive(const std::string& haystack, const std::string& nee
     return h.find(n) != std::string::npos;
 }
 
+int manhattan2(Vec2i a, Vec2i b) {
+    return std::abs(a.x - b.x) + std::abs(a.y - b.y);
+}
+
+std::string gCurrentTestName = "<unbound>";
+bool gFailureLogged = false;
+
+void setCurrentTestName(const char* name) {
+    if (name && *name) {
+        gCurrentTestName = name;
+    } else {
+        gCurrentTestName = "<unbound>";
+    }
+    gFailureLogged = false;
+}
+
+bool checkFailed(const char* fn, int line, const char* cond, const std::string& detail = {}) {
+    gFailureLogged = true;
+    std::cerr << "[FAIL] " << gCurrentTestName << " " << fn << ":" << line << " CHECK(" << cond << ")";
+    if (!detail.empty()) {
+        std::cerr << " -- " << detail;
+    }
+    std::cerr << "\n";
+    return false;
+}
+
+std::string colorToString(const Color& c) {
+    std::ostringstream oss;
+    oss << "("
+        << static_cast<int>(c.r) << ","
+        << static_cast<int>(c.g) << ","
+        << static_cast<int>(c.b) << ","
+        << static_cast<int>(c.a) << ")";
+    return oss.str();
+}
+
 #define CHECK(cond) do { \
     if (!(cond)) { \
-        std::cerr << "[FAIL] " << __FUNCTION__ << ":" << __LINE__ << " CHECK(" #cond ")\n"; \
-        return false; \
+        return checkFailed(__FUNCTION__, __LINE__, #cond); \
+    } \
+} while (0)
+
+#define CHECK_MSG(cond, msgExpr) do { \
+    if (!(cond)) { \
+        std::ostringstream _checkMsgOss; \
+        _checkMsgOss << msgExpr; \
+        return checkFailed(__FUNCTION__, __LINE__, #cond, _checkMsgOss.str()); \
     } \
 } while (0)
 
@@ -603,6 +700,7 @@ bool test_noise_localization_determinism() {
     const Vec2i o2 = noiseInvestigateOffset(h2, r);
     CHECK(o1.x == o2.x);
     CHECK(o1.y == o2.y);
+    CHECK(std::abs(o1.x) + std::abs(o1.y) <= r);
 
     // Changing monsterId must affect the hash (even if the offset can coincide by chance).
     const uint32_t hOther = noiseInvestigateHash(seed, turn, 2, src, volume, eff, dist);
@@ -613,6 +711,18 @@ bool test_noise_localization_determinism() {
 
     // Nearby sounds should also be precise (radius 0).
     CHECK(noiseInvestigateRadius(6, 6, 2) == 0);
+
+    // Sample a bunch of hashes and verify offsets stay inside the intended
+    // Manhattan-diamond uncertainty radius.
+    bool sawOuterRing = false;
+    for (uint32_t i = 0; i < 256u; ++i) {
+        const uint32_t hs = noiseInvestigateHash(seed + i, turn + i, static_cast<int>(10 + i), src, volume, eff, dist);
+        const Vec2i oi = noiseInvestigateOffset(hs, r);
+        const int md = std::abs(oi.x) + std::abs(oi.y);
+        CHECK(md <= r);
+        if (md == r) sawOuterRing = true;
+    }
+    CHECK(sawOuterRing);
 
     return true;
 }
@@ -1265,6 +1375,7 @@ bool test_graffiti_procgen_determinism() {
     d.at(10, 10).type = TileType::DoorLocked;
     d.at(8, 15).type = TileType::Chasm;
     d.at(8, 14).type = TileType::Boulder; // adjacent to chasm
+    d.at(3, 16).type = TileType::Fountain;
 
     Room vault; vault.x = 2; vault.y = 2; vault.w = 6; vault.h = 6; vault.type = RoomType::Vault;
     Room shrine; shrine.x = 12; shrine.y = 2; shrine.w = 6; shrine.h = 6; shrine.type = RoomType::Shrine;
@@ -1275,6 +1386,16 @@ bool test_graffiti_procgen_determinism() {
 
     const std::vector<graffitigen::Hint> hints = graffitigen::collectHints(d);
     CHECK(!hints.empty());
+
+    auto hasHintKind = [&](graffitigen::HintKind k) {
+        for (const auto& h : hints) {
+            if (h.kind == k) return true;
+        }
+        return false;
+    };
+
+    CHECK(hasHintKind(graffitigen::HintKind::Fountain));
+    CHECK(hasHintKind(graffitigen::HintKind::StairsDown));
 
     // Same inputs -> identical outputs.
     const std::string a = graffitigen::generateLine(0x12345678u, d, 5, RoomType::Vault, {3, 3}, hints);
@@ -1289,6 +1410,30 @@ bool test_graffiti_procgen_determinism() {
     CHECK(!hl.empty());
     CHECK(hl.size() <= 72);
     CHECK(containsCaseInsensitive(hl, "WALL") || containsCaseInsensitive(hl, "LOOK") || containsCaseInsensitive(hl, "SECRET"));
+
+    const std::string wf = graffitigen::makeHintLine(0x22222222u, {graffitigen::HintKind::Fountain, {3, 16}}, {3, 3});
+    CHECK(!wf.empty());
+    CHECK(wf.size() <= 72);
+    const bool wfOk =
+        containsCaseInsensitive(wf, "WATER") ||
+        containsCaseInsensitive(wf, "SPRING") ||
+        containsCaseInsensitive(wf, "FOUNTAIN") ||
+        containsCaseInsensitive(wf, "DRIP") ||
+        containsCaseInsensitive(wf, "SPLASH") ||
+        containsCaseInsensitive(wf, "DRINK");
+    CHECK(wfOk);
+
+    const std::string sd = graffitigen::makeHintLine(0x33333333u, {graffitigen::HintKind::StairsDown, {18, 18}}, {3, 3});
+    CHECK(!sd.empty());
+    CHECK(sd.size() <= 72);
+    CHECK(containsCaseInsensitive(sd, "DOWN") || containsCaseInsensitive(sd, "STAIRS") || containsCaseInsensitive(sd, "DESCEND"));
+
+    const std::string gx = graffitigen::makeGlyphOmenLine(0xA5A5A5A5u, RoomType::Secret, 11);
+    const std::string gy = graffitigen::makeGlyphOmenLine(0xA5A5A5A5u, RoomType::Secret, 11);
+    CHECK(gx == gy);
+    CHECK(gx.size() <= 72);
+    CHECK(gx.find('-') != std::string::npos);
+    CHECK(gx.find("11") != std::string::npos);
 
     return true;
 }
@@ -1638,11 +1783,137 @@ bool test_targeting_warning_includes_shopkeeper_name() {
 
     g.targeting = true;
     g.targetingMode_ = Game::TargetingMode::Ranged;
-    g.targetPos = {6, 3};
+    // Keep the cursor in hand-throw range while still tracing through the shopkeeper tile.
+    g.targetPos = {5, 3};
     g.recomputeTargetLine();
 
     CHECK(g.targetValid);
     CHECK(g.targetingWarningText().find(expectedLabel) != std::string::npos);
+    return true;
+}
+
+bool test_pay_at_shop_requires_local_shopkeeper() {
+    Game g;
+    g.newGame(0x0BEEF125u);
+
+    g.branch_ = DungeonBranch::Main;
+    g.depth_ = 4;
+
+    g.dung = Dungeon(24, 8);
+    g.dung.rooms.clear();
+    makeAllVisibleFloor(g.dung);
+
+    Room shopA;
+    shopA.type = RoomType::Shop;
+    shopA.x = 1;
+    shopA.y = 1;
+    shopA.w = 8;
+    shopA.h = 6;
+    g.dung.rooms.push_back(shopA);
+
+    Room shopB;
+    shopB.type = RoomType::Shop;
+    shopB.x = 14;
+    shopB.y = 1;
+    shopB.w = 8;
+    shopB.h = 6;
+    g.dung.rooms.push_back(shopB);
+
+    g.ents.clear();
+    g.ground.clear();
+
+    Entity p;
+    p.id = 1;
+    p.kind = EntityKind::Player;
+    p.hpMax = 20;
+    p.hp = 20;
+    p.pos = {3, 3};
+    g.playerId_ = p.id;
+    g.ents.push_back(p);
+
+    Entity sk;
+    sk.id = 2;
+    sk.kind = EntityKind::Shopkeeper;
+    sk.hpMax = 12;
+    sk.hp = 12;
+    sk.pos = {17, 3}; // In shopB, not in the player's current shop.
+    sk.alerted = false;
+    g.ents.push_back(sk);
+
+    g.inv.clear();
+    g.nextItemId = 1;
+
+    Item gold;
+    gold.id = g.nextItemId++;
+    gold.kind = ItemKind::Gold;
+    gold.count = 400;
+    g.inv.push_back(gold);
+
+    Item unpaid;
+    unpaid.id = g.nextItemId++;
+    unpaid.kind = ItemKind::PotionHealing;
+    unpaid.count = 1;
+    unpaid.shopPrice = 120;
+    unpaid.shopDepth = g.depth_;
+    g.inv.push_back(unpaid);
+
+    CHECK(g.playerInShop());
+    CHECK(g.shopDebtThisDepth() == 120);
+    CHECK(!g.payAtShop());
+    CHECK(g.shopDebtThisDepth() == 120);
+    return true;
+}
+
+bool test_shopkeeper_death_clears_depth_debt_ledger() {
+    Game g;
+    g.newGame(0x0BEEF126u);
+
+    g.branch_ = DungeonBranch::Main;
+    g.depth_ = 4;
+
+    g.dung = Dungeon(12, 8);
+    g.dung.rooms.clear();
+    makeAllVisibleFloor(g.dung);
+
+    Room shop;
+    shop.type = RoomType::Shop;
+    shop.x = 1;
+    shop.y = 1;
+    shop.w = 10;
+    shop.h = 6;
+    g.dung.rooms.push_back(shop);
+
+    g.ents.clear();
+    g.ground.clear();
+
+    Entity p;
+    p.id = 1;
+    p.kind = EntityKind::Player;
+    p.hpMax = 20;
+    p.hp = 20;
+    p.pos = {3, 3};
+    g.playerId_ = p.id;
+    g.ents.push_back(p);
+
+    Entity deadKeeper;
+    deadKeeper.id = 2;
+    deadKeeper.kind = EntityKind::Shopkeeper;
+    deadKeeper.hpMax = 12;
+    deadKeeper.hp = 0;
+    deadKeeper.pos = {5, 3};
+    deadKeeper.alerted = true;
+    g.ents.push_back(deadKeeper);
+
+    g.shopDebtLedger_.fill(0);
+    g.shopDebtLedger_[4] = 77;
+    g.shopDebtLedger_[5] = 33;
+    CHECK(g.shopDebtTotal() == 110);
+
+    g.cleanupDead();
+
+    CHECK(g.shopDebtLedger_[4] == 0);
+    CHECK(g.shopDebtLedger_[5] == 33);
+    CHECK(g.shopDebtTotal() == 33);
     return true;
 }
 
@@ -2053,6 +2324,340 @@ bool test_overworld_springs_present() {
     return foundSpring;
 }
 
+bool test_dungeon_seep_springs_present() {
+    constexpr int W = 80;
+    constexpr int H = 50;
+    constexpr int maxDepth = 20;
+
+    bool foundSpring = false;
+
+    // Sample several run seeds/depths. We don't pin exact counts, but we do
+    // require deterministic placement and at least one spring across the sample.
+    for (int s = 0; s < 6; ++s) {
+        const uint32_t runSeed = 0xA51CEEDu + static_cast<uint32_t>(s) * 977u;
+
+        RNG rngA(runSeed);
+        RNG rngB(runSeed);
+
+        for (int depth = 2; depth <= 12; ++depth) {
+            Dungeon a(W, H);
+            Dungeon b(W, H);
+
+            a.generate(rngA, DungeonBranch::Main, depth, maxDepth, runSeed);
+            b.generate(rngB, DungeonBranch::Main, depth, maxDepth, runSeed);
+
+            int fa = 0;
+            int fb = 0;
+
+            for (int y = 1; y < H - 1; ++y) {
+                for (int x = 1; x < W - 1; ++x) {
+                    if (a.at(x, y).type == TileType::Fountain) {
+                        ++fa;
+
+                        // Springs are tactical POIs, but should not overlap stairs.
+                        CHECK(!(x == a.stairsUp.x && y == a.stairsUp.y));
+                        CHECK(!(x == a.stairsDown.x && y == a.stairsDown.y));
+
+                        // The pass intentionally keeps spring tiles away from stair landings.
+                        if (a.inBounds(a.stairsUp.x, a.stairsUp.y)) {
+                            CHECK(manhattan2({x, y}, a.stairsUp) > 6);
+                        }
+                        if (a.inBounds(a.stairsDown.x, a.stairsDown.y)) {
+                            CHECK(manhattan2({x, y}, a.stairsDown) > 6);
+                        }
+                    }
+                    if (b.at(x, y).type == TileType::Fountain) ++fb;
+                }
+            }
+
+            CHECK(fa == fb);
+
+            // Main-branch dungeon floors introduce fountains via two deterministic
+            // passes: seep springs + hydro confluence weaving.
+            CHECK(a.dungeonSeepFountainTiles + a.dungeonConfluenceFountainTiles == fa);
+            CHECK(a.dungeonSeepSpringCount <= a.dungeonSeepFountainTiles);
+            CHECK(a.dungeonConfluenceCount <= a.dungeonConfluenceFountainTiles);
+            if (a.dungeonSeepSpringCount > 0) CHECK(a.dungeonSeepFountainTiles > 0);
+            if (a.dungeonConfluenceCount > 0) CHECK(a.dungeonConfluenceFountainTiles > 0);
+            CHECK(a.dungeonConfluenceCount == b.dungeonConfluenceCount);
+            CHECK(a.dungeonConfluenceFountainTiles == b.dungeonConfluenceFountainTiles);
+
+            if (fa > 0) foundSpring = true;
+        }
+    }
+
+    CHECK(foundSpring);
+    return foundSpring;
+}
+
+bool test_dungeon_levels_have_fishing_water() {
+    constexpr int W = 80;
+    constexpr int H = 50;
+    constexpr int maxDepth = 20;
+
+    // Across multiple run seeds and all campaign depths, each generated floor
+    // should include at least one fishable water source (fountain or chasm).
+    for (int s = 0; s < 4; ++s) {
+        const uint32_t runSeed = 0xF157500u + static_cast<uint32_t>(s) * 1337u;
+        RNG rng(runSeed);
+
+        for (int depth = 1; depth <= maxDepth; ++depth) {
+            Dungeon d(W, H);
+            d.generate(rng, DungeonBranch::Main, depth, maxDepth, runSeed);
+
+            int fishable = 0;
+            for (int y = 1; y < H - 1; ++y) {
+                for (int x = 1; x < W - 1; ++x) {
+                    const TileType tt = d.at(x, y).type;
+                    if (tt == TileType::Fountain || tt == TileType::Chasm) ++fishable;
+                }
+            }
+            CHECK(fishable > 0);
+        }
+    }
+
+    return true;
+}
+
+bool test_fishing_targeting_accepts_chasm_tiles() {
+    Game g;
+    g.newGame(0xF15A123u);
+
+    // Keep only the player so line/target validation is not perturbed by incidental spawns.
+    const Entity p0 = g.player();
+    g.ents.clear();
+    g.ents.push_back(p0);
+    g.playerId_ = p0.id;
+    g.ground.clear();
+    g.trapsCur.clear();
+    for (auto& v : g.confusionGas_) v = 0u;
+    for (auto& v : g.poisonGas_) v = 0u;
+    for (auto& v : g.corrosiveGas_) v = 0u;
+    for (auto& v : g.fireField_) v = 0u;
+    for (auto& v : g.adhesiveFluid_) v = 0u;
+
+    g.inv.clear();
+    g.invSel = 0;
+    g.targeting = false;
+
+    Item rod;
+    rod.id = g.nextItemId++;
+    rod.kind = ItemKind::FishingRod;
+    rod.count = 1;
+    rod.spriteSeed = 0x1234u;
+    rod.charges = itemDef(rod.kind).maxCharges;
+    g.inv.push_back(rod);
+
+    // Build a clean, visible floor with one fishable chasm tile.
+    for (int y = 0; y < g.dung.height; ++y) {
+        for (int x = 0; x < g.dung.width; ++x) {
+            Tile& t = g.dung.at(x, y);
+            t.type = TileType::Floor;
+            t.visible = true;
+            t.explored = true;
+        }
+    }
+
+    Vec2i p{std::clamp(g.dung.width / 2, 2, g.dung.width - 3), std::clamp(g.dung.height / 2, 2, g.dung.height - 3)};
+    g.playerMut().pos = p;
+
+    Vec2i water{p.x + 2, p.y};
+    if (!g.dung.inBounds(water.x, water.y) || water.x >= g.dung.width - 1) {
+        water = {p.x - 2, p.y};
+    }
+    CHECK(g.dung.inBounds(water.x, water.y));
+    g.dung.at(water.x, water.y).type = TileType::Chasm;
+
+    g.beginFishingTargeting(rod.id);
+
+    CHECK(g.targeting);
+    CHECK(g.targetingMode_ == Game::TargetingMode::Fish);
+    CHECK(g.targetPos.x == water.x);
+    CHECK(g.targetPos.y == water.y);
+    CHECK(g.targetValid);
+    CHECK(g.targetStatusText_.empty());
+
+    return true;
+}
+
+bool test_fishing_targeting_no_visible_water_feedback() {
+    Game g;
+    g.newGame(0xF15A222u);
+
+    // Keep only the player so "no visible water" feedback remains deterministic.
+    const Entity p0 = g.player();
+    g.ents.clear();
+    g.ents.push_back(p0);
+    g.playerId_ = p0.id;
+    g.ground.clear();
+    g.trapsCur.clear();
+    for (auto& v : g.confusionGas_) v = 0u;
+    for (auto& v : g.poisonGas_) v = 0u;
+    for (auto& v : g.corrosiveGas_) v = 0u;
+    for (auto& v : g.fireField_) v = 0u;
+    for (auto& v : g.adhesiveFluid_) v = 0u;
+
+    g.inv.clear();
+    g.invSel = 0;
+    g.targeting = false;
+
+    Item rod;
+    rod.id = g.nextItemId++;
+    rod.kind = ItemKind::FishingRod;
+    rod.count = 1;
+    rod.spriteSeed = 0x2222u;
+    rod.charges = itemDef(rod.kind).maxCharges;
+    g.inv.push_back(rod);
+
+    // Remove all fishable tiles and reveal the map.
+    for (int y = 0; y < g.dung.height; ++y) {
+        for (int x = 0; x < g.dung.width; ++x) {
+            Tile& t = g.dung.at(x, y);
+            t.type = TileType::Floor;
+            t.visible = true;
+            t.explored = true;
+        }
+    }
+
+    Vec2i p{std::clamp(g.dung.width / 2, 2, g.dung.width - 3), std::clamp(g.dung.height / 2, 2, g.dung.height - 3)};
+    g.playerMut().pos = p;
+
+    const size_t msgBefore = g.messages().size();
+    g.beginFishingTargeting(rod.id);
+
+    CHECK(!g.targeting);
+    CHECK(!g.messages().empty());
+    CHECK(g.messages().size() >= msgBefore);
+    CHECK(containsCaseInsensitive(g.messages().back().text, "NO VISIBLE WATER"));
+
+    return true;
+}
+
+bool test_inventory_context_use_opens_fishing_and_crafting_tools() {
+    Game g;
+    g.newGame(0xF15A2026u);
+
+    // Keep only the player so inventory->targeting transitions stay deterministic.
+    const Entity p0 = g.player();
+    g.ents.clear();
+    g.ents.push_back(p0);
+    g.playerId_ = p0.id;
+    g.ground.clear();
+    g.trapsCur.clear();
+    for (auto& v : g.confusionGas_) v = 0u;
+    for (auto& v : g.poisonGas_) v = 0u;
+    for (auto& v : g.corrosiveGas_) v = 0u;
+    for (auto& v : g.fireField_) v = 0u;
+    for (auto& v : g.adhesiveFluid_) v = 0u;
+
+    g.inv.clear();
+    g.invSel = 0;
+    g.targeting = false;
+
+    Item rod;
+    rod.id = g.nextItemId++;
+    rod.kind = ItemKind::FishingRod;
+    rod.count = 1;
+    rod.spriteSeed = 0x1919u;
+    rod.charges = itemDef(rod.kind).maxCharges;
+    g.inv.push_back(rod);
+
+    Item kit;
+    kit.id = g.nextItemId++;
+    kit.kind = ItemKind::CraftingKit;
+    kit.count = 1;
+    kit.spriteSeed = 0x2020u;
+    g.inv.push_back(kit);
+
+    Item rock;
+    rock.id = g.nextItemId++;
+    rock.kind = ItemKind::Rock;
+    rock.count = 2;
+    rock.spriteSeed = 0x3030u;
+    g.inv.push_back(rock);
+
+    // Build a clean, visible floor with one fishable chasm tile in range.
+    for (int y = 0; y < g.dung.height; ++y) {
+        for (int x = 0; x < g.dung.width; ++x) {
+            Tile& t = g.dung.at(x, y);
+            t.type = TileType::Floor;
+            t.visible = true;
+            t.explored = true;
+        }
+    }
+
+    Vec2i p{std::clamp(g.dung.width / 2, 2, g.dung.width - 3), std::clamp(g.dung.height / 2, 2, g.dung.height - 3)};
+    g.playerMut().pos = p;
+
+    Vec2i water{p.x + 2, p.y};
+    if (!g.dung.inBounds(water.x, water.y) || water.x >= g.dung.width - 1) {
+        water = {p.x - 2, p.y};
+    }
+    CHECK(g.dung.inBounds(water.x, water.y));
+    g.dung.at(water.x, water.y).type = TileType::Chasm;
+
+    auto findInvByKind = [&](ItemKind k) -> int {
+        for (int i = 0; i < static_cast<int>(g.inv.size()); ++i) {
+            if (g.inv[static_cast<size_t>(i)].kind == k) return i;
+        }
+        return -1;
+    };
+
+    // ENTER on fishing rod should start fish targeting (no turn spent yet).
+    g.openInventory();
+    g.invSel = findInvByKind(ItemKind::FishingRod);
+    CHECK(g.invSel >= 0);
+    const uint32_t t0 = g.turns();
+    g.handleAction(Action::Confirm);
+    CHECK(g.targeting);
+    CHECK(g.targetingMode_ == Game::TargetingMode::Fish);
+    CHECK(!g.isInventoryOpen());
+    CHECK(g.turns() == t0);
+
+    g.handleAction(Action::Cancel);
+    CHECK(!g.targeting);
+
+    // EQUIP/WIELD hotkey on fishing rod should use the same path.
+    g.openInventory();
+    g.invSel = findInvByKind(ItemKind::FishingRod);
+    CHECK(g.invSel >= 0);
+    const uint32_t t1 = g.turns();
+    g.handleAction(Action::Equip);
+    CHECK(g.targeting);
+    CHECK(g.targetingMode_ == Game::TargetingMode::Fish);
+    CHECK(!g.isInventoryOpen());
+    CHECK(g.turns() == t1);
+
+    g.handleAction(Action::Cancel);
+    CHECK(!g.targeting);
+
+    // ENTER on crafting kit should open crafting mode in inventory (no turn spent).
+    g.openInventory();
+    g.invSel = findInvByKind(ItemKind::CraftingKit);
+    CHECK(g.invSel >= 0);
+    const uint32_t t2 = g.turns();
+    g.handleAction(Action::Confirm);
+    CHECK(g.isInventoryOpen());
+    CHECK(g.isInventoryCraftMode());
+    CHECK(g.turns() == t2);
+
+    // Exit crafting mode while keeping inventory open.
+    g.handleAction(Action::Inventory);
+    CHECK(g.isInventoryOpen());
+    CHECK(!g.isInventoryCraftMode());
+
+    // EQUIP/WIELD hotkey on crafting kit should also open crafting mode.
+    g.invSel = findInvByKind(ItemKind::CraftingKit);
+    CHECK(g.invSel >= 0);
+    const uint32_t t3 = g.turns();
+    g.handleAction(Action::Equip);
+    CHECK(g.isInventoryOpen());
+    CHECK(g.isInventoryCraftMode());
+    CHECK(g.turns() == t3);
+
+    return true;
+}
+
 
 
 
@@ -2164,6 +2769,73 @@ bool test_overworld_tectonic_ridge_field_extrema() {
 
     CHECK(mx > 0.70f);
     CHECK(mn < 0.20f);
+    return true;
+}
+
+bool test_wet_laboratory_chemical_hazards_generate_adhesive_fields() {
+    auto setupWetLab = [](Game& g) {
+        g.branch_ = DungeonBranch::Main;
+        g.depth_ = 9;
+
+        g.dung = Dungeon(28, 18);
+        g.dung.rooms.clear();
+
+        for (int y = 0; y < g.dung.height; ++y) {
+            for (int x = 0; x < g.dung.width; ++x) {
+                Tile& t = g.dung.at(x, y);
+                t.type = TileType::Floor;
+                t.visible = true;
+                t.explored = true;
+            }
+        }
+
+        g.dung.stairsUp = {1, 1};
+        g.dung.stairsDown = {2, 1};
+
+        Room lab;
+        lab.x = 8;
+        lab.y = 5;
+        lab.w = 12;
+        lab.h = 8;
+        lab.type = RoomType::Laboratory;
+        g.dung.rooms.push_back(lab);
+
+        // Active water source inside the laboratory should force an adhesive spill theme.
+        const Vec2i f{lab.cx(), lab.cy()};
+        g.dung.at(f.x, f.y).type = TileType::Fountain;
+
+        g.playerMut().pos = Vec2i{1, 1};
+
+        const size_t n = static_cast<size_t>(g.dung.width * g.dung.height);
+        g.confusionGas_.assign(n, uint8_t{0});
+        g.poisonGas_.assign(n, uint8_t{0});
+        g.corrosiveGas_.assign(n, uint8_t{0});
+        g.fireField_.assign(n, uint8_t{0});
+        g.adhesiveFluid_.assign(n, uint8_t{0});
+    };
+
+    Game a;
+    a.newGame(0xC0DE5EEDu);
+    setupWetLab(a);
+    a.spawnChemicalHazards();
+
+    int adhesiveA = 0;
+    for (uint8_t v : a.adhesiveFluid_) {
+        if (v > 0u) ++adhesiveA;
+    }
+    CHECK(adhesiveA > 0);
+
+    // Determinism check: same run seed + same level setup -> exact same field output.
+    Game b;
+    b.newGame(0xC0DE5EEDu);
+    setupWetLab(b);
+    b.spawnChemicalHazards();
+
+    CHECK(a.adhesiveFluid_ == b.adhesiveFluid_);
+    CHECK(a.poisonGas_ == b.poisonGas_);
+    CHECK(a.corrosiveGas_ == b.corrosiveGas_);
+    CHECK(a.confusionGas_ == b.confusionGas_);
+    CHECK(a.fireField_ == b.fireField_);
     return true;
 }
 
@@ -2687,6 +3359,7 @@ bool test_auto_explore_frontier_levitation_crosses_chasm() {
     for (auto& v : g.poisonGas_) v = 0u;
     for (auto& v : g.corrosiveGas_) v = 0u;
     for (auto& v : g.fireField_) v = 0u;
+    for (auto& v : g.adhesiveFluid_) v = 0u;
 
     Dungeon& d = GameTestAccess::dung(g);
 
@@ -2754,6 +3427,7 @@ bool test_auto_explore_frontier_levitation_diagonal_chasm_corner() {
     for (auto& v : g.poisonGas_) v = 0u;
     for (auto& v : g.corrosiveGas_) v = 0u;
     for (auto& v : g.fireField_) v = 0u;
+    for (auto& v : g.adhesiveFluid_) v = 0u;
 
     Dungeon& d = GameTestAccess::dung(g);
 
@@ -2817,6 +3491,200 @@ bool test_auto_explore_frontier_levitation_diagonal_chasm_corner() {
     CHECK(g.player().pos.x == frontier.x);
     CHECK(g.player().pos.y == frontier.y);
 
+    return true;
+}
+
+
+bool test_adhesive_fluid_seeds_from_fishable_water() {
+    Game g;
+    g.newGame(0xAD1501u);
+
+    const Entity p0 = g.player();
+    g.ents.clear();
+    g.ents.push_back(p0);
+    g.playerId_ = p0.id;
+    g.ground.clear();
+    g.trapsCur.clear();
+
+    Dungeon& d = GameTestAccess::dung(g);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            Tile& t = d.at(x, y);
+            t.type = TileType::Floor;
+            t.explored = true;
+            t.visible = true;
+        }
+    }
+
+    for (auto& v : g.confusionGas_) v = 0u;
+    for (auto& v : g.poisonGas_) v = 0u;
+    for (auto& v : g.corrosiveGas_) v = 0u;
+    for (auto& v : g.fireField_) v = 0u;
+    for (auto& v : g.adhesiveFluid_) v = 0u;
+
+    Vec2i water{d.width / 2, d.height / 2};
+    if (water == d.stairsUp || water == d.stairsDown) water.x = std::max(1, water.x - 2);
+    CHECK(d.inBounds(water.x, water.y));
+    d.at(water.x, water.y).type = TileType::Fountain;
+
+    Vec2i p{std::max(1, water.x - 3), water.y};
+    if (!d.inBounds(p.x, p.y)) p = {1, 1};
+    g.playerMut().pos = p;
+
+    g.applyEndOfTurnEffects();
+
+    int nonZero = 0;
+    int nearWater = 0;
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const size_t i = static_cast<size_t>(y * d.width + x);
+            if (i >= g.adhesiveFluid_.size()) continue;
+            if (g.adhesiveFluid_[i] == 0u) continue;
+            ++nonZero;
+            if (chebyshev(Vec2i{x, y}, water) <= 2) ++nearWater;
+        }
+    }
+
+    CHECK(nonZero > 0);
+    CHECK(nearWater > 0);
+    return true;
+}
+
+bool test_adhesive_fluid_cohesive_movement() {
+    Game g;
+    g.newGame(0xAD1502u);
+
+    const Entity p0 = g.player();
+    g.ents.clear();
+    g.ents.push_back(p0);
+    g.playerId_ = p0.id;
+    g.ground.clear();
+    g.trapsCur.clear();
+
+    Dungeon& d = GameTestAccess::dung(g);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            Tile& t = d.at(x, y);
+            t.type = TileType::Floor;
+            t.explored = true;
+            t.visible = true;
+        }
+    }
+
+    for (auto& v : g.confusionGas_) v = 0u;
+    for (auto& v : g.poisonGas_) v = 0u;
+    for (auto& v : g.corrosiveGas_) v = 0u;
+    for (auto& v : g.fireField_) v = 0u;
+    for (auto& v : g.adhesiveFluid_) v = 0u;
+
+    Vec2i center{d.width / 2 - 2, d.height / 2};
+    Vec2i water{center.x + 1, center.y};
+    if (water == d.stairsUp || water == d.stairsDown) water = {center.x + 2, center.y};
+    CHECK(d.inBounds(center.x, center.y));
+    CHECK(d.inBounds(water.x, water.y));
+
+    d.at(water.x, water.y).type = TileType::Fountain;
+
+    const size_t iCenter = static_cast<size_t>(center.y * d.width + center.x);
+    const size_t iRight = static_cast<size_t>(center.y * d.width + (center.x + 1));
+    CHECK(iCenter < g.adhesiveFluid_.size());
+    CHECK(iRight < g.adhesiveFluid_.size());
+
+    g.adhesiveFluid_[iCenter] = 90u;
+    g.adhesiveFluid_[iRight] = 42u;
+
+    const std::vector<uint8_t> before = g.adhesiveFluid_;
+
+    g.playerMut().pos = {std::max(1, center.x - 4), center.y};
+    g.applyEndOfTurnEffects();
+
+    const std::vector<uint8_t> after = g.adhesiveFluid_;
+    CHECK(after.size() == before.size());
+
+    bool gainedNewTile = false;
+    bool hasAdjacentPair = false;
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            const size_t i = static_cast<size_t>(y * d.width + x);
+            if (i >= after.size()) continue;
+            if (after[i] == 0u) continue;
+
+            if (before[i] == 0u) gainedNewTile = true;
+
+            constexpr Vec2i kDirs[4] = {{1,0},{-1,0},{0,1},{0,-1}};
+            for (const Vec2i& dv : kDirs) {
+                const int nx = x + dv.x;
+                const int ny = y + dv.y;
+                if (!d.inBounds(nx, ny)) continue;
+                const size_t j = static_cast<size_t>(ny * d.width + nx);
+                if (j < after.size() && after[j] > 0u) {
+                    hasAdjacentPair = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    const size_t iWater = static_cast<size_t>(water.y * d.width + water.x);
+    CHECK(iWater < after.size());
+
+    CHECK(gainedNewTile);
+    CHECK(hasAdjacentPair);
+    CHECK(after[iWater] > 0u);
+    return true;
+}
+
+bool test_adhesive_fluid_does_not_perma_web_player() {
+    Game g;
+    g.newGame(0xAD1503u);
+
+    const Entity p0 = g.player();
+    g.ents.clear();
+    g.ents.push_back(p0);
+    g.playerId_ = p0.id;
+    g.ground.clear();
+    g.trapsCur.clear();
+
+    Dungeon& d = GameTestAccess::dung(g);
+    for (int y = 0; y < d.height; ++y) {
+        for (int x = 0; x < d.width; ++x) {
+            Tile& t = d.at(x, y);
+            t.type = TileType::Floor;
+            t.explored = true;
+            t.visible = true;
+        }
+    }
+
+    for (auto& v : g.confusionGas_) v = 0u;
+    for (auto& v : g.poisonGas_) v = 0u;
+    for (auto& v : g.corrosiveGas_) v = 0u;
+    for (auto& v : g.fireField_) v = 0u;
+    for (auto& v : g.adhesiveFluid_) v = 0u;
+
+    const Vec2i start{d.width / 2, d.height / 2};
+    CHECK(d.inBounds(start.x, start.y));
+    CHECK(d.inBounds(start.x + 1, start.y));
+
+    g.playerMut().pos = start;
+    g.playerMut().effects.webTurns = 3;
+
+    const size_t iStart = static_cast<size_t>(start.y * d.width + start.x);
+    CHECK(iStart < g.adhesiveFluid_.size());
+    g.adhesiveFluid_[iStart] = 220u;
+
+    bool escaped = false;
+    for (int i = 0; i < 10; ++i) {
+        const Vec2i before = g.player().pos;
+        const bool acted = g.tryMove(g.playerMut(), 1, 0);
+        CHECK(acted);
+        g.applyEndOfTurnEffects();
+        if (g.player().pos != before) {
+            escaped = true;
+            break;
+        }
+    }
+
+    CHECK(escaped);
     return true;
 }
 
@@ -2915,6 +3783,137 @@ bool test_camp_stash_has_farming_starter_kit() {
 
     CHECK(hasHoe);
     CHECK(hasSeeds);
+    return true;
+}
+
+bool test_spellbook_study_and_reading_conduct() {
+    Game g;
+    g.newGame(0x5A17u);
+
+    g.inv.clear();
+    g.invSel = 0;
+    g.knownSpellsMask_ = 0u;
+    g.conductScrollsRead_ = 0u;
+    g.conductSpellbooksRead_ = 0u;
+
+    auto pushInv = [&](ItemKind k) {
+        Item it;
+        it.id = g.nextItemId++;
+        it.kind = k;
+        it.count = 1;
+        it.spriteSeed = 0xABCD1234u;
+        g.inv.push_back(it);
+        g.invSel = static_cast<int>(g.inv.size()) - 1;
+    };
+
+    // First read learns the spell and grants mana insight.
+    g.mana_ = 0;
+    pushInv(ItemKind::SpellbookFireball);
+    CHECK(g.useSelected());
+    CHECK(g.knowsSpell(SpellKind::Fireball));
+    CHECK(g.playerMana() > 0);
+    CHECK(g.conductSpellbooksRead_ == 1u);
+    CHECK(g.inv.empty());
+
+    // Re-reading a known spellbook is still useful (mana insight) and counts.
+    g.mana_ = 0;
+    pushInv(ItemKind::SpellbookFireball);
+    CHECK(g.useSelected());
+    CHECK(g.knowsSpell(SpellKind::Fireball));
+    CHECK(g.playerMana() > 0);
+    CHECK(g.conductSpellbooksRead_ == 2u);
+    CHECK(g.inv.empty());
+
+    // Scroll reading conduct should increment independently.
+    pushInv(ItemKind::ScrollMapping);
+    CHECK(g.useSelected());
+    CHECK(g.conductScrollsRead_ == 1u);
+
+    return true;
+}
+
+bool test_spells_overlay_toggle_and_cast_minor_heal() {
+    Game g;
+    g.newGame(0x51E117u);
+
+    // Keep simulation deterministic around the cast result.
+    const Entity p0 = g.player();
+    g.ents.clear();
+    g.ents.push_back(p0);
+    g.playerId_ = p0.id;
+
+    g.knownSpellsMask_ = 0u;
+    g.knownSpellsMask_ |= (1u << static_cast<uint32_t>(SpellKind::MinorHeal));
+    g.spellsSel = 0;
+    // Ensure this test exercises the successful cast path (not miscast RNG).
+    g.talentFocus_ = 20;
+
+    g.mana_ = g.playerManaMax();
+    g.playerMut().hp = std::max(1, g.player().hpMax - 4);
+
+    const int hpBefore = g.player().hp;
+    const int manaBefore = g.playerMana();
+    const uint32_t turnBefore = g.turns();
+
+    g.handleAction(Action::Spells);
+    CHECK(g.isSpellsOpen());
+
+    g.handleAction(Action::Confirm);
+    CHECK(!g.isSpellsOpen());
+    CHECK(g.turns() == turnBefore + 1);
+    CHECK(g.playerMana() < manaBefore);
+    CHECK(g.player().hp >= hpBefore);
+
+    // Hotkey should toggle the overlay back open.
+    g.handleAction(Action::Spells);
+    CHECK(g.isSpellsOpen());
+
+    return true;
+}
+
+bool test_spells_hotkey_works_from_inventory_prompts() {
+    Game g;
+    g.newGame(0x51E118u);
+
+    // Identify modal prompt should still allow switching to spells overlay.
+    g.openInventory();
+    g.invIdentifyMode = true;
+    CHECK(g.isInventoryOpen());
+    CHECK(g.invIdentifyMode);
+
+    g.handleAction(Action::Spells);
+    CHECK(g.isSpellsOpen());
+    CHECK(!g.isInventoryOpen());
+    CHECK(!g.invIdentifyMode);
+
+    // Close spells, then verify crafting prompt behavior.
+    g.handleAction(Action::Spells);
+    CHECK(!g.isSpellsOpen());
+
+    g.inv.clear();
+    g.invSel = 0;
+    Item kit;
+    kit.id = g.nextItemId++;
+    kit.kind = ItemKind::CraftingKit;
+    kit.count = 1;
+    g.inv.push_back(kit);
+
+    Item rock;
+    rock.id = g.nextItemId++;
+    rock.kind = ItemKind::Rock;
+    rock.count = 2;
+    g.inv.push_back(rock);
+
+    g.openInventory();
+    g.beginCrafting();
+    CHECK(g.isInventoryOpen());
+    CHECK(g.isInventoryCraftMode());
+
+    g.handleAction(Action::Spells);
+    CHECK(g.isSpellsOpen());
+    CHECK(!g.isInventoryOpen());
+    CHECK(!g.isInventoryCraftMode());
+
     return true;
 }
 
@@ -3036,6 +4035,179 @@ bool test_farming_till_plant_grow_harvest() {
     return true;
 }
 
+bool test_lifecycle_traits_are_deterministic() {
+    Game g;
+    g.newGame(0xA11CE551u);
+
+    Entity a = g.makeMonster(EntityKind::Wolf, {2, 2}, 1, /*allowGear=*/false, 0x1234ABCDu, /*allowProcVariant=*/false);
+    Entity b = g.makeMonster(EntityKind::Wolf, {2, 2}, 1, /*allowGear=*/false, 0x1234ABCDu, /*allowProcVariant=*/false);
+    CHECK(a.lifeTraitMask == b.lifeTraitMask);
+    CHECK(a.lifeSex == b.lifeSex);
+    CHECK(a.lifeTraitMask != 0u);
+
+    Entity sk = g.makeMonster(EntityKind::Shopkeeper, {3, 2}, 1, /*allowGear=*/false, 0x1234ABCDu, /*allowProcVariant=*/false);
+    CHECK(sk.lifeTraitMask == 0u);
+    CHECK(sk.lifeSex == LifeSex::Unknown);
+
+    return true;
+}
+
+bool test_lifecycle_growth_progression() {
+    Game g;
+    g.newGame(0xA11CE552u);
+
+    g.dung = Dungeon(16, 10);
+    g.dung.rooms.clear();
+    makeAllVisibleFloor(g.dung);
+    g.playerMut().pos = {4, 5};
+
+    Entity cub = g.makeMonster(EntityKind::Wolf, {6, 5}, 2, /*allowGear=*/false, 0x77889900u, /*allowProcVariant=*/false);
+    cub.lifeStage = LifeStage::Newborn;
+    cub.lifeAgeTurns = 0;
+    cub.lifeStageTurns = lifecycleStageDurationTurns(LifeStage::Newborn) - 1;
+    cub.lifeReproductionCooldown = 0;
+    const int baseHp = cub.lifeBaseHpMax;
+
+    g.ents.push_back(cub);
+    const size_t idx = g.ents.size() - 1;
+
+    g.tickLifeCycles();
+    CHECK(g.ents[idx].lifeStage == LifeStage::Child);
+
+    g.ents[idx].lifeStageTurns = lifecycleStageDurationTurns(LifeStage::Child) - 1;
+    g.tickLifeCycles();
+    CHECK(g.ents[idx].lifeStage == LifeStage::Adult);
+    CHECK(g.ents[idx].hpMax == baseHp);
+
+    return true;
+}
+
+bool test_lifecycle_reproduction_spawns_newborn() {
+    Game g;
+    g.newGame(0xA11CE553u);
+
+    g.dung = Dungeon(20, 12);
+    g.dung.rooms.clear();
+    makeAllVisibleFloor(g.dung);
+    g.playerMut().pos = {3, 6};
+
+    const int matureAge = lifecycleStageDurationTurns(LifeStage::Newborn) +
+                          lifecycleStageDurationTurns(LifeStage::Child);
+
+    Entity a = g.makeMonster(EntityKind::Wolf, {8, 6}, 7, /*allowGear=*/false, 0xAAAABBBB, /*allowProcVariant=*/false);
+    Entity b = g.makeMonster(EntityKind::Wolf, {9, 6}, 7, /*allowGear=*/false, 0xCCCCDDDD, /*allowProcVariant=*/false);
+
+    a.lifeStage = LifeStage::Adult;
+    b.lifeStage = LifeStage::Adult;
+    a.lifeAgeTurns = matureAge + 80;
+    b.lifeAgeTurns = matureAge + 80;
+    a.lifeStageTurns = 120;
+    b.lifeStageTurns = 120;
+    a.lifeReproductionCooldown = 0;
+    b.lifeReproductionCooldown = 0;
+    a.hp = a.hpMax;
+    b.hp = b.hpMax;
+    if (a.lifeSex == b.lifeSex) {
+        b.lifeSex = (a.lifeSex == LifeSex::Male) ? LifeSex::Female : LifeSex::Male;
+    }
+
+    g.ents.push_back(a);
+    g.ents.push_back(b);
+    const int parentAId = a.id;
+    const int parentBId = b.id;
+
+    const size_t before = g.ents.size();
+    g.tickLifeCycles();
+    CHECK(g.ents.size() == before + 1);
+
+    bool foundNewborn = false;
+    for (const auto& e : g.ents) {
+        if (e.id == parentAId || e.id == parentBId) continue;
+        if (e.kind != EntityKind::Wolf) continue;
+        if (e.lifeStage != LifeStage::Newborn) continue;
+        foundNewborn = true;
+        CHECK(e.lifeTraitMask != 0u);
+        break;
+    }
+    CHECK(foundNewborn);
+
+    for (auto& e : g.ents) {
+        if (e.id == parentAId || e.id == parentBId) {
+            CHECK(e.lifeReproductionCooldown > 0);
+        }
+    }
+
+    return true;
+}
+
+bool spritePixelsEqual(const SpritePixels& a, const SpritePixels& b) {
+    if (a.w != b.w || a.h != b.h) return false;
+    if (a.px.size() != b.px.size()) return false;
+    for (size_t i = 0; i < a.px.size(); ++i) {
+        const Color& ca = a.px[i];
+        const Color& cb = b.px[i];
+        if (ca.r != cb.r || ca.g != cb.g || ca.b != cb.b || ca.a != cb.a) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int spritePixelDiffCount(const SpritePixels& a, const SpritePixels& b) {
+    if (a.w != b.w || a.h != b.h || a.px.size() != b.px.size()) return -1;
+    int diff = 0;
+    for (size_t i = 0; i < a.px.size(); ++i) {
+        const Color& ca = a.px[i];
+        const Color& cb = b.px[i];
+        if (ca.r != cb.r || ca.g != cb.g || ca.b != cb.b || ca.a != cb.a) {
+            ++diff;
+        }
+    }
+    return diff;
+}
+
+bool test_spritegen_floor_determinism_and_4frame_loop() {
+    const uint32_t seed = 0x5EEDBEEFu;
+    const uint8_t style = 0;
+
+    const SpritePixels floor0 = generateThemedFloorTile(seed, style, 0, 16);
+    const SpritePixels floor0b = generateThemedFloorTile(seed, style, 0, 16);
+    const SpritePixels floor4 = generateThemedFloorTile(seed, style, 4, 16);
+
+    CHECK(floor0.w == 16 && floor0.h == 16);
+    CHECK(spritePixelsEqual(floor0, floor0b));
+    CHECK(spritePixelsEqual(floor0, floor4));
+
+    const SpritePixels iso0 = generateIsometricThemedFloorTile(seed, style, 0, 16);
+    const SpritePixels iso0b = generateIsometricThemedFloorTile(seed, style, 0, 16);
+    const SpritePixels iso4 = generateIsometricThemedFloorTile(seed, style, 4, 16);
+
+    CHECK(iso0.w == 16 && iso0.h == 8);
+    CHECK(spritePixelsEqual(iso0, iso0b));
+    CHECK(spritePixelsEqual(iso0, iso4));
+    CHECK(iso0.at(0, 0).a == 0);   // outside the diamond
+    CHECK(iso0.at(8, 3).a > 0);    // center diamond pixel
+
+    return true;
+}
+
+bool test_spritegen_floor_animation_varies_across_frames() {
+    const uint32_t seed = 0xA11CE999u;
+    const uint8_t style = 5; // no sparkle branch; movement should come from floor animation.
+
+    const SpritePixels floor0 = generateThemedFloorTile(seed, style, 0, 16);
+    const SpritePixels floor2 = generateThemedFloorTile(seed, style, 2, 16);
+    const int floorDiff = spritePixelDiffCount(floor0, floor2);
+    CHECK(floorDiff > 0);
+
+    const SpritePixels iso0 = generateIsometricThemedFloorTile(seed, style, 0, 16);
+    const SpritePixels iso2 = generateIsometricThemedFloorTile(seed, style, 2, 16);
+    const int isoDiff = spritePixelDiffCount(iso0, iso2);
+    CHECK(isoDiff > 0);
+
+    return true;
+}
+
 
 bool test_spritegen_scale3x_edge_rules() {
     // This test exercises the optimized Scale3x rules (as used by resampleSpriteToSize)
@@ -3123,7 +4295,11 @@ bool test_spritegen_scale2x_transparent_rgb_invariant_corner_rounding() {
         const Color& a = outClean.px[i];
         const Color& b = outNoisy.px[i];
         if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a) {
-            CHECK(false);
+            const int x = static_cast<int>(i % static_cast<size_t>(outClean.w));
+            const int y = static_cast<int>(i / static_cast<size_t>(outClean.w));
+            CHECK_MSG(false, "pixel mismatch at (" << x << "," << y
+                << "), clean=" << colorToString(a)
+                << ", noisy=" << colorToString(b));
         }
     }
     return true;
@@ -3186,7 +4362,11 @@ bool test_spritegen_resample_factor_6_matches_chain() {
         const Color& a = direct.px[i];
         const Color& b = chained.px[i];
         if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a) {
-            CHECK(false);
+            const int x = static_cast<int>(i % static_cast<size_t>(direct.w));
+            const int y = static_cast<int>(i / static_cast<size_t>(direct.w));
+            CHECK_MSG(false, "pixel mismatch at (" << x << "," << y
+                << "), direct=" << colorToString(a)
+                << ", chained=" << colorToString(b));
         }
     }
 
@@ -3272,7 +4452,11 @@ bool test_spritegen_resample_rect_factor_6_matches_chain() {
         const Color& a = direct.px[i];
         const Color& b = chained.px[i];
         if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a) {
-            CHECK(false);
+            const int x = static_cast<int>(i % static_cast<size_t>(direct.w));
+            const int y = static_cast<int>(i / static_cast<size_t>(direct.w));
+            CHECK_MSG(false, "pixel mismatch at (" << x << "," << y
+                << "), direct=" << colorToString(a)
+                << ", chained=" << colorToString(b));
         }
     }
 
@@ -3313,10 +4497,16 @@ int main(int argc, char** argv) {
         {"overworld_profiles", test_overworld_profiles},
         {"overworld_biome_diversity", test_overworld_biome_diversity},
         {"overworld_tectonics", test_overworld_tectonic_ridge_field_extrema},
+        {"wet_lab_chemical_hazards", test_wet_laboratory_chemical_hazards_generate_adhesive_fields},
         {"overworld_chunk",    test_overworld_chunk_determinism},
         {"overworld_trails",  test_overworld_trails_connectivity},
         {"overworld_rivers",  test_overworld_rivers_and_banks_present},
         {"overworld_springs", test_overworld_springs_present},
+        {"dungeon_seep_springs", test_dungeon_seep_springs_present},
+        {"dungeon_fishing_water", test_dungeon_levels_have_fishing_water},
+        {"fishing_target_chasm", test_fishing_targeting_accepts_chasm_tiles},
+        {"fishing_target_no_water", test_fishing_targeting_no_visible_water_feedback},
+        {"inventory_fishing_crafting_context_use", test_inventory_context_use_opens_fishing_and_crafting_tools},
         {"overworld_brooks",  test_overworld_brooks_present},
         {"overworld_strongholds", test_overworld_strongholds_present},
         {"overworld_weather",  test_overworld_weather_determinism},
@@ -3332,8 +4522,13 @@ int main(int argc, char** argv) {
         {"overworld_auto_travel_label", test_overworld_auto_travel_label},
         {"auto_explore_levitation_chasm", test_auto_explore_frontier_levitation_crosses_chasm},
         {"auto_explore_levitation_chasm_diagonal", test_auto_explore_frontier_levitation_diagonal_chasm_corner},
+        {"adhesive_fluid_seed", test_adhesive_fluid_seeds_from_fishable_water},
+        {"adhesive_fluid_escape", test_adhesive_fluid_does_not_perma_web_player},
+        {"adhesive_fluid_cohesion", test_adhesive_fluid_cohesive_movement},
         {"overworld_gate_alignment", test_overworld_gate_alignment},
         {"ident_appearances", test_ident_appearance_procgen_determinism},
+        {"spritegen_floor_determinism", test_spritegen_floor_determinism_and_4frame_loop},
+        {"spritegen_floor_animation", test_spritegen_floor_animation_varies_across_frames},
         {"spritegen_scale3x_rules", test_spritegen_scale3x_edge_rules},
         {"spritegen_scale2x_transparent_rgb", test_spritegen_scale2x_transparent_rgb_invariant_corner_rounding},
         {"spritegen_nearest_center_mapping", test_spritegen_resample_nearest_center_mapping},
@@ -3343,14 +4538,23 @@ int main(int argc, char** argv) {
         {"shop_profiles",   test_proc_shop_profiles},
         {"shopkeeper_look_name", test_shopkeeper_look_shows_deterministic_name},
         {"shopkeeper_target_warning_name", test_targeting_warning_includes_shopkeeper_name},
+        {"shop_pay_requires_local_keeper", test_pay_at_shop_requires_local_shopkeeper},
+        {"shopkeeper_death_clears_depth_ledger", test_shopkeeper_death_clears_depth_debt_ledger},
         {"shrine_profiles", test_proc_shrine_profiles},
         {"camp_stash_farming_starter_kit", test_camp_stash_has_farming_starter_kit},
+        {"spellbook_study_and_reading_conduct", test_spellbook_study_and_reading_conduct},
+        {"spells_overlay_cast", test_spells_overlay_toggle_and_cast_minor_heal},
+        {"spells_hotkey_inventory_prompt", test_spells_hotkey_works_from_inventory_prompts},
         {"farming_till_plant_grow_harvest", test_farming_till_plant_grow_harvest},
+        {"lifecycle_traits_determinism", test_lifecycle_traits_are_deterministic},
+        {"lifecycle_growth", test_lifecycle_growth_progression},
+        {"lifecycle_reproduction", test_lifecycle_reproduction_spawns_newborn},
         {"victory_plan",   test_victory_plan_procgen_determinism},
     };
 
     bool list = false;
     std::string filter;
+    std::string exact;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -3358,6 +4562,13 @@ int main(int argc, char** argv) {
             list = true;
         } else if (a.rfind("--filter=", 0) == 0) {
             filter = a.substr(std::string("--filter=").size());
+        } else if (a.rfind("--exact=", 0) == 0) {
+            exact = a.substr(std::string("--exact=").size());
+        } else if (a.rfind("--test=", 0) == 0) {
+            exact = a.substr(std::string("--test=").size());
+        } else if (!a.empty() && a[0] == '-') {
+            std::cerr << "Unknown option: " << a << "\n";
+            return 2;
         } else {
             // Convenience: allow passing a bare substring as a filter.
             filter = a;
@@ -3373,16 +4584,57 @@ int main(int argc, char** argv) {
 
     int passed = 0;
     int failed = 0;
+    bool ranAny = false;
+    std::vector<std::string> failedTests;
 
     for (const auto& t : tests) {
-        if (!containsCaseInsensitive(t.name, filter)) continue;
+        if (!exact.empty()) {
+            if (t.name != exact) continue;
+        } else if (!containsCaseInsensitive(t.name, filter)) {
+            continue;
+        }
+        ranAny = true;
 
-        const bool ok = t.fn();
+        setCurrentTestName(t.name);
+        bool ok = false;
+        try {
+            ok = t.fn();
+        } catch (const std::exception& ex) {
+            gFailureLogged = true;
+            std::cerr << "[FAIL] " << t.name << " threw std::exception: " << ex.what() << "\n";
+            ok = false;
+        } catch (...) {
+            gFailureLogged = true;
+            std::cerr << "[FAIL] " << t.name << " threw unknown exception\n";
+            ok = false;
+        }
         if (ok) {
             ++passed;
         } else {
+            if (!gFailureLogged) {
+                std::cerr << "[FAIL] " << t.name
+                          << " returned false without CHECK context\n";
+            }
             ++failed;
+            failedTests.emplace_back(t.name);
         }
+    }
+
+    if (!ranAny) {
+        if (!exact.empty()) {
+            std::cerr << "[FAIL] no test matched --exact=" << exact << "\n";
+        } else {
+            std::cerr << "[FAIL] no tests matched filter '" << filter << "'\n";
+        }
+        return 2;
+    }
+
+    if (!failedTests.empty()) {
+        std::cerr << "[FAIL] Failed tests:";
+        for (const std::string& name : failedTests) {
+            std::cerr << " " << name;
+        }
+        std::cerr << "\n";
     }
 
     std::cout << "Tests: " << passed << " passed, " << failed << " failed." << std::endl;

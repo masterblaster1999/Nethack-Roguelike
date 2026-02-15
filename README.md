@@ -22,6 +22,7 @@ A tiny NetHack-inspired roguelike with:
   - Reach it by taking the upstairs (`<`) from Depth 1.
   - Hostile monsters won't follow you up, so it works as a safe-ish staging area.
   - **Merchant Guild ledger**: use `#debt` (or `#ledger`) to review shop debts, and `#pay` at camp to settle them.
+  - **Settlement simulation**: `#camp` / `#towns` reports prosperity, security, strain, and nearby town market pressure; local shop buy/sell rates react to these conditions.
 
 - **Depth 1**: classic rooms — now with a chance to generate a more scattered **"ruins" graph** layout (packed rooms + MST connectivity + extra loops)
   - **Depth 2**: **Mines** (winding tunnels + small chambers)
@@ -133,10 +134,10 @@ A tiny NetHack-inspired roguelike with:
   - **Scroll of Knock** can also unlock chests.
 - **Run history / high scores** are stored in `procrogue_scores.csv`.
 - **Mouse support**:
-  - **Left click**: auto-travel to the clicked tile
+  - **Left click**: adjacent tile = single step, your tile = context action, distant tile = auto-travel
   - **Right click**: enter look mode at the clicked tile
   - **Mouse move**: moves the look cursor / aiming cursor
-  - **Mouse wheel**: scroll message log
+  - **Mouse wheel**: scroll message log (in minimap: wheel scrolls cursor, Ctrl/Cmd/Shift+wheel zooms)
 - **Settings file** (auto-created on first run): tweak tile size, HUD height, fullscreen, auto-move speed, auto-pickup/autosave, and `bind_*` keybindings.
 - **Optional hunger system**: enable `hunger_enabled` to add food + starvation (and a new **Food Ration** item).
 - **Optional encumbrance system**: enable `encumbrance_enabled` for carrying capacity + burden states.
@@ -177,7 +178,7 @@ A tiny NetHack-inspired roguelike with:
 
 ### Movement / exploration
 - **Move**: WASD / Arrow keys / Q-E-Z-C diagonals (also numpad)
-- **Wait**: `.` or Space
+- **Wait**: `.` / Space / Numpad `5`
 - **Look**: `L` or `V` (or right-click)
 - **Auto-travel**: Enter while looking (or left-click a tile)
 - **Auto-explore**: `O`
@@ -212,12 +213,21 @@ A tiny NetHack-inspired roguelike with:
 ### Meta
 - **Help**: `F1`, `?`, or `H`
 - **Options menu**: `F2`
+- **Options submenu jump**: `Tab` / `Shift+Tab` (next), `Shift+S` (previous)
 - **Extended commands**: `#` (Shift+3)
 - **Save / Load**: `F5` / `F9`
 - **Load autosave**: `F10`
 - **Screenshot**: `F12` (bindable via `bind_screenshot`)
 - **Fullscreen**: `F11` (bindable via `bind_fullscreen`)
 - **Message log scroll**: PageUp / PageDown (or mouse wheel)
+- **Keybind editor UX** (`Options -> Keybinds`):
+  - `Tab` / `Shift+Tab`: open/cycle the **view dropdown** (`All`, `Movement`, `Gameplay`, `UI/Meta`, `Conflicts`)
+  - `Shift+S`: quick-cycle view mode
+  - `Ctrl/Cmd+K`: toggle **conflicts-only** view on/off (restores previous view)
+  - `Enter`: apply selected dropdown view
+  - `[` / `]`: jump to previous/next conflicting entry
+  - `Ctrl/Cmd+R`: resolve conflicts for the selected action
+  - `Ctrl/Cmd+Shift+R`: resolve all detected keybind conflicts
 - **Monster codex**: `F4` (filter with Left/Right, sort with Tab)
 - **Discoveries**: `\\` (filter with Left/Right or Tab, sort with Shift+S)
 - **Restart**: `F6`
@@ -310,6 +320,7 @@ Useful commands:
 - `#stepdelay <ms>` – set auto-step delay (10–500)
 - `#identify on|off` – toggle item identification system
 - `#timers on|off` – toggle status effect timers
+- `#economy` – show local market climate + civic pulse + debt pressure
 - `#engrave <text>` – engrave text on the floor (NetHack-y wards: try `#engrave ELBERETH`)
 - `#seed` – show the current run seed
 - `#scores [n]` – show top scores (default 10)

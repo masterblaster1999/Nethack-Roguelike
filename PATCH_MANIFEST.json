@@ -6,7 +6,7 @@
   "summary": "Add deterministic shopkeeper names to LOOK and targeting warnings, and replace the placeholder GitHub Actions workflow with a real cross-platform CMake/CTest CI run.",
   "files_changed_or_added_this_round": [
     "PATCH_MANIFEST.json",
-    ".github/workflows/blank.yml",
+    ".github/workflows/ci.yml",
     "src/game_look.cpp",
     "src/game_targeting.cpp",
     "src/shopkeeper_identity.hpp",
@@ -14,7 +14,7 @@
   ],
   "files_in_patch_zip": [
     "PATCH_MANIFEST.json",
-    ".github/workflows/blank.yml",
+    ".github/workflows/ci.yml",
     "CMakeLists.txt",
     "dungeon.cpp",
     "src/ai.cpp",

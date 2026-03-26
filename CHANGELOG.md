@@ -1,5 +1,126 @@
 # Changelog
 
+## Round 254
+- Procedural lighting upgrade for spritegen:
+  - Added seeded lighting profiles that now influence palette warmth/coolness, 2D relight direction, wall/floor light grading, ripple patterns, and shadow reach.
+  - Light ripples no longer use one centered ring for every seed; they now vary direction, footprint, tint, and pattern while staying deterministic.
+  - Isometric entity shadows now vary by seed in footprint, distance, and tint while still respecting the requested global light direction.
+- Tests: added coverage for light-ripple profile variety/determinism and seeded isometric shadow profiles.
+
+## Round 253
+- Overworld living-world intel: the atlas now exposes per-chunk event pressure derived from the existing settlement/confluence simulation.
+  - Added `LIVING:` and `FRONTS:` readouts so visited chunks surface migration fronts, ooze seep pressure, gas-vent activity, cache windows, and eco-front intensity instead of hiding those signals behind dungeon-only events.
+- Overworld travel feedback:
+  - Route previews and active auto-travel now report a `ROUTE WATCH` / `AUTO WATCH` summary so long-distance movement calls out the hottest living-world front along the discovered path.
+  - Starting auto-travel now emits a one-line route watch message in the main log.
+- Tests: added deterministic coverage for the new chunk intel model and for auto-travel route-watch messaging.
+
+## Round 252
+- Procedural crafting upgrade: expanded the **mixed-shard transmutation** resonance catalog.
+  - Added new curated shard fusions such as `REGEN+SHIELD -> AURORA`, `REGEN+STONE -> SHIELD`, `AURORA+CLARITY -> LUCK`, `RUNE+CLARITY -> ARC`, `RUNE+AURORA -> CLARITY`, and `ARC+STONE -> RUNE`.
+  - This gives shard transmutation a more readable progression ladder into support/arcane tags instead of falling back to source tags as often.
+- Tests: replaced shard-crafting placeholders with deterministic coverage for shard refinement, curated transmutation outcomes, and the location-invariance guarantee for shard-only crafts.
+
+## Round 251
+- Procgen graffiti upgrade: rumor hints now cover more authored dungeon content.
+  - Added themed-room hints for `Armory`, `Library`, `Laboratory`, and `Outpost` rooms.
+  - Added altar centroid hints so graffiti can point toward prayer sites even outside shrine rooms.
+- Graffiti selection polish:
+  - When a graffiti tile is inside a themed room, nearby matching hints are now preferred over generic local hints.
+  - This makes room-local graffiti read more intentionally authored instead of randomly pointing at an unrelated nearby feature.
+- Tests: strengthened `graffiti_procgen` coverage for the expanded hint pool and room-aware hint picking.
+
+## Round 250
+- Procedural crafting upgrade: added **mixed-shard transmutation** for Essence Shards with different tags.
+  - Two different shard tags now deterministically fuse into a new shard tag/tier instead of falling back to generic crafting.
+  - Added curated high-synergy tag fusions (for example, `EMBER+VENOM -> ALCH`) with deterministic fallback blending.
+  - High-tier harmony transmutations can produce a deterministic trace shard byproduct.
+- Crafting UX:
+  - Inventory crafting preview now distinguishes shard refinement vs shard transmutation and shows the fused tag.
+  - Craft result messaging now explicitly calls out shard transmutation.
+- Determinism/safety:
+  - Shard transmutation is location-invariant (biome/workstation catalysts do not perturb shard-only operations).
+- Tests: added coverage for mixed-shard transmutation determinism and location invariance.
+
+## Round 249
+- Added procedural **living world events** that fire periodically and deterministically during play (`Main` branch):
+  - **Migration waves** can seed new off-screen monster packs.
+  - **Sticky ooze seep** events can create fresh adhesive patches.
+  - **Gas vent bursts** can emit confusion/poison/corrosive clouds.
+  - **Supply cache drops** can place emergent loot in the dungeon.
+- Events are hash-seeded from run/level/turn context, so behavior stays stable across save/load and does not perturb the main RNG stream.
+- Integrated the new event tick into the per-turn timeline just before end-of-turn hazard simulation.
+- Tests: added coverage that living world events produce activity over time and remain deterministic for identical seeds/turns.
+
+## Round 248
+- Auto-move hazard thresholds are now tunable via settings:
+  - `auto_hazard_caution = 0..4` (0 less conservative, 2 default, 4 most conservative).
+  - `auto_hazard_sticky_threshold = 0..255` (adhesive intensity stop threshold).
+- Proactive hazard stops in auto-move now use these tunables for fire/gas/adhesive checks.
+- Settings/replay integration:
+  - Startup + `#reload` now apply both tunables.
+  - In-game settings persistence writes both keys.
+  - Replay metadata records and restores both values for determinism.
+- Tests: added coverage for low-caution poison-gas behavior and sticky-threshold tuning.
+
+## Round 247
+- Auto-move hazard prevention: `stepAutoMove()` now aborts **before** stepping onto hazardous tiles.
+  - Applies to auto-travel, auto-explore, and auto-run.
+  - Stops on next-tile fire, confusion gas, poison gas, corrosive gas, and high-intensity sticky ooze.
+  - Uses explicit messages such as `AUTO-TRAVEL STOPPED (POISON GAS AHEAD).`
+- Tests: added coverage that auto-travel halts before entering a poison-gas tile and does not spend a turn.
+
+## Round 246
+- Auto-move safety: corrosion is now treated like other dangerous statuses in `stepAutoMove()`.
+  - Auto-explore / auto-travel / auto-run now stop immediately if you are already corroded.
+  - Auto-move now also stops when corrosion is newly applied during auto-search or movement turns.
+- Tests: added coverage that auto-explore halts without spending a turn when the player is corroded.
+
+## Round 245
+- Search QoL/safety: repeated search (`#search N`) now applies hazard gating similar to safe rest.
+  - Blocks starting repeated search while burning, confused, webbed, in confusion/poison/corrosive gas, or starving.
+  - Stops mid-search if you take damage or gain dangerous statuses.
+- Tests: added coverage for confusion-gas precheck and damage-based interruption.
+
+## Round 244
+- Gameplay UX expansion: added a new extended command `#diet` (alias: `#combo`) to inspect the procedural meal-combo system in real time.
+  - Shows active fish/crop/meat combo windows, remaining turns, and inventory meal counts.
+  - Highlights the missing archetype needed to complete **Trinity Feast** when a pairing is active.
+  - Reports current Flavor Echo tag-window status to help players plan repeat-tag bonuses.
+- Extended command discoverability:
+  - Added `diet` to command list, autocomplete/help metadata, and alias normalization.
+  - Added help text callout under command help.
+- Tests: added coverage ensuring `#diet` reports combo progress and that `combo` alias dispatches correctly.
+
+## Round 243
+- New gameplay mechanic: **Culinary Combo System** (diet synergy).
+  - Eating varied meal archetypes (**fish + crop + meat**) within a short window now builds combo stages:
+    - Stage 1 pairings grant themed tactical buffs (e.g., insight, bulwark, predator rhythm).
+    - Stage 2 triggers **TRINITY FEAST**, granting a strong multi-buff package plus partial status cleansing.
+  - Repeating the same food tag quickly now triggers **Flavor Echo** bonuses (e.g., regen/haste/shield/clarity surges, luck payout).
+- Combo state is runtime-only and intentionally non-serialized (no save-format churn).
+- Tests: added deterministic coverage for Trinity Feast trigger and Flavor Echo (Clarity) behavior.
+
+## Round 242
+- Rendering polish: added a **hazard hotspot accent pass** that gives dense fire/gas/adhesive tiles a small additive core glow so clustered hazards read with more depth.
+- Rendering polish: added a map-region **hazard pressure tint** post-FX that dynamically blends color/alpha from the player’s current environmental exposure (fire, poison/confusion/corrosive gas, adhesive/webbed state).
+- Effect is visual-only and clipped to the map viewport so HUD readability is preserved.
+
+## Round 241
+- Resting QoL/safety: `restUntilSafe()` now aborts earlier in more dangerous states.
+  - Blocks starting rest while confused, webbed, or standing in confusion/poison/corrosive gas.
+  - Stops mid-rest when new hazardous statuses are applied (poison/confusion/burn/corrosion/web).
+  - Stops mid-rest when you enter hazardous gas while resting.
+  - Adds a deterministic no-progress guard: auto-rest now stops with `REST STOPPED (NO RECOVERY PROGRESS).` instead of burning many empty turns.
+- Tests: added coverage for gas/confusion pre-checks and no-recovery-progress stop behavior.
+
+## Round 240
+- **Procedural wild foraging command (`#forage`)**: added deterministic, tile-keyed "forage windows" that let you gather biome/material-themed ingredients over time.
+  - Outcomes are procedural and stable per run/location/window, yielding items such as **seeds, crop produce, fish, butchered meat, and essence shards**.
+  - Outcome weighting is influenced by local **ecosystem biome**, **terrain material**, room context, and camp/dungeon branch.
+  - Added command aliases: `gather`, `foraging`, `wildcraft`.
+- Tests: added coverage for forage determinism and command execution turn-spending.
+
 ## Round 239
 - Procgen graffiti add-on: expanded hint collection with new floor signals:
   - fountains (`TileType::Fountain`) now contribute directional rumor hints

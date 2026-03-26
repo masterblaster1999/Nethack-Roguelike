@@ -82,6 +82,28 @@
             "name": "msvc-vcpkg-base",
             "hidden": true,
             "inherits": "msvc-base",
+            "environment": {
+                "VCPKG_FORCE_SYSTEM_BINARIES": "1",
+                "GIT": "C:/Program Files/Git/cmd/git.exe",
+                "PATH": "C:/Program Files/Git/cmd;$penv{PATH}",
+                "HTTP_PROXY": null,
+                "HTTPS_PROXY": null,
+                "ALL_PROXY": null,
+                "http_proxy": null,
+                "https_proxy": null,
+                "all_proxy": null,
+                "NO_PROXY": "localhost,127.0.0.1,::1",
+                "no_proxy": "localhost,127.0.0.1,::1",
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "http.proxy",
+                "GIT_CONFIG_VALUE_0": "",
+                "GIT_CONFIG_KEY_1": "https.proxy",
+                "GIT_CONFIG_VALUE_1": "",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GCM_INTERACTIVE": "Never",
+                "VCPKG_DOWNLOADS": "${sourceDir}/build/.vcpkg-downloads",
+                "VCPKG_DEFAULT_BINARY_CACHE": "${sourceDir}/build/.vcpkg-bincache"
+            },
             "cacheVariables": {
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
                 "VCPKG_MANIFEST_MODE": "ON"
@@ -149,6 +171,46 @@
                 "PROCROGUE_BUILD_GAME": "OFF",
                 "PROCROGUE_BUILD_TESTS": "ON"
             }
+        },
+        {
+            "name": "tests-smoke",
+            "displayName": "Tests Smoke (no SDL)",
+            "inherits": "tests"
+        },
+        {
+            "name": "tests-headless-smoke",
+            "displayName": "Tests Headless Smoke (no SDL)",
+            "inherits": "tests"
+        },
+        {
+            "name": "tests-settings",
+            "displayName": "Tests Settings (no SDL)",
+            "inherits": "tests"
+        },
+        {
+            "name": "tests-commands",
+            "displayName": "Tests Commands (no SDL)",
+            "inherits": "tests"
+        },
+        {
+            "name": "tests-replay",
+            "displayName": "Tests Replay (no SDL)",
+            "inherits": "tests"
+        },
+        {
+            "name": "tests-replay-golden",
+            "displayName": "Tests Replay Golden (no SDL)",
+            "inherits": "tests"
+        },
+        {
+            "name": "tests-economy",
+            "displayName": "Tests Economy (no SDL)",
+            "inherits": "tests"
+        },
+        {
+            "name": "tests-saveio",
+            "displayName": "Tests Save/Load IO (no SDL)",
+            "inherits": "tests"
         }
     ],
     "buildPresets": [
@@ -231,6 +293,62 @@
             "inherits": "build-msvc-base",
             "configurePreset": "tests",
             "configuration": "Debug"
+        },
+        {
+            "name": "tests-smoke",
+            "displayName": "Build tests smoke (no SDL)",
+            "inherits": "build-msvc-base",
+            "configurePreset": "tests-smoke",
+            "configuration": "Debug"
+        },
+        {
+            "name": "tests-headless-smoke",
+            "displayName": "Build tests headless smoke (no SDL)",
+            "inherits": "build-msvc-base",
+            "configurePreset": "tests-headless-smoke",
+            "configuration": "Debug"
+        },
+        {
+            "name": "tests-settings",
+            "displayName": "Build tests settings (no SDL)",
+            "inherits": "build-msvc-base",
+            "configurePreset": "tests-settings",
+            "configuration": "Debug"
+        },
+        {
+            "name": "tests-commands",
+            "displayName": "Build tests commands (no SDL)",
+            "inherits": "build-msvc-base",
+            "configurePreset": "tests-commands",
+            "configuration": "Debug"
+        },
+        {
+            "name": "tests-replay",
+            "displayName": "Build tests replay (no SDL)",
+            "inherits": "build-msvc-base",
+            "configurePreset": "tests-replay",
+            "configuration": "Debug"
+        },
+        {
+            "name": "tests-replay-golden",
+            "displayName": "Build tests replay golden (no SDL)",
+            "inherits": "build-msvc-base",
+            "configurePreset": "tests-replay-golden",
+            "configuration": "Debug"
+        },
+        {
+            "name": "tests-economy",
+            "displayName": "Build tests economy (no SDL)",
+            "inherits": "build-msvc-base",
+            "configurePreset": "tests-economy",
+            "configuration": "Debug"
+        },
+        {
+            "name": "tests-saveio",
+            "displayName": "Build tests save/load IO (no SDL)",
+            "inherits": "build-msvc-base",
+            "configurePreset": "tests-saveio",
+            "configuration": "Debug"
         }
     ],
     "testPresets": [
@@ -253,6 +371,132 @@
             "inherits": "tests",
             "execution": {
                 "jobs": 1
+            }
+        },
+        {
+            "name": "tests-smoke",
+            "displayName": "Run smoke suite (17 core tests)",
+            "inherits": "tests",
+            "configurePreset": "tests-smoke",
+            "execution": {
+                "jobs": 4
+            },
+            "filter": {
+                "include": {
+                    "name": "^procrogue_(new_game_determinism|wfc_solver_basic|wfc_solver_unsat|physics_knockback_low_power_entity_block|action_info_view_turn|settings_minimap_zoom|action_palette|noise_localization|proc_spells|proc_monster_codename|crafting_procgen|trap_salvage_procgen|graffiti_procgen|sigil_procgen|shop_profiles|shrine_profiles|victory_plan)$"
+                }
+            }
+        },
+        {
+            "name": "tests-headless-smoke",
+            "displayName": "Run headless replay + perf smoke lane",
+            "inherits": "tests",
+            "configurePreset": "tests-headless-smoke",
+            "execution": {
+                "jobs": 1
+            },
+            "filter": {
+                "include": {
+                    "label": "headless_smoke"
+                }
+            }
+        },
+        {
+            "name": "tests-settings",
+            "displayName": "Run settings-focused tests",
+            "inherits": "tests",
+            "configurePreset": "tests-settings",
+            "execution": {
+                "jobs": 4
+            },
+            "filter": {
+                "include": {
+                    "label": "settings"
+                }
+            }
+        },
+        {
+            "name": "tests-commands",
+            "displayName": "Run command-focused tests",
+            "inherits": "tests",
+            "configurePreset": "tests-commands",
+            "execution": {
+                "jobs": 4
+            },
+            "filter": {
+                "include": {
+                    "label": "commands"
+                }
+            }
+        },
+        {
+            "name": "tests-replay",
+            "displayName": "Run replay-focused tests",
+            "inherits": "tests",
+            "configurePreset": "tests-replay",
+            "execution": {
+                "jobs": 1
+            },
+            "filter": {
+                "include": {
+                    "label": "replay"
+                }
+            }
+        },
+        {
+            "name": "tests-replay-golden",
+            "displayName": "Run replay golden regression tests",
+            "inherits": "tests",
+            "configurePreset": "tests-replay-golden",
+            "execution": {
+                "jobs": 1
+            },
+            "filter": {
+                "include": {
+                    "label": "replay_golden"
+                }
+            }
+        },
+        {
+            "name": "tests-economy",
+            "displayName": "Run economy-focused tests",
+            "inherits": "tests",
+            "configurePreset": "tests-economy",
+            "execution": {
+                "jobs": 4
+            },
+            "filter": {
+                "include": {
+                    "label": "economy"
+                }
+            }
+        },
+        {
+            "name": "tests-saveio",
+            "displayName": "Run save/load IO regression tests",
+            "inherits": "tests",
+            "configurePreset": "tests-saveio",
+            "execution": {
+                "jobs": 1
+            },
+            "filter": {
+                "include": {
+                    "label": "io"
+                }
+            }
+        },
+        {
+            "name": "tests-saveio-fuzz",
+            "displayName": "Run save/load fuzz safety tests",
+            "inherits": "tests",
+            "configurePreset": "tests-saveio",
+            "execution": {
+                "jobs": 1
+            },
+            "filter": {
+                "include": {
+                    "name": "^procrogue_save_load_fuzz_"
+                }
             }
         },
         {

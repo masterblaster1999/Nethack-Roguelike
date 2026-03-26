@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $KnownPresetDirs = @{
     "tests" = "build/tests"
+    "tests-headless-smoke" = "build/tests"
     "ninja-debug" = "build/ninja-debug"
     "ninja-release" = "build/ninja-release"
     "ninja-release-tests" = "build/ninja-release-tests"
@@ -23,7 +24,12 @@ $BuildToolNames = @(
     "mspdbsrv",
     "ProcRogue",
     "ProcRogueHeadless",
-    "procrogue_tests"
+    "procrogue_tests",
+    "procrogue_tests_core",
+    "procrogue_tests_gameplay",
+    "procrogue_tests_worldgen",
+    "procrogue_tests_render",
+    "procrogue_tests_io"
 )
 
 function Get-BuildToolProcesses {

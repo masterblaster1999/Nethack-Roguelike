@@ -26,7 +26,12 @@ $BuildToolNames = @(
     "mspdbsrv",
     "ProcRogue",
     "ProcRogueHeadless",
-    "procrogue_tests"
+    "procrogue_tests",
+    "procrogue_tests_core",
+    "procrogue_tests_gameplay",
+    "procrogue_tests_worldgen",
+    "procrogue_tests_render",
+    "procrogue_tests_io"
 )
 
 function Require-Tool {

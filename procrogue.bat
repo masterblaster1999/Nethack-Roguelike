@@ -15,7 +15,9 @@ if /I "%CMD%"=="cfg" set "CMD=configure"
 if /I "%CMD%"=="config" set "CMD=configure"
 if /I "%CMD%"=="b" set "CMD=build"
 if /I "%CMD%"=="r" set "CMD=run"
+if /I "%CMD%"=="s" set "CMD=smoke"
 if /I "%CMD%"=="t" set "CMD=test"
+if /I "%CMD%"=="p" set "CMD=perf"
 if /I "%CMD%"=="diag" set "CMD=doctor"
 
 if /I "%CMD%"=="help" goto :help
@@ -23,7 +25,9 @@ if /I "%CMD%"=="configure" goto :configure
 if /I "%CMD%"=="build" goto :build
 if /I "%CMD%"=="play" goto :play
 if /I "%CMD%"=="run" goto :run
+if /I "%CMD%"=="smoke" goto :smoke
 if /I "%CMD%"=="test" goto :test
+if /I "%CMD%"=="perf" goto :perf
 if /I "%CMD%"=="clean" goto :clean
 if /I "%CMD%"=="rebuild" goto :rebuild
 if /I "%CMD%"=="doctor" goto :doctor
@@ -40,8 +44,8 @@ call :maybe_stop_stale_build_tools
 
 set "PRESET=%~2"
 if "%PRESET%"=="" set "PRESET=msvc"
-if /I "%PRESET%"=="debug" set "PRESET=ninja-debug"
-if /I "%PRESET%"=="release" set "PRESET=ninja-release"
+if /I "%PRESET%"=="debug" set "PRESET=ninja-debug-game"
+if /I "%PRESET%"=="release" set "PRESET=ninja-release-game"
 if /I "%PRESET%"=="test" set "PRESET=tests"
 if /I "%PRESET%"=="msvc-md" set "PRESET=msvc"
 if /I "%PRESET%"=="msvc-mt" set "PRESET=msvc-static"
@@ -50,6 +54,8 @@ if /I "%PRESET%"=="vcpkg" set "PRESET=msvc-vcpkg"
 if /I "%PRESET%"=="vcpkg-static" set "PRESET=msvc-static-vcpkg"
 if /I "%PRESET%"=="ninja-debug" set "NEED_NATIVE_COMPILER=1"
 if /I "%PRESET%"=="ninja-release" set "NEED_NATIVE_COMPILER=1"
+if /I "%PRESET%"=="ninja-debug-game" set "NEED_NATIVE_COMPILER=1"
+if /I "%PRESET%"=="ninja-release-game" set "NEED_NATIVE_COMPILER=1"
 if /I "%PRESET%"=="ninja-release-tests" set "NEED_NATIVE_COMPILER=1"
 if /I "%PRESET%"=="tests" set "NEED_NATIVE_COMPILER=1"
 
@@ -76,8 +82,8 @@ call :maybe_stop_stale_build_tools
 
 set "BUILD_PRESET=%~2"
 if "%BUILD_PRESET%"=="" set "BUILD_PRESET=build-msvc-release"
-if /I "%BUILD_PRESET%"=="debug" set "BUILD_PRESET=build-ninja-debug"
-if /I "%BUILD_PRESET%"=="release" set "BUILD_PRESET=build-ninja-release"
+if /I "%BUILD_PRESET%"=="debug" set "BUILD_PRESET=build-ninja-debug-game"
+if /I "%BUILD_PRESET%"=="release" set "BUILD_PRESET=build-ninja-release-game"
 if /I "%BUILD_PRESET%"=="msvc" set "BUILD_PRESET=build-msvc-release"
 if /I "%BUILD_PRESET%"=="msvc-static" set "BUILD_PRESET=build-msvc-static-release"
 if /I "%BUILD_PRESET%"=="build-msvc-static" set "BUILD_PRESET=build-msvc-static-release"
@@ -91,6 +97,8 @@ if /I "%BUILD_PRESET%"=="build-msvc-static-vcpkg" set "BUILD_PRESET=build-msvc-s
 if /I "%BUILD_PRESET%"=="test" set "BUILD_PRESET=tests"
 if /I "%BUILD_PRESET%"=="build-ninja-debug" set "NEED_NATIVE_COMPILER=1"
 if /I "%BUILD_PRESET%"=="build-ninja-release" set "NEED_NATIVE_COMPILER=1"
+if /I "%BUILD_PRESET%"=="build-ninja-debug-game" set "NEED_NATIVE_COMPILER=1"
+if /I "%BUILD_PRESET%"=="build-ninja-release-game" set "NEED_NATIVE_COMPILER=1"
 if /I "%BUILD_PRESET%"=="tests" set "NEED_NATIVE_COMPILER=1"
 
 if "%NEED_NATIVE_COMPILER%"=="1" (
@@ -117,8 +125,8 @@ set "BLD_PRESET=build-msvc-release"
 set "RUN_CFG=Release"
 
 if /I "%MODE%"=="debug" (
-    set "CFG_PRESET=ninja-debug"
-    set "BLD_PRESET=build-ninja-debug"
+    set "CFG_PRESET=ninja-debug-game"
+    set "BLD_PRESET=build-ninja-debug-game"
     set "RUN_CFG=Debug"
     set "NEED_NATIVE_COMPILER=1"
 ) else if /I "%MODE%"=="release" (
@@ -216,6 +224,84 @@ ctest --preset "%TEST_PRESET%" --output-on-failure
 if errorlevel 1 goto :fail
 goto :done
 
+:perf
+call :require_tool cmake
+if errorlevel 1 goto :fail
+call :require_tool powershell
+if errorlevel 1 goto :fail
+call :maybe_stop_stale_build_tools
+call :bootstrap_toolchain required
+if errorlevel 1 goto :fail
+
+set "PERF_ITERS=%~2"
+if "%PERF_ITERS%"=="" set "PERF_ITERS=2"
+
+echo [procrogue] cmake --preset tests-smoke
+cmake --preset "tests-smoke"
+if errorlevel 1 goto :fail
+
+call :check_config_output "tests-smoke"
+if errorlevel 1 goto :fail
+
+echo [procrogue] cmake --build --preset tests-smoke --target procrogue_headless
+cmake --build --preset "tests-smoke" --target "procrogue_headless"
+if errorlevel 1 goto :fail
+
+echo [procrogue] powershell -ExecutionPolicy Bypass -File tests\perf\run_perf_regression.ps1 -PerfIters %PERF_ITERS%
+powershell -ExecutionPolicy Bypass -File "%CD%\tests\perf\run_perf_regression.ps1" ^
+  -HeadlessExe "%CD%\build\tests\Debug\ProcRogueHeadless.exe" ^
+  -Suite "smoke" ^
+  -BaselineFile "%CD%\tests\perf\baseline_smoke.json" ^
+  -ReportFile "%CD%\build\tests\perf_report.json" ^
+  -PerfIters %PERF_ITERS%
+if errorlevel 1 goto :fail
+
+echo [procrogue] cmake --preset msvc
+cmake --preset "msvc"
+if errorlevel 1 goto :fail
+
+echo [procrogue] cmake --build --preset build-msvc-release --target procrogue_renderperf
+cmake --build --preset "build-msvc-release" --target "procrogue_renderperf"
+if errorlevel 1 goto :fail
+
+set "RENDER_PERF_ITERS=2"
+echo [procrogue] powershell -ExecutionPolicy Bypass -File tests\perf\run_perf_regression.ps1 -Suite render
+powershell -ExecutionPolicy Bypass -File "%CD%\tests\perf\run_perf_regression.ps1" ^
+  -PerfExe "%CD%\build\msvc\Release\ProcRogueRenderPerf.exe" ^
+  -Suite "render" ^
+  -BaselineFile "%CD%\tests\perf\baseline_render.json" ^
+  -ReportFile "%CD%\build\msvc\render_perf_report.json" ^
+  -PerfIters %RENDER_PERF_ITERS%
+if errorlevel 1 goto :fail
+goto :done
+
+:smoke
+call :require_tool cmake
+if errorlevel 1 goto :fail
+call :require_tool ctest
+if errorlevel 1 goto :fail
+call :require_tool powershell
+if errorlevel 1 goto :fail
+call :maybe_stop_stale_build_tools
+call :bootstrap_toolchain required
+if errorlevel 1 goto :fail
+
+echo [procrogue] cmake --preset tests-headless-smoke
+cmake --preset "tests-headless-smoke"
+if errorlevel 1 goto :fail
+
+call :check_config_output "tests-headless-smoke"
+if errorlevel 1 goto :fail
+
+echo [procrogue] cmake --build --preset tests-headless-smoke --target procrogue_headless
+cmake --build --preset "tests-headless-smoke" --target "procrogue_headless"
+if errorlevel 1 goto :fail
+
+echo [procrogue] ctest --preset tests-headless-smoke --output-on-failure
+ctest --preset "tests-headless-smoke" --output-on-failure
+if errorlevel 1 goto :fail
+goto :done
+
 :clean
 call :maybe_stop_stale_build_tools
 if not exist "%CD%\build" (
@@ -237,9 +323,9 @@ set "MODE=%~2"
 if /I "%MODE%"=="debug" (
     call "%~f0" clean
     if errorlevel 1 goto :fail
-    call "%~f0" configure ninja-debug
+    call "%~f0" configure ninja-debug-game
     if errorlevel 1 goto :fail
-    call "%~f0" build build-ninja-debug
+    call "%~f0" build build-ninja-debug-game
     if errorlevel 1 goto :fail
     goto :done
 )
@@ -331,7 +417,9 @@ echo   play [release^|debug^|static^|vcpkg^|vcpkg-static] Configure + build + ru
 echo   configure [preset]      Configure CMake preset.
 echo   build [build-preset]    Build CMake preset.
 echo   run [release^|debug]    Run existing ProcRogue.exe.
+echo   smoke                   Run the headless replay + perf smoke lane.
 echo   test [test-preset]      Configure + build + run tests.
+echo   perf [iters]            Run headless + render perf regression lanes ^(headless default iters: 2, render fixed at 2^).
 echo   rebuild [release^|debug^|static^|vcpkg^|vcpkg-static] Clean + configure + build.
 echo   clean                   Delete build directory.
 echo   doctor                  Show toolchain diagnostics.
@@ -342,7 +430,10 @@ echo Examples:
 echo   procrogue.bat
 echo   procrogue.bat configure tests
 echo   procrogue.bat build tests
+echo   procrogue.bat smoke
 echo   procrogue.bat test
+echo   procrogue.bat perf
+echo   procrogue.bat perf 1
 echo   procrogue.bat play debug
 echo   procrogue.bat play static
 echo   procrogue.bat play vcpkg
@@ -485,8 +576,11 @@ if /I "%~1"=="msvc-static" set "PRESET_DIR=build\msvc-static"
 if /I "%~1"=="msvc-static-vcpkg" set "PRESET_DIR=build\msvc-static-vcpkg"
 if /I "%~1"=="ninja-debug" set "PRESET_DIR=build\ninja-debug"
 if /I "%~1"=="ninja-release" set "PRESET_DIR=build\ninja-release"
+if /I "%~1"=="ninja-debug-game" set "PRESET_DIR=build\ninja-debug-game"
+if /I "%~1"=="ninja-release-game" set "PRESET_DIR=build\ninja-release-game"
 if /I "%~1"=="ninja-release-tests" set "PRESET_DIR=build\ninja-release-tests"
 if /I "%~1"=="tests" set "PRESET_DIR=build\tests"
+if /I "%~1"=="tests-headless-smoke" set "PRESET_DIR=build\tests"
 
 if not "%PRESET_DIR%"=="" (
     if not exist "%CD%\%PRESET_DIR%\CMakeCache.txt" (
@@ -508,7 +602,13 @@ for %%P in (
     mspdbsrv.exe
     ProcRogue.exe
     ProcRogueHeadless.exe
+    ProcRogueRenderPerf.exe
     procrogue_tests.exe
+    procrogue_tests_core.exe
+    procrogue_tests_gameplay.exe
+    procrogue_tests_worldgen.exe
+    procrogue_tests_render.exe
+    procrogue_tests_io.exe
 ) do (
     taskkill /f /t /im "%%P" >nul 2>nul
 )
@@ -523,7 +623,9 @@ if /I "%CFG%"=="release" set "CFG=Release"
 if "%CFG%"=="" set "CFG=Release"
 
 if /I "%CFG%"=="Debug" (
-    if exist "%CD%\build\ninja-debug\ProcRogue.exe" set "GAME_EXE=%CD%\build\ninja-debug\ProcRogue.exe"
+    if exist "%CD%\build\ninja-debug-game\Debug\ProcRogue.exe" set "GAME_EXE=%CD%\build\ninja-debug-game\Debug\ProcRogue.exe"
+    if not defined GAME_EXE if exist "%CD%\build\ninja-debug-game\ProcRogue.exe" set "GAME_EXE=%CD%\build\ninja-debug-game\ProcRogue.exe"
+    if not defined GAME_EXE if exist "%CD%\build\ninja-debug\ProcRogue.exe" set "GAME_EXE=%CD%\build\ninja-debug\ProcRogue.exe"
     if not defined GAME_EXE if exist "%CD%\build\msvc\Debug\ProcRogue.exe" set "GAME_EXE=%CD%\build\msvc\Debug\ProcRogue.exe"
     if not defined GAME_EXE if exist "%CD%\build\msvc-vcpkg\Debug\ProcRogue.exe" set "GAME_EXE=%CD%\build\msvc-vcpkg\Debug\ProcRogue.exe"
     if not defined GAME_EXE if exist "%CD%\build\msvc-static\Debug\ProcRogue.exe" set "GAME_EXE=%CD%\build\msvc-static\Debug\ProcRogue.exe"
@@ -535,6 +637,8 @@ if /I "%CFG%"=="Release" (
     if not defined GAME_EXE if exist "%CD%\build\msvc-vcpkg\Release\ProcRogue.exe" set "GAME_EXE=%CD%\build\msvc-vcpkg\Release\ProcRogue.exe"
     if not defined GAME_EXE if exist "%CD%\build\msvc-static\Release\ProcRogue.exe" set "GAME_EXE=%CD%\build\msvc-static\Release\ProcRogue.exe"
     if not defined GAME_EXE if exist "%CD%\build\msvc-static-vcpkg\Release\ProcRogue.exe" set "GAME_EXE=%CD%\build\msvc-static-vcpkg\Release\ProcRogue.exe"
+    if not defined GAME_EXE if exist "%CD%\build\ninja-release-game\Release\ProcRogue.exe" set "GAME_EXE=%CD%\build\ninja-release-game\Release\ProcRogue.exe"
+    if not defined GAME_EXE if exist "%CD%\build\ninja-release-game\ProcRogue.exe" set "GAME_EXE=%CD%\build\ninja-release-game\ProcRogue.exe"
     if not defined GAME_EXE if exist "%CD%\build\ninja-release\ProcRogue.exe" set "GAME_EXE=%CD%\build\ninja-release\ProcRogue.exe"
 )
 exit /b 0

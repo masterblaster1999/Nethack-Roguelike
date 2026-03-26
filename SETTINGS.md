@@ -117,12 +117,28 @@ These keys tune the experimental `view_mode = 3d` renderer:
   - Valid values: `adventurer`, `knight`, `rogue`, `archer`, `wizard`.
   - You can also change this in-game with `#class <name>` (restarts the run).
 
+- `player_start` (string, default `default`)
+  - Starting package/loadout for **new runs**.
+  - Valid values: `default`, `cartographer`, `siege`, `saboteur`, `windrunner`, `pyromancer`.
+  - The special package is class-specific. For example, `cartographer` is for Adventurer and `pyromancer` is for Wizard.
+  - You can also change this in-game with `#start <name>` (restarts the run).
+
 - `show_effect_timers` (`true/false`, default `true`)
   - When `true`, status tags show remaining turns (example: `POISON(6)`).
 
 - `show_perf_overlay` (`true/false`, default `false`)
   - Shows a tiny **performance HUD** (FPS + sprite cache stats) in the top-left.
   - Toggle in-game via **Shift+F10** (default) or `#perf on/off`.
+
+- `ui_theme` (string, default `darkstone`)
+  - Valid values: `darkstone`, `parchment`, `arcane`.
+
+- `ui_panels` (string/bool, default `textured`)
+  - Valid values: `textured`, `solid` (also accepts boolean `true/false`).
+
+- `ui_panel_intensity` (string, default `balanced`)
+  - Valid values: `clean`, `balanced`, `high-contrast`.
+  - Tunes panel chrome + perf graph contrast without changing gameplay.
 
 - `vsync` (`true/false`, default `true`)
   - When `true`, the renderer uses vsync (smoother animation, lower CPU usage).
@@ -135,6 +151,60 @@ These keys tune the experimental `view_mode = 3d` renderer:
 
 - `controller_enabled` (`true/false`, default `true`)
   - Enables SDL2 GameController support (D-pad movement, A confirm, etc.).
+
+### Audio
+
+- `audio_enabled` (`true/false`, default `true`)
+  - Enables the runtime audio engine.
+
+- `audio_master_volume` (int, default `70`)
+  - Clamped to `0..100`
+  - Overall output level.
+
+- `audio_ambience_volume` (int, default `78`)
+  - Clamped to `0..100`
+  - Background scene layer level.
+
+- `audio_sfx_volume` (int, default `82`)
+  - Clamped to `0..100`
+  - Procedural sound effect level.
+
+- `audio_music_enabled` (`true/false`, default `true`)
+  - Enables the procedural tune layer.
+
+- `audio_music_volume` (int, default `48`)
+  - Clamped to `0..100`
+  - Procedural tune layer level.
+
+- `audio_music_complexity` (int, default `100`)
+  - Clamped to `0..200`
+  - Procedural tune arrangement density and counterpoint richness.
+
+- `audio_scene_intensity` (int, default `100`)
+  - Clamped to `0..200`
+  - Scales the continuous scene bed.
+
+- `audio_threat_sensitivity` (int, default `100`)
+  - Clamped to `0..200`
+  - Scales danger-driven stingers and beds.
+
+- `audio_resonance_sensitivity` (int, default `100`)
+  - Clamped to `0..200`
+  - Scales resonance events.
+
+- `audio_low_health_gain` (int, default `100`)
+  - Clamped to `0..200`
+  - Scales the low-health pulse layer.
+
+- `audio_swarm_gain` (int, default `100`)
+  - Clamped to `0..200`
+  - Scales swarm pressure cues.
+
+- `audio_stealth_gain` (int, default `100`)
+  - Clamped to `0..200`
+  - Scales stealth / hush cues.
+
+Compatibility aliases using the `sound_*` prefix are also accepted for the audio keys above.
 
 ### Gameplay QoL
 
@@ -183,13 +253,13 @@ These keys tune the experimental `view_mode = 3d` renderer:
   - Autosave writes to `procrogue_autosave.dat`
 
 - `default_slot` (string, default empty)
-  - Empty (or `default`) uses the standard filenames:
+  - Empty, `default`, `none`, `off`, or `auto` uses the standard filenames:
     - `procrogue_save.dat`
     - `procrogue_autosave.dat`
   - Non-empty uses slot filenames:
     - `procrogue_save_<slot>.dat`
     - `procrogue_autosave_<slot>.dat`
-  - You can set this in-game with `#slot <name>`.
+  - You can set this in-game with `#slot <name>` or clear it with `#slot auto`.
 
 - `save_backups` (int, default `3`)
   - Clamped to `0..10`
@@ -218,6 +288,13 @@ You can also use the **Options → Keybinds** editor:
 - **Right**: add another key to the action
 - **Left**: reset to default (removes the `bind_` override)
 - **Delete**: unbind/disable (writes `none`)
+- **Tab / Shift+Tab**: open/cycle keybind view dropdown
+- **Shift+S**: quick-cycle keybind view mode
+- **Ctrl/Cmd+K**: toggle **conflicts-only** view on/off (restores previous view)
+- **Enter (in dropdown)**: apply selected view mode (`All`, `Movement`, `Gameplay`, `UI/Meta`, `Conflicts`)
+- **[ / ]**: jump to previous/next conflicting keybind row
+- **Ctrl/Cmd+R**: resolve conflicts for the selected action
+- **Ctrl/Cmd+Shift+R**: resolve all detected keybind conflicts
 - **/**: filter/search (type to narrow the list)
 - **Ctrl/Cmd+F**: toggle the filter/search box
 - **Ctrl/Cmd+L**: clear the filter
@@ -253,6 +330,11 @@ bind_down_right = n
 # Alternative stairs keys:
 bind_stairs_up = shift+comma, less
 bind_stairs_down = shift+period, greater
+
+# Keypad-friendly defaults:
+bind_wait = space, period, kp_5
+bind_minimap_zoom_out = [, kp_minus
+bind_minimap_zoom_in = ], kp_plus
 ```
 
 Common key names:

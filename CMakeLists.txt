@@ -21,6 +21,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PROCROGUE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+option(PROCROGUE_ENABLE_PCH "Enable C++ precompiled headers for faster clean builds" ON)
 
 set(_PROCROGUE_WINDOWS_UNLOCK_LINK_OUTPUTS_DEFAULT OFF)
 if (WIN32)
@@ -130,6 +131,8 @@ endif()
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
+set(PROCROGUE_PCH_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/src/procrogue_pch.hpp")
+
 function(procrogue_apply_warnings tgt)
     if (MSVC)
         # /FS + /Zf improve PDB access behavior; /MP speeds large TU builds.
@@ -143,6 +146,18 @@ function(procrogue_apply_warnings tgt)
             target_compile_options(${tgt} PRIVATE -Werror)
         endif()
     endif()
+endfunction()
+
+function(procrogue_enable_pch tgt)
+    if (NOT PROCROGUE_ENABLE_PCH)
+        return()
+    endif()
+    if (NOT EXISTS "${PROCROGUE_PCH_HEADER}")
+        message(FATAL_ERROR "Expected precompiled header file at '${PROCROGUE_PCH_HEADER}'.")
+    endif()
+    target_precompile_headers(${tgt} PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:${PROCROGUE_PCH_HEADER}>"
+    )
 endfunction()
 
 function(procrogue_enable_windows_link_unlock tgt output_name)
@@ -162,6 +177,11 @@ function(procrogue_enable_windows_link_unlock tgt output_name)
         COMMAND
             ${CMAKE_COMMAND}
             "-DPROCROGUE_UNLOCK_IMAGE=${output_name}.exe"
+            "-DPROCROGUE_UNLOCK_EXE=$<TARGET_FILE:${tgt}>"
+            "-DPROCROGUE_UNLOCK_PDB=$<TARGET_PDB_FILE:${tgt}>"
+            "-DPROCROGUE_UNLOCK_ILK_DIR=$<TARGET_FILE_DIR:${tgt}>"
+            "-DPROCROGUE_UNLOCK_ILK_BASENAME=${output_name}"
+            "-DPROCROGUE_UNLOCK_RETRY_COUNT=6"
             -P "${PROCROGUE_WINDOWS_UNLOCK_SCRIPT}"
         VERBATIM
     )
@@ -170,28 +190,52 @@ endfunction()
 # ------------------------------------------------------------
 # Core (SDL-free) library
 # ------------------------------------------------------------
+# Keep the core source list explicit so changes to the build graph are reviewable.
 set(PROCROGUE_CORE_SOURCES
     src/replay.cpp
+    src/replay_nav.cpp
+    src/serialization_format.cpp
     src/replay_runner.cpp
     src/content.cpp
+    src/challenge_ladder.cpp
+    src/faction.cpp
     src/game.cpp
+    src/game_spatial_index.cpp
+    src/game_state_runtime.cpp
+    src/game_lifecycle.cpp
+    src/game_state.cpp
+    src/game_overworld.cpp
     src/game_save.cpp
+    src/game_codex.cpp
     src/game_loop.cpp
     src/game_automove.cpp
     src/game_look.cpp
     src/game_interact.cpp
+    src/game_camp_openers.cpp
     src/game_farming.cpp
     src/game_world.cpp
     src/game_inventory.cpp
     src/game_spellcasting.cpp
     src/game_targeting.cpp
     src/game_spawn.cpp
+    src/game_spawn_environment.cpp
     src/game_markers.cpp
     src/pathfinding.cpp
     src/combat.cpp
     src/physics.cpp
     src/combat_rules.cpp
     src/dungeon.cpp
+    src/dungeon_corridors.cpp
+    src/dungeon_rooms_graph.cpp
+    src/dungeon_biome.cpp
+    src/dungeon_side_content.cpp
+    src/dungeon_layout_postpasses.cpp
+    src/dungeon_room_furnish_wfc.cpp
+    src/dungeon_state.cpp
+    src/dungeon_runtime.cpp
+    src/dungeon_visibility.cpp
+    src/dungeon_resonance.cpp
+    src/dungeon_shear.cpp
     src/vault_prefab_catalog.cpp
     src/corridor_braid.cpp
     src/terrain_sculpt.cpp
@@ -199,15 +243,10 @@ set(PROCROGUE_CORE_SOURCES
     src/spells.cpp
     src/shop.cpp
     src/scores.cpp
+    src/settings.cpp
+    src/config_options.cpp
+    src/ai.cpp
 )
-
-# Optional sources (present in some forks/patches)
-if (EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/settings.cpp")
-    list(APPEND PROCROGUE_CORE_SOURCES src/settings.cpp)
-endif()
-if (EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/ai.cpp")
-    list(APPEND PROCROGUE_CORE_SOURCES src/ai.cpp)
-endif()
 
 add_library(procrogue_core STATIC ${PROCROGUE_CORE_SOURCES})
 target_include_directories(procrogue_core PUBLIC src)
@@ -223,6 +262,7 @@ if (WIN32)
 endif()
 
 procrogue_apply_warnings(procrogue_core)
+procrogue_enable_pch(procrogue_core)
 
 # ------------------------------------------------------------
 # SDL-free sprite generation / mesh utilities
@@ -234,6 +274,7 @@ procrogue_apply_warnings(procrogue_core)
 
 set(PROCROGUE_SPRITEGEN_SOURCES
     src/spritegen.cpp
+    src/spritegen_items.cpp
     src/spritegen3d.cpp
     src/mesh2d.cpp
 )
@@ -242,6 +283,193 @@ add_library(procrogue_spritegen STATIC ${PROCROGUE_SPRITEGEN_SOURCES})
 target_compile_features(procrogue_spritegen PUBLIC cxx_std_17)
 target_link_libraries(procrogue_spritegen PUBLIC procrogue_core)
 procrogue_apply_warnings(procrogue_spritegen)
+procrogue_enable_pch(procrogue_spritegen)
+
+# ------------------------------------------------------------
+# SDL-backed renderer library
+# ------------------------------------------------------------
+#
+# The renderer is shared by the game executable, the render perf harness, and
+# the deterministic UI snapshot tests. Keeping it in a dedicated library keeps
+# the largest render TUs from being compiled separately in every consumer.
+if (PROCROGUE_BUILD_GAME OR PROCROGUE_BUILD_TESTS)
+
+set(PROCROGUE_SDL2_LIB "")
+set(PROCROGUE_SDL2_MAIN "")
+
+# Prefer a local SDL2 config if a sibling MSVC build tree already produced one.
+if (NOT DEFINED SDL2_DIR OR SDL2_DIR STREQUAL "")
+    set(_PROCROGUE_SDL2_LOCAL_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/build/msvc/local-sdl2/SDL2Config.cmake")
+    if (EXISTS "${_PROCROGUE_SDL2_LOCAL_CONFIG}")
+        get_filename_component(_PROCROGUE_SDL2_LOCAL_DIR "${_PROCROGUE_SDL2_LOCAL_CONFIG}" DIRECTORY)
+        set(SDL2_DIR "${_PROCROGUE_SDL2_LOCAL_DIR}" CACHE PATH "SDL2 config directory" FORCE)
+    endif()
+    unset(_PROCROGUE_SDL2_LOCAL_CONFIG)
+    unset(_PROCROGUE_SDL2_LOCAL_DIR)
+endif()
+
+# SDL2 config packages can expose the library and SDL2main as separate targets.
+find_package(SDL2 CONFIG QUIET COMPONENTS SDL2)
+if (SDL2_FOUND)
+    find_package(SDL2 CONFIG QUIET COMPONENTS SDL2main)
+endif()
+
+if (TARGET SDL2::SDL2)
+    set(PROCROGUE_SDL2_LIB SDL2::SDL2)
+elseif (TARGET SDL2::SDL2-static)
+    set(PROCROGUE_SDL2_LIB SDL2::SDL2-static)
+elseif (TARGET SDL2)
+    set(PROCROGUE_SDL2_LIB SDL2)
+elseif (TARGET SDL2-static)
+    set(PROCROGUE_SDL2_LIB SDL2-static)
+endif()
+
+if (TARGET SDL2::SDL2main)
+    set(PROCROGUE_SDL2_MAIN SDL2::SDL2main)
+elseif (TARGET SDL2main)
+    set(PROCROGUE_SDL2_MAIN SDL2main)
+endif()
+
+if (NOT PROCROGUE_SDL2_LIB)
+    # On Windows, the fetched SDL2 path is the most reliable fallback.
+    if (WIN32 AND NOT PROCROGUE_FETCH_SDL2)
+        message(STATUS "SDL2 was not found; enabling PROCROGUE_FETCH_SDL2 automatically on Windows.")
+        set(PROCROGUE_FETCH_SDL2 ON CACHE BOOL "Fetch SDL2 automatically when it is not found" FORCE)
+    endif()
+
+    if (PROCROGUE_FETCH_SDL2)
+        message(STATUS "SDL2 not found via find_package(); fetching SDL2 (FetchContent)...")
+        include(FetchContent)
+
+        if (MSVC)
+            # Keep SDL's CRT linkage aligned with the active project runtime ABI.
+            set(_PROCROGUE_SDL_STATIC_CRT OFF)
+            if (CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "^MultiThreaded")
+                set(_PROCROGUE_SDL_STATIC_CRT ON)
+            endif()
+            set(SDL_FORCE_STATIC_VCRT ${_PROCROGUE_SDL_STATIC_CRT} CACHE BOOL "" FORCE)
+            unset(_PROCROGUE_SDL_STATIC_CRT)
+        endif()
+
+        # Keep the fetched SDL build lean.
+        set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+        set(SDL_TEST OFF CACHE BOOL "" FORCE)
+        set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+        set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+
+        # Prefer a cached archive when available to make configure repeatable/offline-friendly.
+        set(_PROCROGUE_SDL_URL "https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.32.10.tar.gz")
+        set(_PROCROGUE_SDL_ARCHIVE_CANDIDATES
+            "${CMAKE_CURRENT_SOURCE_DIR}/_deps/sdl2-src.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/_deps/sdl2-src.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/msvc/_deps/sdl2-src.tar.gz"
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/tests/_deps/sdl2-src.tar.gz"
+        )
+        set(_PROCROGUE_SDL_ARCHIVE_LOCAL "")
+        foreach(_PROCROGUE_SDL_ARCHIVE_PATH IN LISTS _PROCROGUE_SDL_ARCHIVE_CANDIDATES)
+            if (EXISTS "${_PROCROGUE_SDL_ARCHIVE_PATH}")
+                file(SIZE "${_PROCROGUE_SDL_ARCHIVE_PATH}" _PROCROGUE_SDL_ARCHIVE_SIZE)
+                if (_PROCROGUE_SDL_ARCHIVE_SIZE GREATER 0)
+                    set(_PROCROGUE_SDL_ARCHIVE_LOCAL "${_PROCROGUE_SDL_ARCHIVE_PATH}")
+                    break()
+                endif()
+                message(STATUS "Ignoring empty SDL2 archive cache file: ${_PROCROGUE_SDL_ARCHIVE_PATH}")
+                file(REMOVE "${_PROCROGUE_SDL_ARCHIVE_PATH}")
+            endif()
+        endforeach()
+
+        if (_PROCROGUE_SDL_ARCHIVE_LOCAL)
+            set(_PROCROGUE_SDL_URL "${_PROCROGUE_SDL_ARCHIVE_LOCAL}")
+            message(STATUS "Using cached SDL2 archive: ${_PROCROGUE_SDL_ARCHIVE_LOCAL}")
+        else()
+            message(STATUS "No local SDL2 archive cache found; downloading from upstream.")
+        endif()
+
+        # Download SDL2 source via a release archive URL, so a stock Visual Studio install
+        # can configure the project without requiring vcpkg or a system SDL package.
+        FetchContent_Declare(
+            SDL2
+            URL "${_PROCROGUE_SDL_URL}"
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(SDL2)
+        unset(_PROCROGUE_SDL_URL)
+        unset(_PROCROGUE_SDL_ARCHIVE_CANDIDATES)
+        unset(_PROCROGUE_SDL_ARCHIVE_LOCAL)
+        unset(_PROCROGUE_SDL_ARCHIVE_PATH)
+        unset(_PROCROGUE_SDL_ARCHIVE_SIZE)
+
+        if (TARGET SDL2::SDL2)
+            set(PROCROGUE_SDL2_LIB SDL2::SDL2)
+        elseif (TARGET SDL2::SDL2-static)
+            set(PROCROGUE_SDL2_LIB SDL2::SDL2-static)
+        elseif (TARGET SDL2)
+            set(PROCROGUE_SDL2_LIB SDL2)
+        elseif (TARGET SDL2-static)
+            set(PROCROGUE_SDL2_LIB SDL2-static)
+        endif()
+
+        if (TARGET SDL2::SDL2main)
+            set(PROCROGUE_SDL2_MAIN SDL2::SDL2main)
+        elseif (TARGET SDL2main)
+            set(PROCROGUE_SDL2_MAIN SDL2main)
+        endif()
+    endif()
+endif()
+
+if (NOT PROCROGUE_SDL2_LIB)
+    message(FATAL_ERROR
+        "SDL2 was not found.\n"
+        "\n"
+        "Fix options:\n"
+        "  1) Ensure you have internet access and configure with PROCROGUE_FETCH_SDL2=ON, OR\n"
+        "  2) Install SDL2 via vcpkg and configure CMake with the vcpkg toolchain:\n"
+        "     - vcpkg install sdl2\n"
+        "     - cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake\n"
+        "     - or set VCPKG_ROOT and use preset: cmake --preset msvc-vcpkg\n"
+        "  3) Install SDL2 (development files) and set SDL2_DIR or CMAKE_PREFIX_PATH to SDL2's CMake config folder.\n"
+    )
+endif()
+
+set(PROCROGUE_RENDER_SOURCES
+    src/render.cpp
+    src/render_iso_assets.cpp
+    src/render_ui.cpp
+    src/render_ui_discoveries.cpp
+    src/render_options.cpp
+    src/render_streaming.cpp
+    src/render_math.cpp
+    src/render_postfx.cpp
+)
+
+add_library(procrogue_render STATIC ${PROCROGUE_RENDER_SOURCES})
+target_include_directories(procrogue_render PUBLIC src)
+target_compile_features(procrogue_render PUBLIC cxx_std_17)
+target_link_libraries(procrogue_render PUBLIC procrogue_core procrogue_spritegen ${PROCROGUE_SDL2_LIB})
+procrogue_apply_warnings(procrogue_render)
+procrogue_enable_pch(procrogue_render)
+
+endif()
+
+# ------------------------------------------------------------
+# Docs dump tool (SDL-free)
+# ------------------------------------------------------------
+add_executable(procrogue_docsdump EXCLUDE_FROM_ALL
+    src/docs_dump_main.cpp
+)
+set_target_properties(procrogue_docsdump PROPERTIES OUTPUT_NAME ProcRogueDocsDump)
+target_link_libraries(procrogue_docsdump PRIVATE procrogue_core)
+procrogue_apply_warnings(procrogue_docsdump)
+procrogue_enable_pch(procrogue_docsdump)
+
+add_custom_target(docs_dump
+    COMMAND $<TARGET_FILE:procrogue_docsdump> --out-dir "${CMAKE_CURRENT_SOURCE_DIR}/docs"
+    DEPENDS procrogue_docsdump
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Generating docs/SETTINGS.md and docs/COMMANDS.md from shared registries"
+)
 
 # ------------------------------------------------------------
 # Headless tool (SDL-free)
@@ -249,11 +477,13 @@ procrogue_apply_warnings(procrogue_spritegen)
 if (PROCROGUE_BUILD_HEADLESS)
     add_executable(procrogue_headless
         src/headless_main.cpp
+        src/replay_golden.cpp
     )
     set_target_properties(procrogue_headless PROPERTIES OUTPUT_NAME ProcRogueHeadless)
 
     target_link_libraries(procrogue_headless PRIVATE procrogue_core)
     procrogue_apply_warnings(procrogue_headless)
+    procrogue_enable_pch(procrogue_headless)
     procrogue_enable_windows_link_unlock(procrogue_headless ProcRogueHeadless)
 endif()
 
@@ -265,16 +495,16 @@ if (PROCROGUE_BUILD_GAME)
 set(PROCROGUE_TARGET proc_rogue)
 
 add_executable(${PROCROGUE_TARGET}
+    src/audio.cpp
     src/main.cpp
     src/keybinds.cpp
-    src/render.cpp
 )
 set_target_properties(${PROCROGUE_TARGET} PROPERTIES OUTPUT_NAME ProcRogue)
 
 target_include_directories(${PROCROGUE_TARGET} PRIVATE src)
 target_compile_features(${PROCROGUE_TARGET} PRIVATE cxx_std_17)
 
-target_link_libraries(${PROCROGUE_TARGET} PRIVATE procrogue_spritegen)
+target_link_libraries(${PROCROGUE_TARGET} PRIVATE procrogue_render)
 
 # SDL redefines main() on some platforms unless SDL_MAIN_HANDLED is set.
 target_compile_definitions(${PROCROGUE_TARGET} PRIVATE SDL_MAIN_HANDLED)
@@ -286,8 +516,22 @@ endif()
 
 
 procrogue_apply_warnings(${PROCROGUE_TARGET})
+procrogue_enable_pch(${PROCROGUE_TARGET})
 procrogue_enable_windows_link_unlock(${PROCROGUE_TARGET} ProcRogue)
 
+add_executable(procrogue_renderperf EXCLUDE_FROM_ALL
+    src/perf_render_main.cpp
+)
+set_target_properties(procrogue_renderperf PROPERTIES OUTPUT_NAME ProcRogueRenderPerf)
+
+target_link_libraries(procrogue_renderperf PRIVATE procrogue_render)
+target_compile_definitions(procrogue_renderperf PRIVATE SDL_MAIN_HANDLED)
+
+procrogue_apply_warnings(procrogue_renderperf)
+procrogue_enable_pch(procrogue_renderperf)
+procrogue_enable_windows_link_unlock(procrogue_renderperf ProcRogueRenderPerf)
+
+if (FALSE)
 # ------------------------------------------------------------
 # SDL2 dependency (only required for the game executable)
 # ------------------------------------------------------------
@@ -451,9 +695,11 @@ if (_SDL2_MAIN)
 endif()
 target_link_libraries(${PROCROGUE_TARGET} PRIVATE ${_SDL2_LIB})
 
+target_link_libraries(procrogue_renderperf PRIVATE ${_SDL2_LIB})
+
 unset(_SDL2_LIB)
 unset(_SDL2_MAIN)
-
+endif()
 endif() # PROCROGUE_BUILD_GAME
 
 # ------------------------------------------------------------
@@ -463,3 +709,6 @@ if (PROCROGUE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+
+

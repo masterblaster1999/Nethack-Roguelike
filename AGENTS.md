@@ -2,7 +2,7 @@
 
 ## Skills
 
-The local agent instruction index is available in the root prompt context.
+The local agent instruction index is available in the root prompt context.  Additional information below
 
 ### Available skills
 - `skill-creator`: Guide for creating effective skills. Use when creating a new skill or updating one that extends Codex capability with specialized knowledge, workflows, or integrations. (file: `C:/Users/et_pj/.codex/skills/.system/skill-creator/SKILL.md`)
